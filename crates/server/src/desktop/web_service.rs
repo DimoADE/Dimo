@@ -598,6 +598,7 @@ async fn stop_web_server_with_config(config: WebServiceConfig) -> WebServerStatu
             let _ = handle.await;
         }
     }
+    super::host_tunnel::stop_relay().await;
     super::host_tunnel::stop_quick_tunnel().await;
     status_from_runtime(config).await
 }

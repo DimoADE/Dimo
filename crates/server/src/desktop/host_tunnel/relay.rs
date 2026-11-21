@@ -392,7 +392,7 @@ pub(super) async fn start_relay(host: String, port: u16, token: String, local_po
     *RELAY.lock().await = Some(RelayRuntime { handle, state });
 }
 
-pub(super) async fn stop_relay() {
+pub async fn stop_relay() {
     if let Some(runtime) = RELAY.lock().await.take() {
         runtime.handle.abort();
     }

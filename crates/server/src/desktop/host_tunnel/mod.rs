@@ -11,10 +11,9 @@ use utils::tunnel::{
 };
 use uuid::Uuid;
 
-pub use self::relay::stop_quick_tunnel;
+pub use self::relay::{stop_quick_tunnel, stop_relay};
 use self::relay::{
     ensure_quick_tunnel, quick_tunnel_origin, relay_snapshot, set_quick_tunnel_origin, start_relay,
-    stop_relay,
 };
 use super::{error::DesktopError, web_service::DesktopWebServiceContext};
 

@@ -169,7 +169,7 @@ async fn desktop_health() -> Json<Value> {
         "status": "ok",
         "desktop_mode": true,
         "pid": std::process::id(),
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": utils::version::runtime_app_version(),
     }))
 }
 
@@ -474,7 +474,10 @@ async fn invoke_desktop_command(
         // Backup
         "backup_create" => {
             let parsed: OptionsArg<backup::BackupCreateOptions> = parse_args(args)?;
-            to_json(backup::backup_create(&state.events, parsed.options).await?)?
+            to_json(
+                backup::backup_create(&state.events, Some(&state.web_service.pool), parsed.options)
+                    .await?,
+            )?
         }
         "backup_inspect" => {
             let parsed: OptionsArg<backup::BackupInspectOptions> = parse_args(args)?;
@@ -482,7 +485,14 @@ async fn invoke_desktop_command(
         }
         "backup_restore_stage" => {
             let parsed: PayloadArg<backup::BackupRestoreStagePayload> = parse_args(args)?;
-            to_json(backup::backup_restore_stage(&state.events, parsed.payload).await?)?
+            to_json(
+                backup::backup_restore_stage(
+                    &state.events,
+                    Some(&state.web_service.pool),
+                    parsed.payload,
+                )
+                .await?,
+            )?
         }
         "backup_cancel" => {
             let parsed: BackupCancelArg = parse_args(args)?;

@@ -278,6 +278,17 @@ impl ServerRuntime<application::SqliteConversationRepository> {
         }
         self
     }
+
+    #[cfg(test)]
+    pub(crate) fn with_plugin_control_plane(
+        mut self,
+        plugins: Arc<plugins::PluginControlPlane>,
+    ) -> Self {
+        if let Some(state) = Arc::get_mut(&mut self.state) {
+            state.plugin_control_plane = Some(plugins);
+        }
+        self
+    }
 }
 
 impl<R> ServerRuntime<R>
@@ -320,6 +331,15 @@ where
                 Arc::clone(&self.state),
                 require_token::<R>,
             ));
+        let plugin_artifacts = Router::new()
+            .route(
+                "/plugin-artifacts/{plugin_id}/{*path}",
+                get(crate::plugin_artifact::serve_runtime_plugin_artifact::<R>),
+            )
+            .route_layer(middleware::from_fn_with_state(
+                Arc::clone(&self.state),
+                crate::plugin_artifact::require_plugin_artifact_token::<R>,
+            ));
         let app = Router::new()
             .route("/health", get(health::<R>))
             .route("/api/v1/e2ee/handshake", get(health::<R>))
@@ -333,10 +353,6 @@ where
                 get(poll_connect_request::<R>),
             )
             .route(
-                "/api/v1/plugin-artifacts/{plugin_id}/{*path}",
-                get(crate::plugin_artifact::serve_runtime_plugin_artifact::<R>),
-            )
-            .route(
                 "/api/v1/previews/{lease_id}",
                 get(crate::preview_proxy::proxy_root::<R>),
             )
@@ -344,7 +360,7 @@ where
                 "/api/v1/previews/{lease_id}/{*path}",
                 get(crate::preview_proxy::proxy_path::<R>),
             )
-            .nest("/api/v1", protected)
+            .nest("/api/v1", protected.merge(plugin_artifacts))
             .nest(
                 "/api/pulse",
                 crate::pulse_http::pulse_router::<R>(Arc::clone(&self.state)),

@@ -11,6 +11,7 @@ pub mod log_msg;
 pub mod mirror;
 pub mod msg_store;
 pub mod net;
+pub mod parent_watch;
 pub mod path;
 pub mod port_file;
 pub mod process;
