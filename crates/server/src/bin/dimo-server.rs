@@ -14,17 +14,52 @@ use server::{
 use tokio::sync::Notify;
 
 fn main() -> ExitCode {
+    let parsed = parse_args(std::env::args().skip(1));
+    if let Ok(ParsedArgs::Start(ref launch)) = parsed {
+        apply_launch_process_hints(launch);
+    }
+
     // Match the desktop Host: debug command futures exceed Tokio's default stack.
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(16 * 1024 * 1024)
         .build()
         .expect("could not initialize Host runtime")
-        .block_on(run_command())
+        .block_on(run_command(parsed))
 }
 
-async fn run_command() -> ExitCode {
-    match parse_args(std::env::args().skip(1)) {
+fn apply_launch_process_hints(launch: &ServerLaunch) {
+    if let Some(version) = launch
+        .app_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        && std::env::var_os("DIMO_APP_VERSION").is_none()
+    {
+        // SAFETY: Called in `main()` before the Tokio runtime or any background threads spawn.
+        unsafe {
+            std::env::set_var("DIMO_APP_VERSION", version);
+        }
+    }
+
+    if let Some(resources_dir) = launch.resources_dir.as_ref() {
+        let candidate = resources_dir
+            .join("scripts")
+            .join("claude-native-driver.mjs");
+        if candidate.is_file() {
+            agents::engine::claude_events::register_claude_driver_script(candidate.clone());
+            if std::env::var_os("DIMO_CLAUDE_DRIVER_SCRIPT").is_none() {
+                // SAFETY: Called in `main()` before the Tokio runtime or any background threads spawn.
+                unsafe {
+                    std::env::set_var("DIMO_CLAUDE_DRIVER_SCRIPT", &candidate);
+                }
+            }
+        }
+    }
+}
+
+async fn run_command(parsed: Result<ParsedArgs, server::ParseError>) -> ExitCode {
+    match parsed {
         Ok(ParsedArgs::Command(LaunchCommand::Version)) => {
             println!("{}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS

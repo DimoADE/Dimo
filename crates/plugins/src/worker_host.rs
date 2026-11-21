@@ -7,7 +7,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -24,6 +24,19 @@ use tokio::{
 };
 
 use crate::PluginPackage;
+
+/// Upper bound for a single nested `host.call` dispatched from a plugin worker
+/// back to the Host (must accommodate interactive user-confirmation flows such
+/// as `provider.presets.bind`, which allow up to 180s).
+const HOST_CALL_MAX_TIMEOUT: Duration = Duration::from_secs(240);
+
+fn runtime_host_version() -> String {
+    std::env::var("DIMO_APP_VERSION")
+        .ok()
+        .map(|version| version.trim().to_owned())
+        .filter(|version| !version.is_empty())
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned())
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1003,7 +1016,7 @@ impl WorkerHost {
             "initialize",
             json!({
                 "protocolRange": ["1.1"],
-                "hostVersion": env!("CARGO_PKG_VERSION"),
+                "hostVersion": runtime_host_version(),
                 "pluginIdentity": {
                     "publisher": package.publisher.clone().unwrap_or_default(),
                     "id": package.id.as_str(),
@@ -2601,7 +2614,7 @@ async fn mount_and_activate_slot_muxed(
         "initialize",
         json!({
             "protocolRange": ["1.1"],
-            "hostVersion": env!("CARGO_PKG_VERSION"),
+            "hostVersion": runtime_host_version(),
             "pluginIdentity": {
                 "publisher": spec.publisher,
                 "id": spec.plugin_id,
@@ -2708,6 +2721,10 @@ fn spawn_shared_node_runner(
         .spawn()
         .map_err(|error| WorkerHostError::new("worker_spawn_failed", error.to_string()))?;
     let pid = child.id();
+    #[cfg(windows)]
+    if let Some(pid) = pid {
+        let _ = utils::process::assign_pid_to_guardian_job(pid);
+    }
     let stdin = child.stdin.take().ok_or_else(|| {
         WorkerHostError::new(
             "worker_transport_failed",
@@ -2911,103 +2928,116 @@ async fn exchange_muxed(
     )
     .await?;
     let mut frames = FrameReassembler::new(codec);
-    timeout(deadline, async {
-        loop {
-            let raw_line = read_worker_stdout_line(
+    let mut remaining_worker_budget = deadline;
+    let host_call_timeout = HOST_CALL_MAX_TIMEOUT.max(deadline);
+    loop {
+        let read_started = Instant::now();
+        let raw_line = timeout(
+            remaining_worker_budget,
+            read_worker_stdout_line(
                 &mut process.stdout,
                 stdout_line_max_bytes(codec.max_frame_bytes()),
-            )
-            .await?;
-            let envelope: Value = serde_json::from_str(&raw_line).map_err(|error| {
-                WorkerHostError::new("worker_protocol_invalid", error.to_string())
-            })?;
-            if let Some(stderr_line) = envelope.get("stderr").and_then(Value::as_str) {
-                let target_plugin = envelope
-                    .get("pluginId")
-                    .and_then(Value::as_str)
-                    .unwrap_or(plugin_id);
-                record_plugin_log(target_plugin, "stderr", stderr_line);
-                continue;
+            ),
+        )
+        .await
+        .map_err(|_| WorkerHostError::new("worker_timeout", "Worker request timed out"))??;
+        remaining_worker_budget = remaining_worker_budget.saturating_sub(read_started.elapsed());
+
+        let envelope: Value = serde_json::from_str(&raw_line).map_err(|error| {
+            WorkerHostError::new("worker_protocol_invalid", error.to_string())
+        })?;
+        if let Some(stderr_line) = envelope.get("stderr").and_then(Value::as_str) {
+            let target_plugin = envelope
+                .get("pluginId")
+                .and_then(Value::as_str)
+                .unwrap_or(plugin_id);
+            record_plugin_log(target_plugin, "stderr", stderr_line);
+            continue;
+        }
+        if envelope.get("control").is_some() {
+            continue;
+        }
+        let env_plugin_id = envelope.get("pluginId").and_then(Value::as_str);
+        let env_generation = envelope.get("generation").and_then(Value::as_u64);
+        let Some(inner_line) = envelope.get("line").and_then(Value::as_str) else {
+            continue;
+        };
+        if env_plugin_id != Some(plugin_id) || env_generation != Some(generation) {
+            if let (Some(other_id), Some(other_gen)) = (env_plugin_id, env_generation)
+                && let Ok(other_msg) = serde_json::from_str::<Value>(inner_line)
+                && other_msg.get("method").and_then(Value::as_str) == Some("host.call")
+                && let Some(other_broker) = process
+                    .brokers
+                    .get(&(other_id.to_owned(), other_gen))
+                    .cloned()
+            {
+                dispatch_host_call_muxed(
+                    process,
+                    &other_broker,
+                    codec,
+                    &other_msg,
+                    host_call_timeout,
+                )
+                .await?;
             }
-            if envelope.get("control").is_some() {
-                continue;
-            }
-            let env_plugin_id = envelope.get("pluginId").and_then(Value::as_str);
-            let env_generation = envelope.get("generation").and_then(Value::as_u64);
-            let Some(inner_line) = envelope.get("line").and_then(Value::as_str) else {
-                continue;
-            };
-            if env_plugin_id != Some(plugin_id) || env_generation != Some(generation) {
-                if let (Some(other_id), Some(other_gen)) = (env_plugin_id, env_generation)
-                    && let Ok(other_msg) = serde_json::from_str::<Value>(inner_line)
-                    && other_msg.get("method").and_then(Value::as_str) == Some("host.call")
-                    && let Some(other_broker) = process
-                        .brokers
-                        .get(&(other_id.to_owned(), other_gen))
-                        .cloned()
-                {
-                    dispatch_host_call_muxed(process, &other_broker, codec, &other_msg).await?;
-                }
-                continue;
-            }
-            let message = match frames.push_line(inner_line) {
-                Ok(FrameDecode::NeedMore) => continue,
-                Ok(FrameDecode::Message(message)) => message,
-                Err(error) => {
-                    return Err(WorkerHostError::new(
-                        worker_frame_error_code(error.code),
-                        error.message,
-                    ));
-                }
-            };
-            if let Some(msg_method) = message.get("method").and_then(Value::as_str) {
-                if msg_method == "host.call" {
-                    dispatch_host_call_muxed(process, broker, codec, &message).await?;
-                    continue;
-                }
-                if msg_method == "worker.log" {
-                    if let Some(text) = message.pointer("/params/message").and_then(Value::as_str) {
-                        record_plugin_log(plugin_id, "stdout", text);
-                    }
-                    continue;
-                }
-                if message.get("id").is_none() {
-                    continue;
-                }
-            }
-            let resp_id = message.get("id").and_then(Value::as_str);
-            if resp_id != Some(&request_id) {
-                if let Some(stale_seq) = resp_id
-                    .and_then(|id| id.strip_prefix("host:"))
-                    .and_then(|num| num.parse::<u64>().ok())
-                    && stale_seq < current_sequence
-                {
-                    continue;
-                }
+            continue;
+        }
+        let message = match frames.push_line(inner_line) {
+            Ok(FrameDecode::NeedMore) => continue,
+            Ok(FrameDecode::Message(message)) => message,
+            Err(error) => {
                 return Err(WorkerHostError::new(
-                    "worker_protocol_invalid",
-                    "Worker response ID did not match the request",
+                    worker_frame_error_code(error.code),
+                    error.message,
                 ));
             }
-            if message.get("ok").and_then(Value::as_bool) == Some(true) {
-                return Ok(message.get("result").cloned().unwrap_or(Value::Null));
+        };
+        if let Some(msg_method) = message.get("method").and_then(Value::as_str) {
+            if msg_method == "host.call" {
+                dispatch_host_call_muxed(process, broker, codec, &message, host_call_timeout)
+                    .await?;
+                continue;
             }
-            let code = message
-                .pointer("/error/code")
-                .and_then(Value::as_str)
-                .unwrap_or("worker_failed");
-            let detail = message
-                .pointer("/error/message")
-                .and_then(Value::as_str)
-                .unwrap_or("Worker request failed");
+            if msg_method == "worker.log" {
+                if let Some(text) = message.pointer("/params/message").and_then(Value::as_str) {
+                    record_plugin_log(plugin_id, "stdout", text);
+                }
+                continue;
+            }
+            if message.get("id").is_none() {
+                continue;
+            }
+        }
+        let resp_id = message.get("id").and_then(Value::as_str);
+        if resp_id != Some(&request_id) {
+            if let Some(stale_seq) = resp_id
+                .and_then(|id| id.strip_prefix("host:"))
+                .and_then(|num| num.parse::<u64>().ok())
+                && stale_seq < current_sequence
+            {
+                continue;
+            }
             return Err(WorkerHostError::new(
-                "worker_request_failed",
-                format!("{code}: {detail}"),
+                "worker_protocol_invalid",
+                "Worker response ID did not match the request",
             ));
         }
-    })
-    .await
-    .map_err(|_| WorkerHostError::new("worker_timeout", "Worker request timed out"))?
+        if message.get("ok").and_then(Value::as_bool) == Some(true) {
+            return Ok(message.get("result").cloned().unwrap_or(Value::Null));
+        }
+        let code = message
+            .pointer("/error/code")
+            .and_then(Value::as_str)
+            .unwrap_or("worker_failed");
+        let detail = message
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or("Worker request failed");
+        return Err(WorkerHostError::new(
+            "worker_request_failed",
+            format!("{code}: {detail}"),
+        ));
+    }
 }
 
 async fn dispatch_host_call_muxed(
@@ -3015,6 +3045,7 @@ async fn dispatch_host_call_muxed(
     broker: &ScopedCapabilityBroker,
     codec: FrameCodec,
     message: &Value,
+    host_call_timeout: Duration,
 ) -> Result<(), WorkerHostError> {
     let id = message
         .get("id")
@@ -3036,12 +3067,21 @@ async fn dispatch_host_call_muxed(
         .pointer("/params/input")
         .cloned()
         .unwrap_or(Value::Null);
-    let response = match broker.call(capability, operation, input).await {
-        Ok(result) => json!({ "id": id, "ok": true, "result": result }),
-        Err(error) => json!({
+    let response = match timeout(host_call_timeout, broker.call(capability, operation, input)).await
+    {
+        Ok(Ok(result)) => json!({ "id": id, "ok": true, "result": result }),
+        Ok(Err(error)) => json!({
             "id": id,
             "ok": false,
             "error": { "code": error.code(), "message": error.to_string() }
+        }),
+        Err(_) => json!({
+            "id": id,
+            "ok": false,
+            "error": {
+                "code": "host_call_timeout",
+                "message": format!("Host capability call {capability}.{operation} timed out")
+            }
         }),
     };
     write_message_muxed(
@@ -3064,6 +3104,10 @@ fn spawn_hosted_worker(
     let mut child = command
         .spawn()
         .map_err(|error| WorkerHostError::new("worker_spawn_failed", error.to_string()))?;
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        let _ = utils::process::assign_pid_to_guardian_job(pid);
+    }
     let stdin = child.stdin.take().ok_or_else(|| {
         WorkerHostError::new("worker_transport_failed", "Worker stdin is unavailable")
     })?;
@@ -3153,55 +3197,60 @@ async fn exchange(
     )
     .await?;
     let mut frames = FrameReassembler::new(codec);
-    timeout(deadline, async {
-        loop {
-            let line = read_worker_stdout_line(
+    let mut remaining_worker_budget = deadline;
+    let host_call_timeout = HOST_CALL_MAX_TIMEOUT.max(deadline);
+    loop {
+        let read_started = Instant::now();
+        let line = timeout(
+            remaining_worker_budget,
+            read_worker_stdout_line(
                 &mut process.stdout,
                 stdout_line_max_bytes(codec.max_frame_bytes()),
-            )
-            .await?;
-            let message = match frames.push_line(&line) {
-                Ok(FrameDecode::NeedMore) => continue,
-                Ok(FrameDecode::Message(message)) => message,
-                Err(error) => {
-                    return Err(WorkerHostError::new(
-                        worker_frame_error_code(error.code),
-                        error.message,
-                    ));
-                }
-            };
-            if message.get("method").and_then(Value::as_str) == Some("host.call") {
-                dispatch_host_call(process, broker, codec, &message).await?;
-                continue;
-            }
-            if message.get("method").and_then(Value::as_str) == Some("worker.log") {
-                continue;
-            }
-            if message.get("id").and_then(Value::as_str) != Some(&request_id) {
+            ),
+        )
+        .await
+        .map_err(|_| WorkerHostError::new("worker_timeout", "Worker request timed out"))??;
+        remaining_worker_budget = remaining_worker_budget.saturating_sub(read_started.elapsed());
+
+        let message = match frames.push_line(&line) {
+            Ok(FrameDecode::NeedMore) => continue,
+            Ok(FrameDecode::Message(message)) => message,
+            Err(error) => {
                 return Err(WorkerHostError::new(
-                    "worker_protocol_invalid",
-                    "Worker response ID did not match the request",
+                    worker_frame_error_code(error.code),
+                    error.message,
                 ));
             }
-            if message.get("ok").and_then(Value::as_bool) == Some(true) {
-                return Ok(message.get("result").cloned().unwrap_or(Value::Null));
-            }
-            let code = message
-                .pointer("/error/code")
-                .and_then(Value::as_str)
-                .unwrap_or("worker_failed");
-            let detail = message
-                .pointer("/error/message")
-                .and_then(Value::as_str)
-                .unwrap_or("Worker request failed");
+        };
+        if message.get("method").and_then(Value::as_str) == Some("host.call") {
+            dispatch_host_call(process, broker, codec, &message, host_call_timeout).await?;
+            continue;
+        }
+        if message.get("method").and_then(Value::as_str) == Some("worker.log") {
+            continue;
+        }
+        if message.get("id").and_then(Value::as_str) != Some(&request_id) {
             return Err(WorkerHostError::new(
-                "worker_request_failed",
-                format!("{code}: {detail}"),
+                "worker_protocol_invalid",
+                "Worker response ID did not match the request",
             ));
         }
-    })
-    .await
-    .map_err(|_| WorkerHostError::new("worker_timeout", "Worker request timed out"))?
+        if message.get("ok").and_then(Value::as_bool) == Some(true) {
+            return Ok(message.get("result").cloned().unwrap_or(Value::Null));
+        }
+        let code = message
+            .pointer("/error/code")
+            .and_then(Value::as_str)
+            .unwrap_or("worker_failed");
+        let detail = message
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or("Worker request failed");
+        return Err(WorkerHostError::new(
+            "worker_request_failed",
+            format!("{code}: {detail}"),
+        ));
+    }
 }
 
 async fn dispatch_host_call(
@@ -3209,6 +3258,7 @@ async fn dispatch_host_call(
     broker: &ScopedCapabilityBroker,
     codec: FrameCodec,
     message: &Value,
+    host_call_timeout: Duration,
 ) -> Result<(), WorkerHostError> {
     let id = message
         .get("id")
@@ -3230,12 +3280,18 @@ async fn dispatch_host_call(
         .pointer("/params/input")
         .cloned()
         .unwrap_or(Value::Null);
-    let response = match broker.call(capability, operation, input).await {
-        Ok(result) => json!({ "id": id, "ok": true, "result": result }),
-        Err(error) => json!({
+    let response = match timeout(host_call_timeout, broker.call(capability, operation, input)).await
+    {
+        Ok(Ok(result)) => json!({ "id": id, "ok": true, "result": result }),
+        Ok(Err(error)) => json!({
             "id": id,
             "ok": false,
             "error": { "code": error.code(), "message": error.to_string() }
+        }),
+        Err(_) => json!({
+            "id": id,
+            "ok": false,
+            "error": { "code": "host_call_timeout", "message": "Host capability call timed out" }
         }),
     };
     write_message(&mut process.stdin, &response, codec).await

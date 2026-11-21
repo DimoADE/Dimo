@@ -1,11 +1,12 @@
 //! Locate Host-family sidecar binaries (`dimo-mcp`, `dimo-workflow-mcp`).
 //!
-//! Binaries resolved out of a Cargo build tree (`target/debug`, `target/release`,
-//! `CARGO_TARGET_DIR`, or `src-tauri/binaries`) are staged into a stable
-//! user-owned runtime directory (`~/.local/share/dimo/host-bin`) before being
-//! handed to ACP session injection or native CLI projections. This keeps running
-//! MCP child processes from locking Cargo's `target/` outputs on Windows and
-//! keeps projected CLI configs valid across `cargo clean` and worktree removal.
+//! Binaries resolved out of a Cargo or desktop build tree (`target/debug`,
+//! `target/release`, `CARGO_TARGET_DIR`, `electron/resources/bin`, or legacy
+//! `src-tauri/binaries`) are staged into a stable user-owned runtime directory
+//! (`~/.local/share/dimo/host-bin`) before being handed to ACP session
+//! injection or native CLI projections. This keeps running MCP child processes
+//! from locking Cargo's `target/` outputs on Windows and keeps projected CLI
+//! configs valid across `cargo clean` and worktree removal.
 
 use std::{
     fs, io,
@@ -75,7 +76,10 @@ pub fn locate_runnable_host_family_binary(base: &str) -> Option<PathBuf> {
 }
 
 fn is_known_host_family_binary(base: &str) -> bool {
-    matches!(base, "dimo-mcp" | "dimo-workflow-mcp")
+    matches!(
+        base,
+        "dimo-mcp" | "dimo-workflow-mcp" | "dimo-computer-helper"
+    )
 }
 
 fn locate_raw_host_family_binary(
@@ -143,7 +147,9 @@ fn is_build_tree_binary(path: &Path) -> bool {
     }
 
     for window in components.windows(3) {
-        if window[0] == "target" && matches!(window[2].as_str(), "debug" | "release") {
+        if (window[0] == "target" && matches!(window[2].as_str(), "debug" | "release"))
+            || (window[0] == "electron" && window[1] == "resources" && window[2] == "bin")
+        {
             return true;
         }
     }
@@ -247,6 +253,7 @@ fn env_override(base: &str) -> Option<PathBuf> {
     let key = match base {
         "dimo-mcp" => "DIMO_MCP_BIN",
         "dimo-workflow-mcp" => "DIMO_WORKFLOW_MCP_BIN",
+        "dimo-computer-helper" => "DIMO_COMPUTER_HELPER_BIN",
         _ => return None,
     };
     std::env::var_os(key).map(PathBuf::from)
@@ -275,8 +282,10 @@ fn search_from(exe: &Path, base: &str, file_name: &str) -> Option<PathBuf> {
                 return Some(found);
             }
         }
-        if let Some(found) = first_runnable_in(&dir.join("binaries"), base, file_name) {
-            return Some(found);
+        for relative in ["binaries", "resources/bin", "electron/resources/bin"] {
+            if let Some(found) = first_runnable_in(&dir.join(relative), base, file_name) {
+                return Some(found);
+            }
         }
         dir = dir.parent()?;
     }
@@ -369,6 +378,12 @@ mod tests {
             "/repo/src-tauri/binaries/dimo-mcp-x86_64-pc-windows-msvc.exe"
         )));
         assert!(is_build_tree_binary(Path::new(
+            "/repo/electron/resources/bin/dimo-mcp"
+        )));
+        assert!(is_build_tree_binary(Path::new(
+            r"C:\repo\electron\resources\bin\dimo-mcp.exe"
+        )));
+        assert!(is_build_tree_binary(Path::new(
             "/custom-cargo-target/debug/dimo-mcp.exe"
         )));
 
@@ -376,7 +391,13 @@ mod tests {
             "/Applications/Dimo.app/Contents/MacOS/dimo-mcp"
         )));
         assert!(!is_build_tree_binary(Path::new(
+            "/Applications/Dimo.app/Contents/Resources/bin/dimo-mcp"
+        )));
+        assert!(!is_build_tree_binary(Path::new(
             r"C:\Users\alice\AppData\Local\Dimo\dimo-mcp.exe"
+        )));
+        assert!(!is_build_tree_binary(Path::new(
+            r"C:\Program Files\Dimo\resources\bin\dimo-mcp.exe"
         )));
         assert!(!is_build_tree_binary(Path::new("/usr/local/bin/dimo-mcp")));
     }

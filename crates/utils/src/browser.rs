@@ -69,7 +69,10 @@ pub async fn open_browser(url: &str) -> Result<(), Box<dyn std::error::Error + S
     if is_wsl2() {
         let command = wsl_browser_command_parts(url)?;
         let mut cmd = tokio::process::Command::new(command.program);
-        cmd.args(command.args);
+        cmd.args(command.args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
         crate::process::configure_tokio_command_no_window(&mut cmd);
         cmd.spawn()?;
         Ok(())

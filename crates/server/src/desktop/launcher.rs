@@ -413,6 +413,9 @@ pub async fn open_external_terminal(
                     .arg("-a")
                     .arg("Terminal")
                     .arg(&working_dir)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
                     .spawn()
                     .map_err(|err| {
                         DesktopError::Internal(format!("Failed to launch Terminal: {err}"))
@@ -423,6 +426,9 @@ pub async fn open_external_terminal(
                     .arg("-a")
                     .arg("iTerm")
                     .arg(&working_dir)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
                     .spawn()
                     .map_err(|err| {
                         DesktopError::Internal(format!("Failed to launch iTerm2: {err}"))
@@ -433,6 +439,9 @@ pub async fn open_external_terminal(
                     .arg("-a")
                     .arg("Ghostty")
                     .arg(&working_dir)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
                     .spawn()
                     .map_err(|err| {
                         DesktopError::Internal(format!("Failed to launch Ghostty: {err}"))
@@ -457,6 +466,9 @@ pub async fn open_external_terminal(
                 Command::new("wt")
                     .arg("-d")
                     .arg(&working_dir)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
                     .spawn()
                     .map_err(|err| {
                         DesktopError::Internal(format!("Failed to launch Windows Terminal: {err}"))
@@ -465,6 +477,9 @@ pub async fn open_external_terminal(
             "ghostty" => {
                 Command::new("ghostty")
                     .current_dir(&working_dir)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
                     .spawn()
                     .map_err(|err| {
                         DesktopError::Internal(format!("Failed to launch Ghostty: {err}"))
@@ -488,6 +503,9 @@ pub async fn open_external_terminal(
             "terminal" => {
                 Command::new("x-terminal-emulator")
                     .current_dir(&working_dir)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
                     .spawn()
                     .map_err(|err| {
                         DesktopError::Internal(format!("Failed to launch terminal: {err}"))
@@ -496,6 +514,9 @@ pub async fn open_external_terminal(
             "ghostty" => {
                 Command::new("ghostty")
                     .current_dir(&working_dir)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
                     .spawn()
                     .map_err(|err| {
                         DesktopError::Internal(format!("Failed to launch Ghostty: {err}"))
@@ -522,6 +543,9 @@ fn open_warp_terminal(working_dir: &Path) -> Result<(), DesktopError> {
     {
         Command::new("open")
             .arg(&warp_uri)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|err| DesktopError::Internal(format!("Failed to launch Warp: {err}")))?;
         Ok(())
@@ -534,6 +558,9 @@ fn open_warp_terminal(working_dir: &Path) -> Result<(), DesktopError> {
         Command::new("cmd")
             .args(["/C", "start", "", &warp_uri])
             .creation_flags(CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|err| DesktopError::Internal(format!("Failed to launch Warp: {err}")))?;
         Ok(())
@@ -543,6 +570,9 @@ fn open_warp_terminal(working_dir: &Path) -> Result<(), DesktopError> {
     {
         Command::new("xdg-open")
             .arg(&warp_uri)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|err| DesktopError::Internal(format!("Failed to launch Warp: {err}")))?;
         Ok(())

@@ -28,7 +28,10 @@ use std::{
 use thiserror::Error;
 use utils::{
     path::{ALWAYS_SKIP_DIRS, get_dimo_temp_dir},
-    process::{isolate_std_process_group, new_hidden_std_command, terminate_std_child_group},
+    process::{
+        ProcessTreeJob, isolate_std_process_group, new_hidden_std_command,
+        terminate_std_child_group,
+    },
     shell::resolve_executable_path_blocking,
 };
 use wait_timeout::ChildExt;
@@ -1643,6 +1646,7 @@ impl GitCli {
         let mut child = cmd
             .spawn()
             .map_err(|e| GitCliError::CommandFailed(e.to_string()))?;
+        let process_tree_job = ProcessTreeJob::create_and_assign(child.id());
 
         let stdout = child
             .stdout
@@ -1677,7 +1681,11 @@ impl GitCli {
         {
             Some(status) => status,
             None => {
+                #[cfg(windows)]
+                let _ = process_tree_job.terminate();
                 terminate_std_child_group(&mut child);
+                #[cfg(not(windows))]
+                let _ = process_tree_job.terminate();
                 let _ = stdout_reader.join();
                 let _ = stderr_reader.join();
                 return Err(GitCliError::TimedOut(timeout.as_secs()));
@@ -1686,6 +1694,7 @@ impl GitCli {
 
         let stdout_bytes = join_pipe_reader(stdout_reader)?;
         let stderr_bytes = join_pipe_reader(stderr_reader)?;
+        process_tree_job.close();
 
         if !status.success() {
             return Err(GitCliError::CommandFailed(Self::format_command_output(

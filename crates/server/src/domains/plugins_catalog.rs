@@ -768,21 +768,31 @@ impl ServerApplicationDomains {
             .map(|plugin| plugin.id)
             .collect::<std::collections::BTreeSet<_>>();
         for parsed in &commands {
-            let status = utils::process::new_hidden_tokio_command(&program, &parsed.args)
-                .kill_on_drop(true)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .status()
-                .await
-                .map_err(|error| {
-                    ApplicationError::internal(format!("start plugin import command: {error}"))
-                })?;
-            if !status.success() {
-                return Err(ApplicationError::internal(format!(
-                    "plugin import command failed: {}",
+            let mut cmd = utils::process::new_hidden_tokio_command(&program, &parsed.args);
+            let output = utils::process::run_command_output_with_timeout(
+                &mut cmd,
+                std::time::Duration::from_secs(60),
+            )
+            .await
+            .map_err(|error| {
+                ApplicationError::internal(format!(
+                    "plugin import command failed ({}): {error}",
                     parsed.display
-                )));
+                ))
+            })?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                let detail = if stderr.is_empty() {
+                    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+                } else {
+                    stderr
+                };
+                let message = if detail.is_empty() {
+                    format!("plugin import command failed: {}", parsed.display)
+                } else {
+                    format!("plugin import command failed ({}): {detail}", parsed.display)
+                };
+                return Err(ApplicationError::internal(message));
             }
         }
         let mut imported_plugin_ids = adapter

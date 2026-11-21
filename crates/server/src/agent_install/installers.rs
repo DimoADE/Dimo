@@ -7,7 +7,7 @@ pub(super) async fn ensure_managed_uv(managed_artifacts_dir: &Path) -> anyhow::R
     let final_executable = managed_uv_executable(managed_artifacts_dir)
         .ok_or_else(|| anyhow::anyhow!("could not resolve managed uv path"))?;
     if tokio::fs::metadata(&final_executable).await.is_ok() {
-        println!(
+        tracing::info!(
             "Using managed uv {MANAGED_UV_VERSION}: {}",
             final_executable.display()
         );
@@ -19,7 +19,7 @@ pub(super) async fn ensure_managed_uv(managed_artifacts_dir: &Path) -> anyhow::R
     let staging = base.join(format!(".staging-{}", Uuid::new_v4()));
     tokio::fs::create_dir_all(&staging).await?;
     let urls = managed_uv_download_urls(&artifact);
-    println!("Downloading managed uv {MANAGED_UV_VERSION} ({platform})");
+    tracing::info!("Downloading managed uv {MANAGED_UV_VERSION} ({platform})");
     let result = async {
         let (url, bytes) = download_archive_from(&urls, MAX_MANAGED_TOOL_BYTES).await?;
         let actual = format!("{:x}", Sha256::digest(&bytes));
@@ -52,7 +52,7 @@ pub(super) async fn ensure_managed_uv(managed_artifacts_dir: &Path) -> anyhow::R
             tokio::fs::set_permissions(&dest, permissions).await?;
         }
         let _ = tokio::fs::remove_dir_all(&staging).await;
-        println!("Managed uv {MANAGED_UV_VERSION} installed");
+        tracing::info!("Managed uv {MANAGED_UV_VERSION} installed");
         Ok(dest)
     }
     .await;
@@ -69,7 +69,7 @@ pub(super) async fn ensure_managed_bun(managed_artifacts_dir: &Path) -> anyhow::
     let final_executable = managed_bun_executable(managed_artifacts_dir)
         .ok_or_else(|| anyhow::anyhow!("could not resolve managed Bun path"))?;
     if tokio::fs::metadata(&final_executable).await.is_ok() {
-        println!(
+        tracing::info!(
             "Using managed Bun {MANAGED_BUN_VERSION}: {}",
             final_executable.display()
         );
@@ -81,7 +81,7 @@ pub(super) async fn ensure_managed_bun(managed_artifacts_dir: &Path) -> anyhow::
     let staging = base.join(format!(".staging-{}", Uuid::new_v4()));
     tokio::fs::create_dir_all(&staging).await?;
     let urls = managed_bun_download_urls(&artifact);
-    println!("Downloading managed Bun {MANAGED_BUN_VERSION} ({platform})");
+    tracing::info!("Downloading managed Bun {MANAGED_BUN_VERSION} ({platform})");
     let result = async {
         let (url, bytes) = download_archive_from(&urls, MAX_MANAGED_TOOL_BYTES).await?;
         let actual = format!("{:x}", Sha256::digest(&bytes));
@@ -115,7 +115,7 @@ pub(super) async fn ensure_managed_bun(managed_artifacts_dir: &Path) -> anyhow::
             tokio::fs::set_permissions(&dest, permissions).await?;
         }
         let _ = tokio::fs::remove_dir_all(&staging).await;
-        println!("Managed Bun {MANAGED_BUN_VERSION} installed");
+        tracing::info!("Managed Bun {MANAGED_BUN_VERSION} installed");
         Ok(dest)
     }
     .await;
@@ -140,7 +140,7 @@ where
         user_env.npm_prefix.display(),
         component.resolved_source
     );
-    println!("{cmd_line}");
+    tracing::info!("{cmd_line}");
     on_progress(55, &cmd_line);
     let mut errors = Vec::new();
     for registry in utils::mirror::npm_registry_candidates() {
@@ -198,7 +198,7 @@ where
             } else {
                 "permission denied"
             };
-            println!("{reason}, retrying with user prefix...");
+            tracing::info!("{reason}, retrying with user prefix...");
             on_progress(
                 62,
                 &format!(
@@ -349,7 +349,7 @@ where
         "$ uv tool install --force --no-config {}",
         component.resolved_source
     );
-    println!("$ uv tool install {}", component.resolved_source);
+    tracing::info!("$ uv tool install {}", component.resolved_source);
     on_progress(55, &cmd_line);
     let mut errors = Vec::new();
     let mut installed = false;
@@ -419,9 +419,10 @@ where
         on_progress(55, &format!("GET {}", component.resolved_source));
         return install_kiro_from_official_installer(component, user_env).await;
     }
-    println!(
+    tracing::info!(
         "Downloading {} ({})",
-        component.component_id, component.version
+        component.component_id,
+        component.version
     );
     let urls = utils::mirror::download_url_candidates(&component.resolved_source);
     on_progress(
@@ -650,7 +651,7 @@ pub(super) async fn install_kiro_windows_with_fallback(
         .to_ascii_lowercase()
         .ends_with(".ps1")
     {
-        println!(
+        tracing::info!(
             "Running Kiro official PowerShell installer: {}",
             component.resolved_source
         );
@@ -799,7 +800,7 @@ pub(super) async fn download_kiro_windows_msi(
             sha256,
         )
     };
-    println!("Downloading Kiro Windows MSI: {msi_url}");
+    tracing::info!("Downloading Kiro Windows MSI: {msi_url}");
     let msi_urls = utils::mirror::download_url_candidates(&msi_url);
     let (_, bytes) = download_archive_from(&msi_urls, MAX_AGENT_BINARY_BYTES).await?;
     if let agents::ArtifactTrust::ExpectedSha256 { .. } = &component.trust {
@@ -822,7 +823,7 @@ pub(super) async fn install_kiro_unix_installer(
     user_env: &UserEnvironmentLayout,
     staging: &Path,
 ) -> anyhow::Result<PathBuf> {
-    println!(
+    tracing::info!(
         "Running Kiro official installer: {}",
         component.resolved_source
     );
@@ -1198,11 +1199,19 @@ pub(super) async fn file_sha256(path: &Path) -> anyhow::Result<String> {
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
+const INSTALL_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 pub(super) async fn run_command(
     label: &str,
     mut command: tokio::process::Command,
 ) -> anyhow::Result<()> {
-    let output = command.output().await?;
+    command.kill_on_drop(true);
+    let output = utils::process::run_command_output_with_timeout(
+        &mut command,
+        INSTALL_COMMAND_TIMEOUT,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("{label} failed: {error}"))?;
     if output.status.success() {
         return Ok(());
     }
@@ -1220,7 +1229,13 @@ pub(super) async fn run_command_with_progress<F>(
 where
     F: FnMut(u8, &str),
 {
-    let output = command.output().await?;
+    command.kill_on_drop(true);
+    let output = utils::process::run_command_output_with_timeout(
+        &mut command,
+        INSTALL_COMMAND_TIMEOUT,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("{label} failed: {error}"))?;
     let stdout = utils::process::decode_process_output(&output.stdout);
     let stderr = utils::process::decode_process_output(&output.stderr);
     for line in stdout
