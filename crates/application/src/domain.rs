@@ -12,6 +12,7 @@ pub struct AdapterCapabilities {
     pub notification_summary: bool,
     pub device_admin: bool,
     pub desktop_tauri: bool,
+    pub desktop_electron: bool,
 }
 
 impl AdapterCapabilities {
@@ -22,6 +23,7 @@ impl AdapterCapabilities {
             notification_summary: false,
             device_admin: false,
             desktop_tauri: false,
+            desktop_electron: false,
         }
     }
 
@@ -32,6 +34,7 @@ impl AdapterCapabilities {
             notification_summary: true,
             device_admin: true,
             desktop_tauri: false,
+            desktop_electron: false,
         }
     }
 
@@ -42,6 +45,18 @@ impl AdapterCapabilities {
             notification_summary: true,
             device_admin: true,
             desktop_tauri: true,
+            desktop_electron: true,
+        }
+    }
+
+    pub const fn desktop_electron_host() -> Self {
+        Self {
+            preview_proxy: true,
+            offline_read: true,
+            notification_summary: true,
+            device_admin: true,
+            desktop_tauri: false,
+            desktop_electron: true,
         }
     }
 }
@@ -99,6 +114,9 @@ macro_rules! domain_commands {
                 }
                 if adapter.desktop_tauri {
                     scopes.insert("desktop.tauri");
+                }
+                if adapter.desktop_electron {
+                    scopes.insert("desktop.electron");
                 }
                 scopes.into_iter().collect()
             }
@@ -721,6 +739,7 @@ mod tests {
         }
         assert!(!scopes.contains(&"workspace.write"));
         assert!(!scopes.contains(&"desktop.tauri"));
+        assert!(!scopes.contains(&"desktop.electron"));
         assert!(!scopes.contains(&"preview.proxy"));
         assert!(!scopes.contains(&"offline.read"));
         assert!(!scopes.contains(&"device.pair"));
@@ -731,10 +750,17 @@ mod tests {
         assert!(server.contains(&"offline.read"));
         assert!(server.contains(&"device.pair"));
         assert!(!server.contains(&"desktop.tauri"));
+        assert!(!server.contains(&"desktop.electron"));
         let desktop = super::DomainCommand::derived_capability_scopes(
             super::AdapterCapabilities::desktop_host(),
         );
         assert!(desktop.contains(&"desktop.tauri"));
+        assert!(desktop.contains(&"desktop.electron"));
+        let electron = super::DomainCommand::derived_capability_scopes(
+            super::AdapterCapabilities::desktop_electron_host(),
+        );
+        assert!(electron.contains(&"desktop.electron"));
+        assert!(!electron.contains(&"desktop.tauri"));
     }
 
     #[test]

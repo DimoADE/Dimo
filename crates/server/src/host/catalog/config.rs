@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, path::Path, process::Stdio, time::Duration};
 
 use agents::{
     AgentCapability, AgentContentBlock, AgentId, AgentSessionId, CancelAgentPromptInput,
@@ -75,11 +75,11 @@ struct SoundArgs {
     sound_file: SoundFile,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 struct ClaudeSettings {
     #[serde(default)]
     env: HashMap<String, String>,
-    #[serde(default, rename = "enabledPlugins")]
+    #[serde(default, alias = "enabledPlugins")]
     enabled_plugins: HashMap<String, bool>,
 }
 
@@ -227,11 +227,24 @@ pub(super) async fn play_notification_sound(args: Value) -> Result<Value, Applic
     let args: SoundArgs = parse(args)?;
     let file_path = args.sound_file.get_path().await.map_err(internal_error)?;
     if cfg!(target_os = "macos") {
-        let _ = utils::process::new_hidden_tokio_command("afplay", [&file_path]).spawn();
+        let _ = utils::process::new_hidden_tokio_command("afplay", [&file_path])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
     } else if cfg!(target_os = "linux") {
         let _ = utils::process::new_hidden_tokio_command("paplay", [&file_path])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
-            .or_else(|_| utils::process::new_hidden_tokio_command("aplay", [&file_path]).spawn());
+            .or_else(|_| {
+                utils::process::new_hidden_tokio_command("aplay", [&file_path])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+            });
     } else {
         let file_path = file_path.to_string_lossy().replace('\'', "''");
         let script = format!("(New-Object Media.SoundPlayer '{file_path}').PlaySync()");
@@ -239,6 +252,9 @@ pub(super) async fn play_notification_sound(args: Value) -> Result<Value, Applic
             "powershell.exe",
             ["-NoProfile", "-Command", &script],
         )
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn();
     }
     Ok(Value::Null)
@@ -628,10 +644,14 @@ pub(super) async fn list_prompt_enhancement_models(
 pub(super) async fn get_claude_settings() -> Result<Value, ApplicationError> {
     let path = claude_settings_path()
         .ok_or_else(|| ApplicationError::internal("Could not determine home directory"))?;
+    serialize(read_claude_settings_from_path(&path).await?)
+}
+
+async fn read_claude_settings_from_path(path: &Path) -> Result<ClaudeSettings, ApplicationError> {
     if !path.exists() {
-        return serialize(ClaudeSettings::default());
+        return Ok(ClaudeSettings::default());
     }
-    let content = tokio::fs::read_to_string(&path)
+    let content = tokio::fs::read_to_string(path)
         .await
         .map_err(internal_error)?;
     let raw: Value = serde_json::from_str(&content).map_err(internal_error)?;
@@ -640,7 +660,7 @@ pub(super) async fn get_claude_settings() -> Result<Value, ApplicationError> {
             "Claude settings JSON must contain an object at the root",
         ));
     }
-    serialize(ClaudeSettings {
+    Ok(ClaudeSettings {
         env: raw
             .get("env")
             .cloned()
@@ -662,8 +682,16 @@ pub(super) async fn update_claude_settings(args: Value) -> Result<Value, Applica
     let settings: ClaudeSettings = unwrap_named(args, &["settings"])?;
     let path = claude_settings_path()
         .ok_or_else(|| ApplicationError::internal("Could not determine home directory"))?;
+    let written = write_claude_settings_to_path(&path, settings).await?;
+    serialize(written)
+}
+
+async fn write_claude_settings_to_path(
+    path: &Path,
+    settings: ClaudeSettings,
+) -> Result<ClaudeSettings, ApplicationError> {
     let mut existing: Value = if path.exists() {
-        let content = tokio::fs::read_to_string(&path)
+        let content = tokio::fs::read_to_string(path)
             .await
             .map_err(internal_error)?;
         serde_json::from_str(&content).map_err(internal_error)?
@@ -687,12 +715,12 @@ pub(super) async fn update_claude_settings(args: Value) -> Result<Value, Applica
             .map_err(internal_error)?;
     }
     tokio::fs::write(
-        &path,
+        path,
         serde_json::to_string_pretty(&existing).map_err(internal_error)?,
     )
     .await
     .map_err(internal_error)?;
-    serialize(settings)
+    Ok(settings)
 }
 
 pub(super) fn claude_settings_path_value() -> Result<Value, ApplicationError> {
@@ -711,4 +739,72 @@ fn claude_settings_path() -> Option<std::path::PathBuf> {
                 .join(".claude")
                 .join("settings.json")
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn claude_settings_round_trip_preserves_enabled_plugins_and_other_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(".claude").join("settings.json");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "env": { "ANTHROPIC_BASE_URL": "https://example.invalid" },
+                "enabledPlugins": { "dimo-official": true, "legacy-plugin": false },
+                "permissions": { "allow": ["Bash(git status)"] },
+                "theme": "dark"
+            }))
+            .expect("serialize initial settings"),
+        )
+        .expect("write initial settings");
+
+        // 1. Read from disk -> API payload uses snake_case `enabled_plugins`.
+        let loaded = read_claude_settings_from_path(&path)
+            .await
+            .expect("read settings");
+        let api_json = serde_json::to_value(&loaded).expect("serialize API payload");
+        assert_eq!(api_json["enabled_plugins"]["dimo-official"], json!(true));
+        assert_eq!(api_json["enabled_plugins"]["legacy-plugin"], json!(false));
+        assert!(api_json.get("enabledPlugins").is_none());
+
+        // 2. Frontend sends back updated env + preserved `enabled_plugins` under `settings`.
+        let update_args = json!({
+            "settings": {
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://updated.invalid",
+                    "FOO": "bar"
+                },
+                "enabled_plugins": api_json["enabled_plugins"].clone()
+            }
+        });
+        let parsed: ClaudeSettings =
+            unwrap_named(update_args, &["settings"]).expect("deserialize snake_case settings");
+        write_claude_settings_to_path(&path, parsed)
+            .await
+            .expect("write updated settings");
+
+        // 3. On-disk JSON keeps Claude Code's `enabledPlugins` key and unrelated top-level keys.
+        let disk: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read disk file"))
+                .expect("parse disk file");
+        assert_eq!(disk["env"]["ANTHROPIC_BASE_URL"], json!("https://updated.invalid"));
+        assert_eq!(disk["env"]["FOO"], json!("bar"));
+        assert_eq!(disk["enabledPlugins"]["dimo-official"], json!(true));
+        assert_eq!(disk["enabledPlugins"]["legacy-plugin"], json!(false));
+        assert!(disk.get("enabled_plugins").is_none());
+        assert_eq!(disk["permissions"]["allow"][0], json!("Bash(git status)"));
+        assert_eq!(disk["theme"], json!("dark"));
+
+        // 4. Deserialize also accepts camelCase `enabledPlugins` alias.
+        let camel: ClaudeSettings = serde_json::from_value(json!({
+            "env": {},
+            "enabledPlugins": { "camel-plugin": true }
+        }))
+        .expect("deserialize camelCase alias");
+        assert_eq!(camel.enabled_plugins.get("camel-plugin"), Some(&true));
+    }
 }

@@ -1,7 +1,6 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
 };
 
 use async_trait::async_trait;
@@ -10,6 +9,7 @@ use plugins::{
     RemoteProfileError, RemoteProfileErrorCode, RemoteProfileHost,
 };
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 /// Headless Host store for advertised / provisioned origins. Connect reports
@@ -47,11 +47,16 @@ impl FileRemoteProfileHost {
         }
     }
 
-    fn persist(&self, profiles: &[StoredProfile]) -> Result<(), RemoteProfileError> {
+    async fn persist(&self, profiles: &[StoredProfile]) -> Result<(), RemoteProfileError> {
         let raw = serde_json::to_vec_pretty(profiles).map_err(|error| {
             RemoteProfileError::new(RemoteProfileErrorCode::Unavailable, error.to_string())
         })?;
-        fs::write(&self.path, raw).map_err(|error| {
+        if let Some(parent) = self.path.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|error| {
+                RemoteProfileError::new(RemoteProfileErrorCode::Unavailable, error.to_string())
+            })?;
+        }
+        tokio::fs::write(&self.path, raw).await.map_err(|error| {
             RemoteProfileError::new(RemoteProfileErrorCode::Unavailable, error.to_string())
         })
     }
@@ -60,7 +65,7 @@ impl FileRemoteProfileHost {
 #[async_trait]
 impl RemoteProfileHost for FileRemoteProfileHost {
     async fn list(&self) -> Result<Vec<RemoteHostProfile>, RemoteProfileError> {
-        let profiles = self.inner.lock().unwrap().clone();
+        let profiles = self.inner.lock().await.clone();
         Ok(profiles.into_iter().map(into_profile).collect())
     }
 
@@ -69,7 +74,7 @@ impl RemoteProfileHost for FileRemoteProfileHost {
         _plugin_id: &str,
         draft: RemoteHostProfileDraft,
     ) -> Result<RemoteHostProfile, RemoteProfileError> {
-        let mut profiles = self.inner.lock().unwrap();
+        let mut profiles = self.inner.lock().await;
         let id = draft
             .id
             .clone()
@@ -83,19 +88,24 @@ impl RemoteProfileHost for FileRemoteProfileHost {
             provision_kind: draft.provision_kind,
             provision: draft.provision,
         };
-        if let Some(existing) = profiles.iter_mut().find(|profile| profile.id == id) {
+        let mut next = profiles.clone();
+        if let Some(existing) = next.iter_mut().find(|profile| profile.id == id) {
             *existing = stored.clone();
         } else {
-            profiles.push(stored.clone());
+            next.push(stored.clone());
         }
-        self.persist(&profiles)?;
+        self.persist(&next).await?;
+        *profiles = next;
         Ok(into_profile(stored))
     }
 
     async fn forget(&self, _plugin_id: &str, profile_id: &str) -> Result<(), RemoteProfileError> {
-        let mut profiles = self.inner.lock().unwrap();
-        profiles.retain(|profile| profile.id != profile_id);
-        self.persist(&profiles)
+        let mut profiles = self.inner.lock().await;
+        let mut next = profiles.clone();
+        next.retain(|profile| profile.id != profile_id);
+        self.persist(&next).await?;
+        *profiles = next;
+        Ok(())
     }
 
     async fn connect(
@@ -103,7 +113,7 @@ impl RemoteProfileHost for FileRemoteProfileHost {
         _plugin_id: &str,
         request: RemoteConnectRequest,
     ) -> Result<RemoteConnectResult, RemoteProfileError> {
-        let profiles = self.inner.lock().unwrap();
+        let profiles = self.inner.lock().await;
         let profile = if let Some(profile_id) = request.profile_id.as_deref() {
             profiles
                 .iter()
@@ -156,5 +166,41 @@ fn into_profile(stored: StoredProfile) -> RemoteHostProfile {
         has_credential: false,
         connected: false,
         last_connected_at: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn upsert_list_and_forget_persist_async() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let host = FileRemoteProfileHost::load(dir.path());
+        let saved = host
+            .upsert(
+                "acme.remote",
+                RemoteHostProfileDraft {
+                    id: Some("profile-1".into()),
+                    origin: "https://remote.example".into(),
+                    name: Some("Remote".into()),
+                    provision_kind: "manual".into(),
+                    provision: None,
+                },
+            )
+            .await
+            .expect("upsert");
+        assert_eq!(saved.id, "profile-1");
+
+        let reloaded = FileRemoteProfileHost::load(dir.path());
+        let items = reloaded.list().await.expect("list");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].origin, "https://remote.example");
+
+        reloaded
+            .forget("acme.remote", "profile-1")
+            .await
+            .expect("forget");
+        assert!(reloaded.list().await.expect("list after forget").is_empty());
     }
 }

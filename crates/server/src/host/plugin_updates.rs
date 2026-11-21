@@ -45,14 +45,53 @@ pub(crate) struct PluginUpdates {
     prepared: Mutex<BTreeMap<String, PreparedPluginUpdate>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateRequest {
+    #[serde(alias = "plugin_id")]
     plugin_id: String,
     #[serde(default)]
     tag: Option<String>,
     #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    digest: Option<String>,
+    #[serde(default, alias = "confirmation_id")]
     confirmation_id: Option<String>,
+}
+
+fn verify_requested_update_constraints(
+    requested_version: Option<&str>,
+    requested_digest: Option<&str>,
+    resolved_version: &str,
+    package_digest: &str,
+    archive_sha256: Option<&str>,
+) -> Result<(), ApplicationError> {
+    if let Some(version) = requested_version
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let expected = version.strip_prefix('v').unwrap_or(version);
+        let actual = resolved_version.strip_prefix('v').unwrap_or(resolved_version);
+        if actual != expected {
+            return Err(ApplicationError::conflict(format!(
+                "resolved plugin update version {resolved_version} does not match requested version {version}"
+            )));
+        }
+    }
+    if let Some(digest) = requested_digest
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let matches_content = package_digest == digest;
+        let matches_archive = archive_sha256.is_some_and(|sha| sha == digest);
+        if !matches_content && !matches_archive {
+            return Err(ApplicationError::conflict(format!(
+                "resolved plugin update digest {package_digest} does not match requested digest {digest}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl PluginUpdates {
@@ -231,8 +270,72 @@ impl ServerApplicationDomains {
         serde_json::to_value(&observations.statuses).map_err(internal_error)
     }
 
-    /// First call prepares an exact package; confirmation only accepts that package.
-    pub(crate) async fn plugin_update(&self, args: Value) -> Result<Value, ApplicationError> {
+    async fn apply_prepared_plugin_update(
+        &self,
+        installed: &plugins::InstalledPlugin,
+        prepared: PreparedPluginUpdate,
+    ) -> Result<Value, ApplicationError> {
+        self.ensure_required_plugin_dependencies(&prepared.package)
+            .await?;
+        let result = if prepared.previous_enabled {
+            let node = self
+                .worker_runtime
+                .resolve()
+                .await
+                .map_err(internal_error)?;
+            let grants = plugins::candidate_capability_grants(&prepared.package, &[], &[])
+                .map_err(plugin_error)?;
+            self.plugin_control_plane
+                .update_and_activate(
+                    &node,
+                    prepared.package,
+                    &grants,
+                    self.capability_broker.clone(),
+                )
+                .await
+                .map_err(|error| {
+                    ApplicationError::conflict(format!("{}: {error}", error.code()))
+                })?
+        } else {
+            self.plugin_control_plane
+                .import(prepared.package, plugins::ConflictDecision::Replace)
+                .await
+                .map_err(plugin_error)?
+                .plugin
+        };
+        // Publication now owns this directory, including the rollback generation.
+        let _ = prepared._directory.keep();
+        if result.activation == PluginActivation::Enabled
+            && let Err(error) = self
+                .refresh_updated_plugin_projections(installed, &result)
+                .await
+        {
+            tracing::warn!(
+                ?error,
+                plugin_id = result.id(),
+                "could not refresh existing plugin bindings after update"
+            );
+        }
+        let mut observations = self.plugin_updates.observations.lock().await;
+        observations
+            .statuses
+            .retain(|item| item.plugin_id != result.id());
+        if let Err(error) = save_cache(&self.runtime_root, &mut observations) {
+            tracing::warn!(?error, "could not persist plugin update observations");
+        }
+        self.events
+            .emit("plugin-updates-changed", &observations.statuses);
+        self.events.emit("plugin-contributions-changed", now());
+        Ok(plugin_control_item(&result))
+    }
+
+    /// Unified plugin update supporting both two-step preview/confirm (`apply_immediately = false`)
+    /// and one-step update (`apply_immediately = true`) with optional `tag`, `version`, and `digest`.
+    pub(crate) async fn plugin_update_with_mode(
+        &self,
+        args: Value,
+        apply_immediately: bool,
+    ) -> Result<Value, ApplicationError> {
         let args: UpdateRequest = parse(args)?;
         let installed = self
             .plugin_control_plane
@@ -286,58 +389,9 @@ impl ServerApplicationDomains {
                     "prepared update content changed",
                 ));
             }
-            self.ensure_required_plugin_dependencies(&prepared.package)
-                .await?;
-            let result = if prepared.previous_enabled {
-                let node = self
-                    .worker_runtime
-                    .resolve()
-                    .await
-                    .map_err(internal_error)?;
-                let grants = plugins::candidate_capability_grants(&prepared.package, &[], &[])
-                    .map_err(plugin_error)?;
-                self.plugin_control_plane
-                    .update_and_activate(
-                        &node,
-                        prepared.package,
-                        &grants,
-                        self.capability_broker.clone(),
-                    )
-                    .await
-                    .map_err(|error| {
-                        ApplicationError::conflict(format!("{}: {error}", error.code()))
-                    })?
-            } else {
-                self.plugin_control_plane
-                    .import(prepared.package, plugins::ConflictDecision::Replace)
-                    .await
-                    .map_err(plugin_error)?
-                    .plugin
-            };
-            // Publication now owns this directory, including the rollback generation.
-            let _ = prepared._directory.keep();
-            if result.activation == PluginActivation::Enabled
-                && let Err(error) = self
-                    .refresh_updated_plugin_projections(&installed, &result)
-                    .await
-            {
-                tracing::warn!(
-                    ?error,
-                    plugin_id = result.id(),
-                    "could not refresh existing plugin bindings after update"
-                );
-            }
-            let mut observations = self.plugin_updates.observations.lock().await;
-            observations
-                .statuses
-                .retain(|item| item.plugin_id != result.id());
-            if let Err(error) = save_cache(&self.runtime_root, &mut observations) {
-                tracing::warn!(?error, "could not persist plugin update observations");
-            }
-            self.events
-                .emit("plugin-updates-changed", &observations.statuses);
-            self.events.emit("plugin-contributions-changed", now());
-            return Ok(plugin_control_item(&result));
+            return self
+                .apply_prepared_plugin_update(&installed, prepared)
+                .await;
         }
         let lock = installed
             .source
@@ -352,8 +406,9 @@ impl ServerApplicationDomains {
             })
             .ok_or_else(|| ApplicationError::bad_request("plugin has no locked update source"))?;
         let resolver = PluginUpdateResolver::new().map_err(plugin_error)?;
+        let requested_ref = args.tag.as_deref().or(args.version.as_deref());
         let candidate = resolver
-            .resolve(&lock, args.tag.as_deref())
+            .resolve(&lock, requested_ref)
             .await
             .map_err(plugin_error)?
             .ok_or_else(|| ApplicationError::not_found("no stable plugin update is available"))?;
@@ -363,13 +418,22 @@ impl ServerApplicationDomains {
             .await
             .map_err(plugin_error)?;
         let candidate_root = self.runtime_root.join("plugins/candidates");
-        std::fs::create_dir_all(&candidate_root).map_err(internal_error)?;
+        tokio::fs::create_dir_all(&candidate_root)
+            .await
+            .map_err(internal_error)?;
         let directory = tempfile::tempdir_in(candidate_root).map_err(internal_error)?;
         let mut package =
             PluginPackage::materialize_candidate(&archive, directory.path(), &installed.package)
                 .map_err(plugin_error)?;
         plugins::validate_update_package(&package, &candidate).map_err(plugin_error)?;
         let digest = plugins::package_content_digest(&package.source.path).map_err(plugin_error)?;
+        verify_requested_update_constraints(
+            args.version.as_deref(),
+            args.digest.as_deref(),
+            &package.version,
+            &digest,
+            candidate.sha256.as_deref(),
+        )?;
         let mut source_lock = candidate.source.clone();
         source_lock.package_digest = digest.clone();
         package.source.kind = match source_lock.source_kind.as_str() {
@@ -383,11 +447,24 @@ impl ServerApplicationDomains {
         package.source.locked = true;
         package.source.update_lock = Some(source_lock);
         package.source.show_tree = installed.source.show_tree;
+        let prepared_update = PreparedPluginUpdate {
+            package: package.clone(),
+            _directory: directory,
+            previous_digest: installed.package_digest.clone(),
+            previous_config: installed.product_detail().map_err(plugin_error)?.config,
+            previous_enabled: installed.activation == PluginActivation::Enabled,
+            created_at: now(),
+        };
+        if apply_immediately {
+            return self
+                .apply_prepared_plugin_update(&installed, prepared_update)
+                .await;
+        }
         let confirmation_id = uuid::Uuid::new_v4().to_string();
         let response = json!({
             "confirmationId": confirmation_id,
-            "plugin": plugin_control_item(&plugins::InstalledPlugin { package: package.clone(), activation: installed.activation, package_digest: digest.clone() }),
-            "currentVersion": installed.version, "targetVersion": package.version,
+            "plugin": plugin_control_item(&plugins::InstalledPlugin { package, activation: installed.activation, package_digest: digest.clone() }),
+            "currentVersion": installed.version, "targetVersion": prepared_update.package.version,
             "packageDigest": digest, "source": candidate.source,
             "releaseNotes": candidate.release_notes,
         });
@@ -398,17 +475,7 @@ impl ServerApplicationDomains {
                 "too many pending update previews",
             ));
         }
-        prepared.insert(
-            confirmation_id,
-            PreparedPluginUpdate {
-                package,
-                _directory: directory,
-                previous_digest: installed.package_digest.clone(),
-                previous_config: installed.product_detail().map_err(plugin_error)?.config,
-                previous_enabled: installed.activation == PluginActivation::Enabled,
-                created_at: now(),
-            },
-        );
+        prepared.insert(confirmation_id, prepared_update);
         Ok(response)
     }
 }
@@ -482,5 +549,71 @@ mod tests {
             observations.notified.get("acme.notes").map(String::as_str),
             Some("2.0.0")
         );
+    }
+
+    #[test]
+    fn update_request_parses_version_digest_and_snake_case_aliases() {
+        let req: UpdateRequest = parse(json!({
+            "plugin_id": "acme.notes",
+            "version": "2.1.0",
+            "digest": "sha256:abc123",
+            "confirmation_id": "conf-1"
+        }))
+        .expect("snake_case UpdateRequest");
+        assert_eq!(req.plugin_id, "acme.notes");
+        assert_eq!(req.version.as_deref(), Some("2.1.0"));
+        assert_eq!(req.digest.as_deref(), Some("sha256:abc123"));
+        assert_eq!(req.confirmation_id.as_deref(), Some("conf-1"));
+
+        let camel: UpdateRequest = parse(json!({
+            "pluginId": "acme.notes",
+            "tag": "v2.1.0"
+        }))
+        .expect("camelCase UpdateRequest");
+        assert_eq!(camel.tag.as_deref(), Some("v2.1.0"));
+        assert!(camel.confirmation_id.is_none());
+    }
+
+    #[test]
+    fn verify_requested_update_constraints_enforces_version_and_digest() {
+        assert!(
+            verify_requested_update_constraints(
+                Some("v2.1.0"),
+                Some("sha256:pkg"),
+                "2.1.0",
+                "sha256:pkg",
+                Some("sha256:archive"),
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_requested_update_constraints(
+                Some("2.1.0"),
+                Some("sha256:archive"),
+                "2.1.0",
+                "sha256:pkg",
+                Some("sha256:archive"),
+            )
+            .is_ok()
+        );
+        let version_err = verify_requested_update_constraints(
+            Some("2.2.0"),
+            None,
+            "2.1.0",
+            "sha256:pkg",
+            None,
+        )
+        .expect_err("version mismatch should fail");
+        assert!(version_err.to_string().contains("2.2.0"));
+
+        let digest_err = verify_requested_update_constraints(
+            None,
+            Some("sha256:wrong"),
+            "2.1.0",
+            "sha256:pkg",
+            Some("sha256:archive"),
+        )
+        .expect_err("digest mismatch should fail");
+        assert!(digest_err.to_string().contains("sha256:wrong"));
     }
 }

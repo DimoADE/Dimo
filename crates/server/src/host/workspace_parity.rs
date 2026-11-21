@@ -35,43 +35,55 @@ use crate::domains::{ServerApplicationDomains, internal_error, parse, serialize}
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceIdArgs {
+    #[serde(alias = "workspace_id")]
     workspace_id: Uuid,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreatePrArgs {
+    #[serde(alias = "workspace_id")]
     workspace_id: Uuid,
     title: String,
     #[serde(default)]
     body: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "target_branch")]
     target_branch: Option<String>,
     #[serde(default)]
     draft: Option<bool>,
+    #[serde(alias = "repo_id")]
     repo_id: Uuid,
-    #[serde(default)]
+    #[serde(default, alias = "auto_generate_description")]
     auto_generate_description: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceRepoIdArgs {
+    #[serde(alias = "workspace_id")]
     workspace_id: Uuid,
+    #[serde(alias = "repo_id")]
     repo_id: Uuid,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateWorkspaceFromPrRequest {
+    #[serde(alias = "repo_id")]
     repo_id: Uuid,
+    #[serde(alias = "pr_number")]
     pr_number: i64,
+    #[serde(alias = "pr_title")]
     pr_title: String,
+    #[serde(alias = "pr_url")]
     pr_url: String,
+    #[serde(alias = "head_branch")]
     head_branch: String,
+    #[serde(alias = "base_branch")]
     base_branch: String,
+    #[serde(alias = "run_setup")]
     run_setup: bool,
-    #[serde(default)]
+    #[serde(default, alias = "remote_name")]
     remote_name: Option<String>,
 }
 
@@ -79,9 +91,10 @@ struct CreateWorkspaceFromPrRequest {
 #[serde(rename_all = "camelCase")]
 struct CreateAndStartTaskRequest {
     task: CreateTask,
+    #[serde(alias = "executor_profile_id")]
     executor_profile_id: ExecutorProfileId,
     repos: Vec<WorkspaceRepoSpec>,
-    #[serde(default = "default_use_worktree")]
+    #[serde(default = "default_use_worktree", alias = "use_worktree")]
     use_worktree: bool,
 }
 
@@ -92,7 +105,9 @@ fn default_use_worktree() -> bool {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceRepoSpec {
+    #[serde(alias = "repo_id")]
     repo_id: Uuid,
+    #[serde(alias = "target_branch")]
     target_branch: String,
 }
 
@@ -129,12 +144,6 @@ enum RunScriptError {
     ProcessAlreadyRunning,
 }
 
-#[derive(Debug, Serialize)]
-struct RunScriptResult {
-    pub process: Option<ExecutionProcess>,
-    pub error: Option<RunScriptError>,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum PrError {
@@ -144,12 +153,6 @@ enum PrError {
     GitCliNotInstalled,
     TargetBranchNotFound { branch: String },
     UnsupportedProvider,
-}
-
-#[derive(Debug, Serialize)]
-struct CreatePrResult {
-    pub url: Option<String>,
-    pub error: Option<PrError>,
 }
 
 #[derive(Debug, Serialize)]
@@ -183,10 +186,61 @@ enum CreateFromPrError {
     RepoNotInProject,
 }
 
-#[derive(Debug, Serialize)]
-struct CreateFromPrResult {
-    pub response: Option<CreateWorkspaceFromPrResponse>,
-    pub error: Option<CreateFromPrError>,
+fn run_script_error(error: RunScriptError) -> ApplicationError {
+    let base = match &error {
+        RunScriptError::ProcessAlreadyRunning => {
+            ApplicationError::conflict("A process is already running in this workspace")
+        }
+        RunScriptError::NoScriptConfigured => {
+            ApplicationError::bad_request("No script configured for this workspace")
+        }
+    };
+    match serde_json::to_value(&error) {
+        Ok(details) => base.with_detail(details),
+        Err(_) => base,
+    }
+}
+
+fn pr_error(error: PrError) -> ApplicationError {
+    let message = match &error {
+        PrError::CliNotInstalled { provider } => {
+            format!("CLI for {provider:?} is not installed")
+        }
+        PrError::CliNotLoggedIn { provider } => {
+            format!("CLI for {provider:?} is not logged in")
+        }
+        PrError::GitCliNotLoggedIn => "Git CLI is not authenticated".to_string(),
+        PrError::GitCliNotInstalled => "Git CLI is not installed".to_string(),
+        PrError::TargetBranchNotFound { branch } => {
+            format!("Target branch '{branch}' was not found on the remote")
+        }
+        PrError::UnsupportedProvider => "Unsupported Git hosting provider".to_string(),
+    };
+    let base = ApplicationError::bad_request(message);
+    match serde_json::to_value(&error) {
+        Ok(details) => base.with_detail(details),
+        Err(_) => base,
+    }
+}
+
+fn create_from_pr_error(error: CreateFromPrError) -> ApplicationError {
+    let message = match &error {
+        CreateFromPrError::PrNotFound => "Pull request not found".to_string(),
+        CreateFromPrError::BranchFetchFailed { message } => message.clone(),
+        CreateFromPrError::CliNotInstalled { provider } => {
+            format!("CLI for {provider:?} is not installed")
+        }
+        CreateFromPrError::AuthFailed { message } => message.clone(),
+        CreateFromPrError::UnsupportedProvider => "Unsupported Git hosting provider".to_string(),
+        CreateFromPrError::RepoNotInProject => {
+            "Repository is not associated with any project".to_string()
+        }
+    };
+    let base = ApplicationError::bad_request(message);
+    match serde_json::to_value(&error) {
+        Ok(details) => base.with_detail(details),
+        Err(_) => base,
+    }
 }
 
 impl ServerApplicationDomains {
@@ -236,16 +290,20 @@ impl ServerApplicationDomains {
                 .repo_path(&repo)
                 .unwrap_or_else(|| workspace_dir.clone());
             let git = self.deployment.git().clone();
-            let status = tokio::task::block_in_place(|| {
+            let workspace_clone = workspace.clone();
+            let repo_clone = repo.clone();
+            let status = tokio::task::spawn_blocking(move || {
                 branch_status_for_repo(
                     &git,
-                    &workspace,
-                    &repo,
+                    &workspace_clone,
+                    &repo_clone,
                     &worktree_path,
                     &target_branch,
                     repo_merges,
                 )
-            })?;
+            })
+            .await
+            .map_err(internal_error)??;
             results.push(RepoBranchStatus {
                 repo_id: repo.id,
                 repo_name: repo.name,
@@ -279,10 +337,7 @@ impl ServerApplicationDomains {
         .await
         .map_err(internal_error)?
         {
-            return serialize(RunScriptResult {
-                process: None,
-                error: Some(RunScriptError::ProcessAlreadyRunning),
-            });
+            return Err(run_script_error(RunScriptError::ProcessAlreadyRunning));
         }
         let container_ref = self
             .deployment
@@ -307,10 +362,7 @@ impl ServerApplicationDomains {
             _ => None,
         };
         let Some(executor_action) = executor_action else {
-            return serialize(RunScriptResult {
-                process: None,
-                error: Some(RunScriptError::NoScriptConfigured),
-            });
+            return Err(run_script_error(RunScriptError::NoScriptConfigured));
         };
         let session = ensure_workspace_session(&self.pool, workspace.id).await?;
         let process = self
@@ -319,10 +371,7 @@ impl ServerApplicationDomains {
             .start_execution(&workspace, &session, &executor_action, &reason)
             .await
             .map_err(internal_error)?;
-        serialize(RunScriptResult {
-            process: Some(process),
-            error: None,
-        })
+        serialize(process)
     }
 
     pub(crate) async fn create_workspace_pr_host(
@@ -357,68 +406,66 @@ impl ServerApplicationDomains {
         let worktree_path = workspace
             .repo_path(&repo)
             .unwrap_or_else(|| workspace_path.clone());
-        let git = self.deployment.git();
-        let push_remote = git
-            .resolve_remote_for_branch(&repo.path, &workspace.branch)
-            .map_err(internal_error)?;
-        let (target_remote, base_branch) =
-            match git.get_remote_from_branch_name(&repo.path, &target) {
-                Ok(remote) => {
-                    let branch = target
-                        .strip_prefix(&format!("{}/", remote.name))
-                        .unwrap_or(&target);
-                    (remote, branch.to_string())
+        let git = self.deployment.git().clone();
+        let repo_path_for_git = repo.path.clone();
+        let worktree_for_git = worktree_path.clone();
+        let workspace_branch = workspace.branch.clone();
+        let target_for_git = target.clone();
+        let (push_remote, target_remote, base_branch) = tokio::task::spawn_blocking(move || {
+            let push_remote = git
+                .resolve_remote_for_branch(&repo_path_for_git, &workspace_branch)
+                .map_err(internal_error)?;
+            let (target_remote, base_branch) =
+                match git.get_remote_from_branch_name(&repo_path_for_git, &target_for_git) {
+                    Ok(remote) => {
+                        let branch = target_for_git
+                            .strip_prefix(&format!("{}/", remote.name))
+                            .unwrap_or(&target_for_git);
+                        (remote, branch.to_string())
+                    }
+                    Err(_) => (push_remote.clone(), target_for_git.clone()),
+                };
+            match git.check_remote_branch_exists(
+                &repo_path_for_git,
+                &target_remote.url,
+                &base_branch,
+            ) {
+                Ok(false) => {
+                    return Err(pr_error(PrError::TargetBranchNotFound {
+                        branch: target_for_git,
+                    }));
                 }
-                Err(_) => (push_remote.clone(), target.clone()),
-            };
-        match git.check_remote_branch_exists(&repo.path, &target_remote.url, &base_branch) {
-            Ok(false) => {
-                return serialize(CreatePrResult {
-                    url: None,
-                    error: Some(PrError::TargetBranchNotFound { branch: target }),
+                Err(GitServiceError::GitCLI(GitCliError::AuthFailed(_))) => {
+                    return Err(pr_error(PrError::GitCliNotLoggedIn));
+                }
+                Err(GitServiceError::GitCLI(GitCliError::NotAvailable)) => {
+                    return Err(pr_error(PrError::GitCliNotInstalled));
+                }
+                Err(error) => return Err(internal_error(error)),
+                Ok(true) => {}
+            }
+            if let Err(error) = git.push_to_remote(&worktree_for_git, &workspace_branch, false) {
+                return Err(match error {
+                    GitServiceError::GitCLI(GitCliError::AuthFailed(_)) => {
+                        pr_error(PrError::GitCliNotLoggedIn)
+                    }
+                    GitServiceError::GitCLI(GitCliError::NotAvailable) => {
+                        pr_error(PrError::GitCliNotInstalled)
+                    }
+                    other => internal_error(other),
                 });
             }
-            Err(GitServiceError::GitCLI(GitCliError::AuthFailed(_))) => {
-                return serialize(CreatePrResult {
-                    url: None,
-                    error: Some(PrError::GitCliNotLoggedIn),
-                });
-            }
-            Err(GitServiceError::GitCLI(GitCliError::NotAvailable)) => {
-                return serialize(CreatePrResult {
-                    url: None,
-                    error: Some(PrError::GitCliNotInstalled),
-                });
-            }
-            Err(error) => return Err(internal_error(error)),
-            Ok(true) => {}
-        }
-        if let Err(error) = git.push_to_remote(&worktree_path, &workspace.branch, false) {
-            return match error {
-                GitServiceError::GitCLI(GitCliError::AuthFailed(_)) => serialize(CreatePrResult {
-                    url: None,
-                    error: Some(PrError::GitCliNotLoggedIn),
-                }),
-                GitServiceError::GitCLI(GitCliError::NotAvailable) => serialize(CreatePrResult {
-                    url: None,
-                    error: Some(PrError::GitCliNotInstalled),
-                }),
-                other => Err(internal_error(other)),
-            };
-        }
+            Ok((push_remote, target_remote, base_branch))
+        })
+        .await
+        .map_err(internal_error)??;
         let git_host = match GitHostService::from_url(&target_remote.url) {
             Ok(host) => host,
             Err(GitHostError::UnsupportedProvider) => {
-                return serialize(CreatePrResult {
-                    url: None,
-                    error: Some(PrError::UnsupportedProvider),
-                });
+                return Err(pr_error(PrError::UnsupportedProvider));
             }
             Err(GitHostError::CliNotInstalled { provider }) => {
-                return serialize(CreatePrResult {
-                    url: None,
-                    error: Some(PrError::CliNotInstalled { provider }),
-                });
+                return Err(pr_error(PrError::CliNotInstalled { provider }));
             }
             Err(error) => return Err(internal_error(error)),
         };
@@ -477,22 +524,15 @@ impl ServerApplicationDomains {
                 if let Err(error) = utils::browser::open_browser(&pr_info.url).await {
                     tracing::warn!("Failed to open PR in browser: {error}");
                 }
-                serialize(CreatePrResult {
-                    url: Some(pr_info.url),
-                    error: None,
-                })
+                serialize(pr_info.url)
             }
             Err(error) => match &error {
-                GitHostError::CliNotInstalled { provider } => serialize(CreatePrResult {
-                    url: None,
-                    error: Some(PrError::CliNotInstalled {
+                GitHostError::CliNotInstalled { provider } => {
+                    Err(pr_error(PrError::CliNotInstalled {
                         provider: *provider,
-                    }),
-                }),
-                GitHostError::AuthFailed(_) => serialize(CreatePrResult {
-                    url: None,
-                    error: Some(PrError::CliNotLoggedIn { provider }),
-                }),
+                    }))
+                }
+                GitHostError::AuthFailed(_) => Err(pr_error(PrError::CliNotLoggedIn { provider })),
                 _ => Err(internal_error(error)),
             },
         }
@@ -534,10 +574,15 @@ impl ServerApplicationDomains {
                 error: None,
             });
         }
-        let git = self.deployment.git();
-        let remote = git
-            .resolve_remote_for_branch(&repo.path, &workspace_repo.target_branch)
-            .map_err(internal_error)?;
+        let git = self.deployment.git().clone();
+        let repo_path_for_git = repo.path.clone();
+        let target_branch_for_git = workspace_repo.target_branch.clone();
+        let remote = tokio::task::spawn_blocking(move || {
+            git.resolve_remote_for_branch(&repo_path_for_git, &target_branch_for_git)
+        })
+        .await
+        .map_err(internal_error)?
+        .map_err(internal_error)?;
         let git_host = match GitHostService::from_url(&remote.url) {
             Ok(host) => host,
             Err(GitHostError::UnsupportedProvider) => {
@@ -645,26 +690,21 @@ impl ServerApplicationDomains {
             .await
             .map_err(internal_error)?;
         let Some(project_id) = project_repos.first().map(|row| row.project_id) else {
-            return serialize(CreateFromPrResult {
-                response: None,
-                error: Some(CreateFromPrError::RepoNotInProject),
-            });
+            return Err(create_from_pr_error(CreateFromPrError::RepoNotInProject));
         };
-        let remote = match payload.remote_name {
-            Some(ref name) => GitRemote {
-                url: self
-                    .deployment
-                    .git()
-                    .get_remote_url(&repo.path, name)
-                    .map_err(internal_error)?,
-                name: name.clone(),
-            },
-            None => self
-                .deployment
-                .git()
-                .get_default_remote(&repo.path)
-                .map_err(internal_error)?,
-        };
+        let git = self.deployment.git().clone();
+        let repo_path_for_git = repo.path.clone();
+        let requested_remote = payload.remote_name.clone();
+        let remote = tokio::task::spawn_blocking(move || match requested_remote {
+            Some(name) => Ok(GitRemote {
+                url: git.get_remote_url(&repo_path_for_git, &name)?,
+                name,
+            }),
+            None => git.get_default_remote(&repo_path_for_git),
+        })
+        .await
+        .map_err(internal_error)?
+        .map_err(internal_error)?;
         let target_branch_ref = format!("{}/{}", remote.name, payload.base_branch);
         let task = Task::create(
             &self.pool,
@@ -719,36 +759,34 @@ impl ServerApplicationDomains {
         let worktree_path = workspace
             .repo_path(&repo)
             .unwrap_or_else(|| PathBuf::from(&container_ref));
-        let gh = services::services::git_host::github::GhCli::new();
-        match gh.get_repo_info(&remote.url, &worktree_path) {
-            Ok(repo_info) => {
-                if let Err(error) = gh.pr_checkout(
-                    &worktree_path,
-                    &repo_info.owner,
-                    &repo_info.repo_name,
-                    payload.pr_number,
-                ) {
-                    return serialize(CreateFromPrResult {
-                        response: None,
-                        error: Some(CreateFromPrError::BranchFetchFailed {
-                            message: error.to_string(),
-                        }),
-                    });
-                }
-                Workspace::update_branch_name(&self.pool, workspace.id, &payload.head_branch)
-                    .await
-                    .map_err(internal_error)?;
-                workspace.branch = payload.head_branch.clone();
-            }
-            Err(error) => {
-                return serialize(CreateFromPrResult {
-                    response: None,
-                    error: Some(CreateFromPrError::BranchFetchFailed {
-                        message: format!("Failed to get repository info: {error}"),
-                    }),
-                });
-            }
-        }
+        let remote_url = remote.url.clone();
+        let pr_number = payload.pr_number;
+        tokio::task::spawn_blocking(move || {
+            let gh = services::services::git_host::github::GhCli::new();
+            let repo_info = gh.get_repo_info(&remote_url, &worktree_path).map_err(|error| {
+                create_from_pr_error(CreateFromPrError::BranchFetchFailed {
+                    message: format!("Failed to get repository info: {error}"),
+                })
+            })?;
+            gh.pr_checkout(
+                &worktree_path,
+                &repo_info.owner,
+                &repo_info.repo_name,
+                pr_number,
+            )
+            .map_err(|error| {
+                create_from_pr_error(CreateFromPrError::BranchFetchFailed {
+                    message: error.to_string(),
+                })
+            })?;
+            Ok::<(), ApplicationError>(())
+        })
+        .await
+        .map_err(internal_error)??;
+        Workspace::update_branch_name(&self.pool, workspace.id, &payload.head_branch)
+            .await
+            .map_err(internal_error)?;
+        workspace.branch = payload.head_branch.clone();
         Merge::create_pr(
             &self.pool,
             workspace.id,
@@ -784,10 +822,7 @@ impl ServerApplicationDomains {
             .await
             .map_err(internal_error)?
             .ok_or_else(|| ApplicationError::not_found("Workspace not found after creation"))?;
-        serialize(CreateFromPrResult {
-            response: Some(CreateWorkspaceFromPrResponse { workspace, task }),
-            error: None,
-        })
+        serialize(CreateWorkspaceFromPrResponse { workspace, task })
     }
 
     pub(crate) async fn create_task_and_start_host(
@@ -863,9 +898,11 @@ impl ServerApplicationDomains {
                         "Opening the current branch without a worktree requires one repository",
                     )
                 })?;
-                self.deployment
-                    .git()
-                    .get_current_branch(&repo.path)
+                let git = self.deployment.git().clone();
+                let repo_path = repo.path.clone();
+                tokio::task::spawn_blocking(move || git.get_current_branch(&repo_path))
+                    .await
+                    .map_err(internal_error)?
                     .map_err(internal_error)?
             };
             let agent_working_dir = if payload.repos.len() == 1 {
@@ -1143,25 +1180,34 @@ async fn generate_pr_description_host(
         .ok_or_else(|| ApplicationError::bad_request("PR description Agent is not configured"))?;
     let agent_id = AgentId::parse(agent_id)
         .map_err(|error| ApplicationError::bad_request(error.to_string()))?;
-    let git = git::GitCli::new();
-    let base_ref = base_ref_candidates.iter().find(|candidate| {
-        git.git(worktree_path, ["rev-parse", "--verify", candidate.as_str()])
+    let worktree_for_git = worktree_path.to_path_buf();
+    let candidates = base_ref_candidates.to_vec();
+    let (commit_log, diff_stat, diff) = tokio::task::spawn_blocking(move || {
+        let git = git::GitCli::new();
+        let base_ref = candidates.iter().find(|candidate| {
+            git.git(
+                &worktree_for_git,
+                ["rev-parse", "--verify", candidate.as_str()],
+            )
             .is_ok()
-    });
-    let (commit_log, diff_stat, diff) = if let Some(base_ref) = base_ref {
-        let range = format!("{base_ref}..HEAD");
-        let triple_dot = format!("{base_ref}...HEAD");
-        (
-            git.git(worktree_path, ["log", "--format=%h %s", &range])
-                .unwrap_or_default(),
-            git.git(worktree_path, ["diff", "--stat", &triple_dot])
-                .unwrap_or_default(),
-            git.git(worktree_path, ["diff", &triple_dot])
-                .unwrap_or_default(),
-        )
-    } else {
-        (String::new(), String::new(), String::new())
-    };
+        });
+        if let Some(base_ref) = base_ref {
+            let range = format!("{base_ref}..HEAD");
+            let triple_dot = format!("{base_ref}...HEAD");
+            (
+                git.git(&worktree_for_git, ["log", "--format=%h %s", &range])
+                    .unwrap_or_default(),
+                git.git(&worktree_for_git, ["diff", "--stat", &triple_dot])
+                    .unwrap_or_default(),
+                git.git(&worktree_for_git, ["diff", &triple_dot])
+                    .unwrap_or_default(),
+            )
+        } else {
+            (String::new(), String::new(), String::new())
+        }
+    })
+    .await
+    .map_err(internal_error)?;
     let prompt_text = build_pr_description_payload(
         &config,
         &PrDescriptionContext {
@@ -1275,5 +1321,110 @@ async fn collect_pr_response_text(
             _ => {}
         }
         let _ = connection_id;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn create_workspace_from_pr_accepts_snake_case_and_camel_case() {
+        let repo_id = Uuid::new_v4();
+        let snake: CreateWorkspaceFromPrRequest = parse(json!({
+            "payload": {
+                "repo_id": repo_id,
+                "pr_number": 42,
+                "pr_title": "Fix bug",
+                "pr_url": "https://github.com/acme/repo/pull/42",
+                "head_branch": "fix/bug",
+                "base_branch": "main",
+                "run_setup": true,
+                "remote_name": "origin"
+            }
+        }))
+        .expect("snake_case CreateWorkspaceFromPrRequest");
+        assert_eq!(snake.repo_id, repo_id);
+        assert_eq!(snake.pr_number, 42);
+        assert!(snake.run_setup);
+        assert_eq!(snake.remote_name.as_deref(), Some("origin"));
+
+        let camel: CreateWorkspaceFromPrRequest = parse(json!({
+            "repoId": repo_id,
+            "prNumber": 7,
+            "prTitle": "Feat",
+            "prUrl": "https://github.com/acme/repo/pull/7",
+            "headBranch": "feat/x",
+            "baseBranch": "main",
+            "runSetup": false
+        }))
+        .expect("camelCase CreateWorkspaceFromPrRequest");
+        assert_eq!(camel.pr_number, 7);
+        assert!(!camel.run_setup);
+    }
+
+    #[test]
+    fn create_and_start_task_accepts_snake_case_frontend_dto() {
+        let project_id = Uuid::new_v4();
+        let repo_id = Uuid::new_v4();
+        let req: CreateAndStartTaskRequest = parse(json!({
+            "payload": {
+                "task": {
+                    "project_id": project_id,
+                    "title": "Ship fix",
+                    "description": null,
+                    "status": null,
+                    "parent_workspace_id": null,
+                    "image_ids": null
+                },
+                "executor_profile_id": {
+                    "executor": "claude",
+                    "variant": null
+                },
+                "repos": [{
+                    "repo_id": repo_id,
+                    "target_branch": "main"
+                }],
+                "use_worktree": false
+            }
+        }))
+        .expect("snake_case CreateAndStartTaskRequest");
+        assert_eq!(req.task.project_id, project_id);
+        assert_eq!(req.executor_profile_id.executor.as_str(), "claude");
+        assert_eq!(req.repos.len(), 1);
+        assert_eq!(req.repos[0].repo_id, repo_id);
+        assert_eq!(req.repos[0].target_branch, "main");
+        assert!(!req.use_worktree);
+    }
+
+    #[test]
+    fn typed_workspace_errors_populate_structured_application_error_details() {
+        let err = run_script_error(RunScriptError::NoScriptConfigured);
+        assert_eq!(
+            err.envelope().details,
+            Some(json!({ "type": "no_script_configured" }))
+        );
+
+        let err = run_script_error(RunScriptError::ProcessAlreadyRunning);
+        assert_eq!(
+            err.envelope().details,
+            Some(json!({ "type": "process_already_running" }))
+        );
+
+        let err = pr_error(PrError::TargetBranchNotFound {
+            branch: "main".into(),
+        });
+        assert_eq!(
+            err.envelope().details,
+            Some(json!({ "type": "target_branch_not_found", "branch": "main" }))
+        );
+
+        let err = create_from_pr_error(CreateFromPrError::RepoNotInProject);
+        assert_eq!(
+            err.envelope().details,
+            Some(json!({ "type": "repo_not_in_project" }))
+        );
     }
 }
