@@ -279,3 +279,29 @@
 2. **Batch 2（核心交互与桌面稳定性）**：`P0-10`（Toast 焦点与穿透）、`P0-11`（拖拽重复上传 + 源码分流 + HiDPI）、`P1-1`（Repo 命令返回类型）、`P1-2`（插件更新/市场 Schema）、`P1-3`（Sidecar 崩溃自愈）、`P1-6`（`dimo-asset://` CORS）、`P1-7`（WS `Lagged` 重同步）、`P1-10`（Linux 窗口按钮）。
 3. **Batch 3（数据安全、自动更新与发布链路）**：`P0-8`（自动更新 Windows 竞态 & macOS 断链）、`P1-4`（Windows SQLite 备份/恢复）、`P1-5`（`resources/bin/` 历史数据迁移与撤离）、`P1-8`（Windows 进程树/Worker 守护）、`P1-9`（遗漏启动钩子与 `stop_relay`）、`P1-11`（AUMID 与 EVSign 签名流）。
 4. **Batch 4（安全加固与 P2 收尾）**：`P0-9`（Preload 文件读写白名单 + CSP）、`P2-1` ~ `P2-7`。
+
+---
+
+## 6. 修复执行与验收记录（2026-11-21 已全部合入 `master`）
+
+全部 29 项核验问题（`P0-1`~`P0-11`、`P1-1`~`P1-11`、`P2-1`~`P2-7`）已拆分为 7 条文件无冲突的隔离 worktree 轨道按拓扑波次并行实现、逐项代码审核并合入 `master`（基线提交：`44ee9267a`）：
+
+| 轨道 | 波次 | 覆盖条目 | 实现 Commit | 合并 Commit (`master`) | 状态 |
+| --- | :---: | --- | --- | --- | :---: |
+| **W1-A**（Rust 进程/管道/Worker/驱动路径/WS 重同步） | Wave 1 | `P0-1(Rust)`、`P0-2`、`P0-4(Rust)`、`P1-7`、`P1-8`、`P2-4(process/system)`、`P2-7(host_bin/version)` | `62b412352` | `9141497ab` | 已验收合入 |
+| **W1-B**（Rust Host API 契约/Panic/`ClaudeSettings`/插件） | Wave 1 | `P0-1(sound)`、`P0-3`、`P0-5`、`P0-6`、`P0-7(Rust)`、`P1-1`、`P1-2`、`P2-4(async I/O)`、`P2-7(domain)` | `6ba5b28d2` | `bac2adc4a` | 已验收合入 |
+| **W1-C**（Electron 主进程/Sidecar/Updater/Toast/菜单） | Wave 1 | `P0-1(Electron)`、`P0-4(Electron)`、`P0-8`、`P0-10(Electron)`、`P1-3`、`P1-5(Electron)`、`P1-11(AUMID)`、`P2-2`、`P2-3`、`P2-6(Electron)`、`P2-7(IPC)` | `b9aaebda6` | `cfb15d608` | 已验收合入 |
+| **W1-D**（前端 Transport/拖拽/Toast UI/Linux 控制/接线） | Wave 1 | `P0-7(FE)`、`P0-8(FE)`、`P0-10(FE)`、`P0-11(FE)`、`P1-10`、`P2-7(FE)` | `ee1eb9d44` | `e9578c7cc` | 已验收合入 |
+| **W2-A**（Electron 协议 CORS/CSP/FS 白名单/SSH/Preload） | Wave 2 | `P0-9`、`P0-11(Preload)`、`P1-6`、`P2-1`（审核补充 CSP `'wasm-unsafe-eval'` 与 LAN `frame-src http:`：`c3e78d4c1`） | `496ed3548` | `994aae77b` | 已验收合入 |
+| **W2-B**（Rust 备份恢复/目录迁移/启停钩子/制品鉴权/版本） | Wave 2 | `P1-4`、`P1-5(Rust)`、`P1-9`、`P2-4(shutdown/desktop)`、`P2-5`、`P2-7(version/parent_watch)` | `d08e7fa87` | `657a99b67` | 已验收合入 |
+| **W2-C**（Electron 打包/Windows EVSign/macOS 权限/CI） | Wave 2 | `P1-11(EVSign)`、`P2-6(macOS)`、`P2-7(installer.nsh)` | `81d10ce7c` | `a2ee0e588` | 已验收合入 |
+
+### 全栈集成验证结果（`master` 合入后）
+- `SQLX_OFFLINE=true cargo check --workspace --lib --tests`：通过（0 errors）
+- `SQLX_OFFLINE=true cargo test -p utils --lib -- --test-threads=1`：121 passed, 0 failed
+- `SQLX_OFFLINE=true cargo test -p application --lib`：34 passed, 0 failed
+- `SQLX_OFFLINE=true cargo test -p server --lib -- ws:: host:: desktop:: data_dir_adoption:: plugin_artifact:: runtime:: composition:: update:: agent_install::`：401 passed, 0 failed
+- `pnpm run frontend:check`（`tsc --noEmit`）：通过
+- `pnpm --filter @dimo/electron check / test / build`：通过（6/6 文件，62 passed, 0 failed；`dist/main/index.js` 与 `dist/preload/index.js` 构建成功）
+- `pnpm run test:tauri-bridge-manifest`（3/3 passed）与 `node --test scripts/installer-packaging.test.js`（5/5 passed）：通过
+
