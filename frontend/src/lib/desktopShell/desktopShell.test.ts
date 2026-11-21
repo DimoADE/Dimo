@@ -61,6 +61,9 @@ function createMockElectronBridge(): ElectronDesktopBridge {
       check: vi.fn(async () => null),
       relaunch: vi.fn(async () => undefined),
     },
+    desktopToast: {
+      setIgnoreMouseEvents: vi.fn(async () => undefined),
+    },
     invoke: vi.fn(async () => ({ ok: true })) as ElectronDesktopBridge['invoke'],
   };
 }
@@ -105,6 +108,8 @@ describe('DesktopShellBridge', () => {
     expect(shell.assets.convertFileSrc('/tmp/a.html')).toBe(
       'dimo-asset://localhost//tmp/a.html'
     );
+    await shell.desktopToast?.setIgnoreMouseEvents?.(false);
+    expect(mock.desktopToast?.setIgnoreMouseEvents).toHaveBeenCalledWith(false);
     await shell.invoke('reveal_main_window');
     expect(mock.invoke).toHaveBeenCalledWith('reveal_main_window');
   });

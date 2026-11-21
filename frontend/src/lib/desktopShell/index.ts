@@ -20,6 +20,7 @@ export type {
   DesktopSaveDialogOptions,
   DesktopShellAssetsApi,
   DesktopShellBridge,
+  DesktopShellDesktopToastApi,
   DesktopShellDialogApi,
   DesktopShellEventsApi,
   DesktopShellExternalApi,

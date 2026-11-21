@@ -63,7 +63,7 @@ describe('composerHostFileDrop', () => {
     expect(pdf.type).toBe('application/pdf');
   });
 
-  it('hit-tests both physical and CSS coordinates', () => {
+  it('hit-tests CSS logical coordinates without HiDPI false positives', () => {
     const element = document.createElement('div');
     element.getBoundingClientRect = () =>
       ({
@@ -84,7 +84,15 @@ describe('composerHostFileDrop', () => {
       value: 2,
     });
     expect(isPointInElement(element, 50, 50)).toBe(true);
-    expect(isPointInElement(element, 80, 80)).toBe(true);
+    expect(isPointInElement(element, 110, 120)).toBe(true);
+    // (180, 180) is outside [10..110, 20..120], even though (180/2, 180/2) would fall inside.
+    expect(isPointInElement(element, 180, 180)).toBe(false);
+
+    Object.defineProperty(window, 'devicePixelRatio', {
+      configurable: true,
+      value: 1.5,
+    });
+    expect(isPointInElement(element, 150, 150)).toBe(false);
     expect(isPointInElement(element, 400, 400)).toBe(false);
   });
 });

@@ -1651,6 +1651,125 @@ describe('SessionComposerInput (Astryx)', () => {
     ]);
   });
 
+  it('invokes onAttachImages once and stops drop propagation when dropping onto the inner editor', () => {
+    const onAttachImages = vi.fn();
+    const windowDropSpy = vi.fn();
+    window.addEventListener('drop', windowDropSpy);
+    try {
+      renderComposerInput({ onAttachImages });
+      const editor = screen.getByTestId('session-composer-editor');
+      const image = new File(['png'], 'shot.png', { type: 'image/png' });
+      fireEvent.drop(editor, {
+        dataTransfer: {
+          types: ['Files'],
+          files: [image],
+          getData: () => '',
+        },
+      });
+      expect(onAttachImages).toHaveBeenCalledTimes(1);
+      expect(onAttachImages).toHaveBeenCalledWith([
+        expect.objectContaining({ name: 'shot.png', type: 'image/png' }),
+      ]);
+      expect(windowDropSpy).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('drop', windowDropSpy);
+    }
+  });
+
+  it('routes non-media host drops to @file references without calling fs.readFile', async () => {
+    const onAttachImages = vi.fn();
+    const onChange = vi.fn();
+    const readFile = vi.fn(async () => Uint8Array.from([1, 2, 3]));
+    let dragDropCallback:
+      | ((event: {
+          payload:
+            | { type: 'drop'; paths: string[]; position: { x: number; y: number } }
+            | { type: 'leave' };
+        }) => void)
+      | undefined;
+
+    const originalDimoDesktop = window.dimoDesktop;
+    window.dimoDesktop = {
+      getAppVersion: vi.fn(async () => '0.5.2'),
+      getWindowLabel: () => 'main',
+      window: {
+        minimize: vi.fn(),
+        toggleMaximize: vi.fn(),
+        isMaximized: vi.fn(),
+        close: vi.fn(),
+        show: vi.fn(),
+        hide: vi.fn(),
+        setFocus: vi.fn(),
+        setTitle: vi.fn(),
+        startDragging: vi.fn(),
+        onResized: vi.fn(async () => () => undefined),
+        setZoom: vi.fn(),
+        onDragDropEvent: vi.fn(async (cb) => {
+          dragDropCallback = cb as typeof dragDropCallback;
+          return () => undefined;
+        }),
+      },
+      dialog: { open: vi.fn(), save: vi.fn() },
+      fs: { readFile, writeFile: vi.fn(), writeTextFile: vi.fn() },
+      path: { join: vi.fn() },
+      shell: { openExternal: vi.fn() },
+      assets: { convertFileSrc: (p: string) => p },
+      events: { listen: vi.fn(async () => () => undefined), emit: vi.fn() },
+      updater: { check: vi.fn(), relaunch: vi.fn() },
+      invoke: vi.fn() as never,
+    };
+
+    try {
+      renderComposerInput({
+        onAttachImages,
+        onChange,
+        context: { workspacePath: '/repo' },
+      });
+      const zone = screen.getByTestId('session-composer-file-drop-zone');
+      zone.getBoundingClientRect = () =>
+        ({
+          left: 0,
+          right: 400,
+          top: 0,
+          bottom: 200,
+          width: 400,
+          height: 200,
+          x: 0,
+          y: 0,
+          toJSON() {
+            return this;
+          },
+        }) as DOMRect;
+
+      await waitFor(() => expect(dragDropCallback).toBeDefined());
+
+      await act(async () => {
+        dragDropCallback!({
+          payload: {
+            type: 'drop',
+            paths: ['/repo/src/main.ts', '/repo/docs/shot.png'],
+            position: { x: 50, y: 50 },
+          },
+        });
+      });
+
+      await waitFor(() => {
+        expect(onAttachImages).toHaveBeenCalledTimes(1);
+        expect(onChange).toHaveBeenCalled();
+      });
+
+      // Only the media file is read with fs.readFile; .ts goes to @file reference.
+      expect(readFile).toHaveBeenCalledTimes(1);
+      expect(readFile).toHaveBeenCalledWith('/repo/docs/shot.png');
+      const [latestValue] = onChange.mock.calls.at(-1) as [string];
+      expect(latestValue.replace(/\u00A0$/, '')).toBe(
+        '[@:main.ts](src/main.ts)'
+      );
+    } finally {
+      window.dimoDesktop = originalDimoDesktop;
+    }
+  });
+
   it('attaches a marked preview image dropped from the image tab', () => {
     const onAttachImages = vi.fn();
     renderComposerInput({ onAttachImages });

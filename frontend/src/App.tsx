@@ -414,15 +414,6 @@ function SettingsSurfaceContent() {
 
 function AppContent() {
   const location = useLocation();
-  const routeMode = getAppRouteMode(location.pathname);
-
-  if (routeMode === 'desktop-toast') {
-    return (
-      <Suspense fallback={null}>
-        <DesktopToastApp />
-      </Suspense>
-    );
-  }
 
   if (isSettingsSurfacePath(location.pathname)) {
     return <SettingsSurfaceContent />;
@@ -485,13 +476,28 @@ function PluginContributionBridge() {
   );
 }
 
+function AppShell() {
+  const location = useLocation();
+  if (getAppRouteMode(location.pathname) === 'desktop-toast') {
+    return (
+      <Suspense fallback={null}>
+        <DesktopToastApp />
+      </Suspense>
+    );
+  }
+
+  return (
+    <UserSystemProvider>
+      <AppContent />
+    </UserSystemProvider>
+  );
+}
+
 function App() {
   return (
     <AppErrorBoundary>
       <BrowserRouter>
-        <UserSystemProvider>
-          <AppContent />
-        </UserSystemProvider>
+        <AppShell />
       </BrowserRouter>
     </AppErrorBoundary>
   );

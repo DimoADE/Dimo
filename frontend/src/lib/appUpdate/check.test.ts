@@ -252,4 +252,69 @@ describe('appUpdate lifecycle state', () => {
     dismissAppUpdateVersion(null);
     expect(getDismissedAppUpdateVersion()).toBeNull();
   });
+
+  it('treats Electron install() as terminal handoff and skips redundant close/relaunch IPCs', async () => {
+    const install = vi.fn(async () => undefined);
+    const close = vi.fn(async () => undefined);
+    const originalDimoDesktop = window.dimoDesktop;
+    window.dimoDesktop = {
+      getAppVersion: vi.fn(async () => '0.37.0'),
+      getWindowLabel: () => 'main',
+      window: {} as never,
+      dialog: {} as never,
+      fs: {} as never,
+      path: {} as never,
+      shell: {} as never,
+      assets: { convertFileSrc: (p: string) => p },
+      events: { listen: vi.fn(), emit: vi.fn() },
+      updater: { check: mocks.check, relaunch: mocks.relaunch },
+      invoke: mocks.invoke as never,
+    };
+
+    try {
+      mocks.check.mockResolvedValue({
+        version: '0.39.0',
+        download: vi.fn(async (onEvent) => {
+          onEvent({ event: 'Finished' });
+        }),
+        install,
+        close,
+      });
+
+      await installSignedUpdate();
+      await relaunchApp();
+
+      expect(install).toHaveBeenCalledOnce();
+      expect(close).not.toHaveBeenCalled();
+      expect(mocks.relaunch).not.toHaveBeenCalled();
+      expect(getAppUpdateState().status).toBe('restarting');
+    } finally {
+      window.dimoDesktop = originalDimoDesktop;
+    }
+  });
+
+  it('does not surface an error when window teardown interrupts install IPC', async () => {
+    const install = vi.fn(async () => {
+      throw new Error('Object has been destroyed');
+    });
+    const close = vi.fn(async () => {
+      throw new Error('Render frame was disposed');
+    });
+    mocks.check.mockResolvedValue({
+      version: '0.39.0',
+      download: vi.fn(async (onEvent) => {
+        onEvent({ event: 'Finished' });
+      }),
+      install,
+      close,
+    });
+
+    await installSignedUpdate();
+    await expect(relaunchApp()).resolves.toBeUndefined();
+
+    expect(install).toHaveBeenCalledOnce();
+    expect(mocks.relaunch).not.toHaveBeenCalled();
+    expect(getAppUpdateState().status).toBe('restarting');
+    expect(getAppUpdateState().error).toBeNull();
+  });
 });

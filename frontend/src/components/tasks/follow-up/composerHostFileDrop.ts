@@ -58,18 +58,7 @@ export function isPointInElement(
   y: number
 ): boolean {
   const rect = element.getBoundingClientRect();
-  const scale = window.devicePixelRatio || 1;
-  const candidates = [
-    { x, y },
-    { x: x / scale, y: y / scale },
-  ];
-  return candidates.some(
-    (point) =>
-      point.x >= rect.left &&
-      point.x <= rect.right &&
-      point.y >= rect.top &&
-      point.y <= rect.bottom
-  );
+  return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
 export async function fileFromHostPath(

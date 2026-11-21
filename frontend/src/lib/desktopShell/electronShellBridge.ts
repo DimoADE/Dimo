@@ -79,6 +79,16 @@ export function getElectronShellBridge(
       relaunch: () => source.updater.relaunch(),
     },
 
+    desktopToast: source.desktopToast
+      ? {
+          setIgnoreMouseEvents:
+            typeof source.desktopToast.setIgnoreMouseEvents === 'function'
+              ? (ignore: boolean) =>
+                  source.desktopToast!.setIgnoreMouseEvents!(ignore)
+              : undefined,
+        }
+      : undefined,
+
     invoke: <T = unknown>(cmd: string, args?: Record<string, unknown>) =>
       args === undefined
         ? source.invoke<T>(cmd)

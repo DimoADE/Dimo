@@ -43,6 +43,15 @@ describe('DesktopWindowControls', () => {
     expect(screen.getByRole('button', { name: '关闭' })).toBeInTheDocument();
   });
 
+  it('renders minimize, maximize, and close on Linux desktop', () => {
+    vi.spyOn(window.navigator, 'platform', 'get').mockReturnValue('Linux x86_64');
+    render(<DesktopWindowControls />);
+
+    expect(screen.getByRole('button', { name: '最小化' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '最大化' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '关闭' })).toBeInTheDocument();
+  });
+
   it('does not let the Windows chrome overlay steal clicks outside the buttons', () => {
     vi.spyOn(window.navigator, 'platform', 'get').mockReturnValue('Win32');
     render(<DesktopWindowControls />);

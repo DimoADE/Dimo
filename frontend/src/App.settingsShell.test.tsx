@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mounted = {
+  userSystemProvider: false,
   projectProvider: false,
   searchProvider: false,
   agentWorkbenchProvider: false,
@@ -15,14 +16,19 @@ const mounted = {
 };
 
 vi.mock('@/components/ConfigProvider', () => ({
-  UserSystemProvider: ({ children }: { children: ReactNode }) => (
-    <>{children}</>
-  ),
+  UserSystemProvider: ({ children }: { children: ReactNode }) => {
+    mounted.userSystemProvider = true;
+    return <>{children}</>;
+  },
   useUserSystem: () => ({
     config: { theme: 'SYSTEM' },
     updateAndSaveConfig: vi.fn(),
     updateConfig: vi.fn(),
   }),
+}));
+
+vi.mock('@/DesktopToastApp', () => ({
+  DesktopToastApp: () => <div data-testid="desktop-toast-app" />,
 }));
 
 vi.mock('@/components/ThemeProvider', () => ({
@@ -182,8 +188,23 @@ describe('App lightweight settings shell', () => {
     expect(
       await screen.findByTestId('settings-app-routes')
     ).toBeInTheDocument();
+    expect(mounted.userSystemProvider).toBe(true);
     expect(mounted.pluginSync).toBe(true);
     expect(mounted.agentWorkbenchProvider).toBe(false);
     expect(mounted.projectProvider).toBe(false);
+  });
+
+  it('skips UserSystemProvider on the lightweight /desktop-toast route', async () => {
+    window.history.replaceState(null, '', '/desktop-toast');
+    const { default: App } = await import('./App');
+    render(<App />);
+
+    expect(
+      await screen.findByTestId('desktop-toast-app')
+    ).toBeInTheDocument();
+    expect(mounted.userSystemProvider).toBe(false);
+    expect(mounted.projectProvider).toBe(false);
+    expect(mounted.searchProvider).toBe(false);
+    expect(mounted.agentWorkbenchProvider).toBe(false);
   });
 });

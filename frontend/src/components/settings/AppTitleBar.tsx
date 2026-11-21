@@ -1,11 +1,7 @@
-import type {
-  MouseEvent as ReactMouseEvent,
-  PointerEvent as ReactPointerEvent,
-  ReactNode,
-} from 'react';
+import type { MouseEvent as ReactMouseEvent, ReactNode } from 'react';
 import { getDesktopShell } from '@/lib/desktopShell';
 import { cn } from '@/lib/utils';
-import { isWindows } from '@/utils/platform';
+import { isMac } from '@/utils/platform';
 
 interface AppTitleBarProps {
   left?: ReactNode;
@@ -23,12 +19,6 @@ function isNoWindowDragTarget(target: EventTarget | null): boolean {
   );
 }
 
-function startDesktopWindowDrag(): void {
-  void getDesktopShell()
-    .window.startDragging()
-    .catch(() => undefined);
-}
-
 function toggleDesktopWindowMaximize(): void {
   void getDesktopShell()
     .window.toggleMaximize()
@@ -41,16 +31,9 @@ export function AppTitleBar({
   right,
   className,
 }: AppTitleBarProps) {
-  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return;
-    if (isNoWindowDragTarget(event.target)) return;
-    if (!isWindows()) return;
-    startDesktopWindowDrag();
-  };
-
   const onDoubleClick = (event: ReactMouseEvent<HTMLDivElement>) => {
     if (isNoWindowDragTarget(event.target)) return;
-    if (!isWindows()) return;
+    if (isMac()) return;
     toggleDesktopWindowMaximize();
   };
 
@@ -61,7 +44,6 @@ export function AppTitleBar({
         'settings-titlebar window-chrome relative h-9 shrink-0 select-none text-foreground',
         className
       )}
-      onPointerDown={onPointerDown}
       onDoubleClick={onDoubleClick}
     >
       <div data-window-drag-region className="absolute inset-0" />

@@ -27,6 +27,7 @@ import {
 } from '@/lib/appUpdate';
 import { openInSystemBrowser } from '@/hooks/useOpenLink';
 import { SettingsSection } from '@/pages/settings/SettingsUi';
+import { writeClipboardViaBridge } from '@/vscode/bridge';
 
 type UpdaterState =
   | 'idle'
@@ -212,10 +213,10 @@ export function AppUpdaterSection({
       releaseUrl ? `release_url: ${releaseUrl}` : null,
     ].filter((line): line is string => line !== null);
 
-    try {
-      await navigator.clipboard.writeText(lines.join('\n'));
+    const copied = await writeClipboardViaBridge(lines.join('\n'));
+    if (copied) {
       toast.success(t('appUpdater.diagnosticsCopied'));
-    } catch {
+    } else {
       toast.error(t('appUpdater.diagnosticsCopyFailed'));
     }
   }, [

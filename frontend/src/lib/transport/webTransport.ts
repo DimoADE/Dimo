@@ -27,6 +27,7 @@ type ErrorEnvelope = {
   message?: string;
   retryable?: boolean;
   operation_id?: string;
+  details?: unknown;
 };
 
 export class WebTransportError extends Error {
@@ -35,7 +36,8 @@ export class WebTransportError extends Error {
     readonly code: string,
     readonly retryable: boolean,
     readonly operationId?: string,
-    readonly status?: number
+    readonly status?: number,
+    readonly details?: unknown
   ) {
     super(message);
     this.name = 'WebTransportError';
@@ -339,7 +341,8 @@ export class WebTransport implements BackendTransport {
         envelope.code ?? 'remote_http_error',
         envelope.retryable ?? false,
         envelope.operation_id,
-        response.status
+        response.status,
+        envelope.details
       );
       if (response.status === 401 || err.code === 'unauthorized') {
         this.onAuthError?.(err);
@@ -426,7 +429,9 @@ export class WebTransport implements BackendTransport {
         envelope?.message ?? 'Subscription stream failed',
         envelope?.code ?? 'subscription_error',
         envelope?.retryable ?? false,
-        envelope?.operation_id
+        envelope?.operation_id,
+        undefined,
+        envelope?.details
       );
       if (err.code === 'unauthorized') {
         this.onAuthError?.(err);

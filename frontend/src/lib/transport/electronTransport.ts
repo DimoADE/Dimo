@@ -26,8 +26,8 @@ const SHELL_ONLY_EVENTS = new Set<string>([
   'desktop-toast',
   'desktop-toast-activated',
   'dimo://modelrouter-import',
-  'theme-changed',
 ]);
+const DUAL_BUS_EVENTS = new Set<string>(['theme-changed']);
 
 function isServerHostEvent(event: string): boolean {
   if (SHELL_ONLY_EVENTS.has(event)) {
@@ -73,6 +73,12 @@ export class ElectronTransport implements BackendTransport {
     return this.shellOverride ?? getDesktopShell();
   }
 
+  private isServerHostCommand(command: string): boolean {
+    return (
+      HOST_COMMAND_SET.has(command) || !DESKTOP_SHELL_COMMAND_SET.has(command)
+    );
+  }
+
   get origin(): string {
     return this.web.origin;
   }
@@ -82,10 +88,7 @@ export class ElectronTransport implements BackendTransport {
     args?: Record<string, unknown>,
     options?: { operationId?: string }
   ): Promise<unknown> {
-    if (
-      HOST_COMMAND_SET.has(command) ||
-      !DESKTOP_SHELL_COMMAND_SET.has(command)
-    ) {
+    if (this.isServerHostCommand(command)) {
       return this.web.call(command, args, options);
     }
     return this.getShell().invoke(command, args);
@@ -96,6 +99,13 @@ export class ElectronTransport implements BackendTransport {
     args: Record<string, unknown>,
     onMessage: (message: unknown) => void
   ): Promise<T> {
+    const webStream = (this.web as BackendTransport).stream;
+    if (
+      this.isServerHostCommand(command) &&
+      typeof webStream === 'function'
+    ) {
+      return webStream.call(this.web, command, args, onMessage) as Promise<T>;
+    }
     const result = await this.call(command, args);
     if (result && typeof result === 'object' && 'events' in result) {
       const events = (result as { events?: unknown }).events;
@@ -133,6 +143,16 @@ export class ElectronTransport implements BackendTransport {
     event: string,
     handler: (payload: T) => void
   ): Promise<() => void> {
+    if (DUAL_BUS_EVENTS.has(event)) {
+      const [unlistenShell, unlistenWeb] = await Promise.all([
+        this.getShell().events.listen<T>(event, handler),
+        this.web.listen<T>(event, handler).catch(() => () => undefined),
+      ]);
+      return () => {
+        unlistenShell();
+        unlistenWeb();
+      };
+    }
     if (isServerHostEvent(event)) {
       return this.web.listen<T>(event, handler);
     }
