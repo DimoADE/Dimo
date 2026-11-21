@@ -4,14 +4,12 @@
   nsExec::ExecToLog 'taskkill /F /IM dimo-server.exe /T'
   nsExec::ExecToLog 'taskkill /F /IM dimo-mcp.exe /T'
   nsExec::ExecToLog 'taskkill /F /IM dimo-workflow-mcp.exe /T'
-  nsExec::ExecToLog 'taskkill /F /IM dimo-computer-helper.exe /T'
 !macroend
 
 !macro customUnInit
   nsExec::ExecToLog 'taskkill /F /IM dimo-server.exe /T'
   nsExec::ExecToLog 'taskkill /F /IM dimo-mcp.exe /T'
   nsExec::ExecToLog 'taskkill /F /IM dimo-workflow-mcp.exe /T'
-  nsExec::ExecToLog 'taskkill /F /IM dimo-computer-helper.exe /T'
 !macroend
 
 !macro customInstall

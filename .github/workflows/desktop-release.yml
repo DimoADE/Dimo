@@ -357,20 +357,14 @@ jobs:
           CSC_LINK: ${{ runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'pfx' && secrets.WINDOWS_CERTIFICATE || '' }}
           CSC_KEY_PASSWORD: ${{ runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'pfx' && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
           CSC_IDENTITY_AUTO_DISCOVERY: ${{ (runner.os == 'macOS' && needs.prepare-release.outputs.apple_signing_enabled == 'true') || (runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'pfx') }}
+          EVSIGN_LICENSE_KEY: ${{ runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'evsign' && secrets.EVSIGN_LICENSE_KEY || '' }}
+          EVSIGN_SIGN_PASSWORD: ${{ runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'evsign' && secrets.EVSIGN_SIGN_PASSWORD || '' }}
+          EVSIGN_PUBLISHER_NAME: ${{ runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'evsign' && (vars.EVSIGN_PUBLISHER_NAME || secrets.EVSIGN_PUBLISHER_NAME) || '' }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
         run: pnpm --filter @dimo/electron exec electron-builder ${{ matrix.electron_flag }} --config electron-builder.yml --publish never
-
-      - name: Sign Windows installers with EVSign
-        if: ${{ runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'evsign' }}
-        shell: pwsh
-        env:
-          EVSIGN_LICENSE_KEY: ${{ secrets.EVSIGN_LICENSE_KEY }}
-          EVSIGN_SIGN_PASSWORD: ${{ secrets.EVSIGN_SIGN_PASSWORD }}
-        run: |
-          scripts/sign-windows-evsign.ps1 -BundleRoot "electron/release" -TopLevelOnly
 
       - name: Sign Windows bridge payload with Tauri updater key
         if: runner.os == 'Windows'
@@ -486,17 +480,89 @@ jobs:
         if: ${{ runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_enabled == 'true' }}
         shell: pwsh
         run: |
-          $artifacts = Get-ChildItem "electron/release" -File |
-            Where-Object { $_.Extension -in '.exe', '.msi' }
+          $errors = [System.Collections.Generic.List[string]]::new()
+          $artifacts = @(Get-ChildItem "electron/release" -File |
+            Where-Object { $_.Extension -in '.exe', '.msi' })
           if ($artifacts.Count -eq 0) {
             throw 'No Windows installers were produced.'
           }
           foreach ($artifact in $artifacts) {
-            $signature = Get-AuthenticodeSignature $artifact.FullName
+            $signature = Get-AuthenticodeSignature -LiteralPath $artifact.FullName
             if ($signature.Status -ne 'Valid') {
-              throw "Invalid Authenticode signature for $($artifact.FullName): $($signature.Status)"
+              $errors.Add("Invalid Authenticode signature for $($artifact.FullName): $($signature.Status)")
             }
           }
+
+          $installer = $artifacts | Where-Object { $_.Name -like '*-setup.exe' } | Select-Object -First 1
+          if (-not $installer) {
+            $errors.Add('Expected a signed *-setup.exe NSIS installer under electron/release.')
+          } else {
+            $blockmapPath = "$($installer.FullName).blockmap"
+            if (-not (Test-Path -LiteralPath $blockmapPath -PathType Leaf) -or (Get-Item -LiteralPath $blockmapPath).Length -le 0) {
+              $errors.Add("Missing or empty differential update blockmap: $blockmapPath")
+            }
+
+            $latestYmlPath = Join-Path "electron/release" "latest.yml"
+            if (-not (Test-Path -LiteralPath $latestYmlPath -PathType Leaf)) {
+              $errors.Add("Missing electron-builder feed: $latestYmlPath")
+            } else {
+              $sha512 = [System.Security.Cryptography.SHA512]::Create()
+              try {
+                $stream = [System.IO.File]::OpenRead($installer.FullName)
+                try {
+                  $expectedSha512 = [Convert]::ToBase64String($sha512.ComputeHash($stream))
+                } finally {
+                  $stream.Dispose()
+                }
+              } finally {
+                $sha512.Dispose()
+              }
+              $latestYml = Get-Content -LiteralPath $latestYmlPath -Raw
+              if (-not $latestYml.Contains("sha512: $expectedSha512")) {
+                $errors.Add("latest.yml sha512 does not match signed installer $($installer.Name)")
+              }
+              if (-not $latestYml.Contains("size: $($installer.Length)")) {
+                $errors.Add("latest.yml size does not match signed installer $($installer.Name)")
+              }
+            }
+          }
+
+          $unpacked = Get-ChildItem "electron/release" -Directory -Filter "win*-unpacked" | Select-Object -First 1
+          if (-not $unpacked) {
+            $errors.Add('Missing Electron unpacked directory under electron/release.')
+          } else {
+            $innerExes = @(
+              (Join-Path $unpacked.FullName 'Dimo.exe'),
+              (Join-Path $unpacked.FullName 'resources\bin\dimo-server.exe'),
+              (Join-Path $unpacked.FullName 'resources\bin\dimo-mcp.exe'),
+              (Join-Path $unpacked.FullName 'resources\bin\dimo-workflow-mcp.exe')
+            )
+            foreach ($exePath in $innerExes) {
+              if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
+                $errors.Add("Missing packaged Windows executable: $exePath")
+                continue
+              }
+              $innerSig = Get-AuthenticodeSignature -LiteralPath $exePath
+              if ($innerSig.Status -ne 'Valid') {
+                $errors.Add("Invalid Authenticode signature for packaged executable ${exePath}: $($innerSig.Status)")
+              }
+            }
+
+            $appUpdatePath = Join-Path $unpacked.FullName 'resources\app-update.yml'
+            if (-not (Test-Path -LiteralPath $appUpdatePath -PathType Leaf)) {
+              $errors.Add("Missing updater config: $appUpdatePath")
+            } else {
+              $appUpdateYml = Get-Content -LiteralPath $appUpdatePath -Raw
+              if ($appUpdateYml -notmatch '(?m)^\s*publisherName\s*:\s*(\S+|\r?\n\s*-\s*\S+)') {
+                $errors.Add('app-update.yml is missing publisherName; NsisUpdater would skip signature verification.')
+              }
+            }
+          }
+
+          if ($errors.Count -gt 0) {
+            throw ("Windows signing verification failed:`n - " + ($errors -join "`n - "))
+          }
+          Write-Host 'Verified Windows installer, inner executables, blockmap, latest.yml hashes, and app-update.yml publisherName.'
 
       - name: Smoke-test Linux desktop startup through Xvfb
         if: runner.os == 'Linux'
@@ -536,6 +602,14 @@ jobs:
           rm -f \
             "$RUNNER_TEMP/dimo-release-certificate.p12" \
             "$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+
+      - name: Remove temporary Windows EVSign CLI
+        if: ${{ always() && runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'evsign' }}
+        shell: pwsh
+        run: |
+          if ($env:RUNNER_TEMP) {
+            Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'evsign-client.exe') -Force -ErrorAction SilentlyContinue
+          }
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4

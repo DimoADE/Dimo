@@ -107,9 +107,8 @@ function sha512Base64(filePath) {
 }
 
 /**
- * Updates `sha512` and `size` values inside an `electron-builder` `latest*.yml`
- * file to match the final signed release binaries placed in `outputDir`.
- * Necessary because Windows EVSign signs `.exe` installers post-pack.
+ * Ensures `sha512` and `size` values inside an `electron-builder` `latest*.yml`
+ * file match the final signed release binaries placed in `outputDir`.
  */
 function refreshElectronFeedHashes(yamlContent, outputDir) {
   const lines = yamlContent.split(/\r?\n/);
