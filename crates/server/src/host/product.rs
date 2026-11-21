@@ -394,21 +394,7 @@ impl ServerApplicationDomains {
             | DomainCommand::WorkspaceCommitHistory
             | DomainCommand::WorkspaceCommitGraph
             | DomainCommand::WorkspaceCommitDiffs => self.workspace_git_read(command, args).await,
-            DomainCommand::WorkspacePush => {
-                let args: PushWorkspaceArgs = parse(args)?;
-                let force = args.force.unwrap_or(false);
-                self.workspace_git_write(
-                    json!({
-                        "workspaceId": args.workspace_id,
-                        "repoId": args.repo_id,
-                    }),
-                    move |git, path, workspace, _repo, _target| {
-                        git.push_to_remote(path, &workspace.branch, force)?;
-                        Ok(())
-                    },
-                )
-                .await
-            }
+            DomainCommand::WorkspacePush => self.push_workspace_branch(args).await,
             DomainCommand::WorkspacePull => self.pull_workspace_branch(args).await,
             DomainCommand::WorkspaceFetch => {
                 self.workspace_git_write(args, |git, path, _, _, _| git.fetch_all(path))
@@ -692,10 +678,7 @@ impl ServerApplicationDomains {
                 })
                 .await
             }
-            DomainCommand::RepoPull => {
-                self.repo_git_write(args, |git, path| git.pull(path).map(|_| ()))
-                    .await
-            }
+            DomainCommand::RepoPull => self.pull_repo(args).await,
             DomainCommand::RepoFetch => {
                 self.repo_git_write(args, |git, path| git.fetch_all(path))
                     .await
@@ -749,9 +732,8 @@ impl ServerApplicationDomains {
                     .map_err(internal_error)?;
                 Ok(Value::Null)
             }
-            DomainCommand::RepoCommitDetail | DomainCommand::RepoCommitDiffs => {
-                self.commit_read(args).await
-            }
+            DomainCommand::RepoCommitDetail => self.commit_read(args).await,
+            DomainCommand::RepoCommitDiffs => self.repo_commit_diffs(args).await,
             DomainCommand::RepoSearch => {
                 let args: RepoSearchArgs = parse(args)?;
                 let path = self
@@ -1364,8 +1346,37 @@ impl ServerApplicationDomains {
         Ok((workspace, repo, target, path))
     }
 
+    async fn push_workspace_branch(&self, args: Value) -> Result<Value, ApplicationError> {
+        let args: PushWorkspaceArgs = parse(args)?;
+        let force = args.force.unwrap_or(false);
+        let (workspace, _repo, _target, path) = self
+            .resolve_workspace_git_context(&json!({
+                "workspaceId": args.workspace_id,
+                "repoId": args.repo_id,
+            }))
+            .await?;
+        let git = self.deployment.git().clone();
+        let branch = workspace.branch.clone();
+        tokio::task::spawn_blocking(move || git.push_to_remote(&path, &branch, force))
+            .await
+            .map_err(|error| ApplicationError::internal(error.to_string()))?
+            .map_err(|error| map_push_workspace_error(error, force))?;
+        Ok(Value::Null)
+    }
+
     async fn pull_workspace_branch(&self, args: Value) -> Result<Value, ApplicationError> {
         let (_workspace, _repo, _target, path) = self.resolve_workspace_git_context(&args).await?;
+        let git = self.deployment.git().clone();
+        let result = tokio::task::spawn_blocking(move || git.pull(&path))
+            .await
+            .map_err(|error| ApplicationError::internal(error.to_string()))?
+            .map_err(internal_error)?;
+        serialize(result)
+    }
+
+    async fn pull_repo(&self, args: Value) -> Result<Value, ApplicationError> {
+        let args: RepoIdArgs = parse(args)?;
+        let path = self.repo_path(args).await?;
         let git = self.deployment.git().clone();
         let result = tokio::task::spawn_blocking(move || git.pull(&path))
             .await
@@ -1498,7 +1509,7 @@ impl ServerApplicationDomains {
         self.git_write(self.repo_path(args).await?, op).await
     }
 
-    async fn commit_read(&self, args: Value) -> Result<Value, ApplicationError> {
+    async fn resolve_commit_target(&self, args: Value) -> Result<(PathBuf, String), ApplicationError> {
         let args: CommitArgs = parse(args)?;
         let path = if let Some(workspace_id) = args.workspace_id {
             self.primary_worktree(workspace_id, args.repo_id).await?
@@ -1511,8 +1522,27 @@ impl ServerApplicationDomains {
             .sha
             .or(args.commit_hash)
             .ok_or_else(|| ApplicationError::bad_request("sha required"))?;
+        Ok((path, sha))
+    }
+
+    async fn commit_read(&self, args: Value) -> Result<Value, ApplicationError> {
+        let (path, sha) = self.resolve_commit_target(args).await?;
         self.git_read(path, |git, path| git.get_commit_detail(path, &sha))
             .await
+    }
+
+    async fn repo_commit_diffs(&self, args: Value) -> Result<Value, ApplicationError> {
+        let (path, sha) = self.resolve_commit_target(args).await?;
+        self.git_read(path, move |git, path| {
+            git.get_diffs(
+                git::DiffTarget::Commit {
+                    repo_path: path,
+                    commit_sha: &sha,
+                },
+                None,
+            )
+        })
+        .await
     }
 
     async fn stash_op(
@@ -1561,6 +1591,17 @@ impl ServerApplicationDomains {
             .into_iter()
             .next()
             .ok_or_else(|| ApplicationError::not_found("workspace has no repository"))
+    }
+}
+
+fn map_push_workspace_error(error: git::GitServiceError, force: bool) -> ApplicationError {
+    match error {
+        git::GitServiceError::GitCLI(git::GitCliError::PushRejected(message)) if !force => {
+            ApplicationError::conflict(message).with_detail(json!({
+                "type": "force_push_required"
+            }))
+        }
+        other => internal_error(other),
     }
 }
 
@@ -1984,5 +2025,95 @@ mod tests {
             args.payload.payload,
             db::models::scratch::ScratchPayload::WorkspaceNotes(_)
         ));
+    }
+
+    #[test]
+    fn push_workspace_error_maps_rejected_non_force_to_structured_force_push_required() {
+        let err = map_push_workspace_error(
+            git::GitServiceError::GitCLI(git::GitCliError::PushRejected(
+                "non-fast-forward".into(),
+            )),
+            false,
+        );
+        assert_eq!(
+            err.envelope().details,
+            Some(json!({ "type": "force_push_required" }))
+        );
+
+        let forced_err = map_push_workspace_error(
+            git::GitServiceError::GitCLI(git::GitCliError::PushRejected(
+                "rejected even with force".into(),
+            )),
+            true,
+        );
+        assert!(forced_err.envelope().details.is_none());
+    }
+
+    #[test]
+    fn repo_commit_diffs_returns_diff_array_distinct_from_commit_detail() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = git2::Repository::init(dir.path()).expect("init repo");
+        let sig = git2::Signature::now("Test", "test@example.com").expect("sig");
+        std::fs::write(dir.path().join("base.txt"), "base\n").expect("write base");
+        let mut index = repo.index().expect("index");
+        index.add_path(std::path::Path::new("base.txt")).expect("add base");
+        index.write().expect("write index");
+        let base_tree_id = index.write_tree().expect("write base tree");
+        let base_tree = repo.find_tree(base_tree_id).expect("find base tree");
+        let parent_oid = repo
+            .commit(Some("HEAD"), &sig, &sig, "Initial commit", &base_tree, &[])
+            .expect("initial commit");
+        let parent_commit = repo.find_commit(parent_oid).expect("find parent");
+
+        std::fs::write(dir.path().join("hello.txt"), "hello world\n").expect("write file");
+        index.add_path(std::path::Path::new("hello.txt")).expect("add");
+        index.write().expect("write index");
+        let tree_id = index.write_tree().expect("write tree");
+        let tree = repo.find_tree(tree_id).expect("find tree");
+        let commit_oid = repo
+            .commit(
+                Some("HEAD"),
+                &sig,
+                &sig,
+                "Add hello.txt",
+                &tree,
+                &[&parent_commit],
+            )
+            .expect("commit");
+        let sha = commit_oid.to_string();
+
+        let git = git::GitService::new();
+        let detail = git
+            .get_commit_detail(dir.path(), &sha)
+            .expect("commit detail");
+        let detail_json = serialize(detail).expect("serialize detail");
+        assert!(detail_json.is_object());
+
+        let diffs = git
+            .get_diffs(
+                git::DiffTarget::Commit {
+                    repo_path: dir.path(),
+                    commit_sha: &sha,
+                },
+                None,
+            )
+            .expect("commit diffs");
+        let diffs_json = serialize(diffs).expect("serialize diffs");
+        let arr = diffs_json.as_array().expect("diffs must be a JSON array");
+        assert_eq!(arr.len(), 1);
+    }
+
+    #[test]
+    fn pull_result_serializes_non_null_contract() {
+        let value = serialize(git::PullResult {
+            success: true,
+            new_commits: 2,
+            error: None,
+        })
+        .expect("serialize PullResult");
+        assert!(value.is_object());
+        assert_eq!(value["success"], json!(true));
+        assert_eq!(value["new_commits"], json!(2));
+        assert_eq!(value["error"], Value::Null);
     }
 }

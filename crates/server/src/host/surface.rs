@@ -227,15 +227,69 @@ struct PluginPathArgs {
     developer_link: Option<bool>,
     #[allow(dead_code)]
     package_kind: Option<String>,
+    #[allow(dead_code)]
     plugin_id: Option<String>,
+    #[allow(dead_code)]
     permission_ids: Option<Vec<String>>,
+    #[allow(dead_code)]
     source: Option<Value>,
+    #[allow(dead_code)]
+    conflict: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginContributionsArgs {
+    #[serde(alias = "plugin_id")]
+    plugin_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginRollbackArgs {
+    #[serde(alias = "plugin_id")]
+    plugin_id: String,
+    #[serde(default, alias = "permission_ids")]
+    permission_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginMarketplaceInstallSource {
+    #[serde(alias = "owner")]
+    publisher: String,
+    #[serde(alias = "pluginId", alias = "plugin_id", alias = "pluginName", alias = "plugin_name")]
+    id: String,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    digest: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginInstallSource {
+    #[serde(default, alias = "artifact_id")]
+    artifact_id: Option<String>,
+    #[serde(default)]
+    marketplace: Option<PluginMarketplaceInstallSource>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginInstallArgs {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    source: Option<PluginInstallSource>,
+    #[serde(default)]
     conflict: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WeixinCheckArgs {
+    #[serde(alias = "channel_id")]
     channel_id: String,
     qrcode: String,
 }
@@ -674,11 +728,17 @@ impl ServerApplicationDomains {
             DomainCommand::PluginMarketplaceIndex => self.plugin_marketplace_index().await,
             DomainCommand::PluginInstall => self.plugin_install(args).await,
             DomainCommand::PluginUninstall => self.plugin_control_uninstall(args).await,
-            DomainCommand::PluginUpdate | DomainCommand::PluginControlUpdate => {
+            DomainCommand::PluginUpdate => {
                 if let Some(item) = self.native_plugin_update(args.clone()).await? {
                     return Ok(item);
                 }
-                self.plugin_update(args).await
+                self.plugin_update_with_mode(args, true).await
+            }
+            DomainCommand::PluginControlUpdate => {
+                if let Some(item) = self.native_plugin_update(args.clone()).await? {
+                    return Ok(item);
+                }
+                self.plugin_update_with_mode(args, false).await
             }
             DomainCommand::PluginControlPreviewImport => self.plugin_preview_import(args).await,
             DomainCommand::PluginControlRollback => self.plugin_rollback(args).await,
@@ -1277,8 +1337,12 @@ impl ServerApplicationDomains {
                 args.agent_id
             ))
         })?;
-        let entries = scan_configured_history(kind, &HashMap::new())
-            .map_err(|error| ApplicationError::internal(error.to_string()))?;
+        let entries = tokio::task::spawn_blocking(move || {
+            scan_configured_history(kind, &HashMap::new())
+        })
+        .await
+        .map_err(internal_error)?
+        .map_err(|error| ApplicationError::internal(error.to_string()))?;
         serialize(json!({
             "sessions": entries.into_iter().map(|entry| json!({
                 "acpSessionId": entry.external_session_id,
@@ -1379,7 +1443,9 @@ impl ServerApplicationDomains {
             ));
         }
         let snapshot = {
-            let mut job = local_history_job().lock().expect("history job");
+            let mut job = local_history_job()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if job.running {
                 return Err(ApplicationError::conflict(
                     "A local conversation import is already running",
@@ -1389,9 +1455,11 @@ impl ServerApplicationDomains {
             job.snapshot = LocalHistoryImportJobSnapshot::begin_running();
             job.snapshot.clone()
         };
+        let mut guard = HistoryImportJobGuard::new(self.events.clone());
+        let events = self.events.clone();
         let pool = self.pool.clone();
         let selections = args.selections;
-        tokio::spawn(async move {
+        tokio::spawn(crate::host::events::bind_host_events(events, async move {
             let total = selections.len() as u32;
             let mut result = agents::LocalHistoryImportResult {
                 imported: 0,
@@ -1465,14 +1533,17 @@ impl ServerApplicationDomains {
                 }
             }
             let snapshot = {
-                let mut job = local_history_job().lock().expect("history job");
+                let mut job = local_history_job()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 job.running = false;
                 job.snapshot.finish(result);
+                guard.mark_completed();
                 job.snapshot.clone()
             };
             crate::host::events::current_host_events()
                 .emit("local-history-import-progress", snapshot);
-        });
+        }));
         serialize(snapshot)
     }
 
@@ -2347,42 +2418,248 @@ impl ServerApplicationDomains {
     }
 
     async fn plugin_marketplace_index(&self) -> Result<Value, ApplicationError> {
-        let page = self.plugin_marketplace_catalog(json!({})).await?;
-        let listings = page
-            .get("official")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .chain(
-                page.get("community")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten(),
-            )
-            .cloned()
-            .collect::<Vec<_>>();
-        Ok(json!({ "listings": listings }))
+        let index_path = plugins::default_index_path(&self.runtime_root);
+        let mut listings = plugins::load_index(&index_path)
+            .unwrap_or_default()
+            .listings;
+        let mut seen: std::collections::HashSet<(String, String)> = listings
+            .iter()
+            .map(|item| (item.publisher.clone(), item.plugin_id.clone()))
+            .collect();
+        let page_value = self.plugin_marketplace_catalog(json!({})).await?;
+        let page: plugins::CatalogPage =
+            serde_json::from_value(page_value).map_err(internal_error)?;
+        for listing in page.official.into_iter().chain(page.community) {
+            let mapped = catalog_listing_to_marketplace_listing(listing);
+            if seen.insert((mapped.publisher.clone(), mapped.plugin_id.clone())) {
+                listings.push(mapped);
+            }
+        }
+        serialize(plugins::MarketplaceIndex { listings })
     }
 
     async fn plugin_install(&self, args: Value) -> Result<Value, ApplicationError> {
-        let args: PluginPathArgs = parse(args)?;
+        let args: PluginInstallArgs = parse(args)?;
+        let conflict = args.conflict.unwrap_or_else(|| "reject".to_string());
         if let Some(path) = args
             .source
             .as_ref()
-            .and_then(|source| source.get("artifactId").and_then(Value::as_str))
+            .and_then(|source| source.artifact_id.as_deref())
+            .filter(|path| !path.trim().is_empty())
             .map(str::to_string)
-            .or(Some(args.path).filter(|path| !path.is_empty()))
+            .or_else(|| args.path.filter(|path| !path.trim().is_empty()))
         {
             return self
                 .plugin_control_import(json!({
                     "path": path,
-                    "conflict": args.conflict.unwrap_or_else(|| "reject".to_string()),
+                    "conflictDecision": conflict,
                 }))
+                .await;
+        }
+        if let Some(marketplace) = args.source.and_then(|source| source.marketplace) {
+            return self
+                .install_marketplace_plugin_source(marketplace, &conflict)
                 .await;
         }
         Err(ApplicationError::bad_request(
             "plugin install source is invalid",
         ))
+    }
+
+    async fn install_marketplace_plugin_source(
+        &self,
+        marketplace: PluginMarketplaceInstallSource,
+        conflict_decision: &str,
+    ) -> Result<Value, ApplicationError> {
+        let publisher = marketplace.publisher.trim();
+        let plugin_id = marketplace.id.trim();
+        if publisher.is_empty() || plugin_id.is_empty() {
+            return Err(ApplicationError::bad_request(
+                "marketplace source requires publisher and id",
+            ));
+        }
+        let qualified_id = if plugin_id.contains('.') {
+            plugin_id.to_owned()
+        } else {
+            format!("{publisher}.{plugin_id}")
+        };
+        let short_name = plugin_id
+            .strip_prefix(&format!("{publisher}."))
+            .unwrap_or(plugin_id);
+        if plugins::is_authoring_sample_plugin_id(plugin_id)
+            || plugins::is_authoring_sample_plugin_id(&qualified_id)
+        {
+            return Err(ApplicationError::not_found(format!(
+                "{publisher}/{short_name}"
+            )));
+        }
+
+        let requested_version = marketplace
+            .version
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let requested_digest = marketplace
+            .digest
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let origin_url = plugins::marketplace_listing_url(publisher, short_name);
+
+        // 1. Local marketplace index entry (e.g., offline / signed local archive)
+        let index_path = plugins::default_index_path(&self.runtime_root);
+        if let Ok(index) = plugins::load_index(&index_path)
+            && let Some(entry) = index.listings.into_iter().find(|item| {
+                item.publisher == publisher
+                    && (item.plugin_id == plugin_id
+                        || item.plugin_id == qualified_id
+                        || item.plugin_id == short_name)
+                    && requested_version.is_none_or(|ver| {
+                        item.version.strip_prefix('v').unwrap_or(&item.version)
+                            == ver.strip_prefix('v').unwrap_or(ver)
+                    })
+            })
+        {
+            if let Some(expected_digest) = requested_digest
+                && !entry.package_digest.is_empty()
+                && entry.package_digest != expected_digest
+            {
+                return Err(ApplicationError::conflict(format!(
+                    "marketplace listing digest {} does not match requested digest {expected_digest}",
+                    entry.package_digest
+                )));
+            }
+            let local_archive = PathBuf::from(&entry.archive);
+            let resolved_archive = if local_archive.is_absolute() {
+                local_archive
+            } else {
+                index_path
+                    .parent()
+                    .map(|parent| parent.join(&local_archive))
+                    .unwrap_or(local_archive)
+            };
+            if resolved_archive.exists() {
+                verify_optional_archive_digest(&resolved_archive, requested_digest)?;
+                return self
+                    .plugin_control_import(json!({
+                        "path": resolved_archive.to_string_lossy(),
+                        "developerLink": false,
+                        "conflictDecision": conflict_decision,
+                        "origin": origin_url,
+                        "gitRef": entry.version,
+                        "locked": true,
+                    }))
+                    .await;
+            }
+            if entry.archive.starts_with("http://") || entry.archive.starts_with("https://") {
+                let archive = download_surface_marketplace_archive(&entry.archive).await?;
+                verify_optional_archive_digest(&archive, requested_digest)?;
+                return self
+                    .plugin_control_import(json!({
+                        "path": archive.to_string_lossy(),
+                        "developerLink": false,
+                        "conflictDecision": conflict_decision,
+                        "origin": origin_url,
+                        "gitRef": entry.version,
+                        "locked": true,
+                    }))
+                    .await;
+            }
+        }
+
+        let mut last_error = ApplicationError::not_found(format!("{publisher}/{short_name}"));
+        let mut import_error: Option<ApplicationError> = None;
+        let github_origin = plugins::official_github_repository_url(publisher, short_name);
+        let monorepo_root = plugins::monorepo_official_plugin_root(short_name)
+            .or_else(|| plugins::monorepo_official_plugin_root(&qualified_id));
+
+        // 2. Monorepo official plugin checkout when available and matching requested version
+        if let Some(monorepo_root) = monorepo_root.as_deref()
+            && requested_version.is_none()
+            && requested_digest.is_none()
+        {
+            match self
+                .plugin_control_import(json!({
+                    "path": monorepo_root.to_string_lossy(),
+                    "developerLink": false,
+                    "conflictDecision": conflict_decision,
+                    "origin": origin_url,
+                    "gitRef": "2.0.0",
+                    "locked": true,
+                }))
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(error) => import_error = Some(error),
+            }
+        }
+
+        // 3. Official GitHub archive mirrors
+        for url in plugins::official_github_archive_urls(publisher, short_name) {
+            match download_surface_marketplace_archive(&url).await {
+                Ok(archive) => {
+                    if let Err(error) = verify_optional_archive_digest(&archive, requested_digest) {
+                        import_error = Some(error);
+                        continue;
+                    }
+                    match self
+                        .plugin_control_import(json!({
+                            "path": archive.to_string_lossy(),
+                            "developerLink": false,
+                            "conflictDecision": conflict_decision,
+                            "origin": github_origin.as_deref().unwrap_or(&origin_url),
+                            "gitRef": requested_version.unwrap_or("main"),
+                            "locked": true,
+                        }))
+                        .await
+                    {
+                        Ok(result) => return Ok(result),
+                        Err(error) => import_error = Some(error),
+                    }
+                }
+                Err(error) => {
+                    if import_error.is_none() {
+                        last_error = error;
+                    }
+                }
+            }
+        }
+
+        // 4. Remote marketplace artifact registry
+        if let Ok(listing) =
+            plugins::fetch_artifact(publisher, short_name, requested_version).await
+            && let Some(url) = listing.download_url.clone()
+            && !url.starts_with("builtin://")
+            && !url.starts_with("offline://")
+        {
+            match download_surface_marketplace_archive(&url).await {
+                Ok(archive) => {
+                    verify_optional_archive_digest(&archive, requested_digest)?;
+                    match self
+                        .plugin_control_import(json!({
+                            "path": archive.to_string_lossy(),
+                            "developerLink": false,
+                            "conflictDecision": conflict_decision,
+                            "origin": origin_url,
+                            "gitRef": listing.tag,
+                            "locked": true,
+                            "showTree": listing.show_tree,
+                        }))
+                        .await
+                    {
+                        Ok(result) => return Ok(result),
+                        Err(error) => import_error = Some(error),
+                    }
+                }
+                Err(error) => {
+                    if import_error.is_none() {
+                        last_error = error;
+                    }
+                }
+            }
+        }
+
+        Err(import_error.unwrap_or(last_error))
     }
 
     async fn plugin_preview_import(&self, args: Value) -> Result<Value, ApplicationError> {
@@ -2420,10 +2697,7 @@ impl ServerApplicationDomains {
     }
 
     async fn plugin_rollback(&self, args: Value) -> Result<Value, ApplicationError> {
-        let args: PluginPathArgs = parse(args)?;
-        let plugin_id = args
-            .plugin_id
-            .ok_or_else(|| ApplicationError::bad_request("pluginId required"))?;
+        let args: PluginRollbackArgs = parse(args)?;
         let node = self
             .worker_runtime
             .resolve()
@@ -2433,23 +2707,20 @@ impl ServerApplicationDomains {
             .plugin_control_plane
             .rollback_and_activate(
                 &node,
-                &plugin_id,
-                args.permission_ids.as_deref().unwrap_or(&[]),
+                &args.plugin_id,
+                &args.permission_ids,
                 self.capability_broker.clone(),
             )
             .await
             .map_err(|error| ApplicationError::internal(format!("{}: {error}", error.code())))?;
-        serialize(json!({ "id": plugin.id().to_string() }))
+        Ok(crate::domains::plugin_control_item(&plugin))
     }
 
     async fn plugin_contributions(&self, args: Value) -> Result<Value, ApplicationError> {
-        let args: PluginPathArgs = parse(args)?;
-        let plugin_id = args
-            .plugin_id
-            .ok_or_else(|| ApplicationError::bad_request("pluginId required"))?;
+        let args: PluginContributionsArgs = parse(args)?;
         if let Some(plugin) = self
             .plugin_control_plane
-            .plugin(&plugin_id)
+            .plugin(&args.plugin_id)
             .await
             .map_err(|error| ApplicationError::internal(error.to_string()))?
         {
@@ -2458,10 +2729,69 @@ impl ServerApplicationDomains {
                 "mcp": plugin.mcp,
             }));
         }
-        self.native_plugin_contributions(&plugin_id)
+        self.native_plugin_contributions(&args.plugin_id)
             .await?
-            .ok_or_else(|| ApplicationError::not_found(plugin_id))
+            .ok_or_else(|| ApplicationError::not_found(args.plugin_id))
     }
+}
+
+fn catalog_listing_to_marketplace_listing(
+    listing: plugins::CatalogListing,
+) -> plugins::MarketplaceListing {
+    let plugin_id = plugins::canonical_listing_id(&listing);
+    let archive = listing.download_url.unwrap_or_else(|| {
+        plugins::marketplace_listing_url(&listing.owner, &listing.plugin_name)
+    });
+    plugins::MarketplaceListing {
+        publisher: listing.owner,
+        plugin_id,
+        version: listing.version,
+        summary: listing.summary,
+        package_digest: listing.package_digest.unwrap_or_default(),
+        archive,
+        icon: listing.icon,
+    }
+}
+
+fn verify_optional_archive_digest(
+    archive_path: &Path,
+    requested_digest: Option<&str>,
+) -> Result<(), ApplicationError> {
+    let Some(expected) = requested_digest else {
+        return Ok(());
+    };
+    let actual = plugins::archive_digest(archive_path)
+        .map_err(|error| ApplicationError::internal(error.to_string()))?;
+    if actual != expected {
+        return Err(ApplicationError::conflict(format!(
+            "downloaded plugin archive digest {actual} does not match requested digest {expected}"
+        )));
+    }
+    Ok(())
+}
+
+async fn download_surface_marketplace_archive(url: &str) -> Result<PathBuf, ApplicationError> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent("Dimo")
+        .build()
+        .map_err(internal_error)?;
+    let response = client.get(url).send().await.map_err(internal_error)?;
+    if !response.status().is_success() {
+        return Err(ApplicationError::not_found(url.to_owned()));
+    }
+    let bytes = response.bytes().await.map_err(internal_error)?;
+    let suffix = plugins::marketplace_archive_suffix(url);
+    let temp_dir = utils::path::get_dimo_temp_dir();
+    tokio::fs::create_dir_all(&temp_dir)
+        .await
+        .map_err(internal_error)?;
+    let path = temp_dir.join(format!("market-{}.{suffix}", Uuid::new_v4()));
+    tokio::fs::write(&path, bytes)
+        .await
+        .map_err(internal_error)?;
+    Ok(path)
 }
 
 async fn append_imported_history_events(
@@ -2565,6 +2895,48 @@ struct LocalHistoryImportRuntime {
     snapshot: LocalHistoryImportJobSnapshot,
 }
 
+struct HistoryImportJobGuard {
+    completed: bool,
+    events: Arc<crate::host::events::HostEventBus>,
+}
+
+impl HistoryImportJobGuard {
+    fn new(events: Arc<crate::host::events::HostEventBus>) -> Self {
+        Self {
+            completed: false,
+            events,
+        }
+    }
+
+    fn mark_completed(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for HistoryImportJobGuard {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let snapshot = {
+            let mut job = local_history_job()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            job.running = false;
+            if matches!(
+                job.snapshot.status,
+                agents::LocalHistoryImportJobStatus::Running
+            ) {
+                job.snapshot.fail_to_start(
+                    "Local conversation import terminated unexpectedly".to_string(),
+                );
+            }
+            job.snapshot.clone()
+        };
+        self.events.emit("local-history-import-progress", snapshot);
+    }
+}
+
 fn local_history_job() -> &'static std::sync::Mutex<LocalHistoryImportRuntime> {
     static JOB: std::sync::OnceLock<std::sync::Mutex<LocalHistoryImportRuntime>> =
         std::sync::OnceLock::new();
@@ -2578,7 +2950,9 @@ fn local_history_job() -> &'static std::sync::Mutex<LocalHistoryImportRuntime> {
 
 fn apply_history_progress(progress: agents::LocalHistoryImportProgress) {
     let snapshot = {
-        let mut job = local_history_job().lock().expect("history job");
+        let mut job = local_history_job()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         job.snapshot.apply_progress(progress);
         job.snapshot.clone()
     };
@@ -3011,5 +3385,156 @@ mod tests {
         assert_eq!(parsed.operation_id, op.id.to_string());
         assert_eq!(parsed.status, AgentOperationStatus::Canceled);
         assert!(parsed.sequence > 0);
+    }
+
+    #[test]
+    fn dedicated_plugin_and_weixin_arg_structs_deserialize_frontend_payloads() {
+        let contrib: PluginContributionsArgs = parse(json!({ "pluginId": "acme.notes" }))
+            .expect("camelCase PluginContributionsArgs");
+        assert_eq!(contrib.plugin_id, "acme.notes");
+        let contrib_snake: PluginContributionsArgs =
+            parse(json!({ "plugin_id": "acme.notes" })).expect("snake_case PluginContributionsArgs");
+        assert_eq!(contrib_snake.plugin_id, "acme.notes");
+
+        let rollback: PluginRollbackArgs = parse(json!({
+            "pluginId": "acme.notes",
+            "permissionIds": ["fs.read"]
+        }))
+        .expect("PluginRollbackArgs without path");
+        assert_eq!(rollback.plugin_id, "acme.notes");
+        assert_eq!(rollback.permission_ids, vec!["fs.read"]);
+
+        let rollback_minimal: PluginRollbackArgs =
+            parse(json!({ "pluginId": "acme.notes" })).expect("PluginRollbackArgs default perms");
+        assert!(rollback_minimal.permission_ids.is_empty());
+
+        let install_marketplace: PluginInstallArgs = parse(json!({
+            "source": {
+                "marketplace": {
+                    "publisher": "dimo",
+                    "id": "dimo.browser",
+                    "version": "1.2.0",
+                    "digest": "sha256:abc"
+                }
+            },
+            "conflict": "replace"
+        }))
+        .expect("PluginInstallArgs marketplace source");
+        let marketplace = install_marketplace
+            .source
+            .and_then(|s| s.marketplace)
+            .expect("marketplace source");
+        assert_eq!(marketplace.publisher, "dimo");
+        assert_eq!(marketplace.id, "dimo.browser");
+        assert_eq!(marketplace.version.as_deref(), Some("1.2.0"));
+        assert_eq!(marketplace.digest.as_deref(), Some("sha256:abc"));
+        assert_eq!(install_marketplace.conflict.as_deref(), Some("replace"));
+
+        let install_artifact: PluginInstallArgs = parse(json!({
+            "source": { "artifactId": "/tmp/plugin.zip" }
+        }))
+        .expect("PluginInstallArgs artifactId source");
+        assert_eq!(
+            install_artifact
+                .source
+                .and_then(|s| s.artifact_id)
+                .as_deref(),
+            Some("/tmp/plugin.zip")
+        );
+
+        let weixin_snake: WeixinCheckArgs = parse(json!({
+            "channel_id": "wx-1",
+            "qrcode": "qr-abc"
+        }))
+        .expect("snake_case WeixinCheckArgs");
+        assert_eq!(weixin_snake.channel_id, "wx-1");
+        assert_eq!(weixin_snake.qrcode, "qr-abc");
+
+        let weixin_camel: WeixinCheckArgs = parse(json!({
+            "channelId": "wx-2",
+            "qrcode": "qr-def"
+        }))
+        .expect("camelCase WeixinCheckArgs");
+        assert_eq!(weixin_camel.channel_id, "wx-2");
+    }
+
+    #[test]
+    fn catalog_listing_maps_to_marketplace_listing_schema() {
+        let listing = plugins::CatalogListing {
+            owner: "dimo".into(),
+            plugin_name: "browser".into(),
+            tag: "v1.2.3".into(),
+            version: "1.2.3".into(),
+            display_name: "Browser".into(),
+            summary: "Headless browser plugin".into(),
+            category: "tools".into(),
+            source_kind: "github".into(),
+            homepage: None,
+            repo: None,
+            package_digest: Some("sha256:deadbeef".into()),
+            download_url: Some("https://example.invalid/browser.zip".into()),
+            sha256: None,
+            offline_plugin_id: Some("dimo.browser".into()),
+            has_worker: true,
+            has_app: false,
+            has_mcp: false,
+            opens: Vec::new(),
+            readme: None,
+            show_tree: None,
+            icon: Some("https://example.invalid/icon.png".into()),
+            stars: None,
+        };
+        let mapped = catalog_listing_to_marketplace_listing(listing);
+        let value = serde_json::to_value(&mapped).expect("serialize MarketplaceListing");
+        assert_eq!(value["publisher"], json!("dimo"));
+        assert_eq!(value["pluginId"], json!("dimo.browser"));
+        assert_eq!(value["version"], json!("1.2.3"));
+        assert_eq!(value["summary"], json!("Headless browser plugin"));
+        assert_eq!(value["packageDigest"], json!("sha256:deadbeef"));
+        assert_eq!(value["archive"], json!("https://example.invalid/browser.zip"));
+        assert_eq!(value["icon"], json!("https://example.invalid/icon.png"));
+    }
+
+    #[tokio::test]
+    async fn history_import_guard_resets_running_flag_and_emits_on_task_panic() {
+        let events = Arc::new(crate::host::events::HostEventBus::new());
+        let mut rx = events.subscribe();
+
+        {
+            let mut job = local_history_job()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            job.running = true;
+            job.snapshot = LocalHistoryImportJobSnapshot::begin_running();
+        }
+
+        let guard = HistoryImportJobGuard::new(events.clone());
+        let handle = tokio::spawn(crate::host::events::bind_host_events(
+            events.clone(),
+            async move {
+                let _guard = guard;
+                // Confirm current_host_events() is bound inside the spawned task.
+                crate::host::events::current_host_events()
+                    .emit("test-bound-event", json!({ "ok": true }));
+                panic!("simulated import panic");
+            },
+        ));
+        assert!(handle.await.is_err());
+
+        {
+            let job = local_history_job()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert!(!job.running, "guard must clear running flag on panic");
+            assert_eq!(
+                job.snapshot.status,
+                agents::LocalHistoryImportJobStatus::Failed
+            );
+        }
+
+        let first = rx.try_recv().expect("bound event emitted before panic");
+        assert_eq!(first.channel, "test-bound-event");
+        let second = rx.try_recv().expect("guard failure progress event");
+        assert_eq!(second.channel, "local-history-import-progress");
     }
 }
