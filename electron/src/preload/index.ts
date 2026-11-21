@@ -62,6 +62,11 @@ ipcRenderer.on(
   }
 );
 
+// Private preload -> main channel used only when a trusted OS drop yields native
+// file paths via `webUtils.getPathForFile`. Never exposed on `window.dimoDesktop`.
+const INTERNAL_FS_AUTHORIZE_DROPPED_PATHS_CHANNEL =
+  'dimo:fs:authorizeDroppedPaths';
+
 const dragDropListeners = new Set<(event: DragDropEvent) => void>();
 let dragDropWired = false;
 let dragDepth = 0;
@@ -97,69 +102,94 @@ function dispatchDragDrop(payload: DragDropPayload): void {
   }
 }
 
-function ensureDragDropListeners(): void {
+const handleWindowDragEnter = (event: DragEvent): void => {
+  if (!event.dataTransfer?.types?.includes('Files')) {
+    return;
+  }
+  event.preventDefault();
+  dragDepth += 1;
+  if (dragDepth === 1) {
+    dispatchDragDrop({
+      type: 'enter',
+      paths: extractFilePaths(event.dataTransfer),
+      position: { x: event.clientX, y: event.clientY },
+    });
+  }
+};
+
+const handleWindowDragOver = (event: DragEvent): void => {
+  if (!event.dataTransfer?.types?.includes('Files')) {
+    return;
+  }
+  event.preventDefault();
+  dispatchDragDrop({
+    type: 'over',
+    position: { x: event.clientX, y: event.clientY },
+  });
+};
+
+const handleWindowDragLeave = (event: DragEvent): void => {
+  if (dragDepth <= 0) {
+    return;
+  }
+  dragDepth -= 1;
+  if (dragDepth <= 0) {
+    dragDepth = 0;
+    dispatchDragDrop({ type: 'leave' });
+  } else if (event.relatedTarget === null) {
+    dragDepth = 0;
+    dispatchDragDrop({ type: 'leave' });
+  }
+};
+
+const handleWindowDrop = (event: DragEvent): void => {
+  dragDepth = 0;
+  // Skip dispatching a duplicate host drop when a DOM drop target (e.g. the
+  // React composer) has already handled and prevented the event.
+  if (event.defaultPrevented) {
+    return;
+  }
+  if (!event.dataTransfer?.types?.includes('Files')) {
+    return;
+  }
+  event.preventDefault();
+  const paths = extractFilePaths(event.dataTransfer);
+  if (paths.length > 0) {
+    if (event.isTrusted) {
+      ipcRenderer.send(INTERNAL_FS_AUTHORIZE_DROPPED_PATHS_CHANNEL, paths);
+    }
+    dispatchDragDrop({
+      type: 'drop',
+      paths,
+      position: { x: event.clientX, y: event.clientY },
+    });
+  } else {
+    dispatchDragDrop({ type: 'leave' });
+  }
+};
+
+function attachDragDropListeners(): void {
   if (dragDropWired || typeof window === 'undefined') {
     return;
   }
   dragDropWired = true;
+  dragDepth = 0;
+  window.addEventListener('dragenter', handleWindowDragEnter);
+  window.addEventListener('dragover', handleWindowDragOver);
+  window.addEventListener('dragleave', handleWindowDragLeave);
+  window.addEventListener('drop', handleWindowDrop);
+}
 
-  window.addEventListener('dragenter', (event) => {
-    if (!event.dataTransfer?.types?.includes('Files')) {
-      return;
-    }
-    event.preventDefault();
-    dragDepth += 1;
-    if (dragDepth === 1) {
-      dispatchDragDrop({
-        type: 'enter',
-        paths: extractFilePaths(event.dataTransfer),
-        position: { x: event.clientX, y: event.clientY },
-      });
-    }
-  });
-
-  window.addEventListener('dragover', (event) => {
-    if (!event.dataTransfer?.types?.includes('Files')) {
-      return;
-    }
-    event.preventDefault();
-    dispatchDragDrop({
-      type: 'over',
-      position: { x: event.clientX, y: event.clientY },
-    });
-  });
-
-  window.addEventListener('dragleave', (event) => {
-    if (dragDepth <= 0) {
-      return;
-    }
-    dragDepth -= 1;
-    if (dragDepth <= 0) {
-      dragDepth = 0;
-      dispatchDragDrop({ type: 'leave' });
-    } else if (event.relatedTarget === null) {
-      dragDepth = 0;
-      dispatchDragDrop({ type: 'leave' });
-    }
-  });
-
-  window.addEventListener('drop', (event) => {
-    if (!event.dataTransfer?.types?.includes('Files')) {
-      return;
-    }
-    event.preventDefault();
-    dragDepth = 0;
-    const paths = extractFilePaths(event.dataTransfer);
-    if (paths.length > 0) {
-      dispatchDragDrop({
-        type: 'drop',
-        paths,
-        position: { x: event.clientX, y: event.clientY },
-      });
-    } else {
-      dispatchDragDrop({ type: 'leave' });
-    }
-  });
+function detachDragDropListeners(): void {
+  if (!dragDropWired || typeof window === 'undefined') {
+    return;
+  }
+  dragDropWired = false;
+  dragDepth = 0;
+  window.removeEventListener('dragenter', handleWindowDragEnter);
+  window.removeEventListener('dragover', handleWindowDragOver);
+  window.removeEventListener('dragleave', handleWindowDragLeave);
+  window.removeEventListener('drop', handleWindowDrop);
 }
 
 const dimoDesktopBridge = {
@@ -199,10 +229,13 @@ const dimoDesktopBridge = {
     onDragDropEvent: (
       callback: (event: DragDropEvent) => void
     ): Promise<() => void> => {
-      ensureDragDropListeners();
       dragDropListeners.add(callback);
+      attachDragDropListeners();
       return Promise.resolve(() => {
         dragDropListeners.delete(callback);
+        if (dragDropListeners.size === 0) {
+          detachDragDropListeners();
+        }
       });
     },
   },

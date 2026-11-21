@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { Readable } from 'node:stream';
+import type { Readable } from 'node:stream';
 
 import {
   DESKTOP_APP_SCHEME,
@@ -42,6 +42,75 @@ const MIME_TYPES: Record<string, string> = {
   '.txt': 'text/plain; charset=utf-8',
   '.md': 'text/markdown; charset=utf-8',
   '.xml': 'application/xml; charset=utf-8',
+};
+
+/**
+ * Known static asset extensions that must return 404 when missing instead of
+ * falling back to `index.html`. Non-asset dotted client routes such as
+ * `/plugins/com.dimo.foo` or `/settings/plugin/com.dimo.foo` fall back to
+ * `index.html`.
+ */
+const STATIC_ASSET_EXTENSIONS = new Set([
+  '.js',
+  '.mjs',
+  '.cjs',
+  '.css',
+  '.map',
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.svg',
+  '.ico',
+  '.avif',
+  '.woff',
+  '.woff2',
+  '.ttf',
+  '.otf',
+  '.json',
+  '.wasm',
+  '.mp3',
+  '.mp4',
+  '.wav',
+  '.webm',
+  '.txt',
+  '.xml',
+]);
+
+/**
+ * Content-Security-Policy served on `dimo-app://localhost` HTML documents.
+ * Applied via HTTP response header rather than `index.html` `<meta>` so Vite
+ * dev-mode HMR remains unaffected.
+ */
+export const APP_CONTENT_SECURITY_POLICY = [
+  "default-src 'self' dimo-app://localhost",
+  "script-src 'self' dimo-app://localhost blob:",
+  "style-src 'self' dimo-app://localhost 'unsafe-inline'",
+  "img-src 'self' dimo-app://localhost dimo-asset://localhost http://127.0.0.1:* http://localhost:* https: http: data: blob:",
+  "media-src 'self' dimo-app://localhost dimo-asset://localhost http://127.0.0.1:* http://localhost:* https: data: blob:",
+  "font-src 'self' dimo-app://localhost dimo-asset://localhost data:",
+  "connect-src 'self' dimo-app://localhost dimo-asset://localhost http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:* https: wss: http: ws: blob: data:",
+  "worker-src 'self' dimo-app://localhost blob:",
+  "frame-src 'self' dimo-app://localhost dimo-asset://localhost http://127.0.0.1:* http://localhost:* https: blob: data:",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join('; ');
+
+export const ASSET_CORS_HEADERS: Readonly<Record<string, string>> = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Expose-Headers':
+    'Content-Length, Content-Range, Accept-Ranges',
+};
+
+export const ASSET_PREFLIGHT_HEADERS: Readonly<Record<string, string>> = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+  'Access-Control-Allow-Headers': 'Range, Content-Type',
+  'Access-Control-Expose-Headers':
+    'Content-Length, Content-Range, Accept-Ranges',
 };
 
 export function mimeTypeForPath(filePath: string): string {
@@ -260,8 +329,10 @@ export function resolveAppDistFile(
     return canonicalCandidate;
   }
 
-  // SPA fallback to index.html for extensionless client routes.
-  if (!path.extname(relative)) {
+  // SPA fallback to index.html for client routes (including dotted routes like
+  // `/plugins/com.dimo.foo`), while returning 404 for missing static assets.
+  const ext = path.extname(relative).toLowerCase();
+  if (!STATIC_ASSET_EXTENSIONS.has(ext)) {
     const indexPath = canonicalizeExisting(
       path.join(canonicalRoot, 'index.html')
     );
@@ -277,18 +348,162 @@ export function resolveAppDistFile(
   return null;
 }
 
-function createStreamingFileResponse(
+/**
+ * Bridges a Node `Readable` into a Web `ReadableStream<Uint8Array>` with an
+ * eager `'error'` listener and clean `destroy()` on cancel/abort so mid-read
+ * I/O errors or aborted range seeks never emit unhandled Node stream errors.
+ */
+export function toSafeWebStream(
+  stream: Readable,
+  signal?: AbortSignal
+): ReadableStream<Uint8Array> {
+  let settled = false;
+  let controllerRef: ReadableStreamDefaultController<Uint8Array> | null = null;
+
+  const cleanupAbort = () => {
+    if (signal) {
+      signal.removeEventListener('abort', onAbort);
+    }
+  };
+
+  const onAbort = () => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    cleanupAbort();
+    if (!stream.destroyed) {
+      stream.destroy();
+    }
+    try {
+      controllerRef?.close();
+    } catch {
+      // Ignore if controller is already closed or errored.
+    }
+  };
+
+  // Attach immediately so early or post-cancel I/O errors are never uncaught.
+  stream.on('error', (error) => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    cleanupAbort();
+    try {
+      controllerRef?.error(error);
+    } catch {
+      // Ignore if controller is already closed or errored.
+    }
+  });
+
+  if (signal) {
+    if (signal.aborted) {
+      settled = true;
+      if (!stream.destroyed) {
+        stream.destroy();
+      }
+    } else {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+  }
+
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controllerRef = controller;
+      if (settled) {
+        try {
+          controller.close();
+        } catch {
+          // Ignore.
+        }
+        return;
+      }
+
+      stream.pause();
+
+      stream.on('data', (chunk: Buffer | string) => {
+        if (settled) {
+          return;
+        }
+        const bytes =
+          typeof chunk === 'string'
+            ? Buffer.from(chunk)
+            : new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+        try {
+          controller.enqueue(bytes);
+          if (controller.desiredSize !== null && controller.desiredSize <= 0) {
+            stream.pause();
+          }
+        } catch {
+          settled = true;
+          cleanupAbort();
+          if (!stream.destroyed) {
+            stream.destroy();
+          }
+        }
+      });
+
+      stream.on('end', () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanupAbort();
+        try {
+          controller.close();
+        } catch {
+          // Ignore.
+        }
+      });
+
+      stream.on('close', () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanupAbort();
+        try {
+          controller.close();
+        } catch {
+          // Ignore.
+        }
+      });
+    },
+    pull() {
+      if (!settled && !stream.destroyed) {
+        stream.resume();
+      }
+    },
+    cancel() {
+      settled = true;
+      cleanupAbort();
+      if (!stream.destroyed) {
+        stream.destroy();
+      }
+    },
+  });
+}
+
+export function createStreamingFileResponse(
   filePath: string,
-  request: Request
+  request: Request,
+  options?: { extraHeaders?: Readonly<Record<string, string>> }
 ): Response {
+  const extraHeaders = options?.extraHeaders;
   let stat: fs.Stats;
   try {
     stat = fs.statSync(filePath);
   } catch {
-    return new Response('Not Found', { status: 404 });
+    return new Response('Not Found', {
+      status: 404,
+      ...(extraHeaders ? { headers: { ...extraHeaders } } : {}),
+    });
   }
   if (!stat.isFile()) {
-    return new Response('Not Found', { status: 404 });
+    return new Response('Not Found', {
+      status: 404,
+      ...(extraHeaders ? { headers: { ...extraHeaders } } : {}),
+    });
   }
 
   const contentType = mimeTypeForPath(filePath);
@@ -299,6 +514,7 @@ function createStreamingFileResponse(
     return new Response('Range Not Satisfiable', {
       status: 416,
       headers: {
+        ...extraHeaders,
         'Content-Range': `bytes */${totalSize}`,
         'Accept-Ranges': 'bytes',
       },
@@ -311,6 +527,7 @@ function createStreamingFileResponse(
       return new Response(null, {
         status: 206,
         headers: {
+          ...extraHeaders,
           'Content-Type': contentType,
           'Content-Length': String(length),
           'Content-Range': `bytes ${rangeResult.start}-${rangeResult.end}/${totalSize}`,
@@ -321,6 +538,7 @@ function createStreamingFileResponse(
     return new Response(null, {
       status: 200,
       headers: {
+        ...extraHeaders,
         'Content-Type': contentType,
         'Content-Length': String(totalSize),
         'Accept-Ranges': 'bytes',
@@ -334,9 +552,10 @@ function createStreamingFileResponse(
       start: rangeResult.start,
       end: rangeResult.end,
     });
-    return new Response(Readable.toWeb(stream) as ReadableStream, {
+    return new Response(toSafeWebStream(stream, request.signal), {
       status: 206,
       headers: {
+        ...extraHeaders,
         'Content-Type': contentType,
         'Content-Length': String(length),
         'Content-Range': `bytes ${rangeResult.start}-${rangeResult.end}/${totalSize}`,
@@ -346,13 +565,57 @@ function createStreamingFileResponse(
   }
 
   const stream = fs.createReadStream(filePath);
-  return new Response(Readable.toWeb(stream) as ReadableStream, {
+  return new Response(toSafeWebStream(stream, request.signal), {
     status: 200,
     headers: {
+      ...extraHeaders,
       'Content-Type': contentType,
       'Content-Length': String(totalSize),
       'Accept-Ranges': 'bytes',
     },
+  });
+}
+
+export function handleAppProtocolRequest(
+  frontendDistDir: string,
+  request: Request
+): Response {
+  const resolved = resolveAppDistFile(frontendDistDir, request.url);
+  if (!resolved) {
+    return new Response('Not Found', { status: 404 });
+  }
+  const extraHeaders = mimeTypeForPath(resolved).startsWith('text/html')
+    ? { 'Content-Security-Policy': APP_CONTENT_SECURITY_POLICY }
+    : undefined;
+  return createStreamingFileResponse(resolved, request, { extraHeaders });
+}
+
+export function handleAssetProtocolRequest(
+  assetScope: PreviewAssetScope,
+  request: Request
+): Response {
+  if (request.method.toUpperCase() === 'OPTIONS') {
+    return new Response(null, {
+      status: 204,
+      headers: ASSET_PREFLIGHT_HEADERS,
+    });
+  }
+
+  const targetPath = decodeAssetUrlPath(request.url);
+  if (!targetPath) {
+    return new Response('Bad Request', {
+      status: 400,
+      headers: ASSET_CORS_HEADERS,
+    });
+  }
+  if (!assetScope.isAllowed(targetPath)) {
+    return new Response('Forbidden', {
+      status: 403,
+      headers: ASSET_CORS_HEADERS,
+    });
+  }
+  return createStreamingFileResponse(targetPath, request, {
+    extraHeaders: ASSET_CORS_HEADERS,
   });
 }
 
@@ -399,24 +662,13 @@ export function registerProtocolHandlers(options: {
   }
   registeredProtocols.add(protocol);
 
-  protocol.handle(DESKTOP_APP_SCHEME, (request) => {
-    const resolved = resolveAppDistFile(frontendDistDir, request.url);
-    if (!resolved) {
-      return new Response('Not Found', { status: 404 });
-    }
-    return createStreamingFileResponse(resolved, request);
-  });
+  protocol.handle(DESKTOP_APP_SCHEME, (request) =>
+    handleAppProtocolRequest(frontendDistDir, request)
+  );
 
-  protocol.handle(DESKTOP_ASSET_SCHEME, (request) => {
-    const targetPath = decodeAssetUrlPath(request.url);
-    if (!targetPath) {
-      return new Response('Bad Request', { status: 400 });
-    }
-    if (!assetScope.isAllowed(targetPath)) {
-      return new Response('Forbidden', { status: 403 });
-    }
-    return createStreamingFileResponse(targetPath, request);
-  });
+  protocol.handle(DESKTOP_ASSET_SCHEME, (request) =>
+    handleAssetProtocolRequest(assetScope, request)
+  );
 }
 
 export function registerProtocolHandlersForSession(
