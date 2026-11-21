@@ -153,7 +153,8 @@ describe('dimo-app:// CSP & dimo-asset:// CORS/OPTIONS protocol handlers', () =>
       APP_CONTENT_SECURITY_POLICY
     );
     expect(APP_CONTENT_SECURITY_POLICY).toContain("script-src 'self' dimo-app://localhost");
-    expect(APP_CONTENT_SECURITY_POLICY).not.toContain('unsafe-eval');
+    expect(APP_CONTENT_SECURITY_POLICY).toContain("'wasm-unsafe-eval'");
+    expect(APP_CONTENT_SECURITY_POLICY).not.toContain("'unsafe-eval'");
     expect(await rootRes.text()).toContain('<!doctype html>');
 
     // Dotted SPA fallback also receives HTML + CSP

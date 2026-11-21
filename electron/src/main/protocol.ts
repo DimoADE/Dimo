@@ -85,14 +85,14 @@ const STATIC_ASSET_EXTENSIONS = new Set([
  */
 export const APP_CONTENT_SECURITY_POLICY = [
   "default-src 'self' dimo-app://localhost",
-  "script-src 'self' dimo-app://localhost blob:",
+  "script-src 'self' dimo-app://localhost blob: 'wasm-unsafe-eval'",
   "style-src 'self' dimo-app://localhost 'unsafe-inline'",
   "img-src 'self' dimo-app://localhost dimo-asset://localhost http://127.0.0.1:* http://localhost:* https: http: data: blob:",
   "media-src 'self' dimo-app://localhost dimo-asset://localhost http://127.0.0.1:* http://localhost:* https: data: blob:",
   "font-src 'self' dimo-app://localhost dimo-asset://localhost data:",
   "connect-src 'self' dimo-app://localhost dimo-asset://localhost http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:* https: wss: http: ws: blob: data:",
   "worker-src 'self' dimo-app://localhost blob:",
-  "frame-src 'self' dimo-app://localhost dimo-asset://localhost http://127.0.0.1:* http://localhost:* https: blob: data:",
+  "frame-src 'self' dimo-app://localhost dimo-asset://localhost http://127.0.0.1:* http://localhost:* https: http: blob: data:",
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",
