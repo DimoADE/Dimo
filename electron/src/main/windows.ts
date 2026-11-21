@@ -14,6 +14,7 @@ import {
 } from 'electron';
 
 import {
+  DEFAULT_APP_USER_MODEL_ID,
   DESKTOP_APP_ORIGIN,
   IPC_CHANNELS,
   hostAppWindowLabel,
@@ -30,6 +31,16 @@ const MAIN_WINDOW_LABEL = 'main';
 const DESKTOP_TOAST_WINDOW_LABEL = 'desktop-toast';
 const REVEAL_FALLBACK_MS = 2_500;
 const ALLOWED_EXTERNAL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:']);
+const SAFE_APP_PERMISSIONS = new Set([
+  'clipboard-read',
+  'clipboard-sanitized-write',
+  'fullscreen',
+  'notifications',
+  'media',
+  'pointerLock',
+  'window-management',
+]);
+const PERMISSION_HOOKED_SESSIONS = new WeakSet<Session>();
 
 export interface WindowManagerOptions {
   preloadPath: string;
@@ -38,12 +49,94 @@ export interface WindowManagerOptions {
   appUserModelId?: string;
   smokeMode?: boolean;
   onWindowClosed?: (label: string, windowStillOpen: boolean) => void;
+  onMainWindowLoaded?: () => void;
+  onMainWindowClosed?: () => void;
+  onMainWindowClosedWithoutTray?: () => void;
   registerSessionProtocols?: (targetSession: Session) => void;
 }
 
 export interface OpenSettingsWindowOptions {
   title?: string;
   path?: string;
+}
+
+function normalizeUrlOrigin(rawUrl: string): string | null {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.origin && parsed.origin !== 'null') {
+      return parsed.origin;
+    }
+    if (parsed.protocol && parsed.host) {
+      return `${parsed.protocol}//${parsed.host}`;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function evaluatePermissionRequest(params: {
+  origin: string;
+  allowedAppOrigin: string;
+  permission: string;
+  isWebview?: boolean;
+}): boolean {
+  if (params.isWebview) {
+    return false;
+  }
+  if (!SAFE_APP_PERMISSIONS.has(params.permission)) {
+    return false;
+  }
+  const normalizedOrigin = normalizeUrlOrigin(params.origin);
+  const normalizedAllowed = normalizeUrlOrigin(params.allowedAppOrigin);
+  return (
+    normalizedOrigin !== null &&
+    normalizedAllowed !== null &&
+    normalizedOrigin === normalizedAllowed
+  );
+}
+
+export function installSessionPermissionHandlers(
+  targetSession: Session,
+  allowedAppOrigin: string,
+  options: { isWebviewSession?: boolean } = {}
+): void {
+  if (PERMISSION_HOOKED_SESSIONS.has(targetSession)) {
+    return;
+  }
+  PERMISSION_HOOKED_SESSIONS.add(targetSession);
+
+  targetSession.setPermissionRequestHandler?.(
+    (webContents, permission, callback, details) => {
+      const isWebview = Boolean(
+        options.isWebviewSession || webContents?.getType?.() === 'webview'
+      );
+      const origin = details?.requestingUrl || webContents?.getURL?.() || '';
+      callback(
+        evaluatePermissionRequest({
+          origin,
+          allowedAppOrigin,
+          permission,
+          isWebview,
+        })
+      );
+    }
+  );
+
+  targetSession.setPermissionCheckHandler?.(
+    (webContents, permission, requestingOrigin) => {
+      const isWebview = Boolean(
+        options.isWebviewSession || webContents?.getType?.() === 'webview'
+      );
+      const origin = requestingOrigin || webContents?.getURL?.() || '';
+      return evaluatePermissionRequest({
+        origin,
+        allowedAppOrigin,
+        permission,
+        isWebview,
+      });
+    }
+  );
 }
 
 function normalizeSettingsPath(rawPath?: string | null): string {
@@ -103,6 +196,7 @@ export class WindowManager {
   private quitting = false;
   private trayEnabled = false;
   private developerModeEnabled = false;
+  private zoomFactor = 1.0;
   private currentAppIcon: NativeImage | null = null;
   private currentAppIconIcoPath: string | null = null;
 
@@ -158,6 +252,28 @@ export class WindowManager {
     return this.labelsByWebContents.get(webContents) ?? MAIN_WINDOW_LABEL;
   }
 
+  getFocusedWindowLabel(): string {
+    const focused = BrowserWindow.getFocusedWindow();
+    if (focused && !focused.isDestroyed()) {
+      return this.getLabelForWebContents(focused.webContents);
+    }
+    return MAIN_WINDOW_LABEL;
+  }
+
+  setZoomFactor(scale: number): void {
+    if (!Number.isFinite(scale) || scale <= 0) {
+      return;
+    }
+    this.zoomFactor = scale;
+    for (const win of this.allWindows()) {
+      win.webContents.setZoomFactor(scale);
+    }
+  }
+
+  getZoomFactor(): number {
+    return this.zoomFactor;
+  }
+
   getWindowForWebContents(webContents: WebContents): BrowserWindow | undefined {
     const fromElectron = BrowserWindow.fromWebContents(webContents);
     if (fromElectron && !fromElectron.isDestroyed()) {
@@ -211,7 +327,7 @@ export class WindowManager {
             : undefined;
     try {
       win.setAppDetails({
-        appId: this.options.appUserModelId ?? 'com.dimo.desktop',
+        appId: this.options.appUserModelId ?? DEFAULT_APP_USER_MODEL_ID,
         ...(candidateIco ? { appIconPath: candidateIco, appIconIndex: 0 } : {}),
         relaunchDisplayName: this.options.devUrl ? 'Dimo Dev' : 'Dimo',
       });
@@ -245,7 +361,7 @@ export class WindowManager {
     return `${DESKTOP_APP_ORIGIN}${cleanPath}`;
   }
 
-  private getAllowedAppOrigin(): string {
+  getAllowedAppOrigin(): string {
     if (this.options.devUrl) {
       try {
         return new URL(this.options.devUrl).origin;
@@ -484,10 +600,11 @@ export class WindowManager {
       partition?: string;
     }
   ): BrowserWindow {
+    const allowedOrigin = this.getAllowedAppOrigin();
     if (config.partition) {
-      this.options.registerSessionProtocols?.(
-        session.fromPartition(config.partition)
-      );
+      const targetSession = session.fromPartition(config.partition);
+      this.options.registerSessionProtocols?.(targetSession);
+      installSessionPermissionHandlers(targetSession, allowedOrigin);
     }
 
     const win = new BrowserWindow({
@@ -505,7 +622,7 @@ export class WindowManager {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
-        spellcheck: false,
+        spellcheck: true,
         webviewTag: true,
         ...(config.partition ? { partition: config.partition } : {}),
       },
@@ -514,6 +631,15 @@ export class WindowManager {
     this.windows.set(label, win);
     this.labelsByWebContents.set(win.webContents, label);
     this.applyWindowsAppDetails(win);
+    if (this.zoomFactor !== 1.0) {
+      win.webContents.setZoomFactor(this.zoomFactor);
+    }
+
+    if (label === MAIN_WINDOW_LABEL) {
+      win.webContents.once('did-finish-load', () => {
+        this.options.onMainWindowLoaded?.();
+      });
+    }
 
     const notifyResized = () => {
       if (!win.isDestroyed()) {
@@ -531,6 +657,9 @@ export class WindowManager {
         if (this.quitting || this.options.smokeMode) {
           return;
         }
+        if (label === 'settings' && !this.trayEnabled && !this.getMainWindow()) {
+          return;
+        }
         if (
           config.hideOnClose === 'always' ||
           (config.hideOnClose === 'when-tray-enabled' && this.trayEnabled)
@@ -544,6 +673,16 @@ export class WindowManager {
     win.on('closed', () => {
       if (this.windows.get(label) === win) {
         this.windows.delete(label);
+      }
+      if (label === MAIN_WINDOW_LABEL) {
+        this.options.onMainWindowClosed?.();
+        if (!this.trayEnabled) {
+          const localSettings = this.getWindow('settings');
+          if (localSettings && !localSettings.isDestroyed()) {
+            localSettings.destroy();
+          }
+          this.options.onMainWindowClosedWithoutTray?.();
+        }
       }
       if (isHostWindowLabel(label)) {
         const pairedSettingsLabel = hostSettingsWindowForApp(label);
@@ -574,7 +713,6 @@ export class WindowManager {
     });
 
     // Guard against untrusted popups or top-level navigations away from app origin.
-    const allowedOrigin = this.getAllowedAppOrigin();
     win.webContents.setWindowOpenHandler(({ url }) => {
       if (isSafeExternalUrl(url)) {
         void shell.openExternal(url);
@@ -583,17 +721,14 @@ export class WindowManager {
     });
 
     win.webContents.on('will-navigate', (event, targetUrl) => {
-      try {
-        const parsed = new URL(targetUrl);
-        if (parsed.origin === allowedOrigin) {
-          return;
-        }
-        event.preventDefault();
-        if (isSafeExternalUrl(targetUrl)) {
-          void shell.openExternal(targetUrl);
-        }
-      } catch {
-        event.preventDefault();
+      const targetOrigin = normalizeUrlOrigin(targetUrl);
+      const expectedOrigin = normalizeUrlOrigin(allowedOrigin);
+      if (targetOrigin && expectedOrigin && targetOrigin === expectedOrigin) {
+        return;
+      }
+      event.preventDefault();
+      if (isSafeExternalUrl(targetUrl)) {
+        void shell.openExternal(targetUrl);
       }
     });
 

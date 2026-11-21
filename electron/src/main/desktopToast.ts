@@ -135,9 +135,17 @@ export class DesktopToastManager {
     this.hide();
   }
 
+  setIgnoreMouseEvents(ignore: boolean): void {
+    const win = this.getWindow();
+    if (win) {
+      win.setIgnoreMouseEvents(ignore, { forward: true });
+    }
+  }
+
   hide(): void {
     const win = this.getWindow();
     if (win) {
+      win.setIgnoreMouseEvents(true, { forward: true });
       win.hide();
       this.scheduleIdleCleanup();
     }
@@ -174,7 +182,7 @@ export class DesktopToastManager {
       backgroundColor: '#00000000',
       alwaysOnTop: true,
       skipTaskbar: true,
-      focusable: false,
+      focusable: true,
       hasShadow: false,
       show: false,
       webPreferences: {
@@ -185,6 +193,10 @@ export class DesktopToastManager {
         spellcheck: false,
       },
     });
+
+    // Pass clicks on transparent backdrop pixels through to underlying windows
+    // while forwarding hover events so toast cards can opt back into input.
+    win.setIgnoreMouseEvents(true, { forward: true });
 
     // Keep overlay visible across virtual desktops/fullscreen spaces on macOS.
     if (process.platform === 'darwin') {

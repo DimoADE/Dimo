@@ -110,10 +110,16 @@ export interface InstallCrashHandlersOptions {
   getDataDir: () => string | undefined;
 }
 
-export function installCrashHandlers(
+export type CrashRecorder = (
+  source: string,
+  message: string,
+  stack?: string
+) => void;
+
+export function createCrashRecorder(
   options: InstallCrashHandlersOptions
-): () => void {
-  const recordCrash = (source: string, message: string, stack?: string) => {
+): CrashRecorder {
+  return (source: string, message: string, stack?: string) => {
     const tryFallback = () => {
       const dataDir = options.getDataDir();
       if (!dataDir) {
@@ -146,6 +152,12 @@ export function installCrashHandlers(
       tryFallback();
     }
   };
+}
+
+export function installCrashHandlers(
+  options: InstallCrashHandlersOptions
+): () => void {
+  const recordCrash = createCrashRecorder(options);
 
   const onUncaughtException = (error: Error) => {
     console.error('[electron:crash] uncaughtException:', error);

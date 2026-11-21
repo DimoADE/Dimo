@@ -1,10 +1,14 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 
-import type { ElectronBackendConnectionInfo } from '../shared/ipcContract';
+import type {
+  ElectronBackendConnectionInfo,
+  SidecarRuntimeStatus,
+} from '../shared/ipcContract';
 
 export interface ServerReadyMessage {
   type: 'dimo-server-ready';
@@ -13,6 +17,16 @@ export interface ServerReadyMessage {
   pid: number;
   protocol_version: string;
   data_dir?: string;
+}
+
+export interface SidecarUnexpectedExitInfo {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  stderrTail: string[];
+  willRestart: boolean;
+  attempt: number;
+  maxAttempts: number;
+  restartDelayMs: number | null;
 }
 
 export interface SidecarStartOptions {
@@ -25,11 +39,24 @@ export interface SidecarStartOptions {
   readyTimeoutMs?: number;
   env?: NodeJS.ProcessEnv;
   logger?: Pick<Console, 'info' | 'warn' | 'error'>;
+  maxRestartAttempts?: number;
+  restartWindowMs?: number;
+  restartBaseDelayMs?: number;
+  onUnexpectedExit?: (info: SidecarUnexpectedExitInfo) => void;
+  onRestarted?: (
+    connection: ElectronBackendConnectionInfo,
+    attempt: number
+  ) => void;
+  onRestartFailed?: (error: Error, attempt: number, exhausted: boolean) => void;
+  spawnProcess?: typeof spawn;
 }
 
 const DEFAULT_READY_TIMEOUT_MS = 30_000;
 const SHUTDOWN_GRACE_MS = 5_000;
 const STDERR_RING_LIMIT = 40;
+const DEFAULT_MAX_RESTART_ATTEMPTS = 3;
+const DEFAULT_RESTART_WINDOW_MS = 60_000;
+const DEFAULT_RESTART_BASE_DELAY_MS = 1_000;
 
 export function generateDesktopToken(): string {
   return crypto.randomBytes(32).toString('hex');
@@ -39,6 +66,216 @@ export function serverBinaryFilename(
   platform: NodeJS.Platform = process.platform
 ): string {
   return platform === 'win32' ? 'dimo-server.exe' : 'dimo-server';
+}
+
+export function resolveSidecarStdio(
+  platform: NodeJS.Platform = process.platform
+): ['ignore' | 'pipe', 'pipe', 'pipe'] {
+  // On Windows, `--parent-pid` handles parent-exit monitoring and the stdin
+  // watchdog is disabled; inheriting/piping stdin can deadlock child processes.
+  return platform === 'win32'
+    ? ['ignore', 'pipe', 'pipe']
+    : ['pipe', 'pipe', 'pipe'];
+}
+
+export function resolveClaudeDriverScript(
+  resourcesDir: string | undefined,
+  env: NodeJS.ProcessEnv = process.env
+): string | undefined {
+  if (env.DIMO_CLAUDE_DRIVER_SCRIPT?.trim()) {
+    return env.DIMO_CLAUDE_DRIVER_SCRIPT.trim();
+  }
+  if (!resourcesDir) {
+    return undefined;
+  }
+  const candidate = path.join(
+    resourcesDir,
+    'scripts',
+    'claude-native-driver.mjs'
+  );
+  return fs.existsSync(candidate) ? candidate : undefined;
+}
+
+function isAppBundleSegment(segment: string): boolean {
+  return segment.length > 4 && segment.toLowerCase().endsWith('.app');
+}
+
+/**
+ * Mirrors Rust `utils::assets::is_inside_macos_app_bundle`: writing runtime
+ * data inside a `.app` bundle breaks macOS code signatures and loses data on
+ * in-app updates.
+ */
+export function isInsideMacosAppBundle(
+  targetPath: string,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  const segments = targetPath
+    .split(/[\\/]+/)
+    .filter((segment) => segment.length > 0);
+  if (platform === 'darwin' && segments.some(isAppBundleSegment)) {
+    return true;
+  }
+  for (let i = 0; i + 1 < segments.length; i += 1) {
+    if (
+      isAppBundleSegment(segments[i]) &&
+      segments[i + 1].toLowerCase() === 'contents'
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function resolveBootstrapConfigPath(options?: {
+  env?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
+  homedir?: string;
+}): string {
+  const env = options?.env ?? process.env;
+  const platform = options?.platform ?? process.platform;
+  const home = options?.homedir ?? os.homedir();
+
+  const explicit = env.DIMO_BOOTSTRAP_CONFIG_PATH?.trim();
+  if (explicit) {
+    return explicit;
+  }
+  if (platform === 'win32') {
+    const appData = env.APPDATA || path.join(home, 'AppData', 'Roaming');
+    return path.join(appData, 'dimo', 'dimo', 'config', 'bootstrap.json');
+  }
+  if (platform === 'darwin') {
+    return path.join(
+      home,
+      'Library',
+      'Application Support',
+      'app.dimo.dimo',
+      'bootstrap.json'
+    );
+  }
+  const xdgConfig = env.XDG_CONFIG_HOME || path.join(home, '.config');
+  return path.join(xdgConfig, 'dimo', 'bootstrap.json');
+}
+
+export function resolvePreRenameBootstrapConfigPath(options?: {
+  env?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
+  homedir?: string;
+}): string {
+  const env = options?.env ?? process.env;
+  const platform = options?.platform ?? process.platform;
+  const home = options?.homedir ?? os.homedir();
+
+  if (platform === 'win32') {
+    const appData = env.APPDATA || path.join(home, 'AppData', 'Roaming');
+    return path.join(appData, 'vibex', 'vibex', 'config', 'bootstrap.json');
+  }
+  if (platform === 'darwin') {
+    return path.join(
+      home,
+      'Library',
+      'Application Support',
+      'app.vibex.vibex',
+      'bootstrap.json'
+    );
+  }
+  const xdgConfig = env.XDG_CONFIG_HOME || path.join(home, '.config');
+  return path.join(xdgConfig, 'vibex', 'bootstrap.json');
+}
+
+function readCustomDataDirFromFile(
+  bootstrapPath: string,
+  platform: NodeJS.Platform
+): string | undefined {
+  try {
+    const raw = fs.readFileSync(bootstrapPath, 'utf8');
+    const parsed = JSON.parse(raw) as { custom_data_dir?: unknown };
+    if (typeof parsed.custom_data_dir !== 'string') {
+      return undefined;
+    }
+    const trimmed = parsed.custom_data_dir.trim();
+    if (trimmed.length === 0) {
+      return undefined;
+    }
+    const isAbsolute =
+      platform === 'win32'
+        ? path.win32.isAbsolute(trimmed)
+        : path.posix.isAbsolute(trimmed);
+    if (!isAbsolute || isInsideMacosAppBundle(trimmed, platform)) {
+      return undefined;
+    }
+    return trimmed;
+  } catch {
+    return undefined;
+  }
+}
+
+export function resolveEnvDataDir(options?: {
+  env?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
+}): string | undefined {
+  const env = options?.env ?? process.env;
+  const platform = options?.platform ?? process.platform;
+  const candidate =
+    env.DIMO_DATA_DIR?.trim() || env.VIBEX_DATA_DIR?.trim() || '';
+  if (!candidate || isInsideMacosAppBundle(candidate, platform)) {
+    return undefined;
+  }
+  return candidate;
+}
+
+export function resolveDefaultDataDir(options?: {
+  repoRoot?: string;
+  isPackaged?: boolean;
+  env?: NodeJS.ProcessEnv;
+  platform?: NodeJS.Platform;
+  homedir?: string;
+}): string {
+  const env = options?.env ?? process.env;
+  const platform = options?.platform ?? process.platform;
+  const home = options?.homedir ?? os.homedir();
+
+  const envDataDir = resolveEnvDataDir({ env, platform });
+  if (envDataDir) {
+    return envDataDir;
+  }
+
+  const currentBootstrap = resolveBootstrapConfigPath({
+    env,
+    platform,
+    homedir: home,
+  });
+  const fromCurrent = readCustomDataDirFromFile(currentBootstrap, platform);
+  if (fromCurrent) {
+    return fromCurrent;
+  }
+
+  const preRenameBootstrap = resolvePreRenameBootstrapConfigPath({
+    env,
+    platform,
+    homedir: home,
+  });
+  if (preRenameBootstrap !== currentBootstrap) {
+    const fromPreRename = readCustomDataDirFromFile(
+      preRenameBootstrap,
+      platform
+    );
+    if (fromPreRename) {
+      return fromPreRename;
+    }
+  }
+
+  if (!options?.isPackaged && options?.repoRoot) {
+    return path.join(options.repoRoot, 'dev_assets');
+  }
+  if (platform === 'win32') {
+    const appData = env.APPDATA || path.join(home, 'AppData', 'Roaming');
+    return path.join(appData, 'dimo', 'dimo', 'data');
+  }
+  if (platform === 'darwin') {
+    return path.join(home, 'Library', 'Application Support', 'app.dimo.dimo');
+  }
+  const xdgData = env.XDG_DATA_HOME || path.join(home, '.local', 'share');
+  return path.join(xdgData, 'dimo');
 }
 
 export function resolveSidecarBinaryPath(options: {
@@ -120,7 +357,11 @@ export class SidecarManager {
   private connection: ElectronBackendConnectionInfo | null = null;
   private readyInfo: ServerReadyMessage | null = null;
   private shuttingDown = false;
+  private restarting = false;
   private shutdownPromise: Promise<void> | null = null;
+  private restartTimer: NodeJS.Timeout | null = null;
+  private restartTimestamps: number[] = [];
+  private lastStartOptions: SidecarStartOptions | null = null;
   private logger: Pick<Console, 'info' | 'warn' | 'error'> = console;
 
   getConnection(): ElectronBackendConnectionInfo {
@@ -128,6 +369,20 @@ export class SidecarManager {
       throw new Error('dimo-server sidecar has not started yet');
     }
     return this.connection;
+  }
+
+  getConnectionOrNull(): ElectronBackendConnectionInfo | null {
+    return this.isRunning() ? this.connection : null;
+  }
+
+  getStatus(): SidecarRuntimeStatus {
+    if (this.isRunning() && this.connection) {
+      return 'running';
+    }
+    if (this.restarting) {
+      return 'restarting';
+    }
+    return 'stopped';
   }
 
   getReadyInfo(): ServerReadyMessage | null {
@@ -148,6 +403,16 @@ export class SidecarManager {
     if (this.connection && this.isRunning()) {
       return this.connection;
     }
+    this.cancelPendingRestart();
+    this.restartTimestamps = [];
+    this.restarting = false;
+    this.lastStartOptions = options;
+    return this.spawnAndAwaitReady(options);
+  }
+
+  private async spawnAndAwaitReady(
+    options: SidecarStartOptions
+  ): Promise<ElectronBackendConnectionInfo> {
     this.logger = options.logger ?? console;
     this.shuttingDown = false;
     this.shutdownPromise = null;
@@ -174,21 +439,30 @@ export class SidecarManager {
       args.push('--resources-dir', options.resourcesDir);
     }
 
+    const baseEnv = options.env ?? process.env;
     const childEnv: NodeJS.ProcessEnv = {
-      ...(options.env ?? process.env),
+      ...baseEnv,
       DIMO_DESKTOP_TOKEN: token,
     };
     if (options.dataDir) {
       childEnv.DIMO_DATA_DIR = options.dataDir;
+    }
+    const claudeDriverScript = resolveClaudeDriverScript(
+      options.resourcesDir,
+      childEnv
+    );
+    if (claudeDriverScript) {
+      childEnv.DIMO_CLAUDE_DRIVER_SCRIPT = claudeDriverScript;
     }
 
     this.logger.info(
       `[electron:sidecar] spawning ${binaryPath} ${args.join(' ')}`
     );
 
-    const child = spawn(binaryPath, args, {
+    const spawnFn = options.spawnProcess ?? spawn;
+    const child = spawnFn(binaryPath, args, {
       env: childEnv,
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: resolveSidecarStdio(),
       windowsHide: true,
     });
     this.child = child;
@@ -204,6 +478,42 @@ export class SidecarManager {
       }
       this.logger.info(`[dimo-server] ${line}`);
     });
+
+    const drainStdout = () => {
+      if (!child.stdout) return;
+      child.stdout.on('data', (chunk: Buffer | string) => {
+        const text =
+          typeof chunk === 'string'
+            ? chunk.trim()
+            : chunk.toString('utf8').trim();
+        if (text.length > 0) {
+          this.logger.info(`[dimo-server:stdout] ${text}`);
+        }
+      });
+      child.stdout.resume();
+    };
+
+    const onPostReadyExit = (
+      code: number | null,
+      signal: NodeJS.Signals | null
+    ) => {
+      stderrReader?.close();
+      if (this.child !== child) {
+        return;
+      }
+      this.child = null;
+      this.connection = null;
+      this.readyInfo = null;
+
+      if (this.shuttingDown) {
+        return;
+      }
+
+      this.logger.error(
+        `[electron:sidecar] dimo-server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'})`
+      );
+      this.handleUnexpectedExit(code, signal, [...stderrTail]);
+    };
 
     const ready = await new Promise<ServerReadyMessage>((resolve, reject) => {
       let settled = false;
@@ -229,6 +539,10 @@ export class SidecarManager {
           settled = true;
           clearTimeout(timer);
           cleanupListeners();
+          // Resume draining stdout synchronously so OS pipe buffers (4 KiB on Windows)
+          // never stall dimo-server or inherited children even for a single tick.
+          drainStdout();
+          child.on('exit', onPostReadyExit);
           resolve(parsed);
         }
       };
@@ -267,21 +581,21 @@ export class SidecarManager {
       child.on('error', onError);
       child.on('exit', onExit);
     }).catch(async (error) => {
+      stderrReader?.close();
       await this.forceKillChild(child);
-      this.child = null;
-      throw error;
-    });
-
-    child.on('exit', (code, signal) => {
-      if (!this.shuttingDown) {
-        this.logger.error(
-          `[electron:sidecar] dimo-server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'})`
-        );
-      }
       if (this.child === child) {
         this.child = null;
       }
+      throw error;
     });
+
+    if (this.child !== child || child.exitCode !== null) {
+      return {
+        baseUrl: `http://127.0.0.1:${ready.port}`,
+        token,
+        dataDir: options.dataDir ?? ready.data_dir,
+      };
+    }
 
     this.readyInfo = ready;
     this.connection = {
@@ -294,6 +608,119 @@ export class SidecarManager {
       `[electron:sidecar] ready at ${this.connection.baseUrl} (pid=${ready.pid})`
     );
     return this.connection;
+  }
+
+  private handleUnexpectedExit(
+    code: number | null,
+    signal: NodeJS.Signals | null,
+    stderrTail: string[]
+  ): void {
+    const opts = this.lastStartOptions;
+    const maxAttempts = opts?.maxRestartAttempts ?? DEFAULT_MAX_RESTART_ATTEMPTS;
+    const windowMs = opts?.restartWindowMs ?? DEFAULT_RESTART_WINDOW_MS;
+    const baseDelayMs = opts?.restartBaseDelayMs ?? DEFAULT_RESTART_BASE_DELAY_MS;
+
+    const now = Date.now();
+    this.restartTimestamps = this.restartTimestamps.filter(
+      (ts) => now - ts < windowMs
+    );
+
+    if (opts && maxAttempts > 0 && this.restartTimestamps.length < maxAttempts) {
+      const attempt = this.restartTimestamps.length + 1;
+      const restartDelayMs = baseDelayMs * 2 ** (attempt - 1);
+      this.restartTimestamps.push(now);
+      this.restarting = true;
+
+      opts.onUnexpectedExit?.({
+        code,
+        signal,
+        stderrTail,
+        willRestart: true,
+        attempt,
+        maxAttempts,
+        restartDelayMs,
+      });
+
+      this.scheduleRestart(attempt, maxAttempts, restartDelayMs);
+      return;
+    }
+
+    this.restarting = false;
+    opts?.onUnexpectedExit?.({
+      code,
+      signal,
+      stderrTail,
+      willRestart: false,
+      attempt: this.restartTimestamps.length,
+      maxAttempts,
+      restartDelayMs: null,
+    });
+  }
+
+  private scheduleRestart(
+    attempt: number,
+    maxAttempts: number,
+    delayMs: number
+  ): void {
+    this.cancelPendingRestart();
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null;
+      if (this.shuttingDown || !this.lastStartOptions) {
+        this.restarting = false;
+        return;
+      }
+
+      const opts = this.lastStartOptions;
+      this.logger.warn(
+        `[electron:sidecar] attempting auto-restart ${attempt}/${maxAttempts} after ${delayMs}ms`
+      );
+
+      void this.spawnAndAwaitReady(opts)
+        .then((conn) => {
+          if (this.shuttingDown) {
+            return;
+          }
+          this.restarting = false;
+          opts.onRestarted?.(conn, attempt);
+        })
+        .catch((err) => {
+          if (this.shuttingDown) {
+            this.restarting = false;
+            return;
+          }
+          const error = err instanceof Error ? err : new Error(String(err));
+          this.logger.error(
+            `[electron:sidecar] auto-restart ${attempt}/${maxAttempts} failed: ${error.message}`
+          );
+
+          const windowMs = opts.restartWindowMs ?? DEFAULT_RESTART_WINDOW_MS;
+          const baseDelayMs =
+            opts.restartBaseDelayMs ?? DEFAULT_RESTART_BASE_DELAY_MS;
+          const now = Date.now();
+          this.restartTimestamps = this.restartTimestamps.filter(
+            (ts) => now - ts < windowMs
+          );
+
+          if (this.restartTimestamps.length < maxAttempts) {
+            opts.onRestartFailed?.(error, attempt, false);
+            const nextAttempt = this.restartTimestamps.length + 1;
+            const nextDelayMs = baseDelayMs * 2 ** (nextAttempt - 1);
+            this.restartTimestamps.push(now);
+            this.scheduleRestart(nextAttempt, maxAttempts, nextDelayMs);
+          } else {
+            this.restarting = false;
+            opts.onRestartFailed?.(error, attempt, true);
+          }
+        });
+    }, delayMs);
+    this.restartTimer.unref?.();
+  }
+
+  private cancelPendingRestart(): void {
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
   }
 
   async healthCheck(): Promise<{
@@ -391,6 +818,8 @@ export class SidecarManager {
       return this.shutdownPromise;
     }
     this.shuttingDown = true;
+    this.restarting = false;
+    this.cancelPendingRestart();
     this.shutdownPromise = this.performShutdown();
     return this.shutdownPromise;
   }
@@ -400,6 +829,8 @@ export class SidecarManager {
     const conn = this.connection;
     if (!child || child.exitCode !== null) {
       this.child = null;
+      this.connection = null;
+      this.readyInfo = null;
       return;
     }
 
@@ -448,6 +879,8 @@ export class SidecarManager {
     }
 
     this.child = null;
+    this.connection = null;
+    this.readyInfo = null;
   }
 
   private async forceKillChild(child: ChildProcess): Promise<void> {

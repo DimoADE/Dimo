@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 
 import {
@@ -92,6 +93,27 @@ export function isAllowedBrowserUrl(rawUrl: string): boolean {
   }
 }
 
+export function resolveUniqueDownloadPath(
+  downloadsDir: string,
+  rawFilename: string,
+  reserved?: ReadonlySet<string>,
+  existsSync: (filePath: string) => boolean = fs.existsSync
+): { savePath: string; filename: string } {
+  const baseName = path.basename(rawFilename.trim() || 'download');
+  const sanitized = baseName.replace(/[\\/:*?"<>|]+/g, '_').trim() || 'download';
+  const ext = path.extname(sanitized);
+  const stem = ext ? sanitized.slice(0, -ext.length) : sanitized;
+  let filename = sanitized;
+  let savePath = path.join(downloadsDir, filename);
+  let counter = 1;
+  while (existsSync(savePath) || reserved?.has(savePath)) {
+    filename = `${stem} (${counter})${ext}`;
+    savePath = path.join(downloadsDir, filename);
+    counter += 1;
+  }
+  return { savePath, filename };
+}
+
 export function normalizeConsoleLevel(
   rawLevel: number | string
 ): 'debug' | 'log' | 'info' | 'warn' | 'error' {
@@ -145,6 +167,8 @@ export class ElectronBrowserController {
   private readonly tabs = new Map<string, TabState>();
   private readonly tabIdByWebContentsId = new Map<number, string>();
   private readonly hookedSessions = new WeakSet<Session>();
+  private readonly webRequestHookedSessions = new WeakSet<Session>();
+  private readonly reservedDownloadPaths = new Set<string>();
   private readonly approvedNavigations = new Set<string>();
   private readonly onEvent: (payload: Record<string, unknown>) => void;
   private readonly getDownloadsDir: () => string | undefined;
@@ -329,12 +353,13 @@ export class ElectronBrowserController {
     }
     this.tabs.clear();
     this.tabIdByWebContentsId.clear();
+    this.reservedDownloadPaths.clear();
   }
 
   private bindWebContentsToEntry(entry: TabState, wc: WebContents): void {
     entry.webContentsId = wc.id;
     this.tabIdByWebContentsId.set(wc.id, entry.tabId);
-    this.ensureSessionDownloadHook(wc.session);
+    this.ensureSessionHooks(wc.session);
 
     const onStartLoading = () => {
       const current = wc.isDestroyed() ? entry.url : wc.getURL() || entry.url;
@@ -455,7 +480,7 @@ export class ElectronBrowserController {
       });
     };
 
-    const onWillNavigate = (event: Electron.Event, url: string) => {
+    const enforceNavigationFallback = (event: Electron.Event, url: string) => {
       if (!isAllowedBrowserUrl(url)) {
         event.preventDefault();
         this.onEvent({
@@ -465,7 +490,14 @@ export class ElectronBrowserController {
         });
         return;
       }
-      if (!this.checkNavigation || url === 'about:blank') {
+      // When session.webRequest.onBeforeRequest is active, async policy checks
+      // run at the network layer so POST form submissions and 3xx redirects are
+      // never downgraded to GET via loadURL().
+      if (
+        !this.checkNavigation ||
+        url === 'about:blank' ||
+        this.webRequestHookedSessions.has(wc.session)
+      ) {
         return;
       }
       const approvalKey = `${entry.tabId}\0${url}`;
@@ -503,6 +535,14 @@ export class ElectronBrowserController {
             });
           }
         });
+    };
+
+    const onWillNavigate = (event: Electron.Event, url: string) => {
+      enforceNavigationFallback(event, url);
+    };
+
+    const onWillRedirect = (event: Electron.Event, url: string) => {
+      enforceNavigationFallback(event, url);
     };
 
     const onDestroyed = () => {
@@ -559,6 +599,7 @@ export class ElectronBrowserController {
     });
 
     wc.on('will-navigate', onWillNavigate);
+    wc.on('will-redirect', onWillRedirect);
     wc.on('did-start-loading', onStartLoading);
     wc.on('did-stop-loading', onStopLoading);
     wc.on('did-navigate', onNavigate);
@@ -573,6 +614,7 @@ export class ElectronBrowserController {
       this.tabIdByWebContentsId.delete(wc.id);
       if (!wc.isDestroyed()) {
         wc.removeListener('will-navigate', onWillNavigate);
+        wc.removeListener('will-redirect', onWillRedirect);
         wc.removeListener('did-start-loading', onStartLoading);
         wc.removeListener('did-stop-loading', onStopLoading);
         wc.removeListener('did-navigate', onNavigate);
@@ -623,18 +665,73 @@ export class ElectronBrowserController {
     entry.webContentsId = null;
   }
 
-  private ensureSessionDownloadHook(sess: Session): void {
+  private ensureSessionHooks(sess: Session): void {
     if (this.hookedSessions.has(sess)) {
       return;
     }
     this.hookedSessions.add(sess);
+
+    // Deny sensitive device/OS permission prompts from untrusted Host Browser pages.
+    sess.setPermissionRequestHandler?.((_wc, _permission, callback) => {
+      callback(false);
+    });
+    sess.setPermissionCheckHandler?.(() => false);
+
+    if (sess.webRequest?.onBeforeRequest) {
+      this.webRequestHookedSessions.add(sess);
+      sess.webRequest.onBeforeRequest(
+        { urls: ['http://*/*', 'https://*/*'], types: ['mainFrame'] },
+        (details, callback) => {
+          const wcId = details.webContentsId;
+          const tabId =
+            wcId !== undefined ? this.tabIdByWebContentsId.get(wcId) : undefined;
+          if (!tabId || !this.checkNavigation) {
+            callback({ cancel: false });
+            return;
+          }
+          const url = details.url;
+          void this.checkNavigation(url)
+            .then((policy) => {
+              if (policy.preferSystem) {
+                void shell.openExternal(url).catch(() => undefined);
+                callback({ cancel: true });
+                return;
+              }
+              if (!policy.allowed) {
+                this.onEvent({
+                  kind: 'navigation.blocked',
+                  tabId,
+                  url,
+                });
+                callback({ cancel: true });
+                return;
+              }
+              callback({ cancel: false });
+            })
+            .catch(() => {
+              callback({ cancel: false });
+            });
+        }
+      );
+    }
+
     sess.on('will-download', (_event, item: DownloadItem, wc: WebContents) => {
       const tabId = this.tabIdByWebContentsId.get(wc.id);
       const downloadId = crypto.randomUUID();
-      const filename = item.getFilename();
+      const rawFilename = item.getFilename();
       const downloadsDir = this.getDownloadsDir();
+      let filename = rawFilename;
+      let reservedPath: string | null = null;
       if (downloadsDir) {
-        item.setSavePath(path.join(downloadsDir, filename));
+        const resolved = resolveUniqueDownloadPath(
+          downloadsDir,
+          rawFilename,
+          this.reservedDownloadPaths
+        );
+        filename = resolved.filename;
+        reservedPath = resolved.savePath;
+        this.reservedDownloadPaths.add(reservedPath);
+        item.setSavePath(resolved.savePath);
       }
       this.onEvent({
         kind: 'download',
@@ -659,6 +756,9 @@ export class ElectronBrowserController {
         });
       });
       item.once('done', (_doneEvent, state) => {
+        if (reservedPath) {
+          this.reservedDownloadPaths.delete(reservedPath);
+        }
         this.onEvent({
           kind: 'download',
           tabId,
