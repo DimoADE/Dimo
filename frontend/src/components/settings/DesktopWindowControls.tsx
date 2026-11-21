@@ -1,10 +1,10 @@
 import { useTauriClient } from '@/lib/desktopShell';
-import { isWindows } from '@/utils/platform';
+import { isMac } from '@/utils/platform';
 import { WindowControls } from './WindowControls';
 
 export function DesktopWindowControls() {
   const isTauri = useTauriClient();
-  if (!isTauri || !isWindows()) {
+  if (!isTauri || isMac()) {
     return null;
   }
 

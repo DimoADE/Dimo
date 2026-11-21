@@ -32,6 +32,7 @@ import { type AtReferenceMember } from '../composerAtReferences';
 import {
   fileFromHostPath,
   hostPathFileName,
+  isAttachableMediaHostPath,
   isPointInElement,
   relativePathInsideRoot,
 } from '../composerHostFileDrop';
@@ -250,6 +251,10 @@ export function useSessionComposerInsert({
       const otherPaths: string[] = [];
       for (const path of paths) {
         if (!mountedRef.current) return;
+        if (!isAttachableMediaHostPath(path)) {
+          otherPaths.push(path);
+          continue;
+        }
         try {
           files.push(
             await fileFromHostPath(path, (filePath) =>
@@ -424,6 +429,7 @@ export function useSessionComposerInsert({
       if (files.length === 0) return;
 
       event.preventDefault();
+      event.stopPropagation();
       onAttachImages(files);
     },
     [insertDroppedFileReference, onAttachImages, setComposerDropActive]

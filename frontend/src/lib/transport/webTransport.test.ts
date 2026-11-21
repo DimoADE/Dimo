@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { invokeAsResult } from '@/lib/api/base';
+import { mountBackendTransport } from './transportRegistry';
 import {
   WEB_SOCKET_KEEPALIVE_MS,
   WebTransport,
@@ -94,7 +96,8 @@ describe('WebTransport', () => {
     expect(body.args).toEqual({ workspaceId: 'workspace-1' });
   });
 
-  it('preserves the stable remote error envelope as an actionable Error', async () => {
+  it('preserves the stable remote error envelope including structured details', async () => {
+    const details = { type: 'force_push_required', branch: 'main' };
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
@@ -105,6 +108,7 @@ describe('WebTransport', () => {
           message: 'Automation Engine is owned by another host',
           retryable: true,
           operation_id: '0195d6f4-8c37-7b28-a982-6a9e60142f55',
+          details,
         }),
       })
     );
@@ -119,7 +123,59 @@ describe('WebTransport', () => {
       message: 'Automation Engine is owned by another host',
       retryable: true,
       operationId: '0195d6f4-8c37-7b28-a982-6a9e60142f55',
+      status: 409,
+      details,
     });
+  });
+
+  it('preserves structured details on WebTransportError when constructed directly', () => {
+    const details = { type: 'cli_not_logged_in' };
+    const error = new WebTransportError(
+      'GitHub CLI not logged in',
+      'pr_error',
+      false,
+      'op-1',
+      422,
+      details
+    );
+    expect(error.details).toEqual(details);
+    expect('details' in error).toBe(true);
+  });
+
+  it('populates typed Result.error in invokeAsResult from WebTransportError.details', async () => {
+    const details = { type: 'force_push_required' };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: async () => ({
+          code: 'push_error',
+          message: 'Remote branch has diverged',
+          retryable: false,
+          operation_id: '0195d6f4-8c37-7b28-a982-6a9e60142f55',
+          details,
+        }),
+      })
+    );
+    const transport = new WebTransport({
+      baseUrl: 'http://127.0.0.1:17891',
+      token: 'remote-secret',
+    });
+    const unmount = mountBackendTransport(transport);
+    try {
+      const result = await invokeAsResult<void, { type: string }>(
+        'push_workspace_branch',
+        { workspaceId: 'ws-1' }
+      );
+      expect(result).toEqual({
+        success: false,
+        error: { type: 'force_push_required' },
+        message: 'Remote branch has diverged',
+      });
+    } finally {
+      unmount();
+    }
   });
 
   it('creates a device pairing challenge without putting either token in the URL', async () => {

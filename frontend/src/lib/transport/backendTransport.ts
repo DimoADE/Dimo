@@ -362,6 +362,7 @@ export type ApplicationCommandResult<C extends ApplicationCommandName> =
 
 export interface BackendTransport {
   readonly environment: BackendEnvironment;
+  readonly origin?: string;
   call(
     command: string,
     args?: Record<string, unknown>,

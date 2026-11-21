@@ -11,7 +11,10 @@ import {
   electronRemoteDesktopBridge,
   resetRemoteDesktopMultiplexersForTests,
 } from './remoteDesktopTransport';
-import { getLocalDesktopTransport } from './transportRegistry';
+import {
+  configuredBackendTransport,
+  getLocalDesktopTransport,
+} from './transportRegistry';
 import type { WebTransport } from './webTransport';
 
 function createMockWebTransport(): {
@@ -139,7 +142,7 @@ describe('ElectronTransport', () => {
     expect(shell.shell.invoke).toHaveBeenCalledWith('host_client_status', {});
   });
 
-  it('partitions server HostEventBus channels to WebTransport and shell-only events to DesktopShell IPC', async () => {
+  it('partitions server HostEventBus channels, shell-only events, and dual-bus theme-changed', async () => {
     const web = createMockWebTransport();
     const shell = createMockShell();
     const transport = new ElectronTransport({
@@ -157,9 +160,9 @@ describe('ElectronTransport', () => {
       browserReceived.push(payload);
     });
 
-    const shellReceived: unknown[] = [];
+    const themeReceived: unknown[] = [];
     const unlistenTheme = await transport.listen('theme-changed', (payload) => {
-      shellReceived.push(payload);
+      themeReceived.push(payload);
     });
     const toastReceived: unknown[] = [];
     const unlistenToast = await transport.listen('desktop-toast', (payload) => {
@@ -168,7 +171,7 @@ describe('ElectronTransport', () => {
 
     expect(web.transport.listen).toHaveBeenCalledWith('host-client-changed', expect.any(Function));
     expect(web.transport.listen).toHaveBeenCalledWith('plugin:browser:tab', expect.any(Function));
-    expect(web.transport.listen).not.toHaveBeenCalledWith('theme-changed', expect.any(Function));
+    expect(web.transport.listen).toHaveBeenCalledWith('theme-changed', expect.any(Function));
     expect(web.transport.listen).not.toHaveBeenCalledWith('desktop-toast', expect.any(Function));
 
     expect(shell.shell.events.listen).toHaveBeenCalledWith('theme-changed', expect.any(Function));
@@ -182,11 +185,12 @@ describe('ElectronTransport', () => {
     shell.emitIpcEvent('host-client-changed', { source: 'ipc-ignored' });
     web.emitWsEvent('plugin:browser:tab', { tabId: 't1' });
     shell.emitIpcEvent('theme-changed', { theme: 'DARK' });
+    web.emitWsEvent('theme-changed', { theme: 'LIGHT' });
     shell.emitIpcEvent('desktop-toast', { title: 'Hi' });
 
     expect(serverReceived).toEqual([{ source: 'ws' }]);
     expect(browserReceived).toEqual([{ tabId: 't1' }]);
-    expect(shellReceived).toEqual([{ theme: 'DARK' }]);
+    expect(themeReceived).toEqual([{ theme: 'DARK' }, { theme: 'LIGHT' }]);
     expect(toastReceived).toEqual([{ title: 'Hi' }]);
 
     unlistenServer();
@@ -195,9 +199,61 @@ describe('ElectronTransport', () => {
     unlistenToast();
 
     web.emitWsEvent('host-client-changed', { source: 'ws-after' });
-    shell.emitIpcEvent('theme-changed', { theme: 'LIGHT' });
+    shell.emitIpcEvent('theme-changed', { theme: 'SYSTEM' });
+    web.emitWsEvent('theme-changed', { theme: 'DARK' });
     expect(serverReceived).toEqual([{ source: 'ws' }]);
-    expect(shellReceived).toEqual([{ theme: 'DARK' }]);
+    expect(themeReceived).toEqual([{ theme: 'DARK' }, { theme: 'LIGHT' }]);
+  });
+
+  it('delegates server host stream() calls to WebTransport.stream when available and falls back otherwise', async () => {
+    const web = createMockWebTransport();
+    const webStream = vi.fn(
+      async (
+        command: string,
+        args: Record<string, unknown>,
+        onMessage: (message: unknown) => void
+      ) => {
+        onMessage({ delta: 'hello' });
+        return { streamed: true, command, args };
+      }
+    );
+    (web.transport as unknown as { stream?: typeof webStream }).stream = webStream;
+
+    const shell = createMockShell();
+    const transport = new ElectronTransport({
+      backend: { baseUrl: 'http://127.0.0.1:4100', token: 'a'.repeat(64) },
+      webTransport: web.transport,
+      shell: shell.shell,
+    });
+
+    const hostMessages: unknown[] = [];
+    const hostRes = await transport.stream(
+      'agent_connect',
+      { id: 'a1' },
+      (msg) => hostMessages.push(msg)
+    );
+    expect(webStream).toHaveBeenCalledWith(
+      'agent_connect',
+      { id: 'a1' },
+      expect.any(Function)
+    );
+    expect(hostMessages).toEqual([{ delta: 'hello' }]);
+    expect(hostRes).toEqual({
+      streamed: true,
+      command: 'agent_connect',
+      args: { id: 'a1' },
+    });
+
+    const shellInvoke = shell.shell.invoke as ReturnType<typeof vi.fn>;
+    shellInvoke.mockResolvedValueOnce({ events: [{ step: 1 }], done: true });
+    const shellMessages: unknown[] = [];
+    const shellRes = await transport.stream(
+      'host_client_status',
+      {},
+      (msg) => shellMessages.push(msg)
+    );
+    expect(shellMessages).toEqual([{ step: 1 }]);
+    expect(shellRes).toEqual({ events: [{ step: 1 }], done: true });
   });
 
   it('delegates emit, capabilities, and artifactPreviewUrl', async () => {
@@ -222,7 +278,7 @@ describe('ElectronTransport', () => {
 });
 
 describe('getLocalDesktopTransport & electronRemoteDesktopBridge', () => {
-  it('selects ElectronTransport automatically when window.dimoDesktop.backend is present', () => {
+  it('selects ElectronTransport automatically when window.dimoDesktop.backend is present and forwards origin', () => {
     const tauriDefault = getLocalDesktopTransport();
     expect(tauriDefault.environment).toBe('desktop');
     expect(tauriDefault).not.toBeInstanceOf(ElectronTransport);
@@ -251,6 +307,7 @@ describe('getLocalDesktopTransport & electronRemoteDesktopBridge', () => {
     const electronTransport = getLocalDesktopTransport();
     expect(electronTransport).toBeInstanceOf(ElectronTransport);
     expect(electronTransport.environment).toBe('desktop');
+    expect(configuredBackendTransport.origin).toBe('http://127.0.0.1:43210');
   });
 
   it('filters remote host events, normalizes sequence to bigint, and handles subscription close/error via electronRemoteDesktopBridge', async () => {

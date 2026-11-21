@@ -54,6 +54,7 @@ import {
 } from '@/lib/desktopShell';
 import { ElectronBrowserWebview } from './ElectronBrowserWebview';
 import { openInSystemBrowser } from '@/hooks/useOpenLink';
+import { writeClipboardViaBridge } from '@/vscode/bridge';
 import {
   requestComposerImageInsert,
   requestComposerTokenInsert,
@@ -1703,8 +1704,10 @@ export function HostBrowserPanel({
       host = currentUrl;
     }
     const text = `GET ${currentUrl}\nHost: ${host}`;
-    void navigator.clipboard.writeText(text).then(() => {
-      toast.success(t('browserPanel.copiedRequest'));
+    void writeClipboardViaBridge(text).then((copied) => {
+      if (copied) {
+        toast.success(t('browserPanel.copiedRequest'));
+      }
     });
   };
 
@@ -2150,8 +2153,10 @@ export function HostBrowserPanel({
             <DropdownMenuSeparator />
             <DropdownMenuItem
               onSelect={() => {
-                void navigator.clipboard.writeText(currentUrl).then(() => {
-                  toast.success(t('browserPanel.copied'));
+                void writeClipboardViaBridge(currentUrl).then((copied) => {
+                  if (copied) {
+                    toast.success(t('browserPanel.copied'));
+                  }
                 });
               }}
             >

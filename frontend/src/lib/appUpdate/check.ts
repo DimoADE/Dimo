@@ -411,6 +411,18 @@ export async function installSignedUpdate(
 
 export const startAppUpdate = installSignedUpdate;
 
+function isWindowClosingIpcError(error: unknown): boolean {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === 'string'
+        ? error
+        : '';
+  return /object has been destroyed|render frame was disposed|reply was never sent|channel closed|window.*(closed|destroyed)/i.test(
+    message
+  );
+}
+
 export async function relaunchApp(): Promise<void> {
   writePostUpdateRestoreRoute();
   clearLastCheck();
@@ -423,6 +435,15 @@ export async function relaunchApp(): Promise<void> {
   const pendingUpdate = stagedUpdate;
   stagedUpdate = null;
 
+  let windowClosing = false;
+  const markWindowClosing = () => {
+    windowClosing = true;
+  };
+  if (typeof window !== 'undefined') {
+    window.addEventListener('beforeunload', markWindowClosing, { once: true });
+    window.addEventListener('pagehide', markWindowClosing, { once: true });
+  }
+
   try {
     try {
       await evacuateUserDataBeforeReplacingInstall();
@@ -430,17 +451,48 @@ export async function relaunchApp(): Promise<void> {
       stagedUpdate = pendingUpdate;
       throw error;
     }
+
+    const shell = getDesktopShell();
+    let installedViaHandle = false;
+
     if (pendingUpdate) {
       try {
         await pendingUpdate.install();
+        installedViaHandle = true;
+      } catch (error) {
+        if (windowClosing || isWindowClosingIpcError(error)) {
+          return;
+        }
+        throw error;
       } finally {
-        if (typeof pendingUpdate.close === 'function') {
-          await pendingUpdate.close().catch(() => undefined);
+        if (
+          !windowClosing &&
+          !(installedViaHandle && shell.kind === 'electron') &&
+          typeof pendingUpdate.close === 'function'
+        ) {
+          try {
+            await pendingUpdate.close();
+          } catch {
+            // Best-effort cleanup; ignore if the window/IPC is tearing down.
+          }
         }
       }
     }
 
-    await getDesktopShell().updater.relaunch();
+    // In Electron, `pendingUpdate.install()` hands off directly to
+    // `autoUpdater.quitAndInstall()`, which terminates and restarts the app.
+    if ((installedViaHandle && shell.kind === 'electron') || windowClosing) {
+      return;
+    }
+
+    try {
+      await shell.updater.relaunch();
+    } catch (error) {
+      if (windowClosing || isWindowClosingIpcError(error)) {
+        return;
+      }
+      throw error;
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     setLifecycleState({
@@ -449,5 +501,10 @@ export async function relaunchApp(): Promise<void> {
       error: message,
     });
     throw error;
+  } finally {
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('beforeunload', markWindowClosing);
+      window.removeEventListener('pagehide', markWindowClosing);
+    }
   }
 }

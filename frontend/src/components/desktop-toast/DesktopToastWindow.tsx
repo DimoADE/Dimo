@@ -76,12 +76,66 @@ export function DesktopToastWindow() {
   );
   const [replyError, setReplyError] = useState<Record<string, string>>({});
   const timersRef = useRef(new Map<string, number>());
+  const hoveredToastIdsRef = useRef(new Set<string>());
+  const focusedToastIdsRef = useRef(new Set<string>());
+  const lastIgnoreMouseEventsRef = useRef<boolean | null>(null);
   // Mirrors the dismiss timers so the close-button ring restarts / pauses with them.
   const [countdowns, setCountdowns] = useState<
     Record<string, { ms: number; epoch: number }>
   >({});
 
+  const syncIgnoreMouseEvents = useCallback((force = false) => {
+    const shouldIgnore =
+      hoveredToastIdsRef.current.size === 0 &&
+      focusedToastIdsRef.current.size === 0;
+    if (!force && lastIgnoreMouseEventsRef.current === shouldIgnore) {
+      return;
+    }
+    lastIgnoreMouseEventsRef.current = shouldIgnore;
+    void getDesktopShell()
+      .desktopToast?.setIgnoreMouseEvents?.(shouldIgnore)
+      ?.catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    const hoveredIds = hoveredToastIdsRef.current;
+    const focusedIds = focusedToastIdsRef.current;
+    syncIgnoreMouseEvents(true);
+    const handleWindowBlur = () => {
+      if (focusedIds.size === 0) return;
+      focusedIds.clear();
+      syncIgnoreMouseEvents();
+    };
+    window.addEventListener('blur', handleWindowBlur);
+    return () => {
+      window.removeEventListener('blur', handleWindowBlur);
+      hoveredIds.clear();
+      focusedIds.clear();
+      lastIgnoreMouseEventsRef.current = true;
+      void getDesktopShell()
+        .desktopToast?.setIgnoreMouseEvents?.(true)
+        ?.catch(() => undefined);
+    };
+  }, [syncIgnoreMouseEvents]);
+
+  useEffect(() => {
+    const activeIds = new Set(toasts.map((toast) => toast.id));
+    for (const id of Array.from(hoveredToastIdsRef.current)) {
+      if (!activeIds.has(id)) {
+        hoveredToastIdsRef.current.delete(id);
+      }
+    }
+    for (const id of Array.from(focusedToastIdsRef.current)) {
+      if (!activeIds.has(id)) {
+        focusedToastIdsRef.current.delete(id);
+      }
+    }
+    syncIgnoreMouseEvents();
+  }, [syncIgnoreMouseEvents, toasts]);
+
   const removeToast = useCallback((toastId: string) => {
+    hoveredToastIdsRef.current.delete(toastId);
+    focusedToastIdsRef.current.delete(toastId);
     setToasts((previous) => previous.filter((toast) => toast.id !== toastId));
     setDrafts((previous) => {
       if (!(toastId in previous)) return previous;
@@ -345,6 +399,14 @@ export function DesktopToastWindow() {
                 data-reply-open={replyExpanded ? 'true' : 'false'}
                 data-reply-status={status}
                 role={toast.kind === 'error' ? 'alert' : 'status'}
+                onPointerEnter={() => {
+                  hoveredToastIdsRef.current.add(toast.id);
+                  syncIgnoreMouseEvents();
+                }}
+                onPointerLeave={() => {
+                  hoveredToastIdsRef.current.delete(toast.id);
+                  syncIgnoreMouseEvents();
+                }}
               >
                 <div className="vu-toast-heading">
                   <span className="vu-toast-icon-tile vu-desktop-toast-app-icon">
@@ -432,8 +494,14 @@ export function DesktopToastWindow() {
                               }));
                               holdToast(toast.id);
                             }}
-                            onFocus={() => holdToast(toast.id)}
+                            onFocus={() => {
+                              focusedToastIdsRef.current.add(toast.id);
+                              syncIgnoreMouseEvents();
+                              holdToast(toast.id);
+                            }}
                             onBlur={(event) => {
+                              focusedToastIdsRef.current.delete(toast.id);
+                              syncIgnoreMouseEvents();
                               // 失焦且无草稿时恢复自动消失；发送中（输入禁用）不重排。
                               if (
                                 !event.target.value.trim() &&

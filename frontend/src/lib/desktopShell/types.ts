@@ -123,6 +123,10 @@ export interface DesktopShellUpdaterApi {
   relaunch(): Promise<void>;
 }
 
+export interface DesktopShellDesktopToastApi {
+  setIgnoreMouseEvents?: (ignore: boolean) => Promise<void>;
+}
+
 export interface DesktopShellBridge {
   readonly kind: DesktopShellKind;
   getAppVersion(): Promise<string>;
@@ -135,6 +139,7 @@ export interface DesktopShellBridge {
   readonly assets: DesktopShellAssetsApi;
   readonly events: DesktopShellEventsApi;
   readonly updater: DesktopShellUpdaterApi;
+  readonly desktopToast?: DesktopShellDesktopToastApi;
   invoke<T = unknown>(
     cmd: string,
     args?: Record<string, unknown>
@@ -165,6 +170,7 @@ export interface ElectronDesktopBridge {
   readonly assets: DesktopShellAssetsApi;
   readonly events: DesktopShellEventsApi;
   readonly updater: DesktopShellUpdaterApi;
+  readonly desktopToast?: DesktopShellDesktopToastApi;
   invoke<T = unknown>(
     cmd: string,
     args?: Record<string, unknown>

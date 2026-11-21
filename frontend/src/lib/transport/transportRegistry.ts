@@ -63,6 +63,9 @@ export const configuredBackendTransport: BackendTransport = {
   get environment() {
     return getBackendTransport().environment;
   },
+  get origin() {
+    return getBackendTransport().origin;
+  },
   call(command, args, options) {
     const transport = getBackendTransport();
     return options === undefined

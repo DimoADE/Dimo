@@ -341,9 +341,6 @@ export function SessionComposerSurface({
             if (attached.length > 0) onAttachImages(attached);
           }}
           onPaste={handleComposerPaste}
-          onDrop={handleDrop}
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
           data-testid="session-composer-editor"
         />
         {activeHoverToken?.token.kind === 'element' ? (

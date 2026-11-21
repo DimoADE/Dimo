@@ -21,6 +21,7 @@ import {
   useDimoAccount,
 } from '@/features/model-router';
 import { cn } from '@/lib/utils';
+import { writeClipboardViaBridge } from '@/vscode/bridge';
 
 import { AccountHostConfigSection } from './AccountHostConfigSection';
 import { AccountSubscriptionSection } from './AccountSubscriptionSection';
@@ -60,10 +61,10 @@ export function AccountSettings() {
   }, [isSignedIn, refresh]);
 
   const handleCopyAccountId = async (value: string) => {
-    try {
-      await navigator.clipboard.writeText(value);
+    const copied = await writeClipboardViaBridge(value);
+    if (copied) {
       toast.success(t('settings:account.copied'));
-    } catch {
+    } else {
       toast.error(t('settings:account.copyFailed'));
     }
   };
