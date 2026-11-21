@@ -65,6 +65,11 @@ test('generates Tauri bridge latest.json and refreshes all 5 Electron updater fe
   );
   writeArtifact(
     artifactsDir,
+    `Dimo-windows-arm64/Dimo-${version}-windows-arm64-setup.exe.blockmap`,
+    'blockmap-arm64'
+  );
+  writeArtifact(
+    artifactsDir,
     'Dimo-windows-arm64/latest.yml',
     [
       `version: ${version}`,
@@ -179,17 +184,29 @@ test('generates Tauri bridge latest.json and refreshes all 5 Electron updater fe
     `https://github.com/DimoADE/Dimo/releases/download/v${version}/Dimo-${version}-darwin-arm64.app.tar.gz`
   );
 
-  // Verify EVSign post-signing hash refresh on latest.yml and latest-arm64.yml
+  // Verify latest.yml / latest-arm64.yml hashes, sizes, and .blockmap propagation
   const winX64Feed = fs.readFileSync(path.join(outputDir, 'latest.yml'), 'utf8');
   assert.ok(winX64Feed.includes(`sha512: ${sha512Base64(winX64Exe)}`));
   assert.ok(winX64Feed.includes(`size: ${fs.statSync(winX64Exe).size}`));
   assert.ok(!winX64Feed.includes('STALE_PRE_EVSIGN_HASH'));
+  assert.equal(
+    fs.existsSync(
+      path.join(outputDir, `Dimo-${version}-windows-x64-setup.exe.blockmap`)
+    ),
+    true
+  );
 
   const winArm64Feed = fs.readFileSync(
     path.join(outputDir, 'latest-arm64.yml'),
     'utf8'
   );
   assert.ok(winArm64Feed.includes(`sha512: ${sha512Base64(winArm64Exe)}`));
+  assert.equal(
+    fs.existsSync(
+      path.join(outputDir, `Dimo-${version}-windows-arm64-setup.exe.blockmap`)
+    ),
+    true
+  );
 
   const macFeed = fs.readFileSync(path.join(outputDir, 'latest-mac.yml'), 'utf8');
   assert.ok(macFeed.includes(`sha512: ${sha512Base64(macZip)}`));
@@ -201,6 +218,29 @@ test('generates Tauri bridge latest.json and refreshes all 5 Electron updater fe
     fs.existsSync(path.join(outputDir, `Dimo-${version}-linux-x64.deb`)),
     true
   );
+});
+
+test('refreshElectronFeedHashes preserves already-signed feed hashes and sizes verbatim', () => {
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dimo-signed-feed-'));
+  const exePath = writeArtifact(
+    workDir,
+    'Dimo-0.6.0-windows-x64-setup.exe',
+    'in-builder-evsigned-nsis-installer'
+  );
+  const sha = sha512Base64(exePath);
+  const size = fs.statSync(exePath).size;
+  const sample = [
+    'version: 0.6.0',
+    'files:',
+    '  - url: Dimo-0.6.0-windows-x64-setup.exe',
+    `    sha512: ${sha}`,
+    `    size: ${size}`,
+    'path: Dimo-0.6.0-windows-x64-setup.exe',
+    `sha512: ${sha}`,
+    'releaseDate: "2026-11-21T00:00:00.000Z"',
+    '',
+  ].join('\n');
+  assert.equal(refreshElectronFeedHashes(sample, workDir), sample);
 });
 
 test('refreshElectronFeedHashes preserves unrelated lines when files are absent', () => {

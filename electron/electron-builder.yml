@@ -52,6 +52,10 @@ win:
   executableName: Dimo
   icon: build/icons/icon.ico
   artifactName: Dimo-${version}-windows-${arch}-setup.${ext}
+  signtoolOptions:
+    signingHashAlgorithms:
+      - sha256
+    sign: ./build/signWindows.js
   target:
     - target: nsis
       arch:
@@ -76,6 +80,8 @@ mac:
   gatekeeperAssess: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    NSMicrophoneUsageDescription: Dimo requires microphone access for voice input and audio features.
   artifactName: Dimo-${version}-darwin-${arch}.${ext}
   target:
     - target: dmg

@@ -1,6 +1,7 @@
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { resolvePowerShellExecutable } = require('./signWindows');
 
 const KEEP_LOCALES = new Set([
   'en-US.pak',
@@ -24,6 +25,142 @@ function pruneChromiumLocales(appOutDir) {
     removed += 1;
   }
   return removed;
+}
+
+function parsePublisherNameEnv(rawValue) {
+  if (typeof rawValue !== 'string') {
+    return null;
+  }
+  const trimmed = rawValue.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (trimmed.startsWith('[')) {
+    const parsed = JSON.parse(trimmed);
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length === 0 ||
+      parsed.some((entry) => typeof entry !== 'string' || !entry.trim())
+    ) {
+      throw new Error(
+        'EVSIGN_PUBLISHER_NAME JSON array must contain non-empty strings.'
+      );
+    }
+    return parsed.map((entry) => entry.trim());
+  }
+  return [trimmed];
+}
+
+function findSignedWindowsSidecar(appOutDir) {
+  const binDir = path.join(appOutDir, 'resources', 'bin');
+  if (!fs.existsSync(binDir)) {
+    return null;
+  }
+  const preferred = path.join(binDir, 'dimo-server.exe');
+  if (fs.existsSync(preferred)) {
+    return preferred;
+  }
+  const entries = fs.readdirSync(binDir).sort();
+  for (const entry of entries) {
+    if (entry.toLowerCase().endsWith('.exe')) {
+      return path.join(binDir, entry);
+    }
+  }
+  return null;
+}
+
+function readAuthenticodeSubject(filePath, env = process.env) {
+  const escaped = filePath.replace(/'/g, "''");
+  const psExe = resolvePowerShellExecutable(env);
+  const command =
+    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); " +
+    `$sig = Get-AuthenticodeSignature -LiteralPath '${escaped}'; ` +
+    "[PSCustomObject]@{ Status = [int]$sig.Status; StatusText = [string]$sig.Status; Subject = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { $null } } | ConvertTo-Json -Compress";
+  const stdout = execFileSync(
+    psExe,
+    ['-NoProfile', '-NonInteractive', '-Command', command],
+    { encoding: 'utf8', env }
+  ).trim();
+  const parsed = JSON.parse(stdout);
+  if (parsed.Status !== 0 && parsed.StatusText !== 'Valid') {
+    throw new Error(
+      `Expected valid Authenticode signature on ${filePath}, got ${parsed.StatusText || parsed.Status}`
+    );
+  }
+  const subject = typeof parsed.Subject === 'string' ? parsed.Subject.trim() : '';
+  if (!subject) {
+    throw new Error(
+      `Authenticode signature on ${filePath} is missing SignerCertificate.Subject`
+    );
+  }
+  return subject;
+}
+
+function appendPublisherNameToUpdateConfig(yamlContent, publisherNames) {
+  if (/^\s*publisherName\s*:/m.test(yamlContent)) {
+    return yamlContent;
+  }
+  const normalized = yamlContent.replace(/\r?\n*$/, '\n');
+  const lines = [
+    'publisherName:',
+    ...publisherNames.map((name) => `  - ${JSON.stringify(name)}`),
+  ];
+  return `${normalized}${lines.join('\n')}\n`;
+}
+
+// PublishManager writes resources/app-update.yml in its system afterPack
+// listener (which always runs before user afterPack hooks), after extraResources
+// sidecars have already been signed by win.signtoolOptions.sign. Because EVSign
+// has no local PFX certificate for electron-builder to inspect, inject the
+// signer DN here so NsisUpdater.verifySignature() enforces Authenticode checks.
+function ensureWindowsEvsignPublisherName(
+  context,
+  {
+    env = process.env,
+    readSubject = (filePath) => readAuthenticodeSubject(filePath, env),
+  } = {}
+) {
+  if (context.electronPlatformName !== 'win32') {
+    return false;
+  }
+  if (!env.EVSIGN_LICENSE_KEY || !env.EVSIGN_LICENSE_KEY.trim()) {
+    return false;
+  }
+
+  const appUpdatePath = path.join(
+    context.appOutDir,
+    'resources',
+    'app-update.yml'
+  );
+  if (!fs.existsSync(appUpdatePath)) {
+    return false;
+  }
+
+  const existingYaml = fs.readFileSync(appUpdatePath, 'utf8');
+  if (/^\s*publisherName\s*:/m.test(existingYaml)) {
+    return false;
+  }
+
+  let publisherNames = parsePublisherNameEnv(env.EVSIGN_PUBLISHER_NAME);
+  if (!publisherNames) {
+    const signedSidecar = findSignedWindowsSidecar(context.appOutDir);
+    if (!signedSidecar) {
+      throw new Error(
+        `Cannot derive EVSign publisherName: no signed sidecar found under ${path.join(context.appOutDir, 'resources', 'bin')}`
+      );
+    }
+    publisherNames = [readSubject(signedSidecar)];
+  }
+
+  const updatedYaml = appendPublisherNameToUpdateConfig(
+    existingYaml,
+    publisherNames
+  );
+  fs.writeFileSync(appUpdatePath, updatedYaml, 'utf8');
+  console.log(
+    `[afterPack] wrote Windows EVSign publisherName to app-update.yml (${publisherNames.join(' | ')})`
+  );
+  return true;
 }
 
 function signMacSidecars(context) {
@@ -66,7 +203,7 @@ function signMacSidecars(context) {
   }
 }
 
-exports.default = async function afterPack(context) {
+async function afterPack(context) {
   if (context.electronPlatformName === 'darwin') {
     signMacSidecars(context);
     return;
@@ -77,4 +214,12 @@ exports.default = async function afterPack(context) {
       `[afterPack] pruned ${removed} unused Chromium locale .pak files`
     );
   }
-};
+  ensureWindowsEvsignPublisherName(context);
+}
+
+exports.default = afterPack;
+exports.afterPack = afterPack;
+exports.parsePublisherNameEnv = parsePublisherNameEnv;
+exports.appendPublisherNameToUpdateConfig = appendPublisherNameToUpdateConfig;
+exports.ensureWindowsEvsignPublisherName = ensureWindowsEvsignPublisherName;
+exports.readAuthenticodeSubject = readAuthenticodeSubject;
