@@ -70,7 +70,7 @@ fn write_crash_report(info: &std::panic::PanicHookInfo<'_>) -> std::io::Result<P
          backtrace:\n\
          {backtrace}\n",
         time = now.to_rfc3339(),
-        version = utils::version::APP_VERSION,
+        version = utils::version::runtime_app_version(),
         os = std::env::consts::OS,
         arch = std::env::consts::ARCH,
         thread = thread,
@@ -127,7 +127,7 @@ pub fn write_shell_crash_report(
          stack:\n\
          {backtrace}\n",
         time = now.to_rfc3339(),
-        version = utils::version::APP_VERSION,
+        version = utils::version::runtime_app_version(),
         os = std::env::consts::OS,
         arch = std::env::consts::ARCH,
         source = source_label,

@@ -61,7 +61,7 @@ fn apply_launch_process_hints(launch: &ServerLaunch) {
 async fn run_command(parsed: Result<ParsedArgs, server::ParseError>) -> ExitCode {
     match parsed {
         Ok(ParsedArgs::Command(LaunchCommand::Version)) => {
-            println!("{}", env!("CARGO_PKG_VERSION"));
+            println!("{}", utils::version::runtime_app_version());
             ExitCode::SUCCESS
         }
         Ok(ParsedArgs::Command(LaunchCommand::Help)) => {
@@ -310,44 +310,8 @@ fn spawn_desktop_watchdogs(parent_pid: Option<u32>, shutdown: Arc<Notify>) {
         });
 }
 
-#[cfg(target_os = "windows")]
 fn wait_for_parent_exit(pid: u32) {
-    use windows::Win32::{
-        Foundation::CloseHandle,
-        System::Threading::{INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
-    };
-    unsafe {
-        if let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
-            let _ = WaitForSingleObject(handle, INFINITE);
-            let _ = CloseHandle(handle);
-        }
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn wait_for_parent_exit(pid: u32) {
-    // Poll every 500ms whether the parent process is still alive (or reparented to PID 1).
-    let proc_path = PathBuf::from(format!("/proc/{pid}"));
-    let has_proc = proc_path.exists();
-    loop {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        if has_proc {
-            if !proc_path.exists() {
-                return;
-            }
-            continue;
-        }
-        let alive = std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success());
-        if !alive {
-            return;
-        }
-    }
+    utils::parent_watch::wait_for_parent_exit(pid);
 }
 
 fn resolve_startup_token(

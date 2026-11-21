@@ -61,10 +61,12 @@ pub async fn adopt_legacy_data_dir() -> Vec<DataDirAdoptionOutcome> {
     }
     let stable = utils::assets::release_default_data_dir();
     let explicit = explicit_data_dirs();
-    if let Some(exe_dir) = utils::assets::packaged_install_dir()
+    if let Ok(exe) = std::env::current_exe()
         && (stable.join("db.sqlite").is_file() || !explicit.is_empty())
     {
-        outcomes.extend(preserve_weaker_install_copies(&exe_dir, &stable, &explicit).await);
+        for scan_dir in utils::assets::packaged_install_scan_dirs_for(&exe) {
+            outcomes.extend(preserve_weaker_install_copies(&scan_dir, &stable, &explicit).await);
+        }
     }
     pin_opened_in_place_when_stable_is_empty(&outcomes, &stable);
     outcomes
@@ -83,11 +85,18 @@ pub async fn evacuate_user_data_before_app_update() -> Result<(), String> {
     }
     let stable = utils::assets::release_default_data_dir();
     let outcomes = if stable.join("db.sqlite").is_file() {
-        match utils::assets::packaged_install_dir() {
-            Some(exe_dir) => {
-                preserve_weaker_install_copies(&exe_dir, &stable, &explicit_data_dirs()).await
+        let explicit = explicit_data_dirs();
+        match std::env::current_exe() {
+            Ok(exe) => {
+                let mut preserved = Vec::new();
+                for scan_dir in utils::assets::packaged_install_scan_dirs_for(&exe) {
+                    preserved.extend(
+                        preserve_weaker_install_copies(&scan_dir, &stable, &explicit).await,
+                    );
+                }
+                preserved
             }
-            None => Vec::new(),
+            Err(_) => Vec::new(),
         }
     } else {
         adopt_legacy_data_dir().await
@@ -314,10 +323,12 @@ fn database_update_would_delete(
     update_replaces_bundle: bool,
     current_exe: &Path,
 ) -> Option<PathBuf> {
-    let exe_dir = current_exe.parent()?;
-    sqlite_dirs_directly_under(exe_dir).into_iter().find(|dir| {
-        utils::assets::app_update_deletes_directory(update_replaces_bundle, current_exe, dir)
-    })
+    utils::assets::packaged_install_scan_dirs_for(current_exe)
+        .into_iter()
+        .flat_map(|scan_dir| sqlite_dirs_directly_under(&scan_dir))
+        .find(|dir| {
+            utils::assets::app_update_deletes_directory(update_replaces_bundle, current_exe, dir)
+        })
 }
 
 fn update_blocked_message(dir: &Path) -> String {
@@ -1379,5 +1390,57 @@ mod tests {
         assert!(!utils::assets::is_inside_macos_app_bundle(&superseded));
         assert!(superseded.join("db.sqlite").is_file());
         assert_eq!(std::fs::read_dir(&macos_dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn electron_macos_resources_bin_detects_legacy_contents_macos_database_before_update() {
+        let root = tempfile::tempdir().unwrap();
+        let contents = root.path().join("Dimo.app").join("Contents");
+        let legacy_data = contents.join("MacOS").join("data");
+        std::fs::create_dir_all(&legacy_data).unwrap();
+        std::fs::write(legacy_data.join("db.sqlite"), b"legacy").unwrap();
+        let exe = contents.join("Resources").join("bin").join("dimo-server");
+
+        assert_eq!(
+            database_update_would_delete(true, &exe).as_deref(),
+            Some(legacy_data.as_path())
+        );
+        assert!(database_update_would_delete(false, &exe).is_none());
+    }
+
+    #[test]
+    fn electron_windows_and_linux_resources_bin_scan_install_root_legacy_data() {
+        let root = tempfile::tempdir().unwrap();
+        let win_install = root.path().join("DimoWin");
+        let win_data = win_install.join("data");
+        std::fs::create_dir_all(&win_data).unwrap();
+        std::fs::write(win_data.join("db.sqlite"), b"legacy").unwrap();
+        let win_exe = win_install
+            .join("resources")
+            .join("bin")
+            .join("dimo-server.exe");
+
+        let win_dirs: Vec<PathBuf> = utils::assets::packaged_install_scan_dirs_for(&win_exe)
+            .into_iter()
+            .flat_map(|scan_dir| sqlite_dirs_directly_under(&scan_dir))
+            .collect();
+        assert_eq!(win_dirs, vec![win_data]);
+        assert!(database_update_would_delete(false, &win_exe).is_none());
+
+        let linux_install = root.path().join("opt").join("Dimo");
+        let linux_data = linux_install.join("data");
+        std::fs::create_dir_all(&linux_data).unwrap();
+        std::fs::write(linux_data.join("db.sqlite"), b"legacy").unwrap();
+        let linux_exe = linux_install
+            .join("resources")
+            .join("bin")
+            .join("dimo-server");
+
+        let linux_dirs: Vec<PathBuf> = utils::assets::packaged_install_scan_dirs_for(&linux_exe)
+            .into_iter()
+            .flat_map(|scan_dir| sqlite_dirs_directly_under(&scan_dir))
+            .collect();
+        assert_eq!(linux_dirs, vec![linux_data]);
+        assert!(database_update_would_delete(false, &linux_exe).is_none());
     }
 }
