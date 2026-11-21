@@ -16,6 +16,8 @@ import type { DesktopChromeManager } from './chrome';
 import type { DeepLinkManager } from './deeplink';
 import type { DesktopToastManager } from './desktopToast';
 import {
+  AuthorizedLocalPathRegistry,
+  INTERNAL_FS_AUTHORIZE_DROPPED_PATHS_CHANNEL,
   joinLocalPath,
   openExternalTarget,
   readLocalFile,
@@ -187,34 +189,63 @@ export function registerIpcHandlers(context: IpcContext): void {
     }
   });
 
+  const authorizedLocalPaths = new AuthorizedLocalPathRegistry({
+    extraReadPredicate: (filePath) => assetScope.isAllowed(filePath),
+  });
+
   // Dialogs
   ipcMain.handle(
     IPC_CHANNELS.DIALOG_OPEN,
     (event, options?: DesktopOpenDialogOptions) =>
-      showOpenDialog(windows.getWindowForWebContents(event.sender), options)
+      showOpenDialog(
+        windows.getWindowForWebContents(event.sender),
+        options,
+        authorizedLocalPaths
+      )
   );
 
   ipcMain.handle(
     IPC_CHANNELS.DIALOG_SAVE,
     (event, options?: DesktopSaveDialogOptions) =>
-      showSaveDialog(windows.getWindowForWebContents(event.sender), options)
+      showSaveDialog(
+        windows.getWindowForWebContents(event.sender),
+        options,
+        authorizedLocalPaths
+      )
+  );
+
+  // Private preload-only registration for trusted OS drag-and-drop file paths.
+  ipcMain.on(
+    INTERNAL_FS_AUTHORIZE_DROPPED_PATHS_CHANNEL,
+    (event, filePaths: unknown) => {
+      if (!windows.getWindowForWebContents(event.sender)) {
+        return;
+      }
+      if (!Array.isArray(filePaths)) {
+        return;
+      }
+      const validPaths = filePaths
+        .filter((entry): entry is string => typeof entry === 'string')
+        .slice(0, 256);
+      authorizedLocalPaths.grantReadFiles(validPaths);
+    }
   );
 
   // Local FS & path helpers
   ipcMain.handle(IPC_CHANNELS.FS_READ_FILE, (_event, filePath: string) =>
-    readLocalFile(filePath)
+    readLocalFile(filePath, authorizedLocalPaths)
   );
 
   ipcMain.handle(
     IPC_CHANNELS.FS_WRITE_FILE,
     (_event, filePath: string, contents: Uint8Array) =>
-      writeLocalFile(filePath, contents)
+      writeLocalFile(filePath, contents, authorizedLocalPaths)
   );
 
   ipcMain.handle(
     IPC_CHANNELS.FS_WRITE_TEXT_FILE,
     (_event, filePath: string, contents: string) =>
-      writeLocalTextFile(filePath, contents)
+      writeLocalTextFile(filePath, contents, authorizedLocalPaths)
   );
 
   ipcMain.handle(IPC_CHANNELS.PATH_JOIN, (_event, parts: string[]) =>
