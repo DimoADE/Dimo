@@ -1,33 +1,151 @@
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('electron', () => ({
-  app: {
-    isPackaged: false,
-    on: vi.fn(),
-    off: vi.fn(),
-    setAsDefaultProtocolClient: vi.fn(),
-  },
-  BrowserWindow: vi.fn(),
-  Menu: { buildFromTemplate: vi.fn(), setApplicationMenu: vi.fn() },
-  Tray: vi.fn(),
-  nativeImage: {
-    createFromPath: vi.fn(),
-    createFromBitmap: vi.fn(),
-  },
-  screen: {
-    getDisplayMatching: vi.fn(),
-    getPrimaryDisplay: vi.fn(),
-  },
-  shell: {
-    openExternal: vi.fn(),
-  },
-}));
+const createdWindows: Array<{
+  options: Record<string, unknown>;
+  emitter: EventEmitter;
+  webContentsEmitter: EventEmitter;
+  destroy: ReturnType<typeof vi.fn>;
+  hide: ReturnType<typeof vi.fn>;
+  show: ReturnType<typeof vi.fn>;
+  showInactive: ReturnType<typeof vi.fn>;
+  focus: ReturnType<typeof vi.fn>;
+  setBounds: ReturnType<typeof vi.fn>;
+  setIgnoreMouseEvents: ReturnType<typeof vi.fn>;
+  setZoomFactor: ReturnType<typeof vi.fn>;
+}> = [];
+
+vi.mock('electron', () => {
+  const BrowserWindowMock = vi.fn((options: Record<string, unknown>) => {
+    const emitter = new EventEmitter();
+    const webContentsEmitter = new EventEmitter();
+    let destroyed = false;
+    let visible = false;
+    const setZoomFactor = vi.fn();
+    const destroy = vi.fn(() => {
+      if (!destroyed) {
+        destroyed = true;
+        emitter.emit('closed');
+      }
+    });
+    const hide = vi.fn(() => {
+      visible = false;
+    });
+    const show = vi.fn(() => {
+      visible = true;
+      emitter.emit('show');
+    });
+    const showInactive = vi.fn(() => {
+      visible = true;
+      emitter.emit('show');
+    });
+    const focus = vi.fn();
+    const setBounds = vi.fn();
+    const setIgnoreMouseEvents = vi.fn();
+    const record = {
+      options,
+      emitter,
+      webContentsEmitter,
+      destroy,
+      hide,
+      show,
+      showInactive,
+      focus,
+      setBounds,
+      setIgnoreMouseEvents,
+      setZoomFactor,
+    };
+    createdWindows.push(record);
+    return {
+      on: (ev: string, cb: (...args: unknown[]) => void) => emitter.on(ev, cb),
+      once: (ev: string, cb: (...args: unknown[]) => void) => emitter.once(ev, cb),
+      emit: (ev: string, ...args: unknown[]) => emitter.emit(ev, ...args),
+      isDestroyed: () => destroyed,
+      isVisible: () => visible,
+      isMinimized: () => false,
+      isFocused: () => false,
+      restore: vi.fn(),
+      show,
+      showInactive,
+      hide,
+      focus,
+      destroy,
+      setTitle: vi.fn(),
+      getTitle: () => String(options.title ?? ''),
+      setBounds,
+      getBounds: () => ({ x: 0, y: 0, width: 1200, height: 800 }),
+      setIgnoreMouseEvents,
+      setVisibleOnAllWorkspaces: vi.fn(),
+      setAppDetails: vi.fn(),
+      loadURL: vi.fn().mockResolvedValue(undefined),
+      webContents: {
+        id: createdWindows.length,
+        on: (ev: string, cb: (...args: unknown[]) => void) =>
+          webContentsEmitter.on(ev, cb),
+        once: (ev: string, cb: (...args: unknown[]) => void) =>
+          webContentsEmitter.once(ev, cb),
+        send: vi.fn(),
+        setZoomFactor,
+        setWindowOpenHandler: vi.fn(),
+        isDevToolsOpened: () => false,
+        closeDevTools: vi.fn(),
+        openDevTools: vi.fn(),
+        executeJavaScript: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+  });
+  (BrowserWindowMock as unknown as Record<string, unknown>).getFocusedWindow =
+    vi.fn(() => null);
+  (BrowserWindowMock as unknown as Record<string, unknown>).fromWebContents =
+    vi.fn(() => null);
+
+  return {
+    app: {
+      isPackaged: false,
+      name: 'Dimo',
+      on: vi.fn(),
+      off: vi.fn(),
+      relaunch: vi.fn(),
+      exit: vi.fn(),
+      setAsDefaultProtocolClient: vi.fn(),
+    },
+    BrowserWindow: BrowserWindowMock,
+    Menu: {
+      buildFromTemplate: vi.fn((template: unknown) => template),
+      setApplicationMenu: vi.fn(),
+    },
+    Tray: vi.fn(),
+    nativeImage: {
+      createFromPath: vi.fn(() => ({ isEmpty: () => true })),
+      createFromBitmap: vi.fn(),
+    },
+    screen: {
+      getDisplayMatching: vi.fn(() => ({
+        workArea: { x: 0, y: 0, width: 1920, height: 1080 },
+      })),
+      getPrimaryDisplay: vi.fn(() => ({
+        workArea: { x: 0, y: 0, width: 1920, height: 1080 },
+      })),
+    },
+    session: {
+      fromPartition: vi.fn(() => ({
+        setPermissionRequestHandler: vi.fn(),
+        setPermissionCheckHandler: vi.fn(),
+      })),
+    },
+    shell: {
+      openExternal: vi.fn(),
+    },
+  };
+});
 
 import {
+  DEFAULT_APP_USER_MODEL_ID,
+  DESKTOP_APP_ORIGIN,
   hostAppWindowLabel,
   hostSettingsWindowForApp,
   hostSettingsWindowLabel,
@@ -39,6 +157,8 @@ import {
   settingsWindowLabelForCaller,
 } from '../shared/ipcContract';
 import {
+  DesktopChromeManager,
+  buildMacOsMenuTemplate,
   createBadgeOverlayRgba,
   encodeSinglePngIco,
   resolveAppIconAssetPath,
@@ -58,10 +178,19 @@ import {
 } from './deeplink';
 import {
   DESKTOP_TOAST_ACTIVATED_EVENT,
+  DesktopToastManager,
   DesktopToastQueue,
   computeToastWindowPosition,
 } from './desktopToast';
-import { isDevToolsShortcut } from './windows';
+import {
+  DesktopUpdaterManager,
+  type AutoUpdaterLike,
+} from './updater';
+import {
+  WindowManager,
+  evaluatePermissionRequest,
+  isDevToolsShortcut,
+} from './windows';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const tempDirs: string[] = [];
@@ -204,14 +333,31 @@ describe('dimo:// deep links and launch args', () => {
     });
     expect(manager.takePendingModelRouterImport()).toBeNull();
 
-    // Session activation URL routes to desktop-toast-activated.
+    // Session activation URL arriving before main window finishes loading is queued,
+    // not broadcast into an unmounted renderer, and replays once markMainWindowReady() fires.
     manager.handleProcessArgs(
       ['Dimo.exe', 'dimo://open?project=p1&workspace=w2&session=s3'],
       { isStartup: false }
     );
+    expect(broadcastEvent).not.toHaveBeenCalledWith(
+      DESKTOP_TOAST_ACTIVATED_EVENT,
+      expect.anything()
+    );
+
+    manager.markMainWindowReady();
     expect(broadcastEvent).toHaveBeenLastCalledWith(
       DESKTOP_TOAST_ACTIVATED_EVENT,
       { projectId: 'p1', workspaceId: 'w2', sessionId: 's3' }
+    );
+
+    // Subsequent warm-start session activation broadcasts immediately.
+    manager.handleProcessArgs(
+      ['Dimo.exe', 'dimo://open?project=p2&workspace=w3&session=s4'],
+      { isStartup: false }
+    );
+    expect(broadcastEvent).toHaveBeenLastCalledWith(
+      DESKTOP_TOAST_ACTIVATED_EVENT,
+      { projectId: 'p2', workspaceId: 'w3', sessionId: 's4' }
     );
 
     // Second-instance --new-window opens a new local window.
@@ -219,6 +365,46 @@ describe('dimo:// deep links and launch args', () => {
       isStartup: false,
     });
     expect(openAppWindow).toHaveBeenCalledTimes(1);
+  });
+
+  it('queues early second-instance launch actions before attachHandlers and supports single-take session activation', () => {
+    const manager = new DeepLinkManager();
+    const showMainWindow = vi.fn();
+    const openSettingsWindow = vi.fn();
+    const openAppWindow = vi.fn();
+    const broadcastEvent = vi.fn();
+
+    // Actions and session deep links arriving before handlers attach
+    manager.handleProcessArgs(['Dimo.exe', '--open-settings'], { isStartup: false });
+    manager.handleProcessArgs(['Dimo.exe', '--new-window'], { isStartup: false });
+    manager.handleProcessArgs(['Dimo.exe'], { isStartup: false });
+    manager.handleUrl('dimo://open?project=p9&workspace=w9&session=s9');
+
+    manager.attachHandlers({
+      showMainWindow,
+      openSettingsWindow,
+      openAppWindow,
+      broadcastEvent,
+    });
+
+    expect(openSettingsWindow).toHaveBeenCalledTimes(1);
+    expect(openAppWindow).toHaveBeenCalledTimes(1);
+    expect(showMainWindow).toHaveBeenCalledTimes(2); // once for focus, once for URL
+
+    // Renderer can explicitly consume pending session activation before did-finish-load
+    expect(manager.takePendingSessionActivation()).toEqual({
+      projectId: 'p9',
+      workspaceId: 'w9',
+      sessionId: 's9',
+    });
+    expect(manager.takePendingSessionActivation()).toBeNull();
+
+    // markMainWindowReady() does not double-broadcast already-consumed activation
+    manager.markMainWindowReady();
+    expect(broadcastEvent).not.toHaveBeenCalledWith(
+      DESKTOP_TOAST_ACTIVATED_EVENT,
+      expect.anything()
+    );
   });
 });
 
@@ -253,6 +439,45 @@ describe('floating desktop toast layout & queue', () => {
     expect(queue.isReady()).toBe(true);
     expect(queue.pendingCount()).toBe(0);
     expect(queue.enqueueOrDeliver(payload)).toBe(true);
+  });
+
+  it('creates focusable toast window with forwarded mouse pass-through and IPC toggle', () => {
+    createdWindows.length = 0;
+    const windows = new WindowManager({ preloadPath: '/preload.js' });
+    const toast = new DesktopToastManager({
+      preloadPath: '/preload.js',
+      windows,
+    });
+
+    toast.show({
+      projectId: 'p1',
+      workspaceId: 'w1',
+      sessionId: 's1',
+      title: 'Alert',
+      description: 'Reply inline',
+      kind: 'success',
+      durationMs: 4000,
+    });
+
+    expect(createdWindows).toHaveLength(1);
+    const toastRecord = createdWindows[0];
+    expect(toastRecord.options.focusable).toBe(true);
+    expect(toastRecord.showInactive).toHaveBeenCalledTimes(1);
+    expect(toastRecord.setIgnoreMouseEvents).toHaveBeenCalledWith(true, {
+      forward: true,
+    });
+
+    toast.setIgnoreMouseEvents(false);
+    expect(toastRecord.setIgnoreMouseEvents).toHaveBeenLastCalledWith(false, {
+      forward: true,
+    });
+
+    toast.hide();
+    expect(toastRecord.setIgnoreMouseEvents).toHaveBeenLastCalledWith(true, {
+      forward: true,
+    });
+    expect(toastRecord.hide).toHaveBeenCalledTimes(1);
+    toast.destroy();
   });
 });
 
@@ -363,5 +588,193 @@ describe('desktop chrome assets, badge bitmap, and crash fallback', () => {
     expect(ico.readUInt32LE(14)).toBe(fakePng.length); // bytes in res
     expect(ico.readUInt32LE(18)).toBe(22); // offset
     expect(ico.subarray(22).equals(fakePng)).toBe(true);
+  });
+
+  it('builds complete macOS menus without duplicate Close and clears app menu on non-macOS', async () => {
+    const onOpenSettings = vi.fn();
+    const template = buildMacOsMenuTemplate({
+      appName: 'Dimo',
+      onNewWindow: vi.fn(),
+      onOpenSettings,
+      onExitRequested: vi.fn(),
+    });
+
+    const appSubmenu = template[0].submenu as Array<Record<string, unknown>>;
+    const settingsItem = appSubmenu.find((item) => item.accelerator === 'CmdOrCtrl+,');
+    expect(settingsItem).toBeDefined();
+    (settingsItem!.click as () => void)();
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+
+    const editSubmenu = template[2].submenu as Array<Record<string, unknown>>;
+    expect(editSubmenu.some((item) => item.role === 'pasteAndMatchStyle')).toBe(true);
+    expect(editSubmenu.some((item) => item.role === 'delete')).toBe(true);
+
+    const windowSubmenu = template[4].submenu as Array<Record<string, unknown>>;
+    expect(windowSubmenu.some((item) => item.role === 'front')).toBe(true);
+    expect(windowSubmenu.some((item) => item.role === 'close')).toBe(false);
+
+    if (process.platform !== 'darwin') {
+      const { Menu } = await import('electron');
+      vi.mocked(Menu.setApplicationMenu).mockClear();
+      const windows = new WindowManager({ preloadPath: '/preload.js' });
+      const chrome = new DesktopChromeManager({
+        windows,
+        onExitRequested: async () => undefined,
+      });
+      chrome.install();
+      expect(Menu.setApplicationMenu).toHaveBeenCalledWith(null);
+    }
+  });
+});
+
+describe('WindowManager remediation behaviors (hidden settings exit, zoom sync, spellcheck, permissions)', () => {
+  it('destroys hidden local settings window when main closes without tray and syncs zoom across windows', () => {
+    createdWindows.length = 0;
+    const onMainWindowLoaded = vi.fn();
+    const onMainWindowClosed = vi.fn();
+    const onMainWindowClosedWithoutTray = vi.fn();
+    const manager = new WindowManager({
+      preloadPath: '/preload.js',
+      appUserModelId: DEFAULT_APP_USER_MODEL_ID,
+      onMainWindowLoaded,
+      onMainWindowClosed,
+      onMainWindowClosedWithoutTray,
+    });
+    manager.setTrayEnabled(false);
+
+    const mainWin = manager.createMainWindow();
+    const mainRecord = createdWindows[0];
+    expect(
+      (mainRecord.options.webPreferences as Record<string, unknown>).spellcheck
+    ).toBe(true);
+
+    mainRecord.webContentsEmitter.emit('did-finish-load');
+    expect(onMainWindowLoaded).toHaveBeenCalledTimes(1);
+
+    // Open settings and hide it via close event (hideOnClose: 'always')
+    manager.openSettingsWindow('main');
+    const settingsRecord = createdWindows[1];
+    const closeEv = { preventDefault: vi.fn() };
+    settingsRecord.emitter.emit('close', closeEv);
+    expect(closeEv.preventDefault).toHaveBeenCalledTimes(1);
+    expect(settingsRecord.hide).toHaveBeenCalledTimes(1);
+
+    // Sync zoom across all open windows and apply to newly opened windows
+    manager.setZoomFactor(1.25);
+    expect(mainRecord.setZoomFactor).toHaveBeenCalledWith(1.25);
+    expect(settingsRecord.setZoomFactor).toHaveBeenCalledWith(1.25);
+
+    manager.openAppWindow();
+    const appRecord = createdWindows[2];
+    expect(appRecord.setZoomFactor).toHaveBeenCalledWith(1.25);
+
+    // Closing main when tray is disabled destroys hidden settings and triggers callback
+    mainWin.destroy();
+    expect(onMainWindowClosed).toHaveBeenCalledTimes(1);
+    expect(settingsRecord.destroy).toHaveBeenCalledTimes(1);
+    expect(onMainWindowClosedWithoutTray).toHaveBeenCalledTimes(1);
+  });
+
+  it('restricts session permission requests to safe app-origin permissions and denies webviews', () => {
+    expect(
+      evaluatePermissionRequest({
+        origin: `${DESKTOP_APP_ORIGIN}/settings`,
+        allowedAppOrigin: DESKTOP_APP_ORIGIN,
+        permission: 'clipboard-read',
+      })
+    ).toBe(true);
+    expect(
+      evaluatePermissionRequest({
+        origin: `${DESKTOP_APP_ORIGIN}/settings`,
+        allowedAppOrigin: DESKTOP_APP_ORIGIN,
+        permission: 'geolocation',
+      })
+    ).toBe(false);
+    expect(
+      evaluatePermissionRequest({
+        origin: 'https://evil.example/phish',
+        allowedAppOrigin: DESKTOP_APP_ORIGIN,
+        permission: 'notifications',
+      })
+    ).toBe(false);
+    expect(
+      evaluatePermissionRequest({
+        origin: `${DESKTOP_APP_ORIGIN}/page`,
+        allowedAppOrigin: DESKTOP_APP_ORIGIN,
+        permission: 'media',
+        isWebview: true,
+      })
+    ).toBe(false);
+  });
+});
+
+describe('DesktopUpdaterManager P0-8 safeguards', () => {
+  function createFakeAutoUpdater(): AutoUpdaterLike & EventEmitter {
+    const emitter = new EventEmitter();
+    return Object.assign(emitter, {
+      autoDownload: true,
+      autoInstallOnAppQuit: true,
+      allowPrerelease: false,
+      checkForUpdates: vi.fn(),
+      downloadUpdate: vi.fn(),
+      quitAndInstall: vi.fn(),
+    });
+  }
+
+  it('attaches an error listener, swallows late timeout rejections, pre-feeds Squirrel on darwin, and defers install', async () => {
+    const fake = createFakeAutoUpdater();
+    let rejectLateCheck: ((err: Error) => void) | undefined;
+    vi.mocked(fake.checkForUpdates).mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectLateCheck = reject;
+        })
+    );
+
+    const callOrder: string[] = [];
+    const manager = new DesktopUpdaterManager({
+      currentVersion: '0.5.2',
+      isPackaged: () => true,
+      platform: 'darwin',
+      deferInstall: true,
+      loadAutoUpdater: () => fake,
+      beforeQuitForUpdate: async () => {
+        callOrder.push('beforeQuit');
+      },
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+    });
+
+    // Timeout rejects cleanly and a subsequent late rejection from checkForUpdates does not crash
+    await expect(manager.check({ timeout: 20 })).rejects.toThrow(/timed out/i);
+    rejectLateCheck?.(new Error('late network error'));
+    await new Promise((r) => setTimeout(r, 15));
+
+    // Emitting 'error' on autoUpdater does not throw unhandled EventEmitter error
+    expect(() => fake.emit('error', new Error('Squirrel feed error'))).not.toThrow();
+
+    // Check + download on darwin enables autoInstallOnAppQuit for Squirrel.Mac pre-feed
+    vi.mocked(fake.checkForUpdates).mockResolvedValueOnce({
+      updateInfo: { version: '0.6.0' },
+    });
+    vi.mocked(fake.downloadUpdate).mockImplementationOnce(async () => {
+      fake.emit('update-downloaded', { version: '0.6.0' });
+      return ['/tmp/update.zip'];
+    });
+    vi.mocked(fake.quitAndInstall).mockImplementationOnce(() => {
+      callOrder.push('quitAndInstall');
+    });
+
+    const checkRes = await manager.check();
+    expect(checkRes?.version).toBe('0.6.0');
+    await manager.download(checkRes!.token, () => undefined);
+    expect(fake.autoInstallOnAppQuit).toBe(true);
+
+    // Deferred install resolves IPC before running beforeQuitForUpdate + quitAndInstall
+    await manager.install(checkRes!.token);
+    expect(manager.isInstalling()).toBe(true);
+    expect(callOrder).toEqual([]);
+
+    await new Promise((r) => setTimeout(r, 20));
+    expect(callOrder).toEqual(['beforeQuit', 'quitAndInstall']);
   });
 });

@@ -1,14 +1,18 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 
-import { app, protocol } from 'electron';
+import { app, protocol, session } from 'electron';
 
-import { isHostWindowLabel } from '../shared/ipcContract';
+import {
+  DEFAULT_APP_USER_MODEL_ID,
+  SIDECAR_EXITED_EVENT,
+  SIDECAR_RESTARTED_EVENT,
+  isHostWindowLabel,
+} from '../shared/ipcContract';
 import { ElectronBrowserController } from './browser/controller';
 import { NativeTabsRpcClient } from './browser/nativeTabsRpc';
 import { DesktopChromeManager } from './chrome';
-import { installCrashHandlers } from './crashReporter';
+import { createCrashRecorder, installCrashHandlers } from './crashReporter';
 import { DeepLinkManager } from './deeplink';
 import { DesktopToastManager } from './desktopToast';
 import { registerIpcHandlers } from './ipc';
@@ -18,31 +22,17 @@ import {
   registerProtocolHandlers,
   registerProtocolHandlersForSession,
 } from './protocol';
-import { SidecarManager } from './sidecar';
+import {
+  SidecarManager,
+  resolveDefaultDataDir,
+  resolveEnvDataDir,
+} from './sidecar';
 import { DesktopUpdaterManager } from './updater';
-import { resolveDefaultIconPath, WindowManager } from './windows';
-
-function resolveBootstrapConfigPath(): string {
-  const explicit = process.env.DIMO_BOOTSTRAP_CONFIG_PATH?.trim();
-  if (explicit) {
-    return explicit;
-  }
-  if (process.platform === 'win32') {
-    const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
-    return path.join(appData, 'dimo', 'dimo', 'config', 'bootstrap.json');
-  }
-  if (process.platform === 'darwin') {
-    return path.join(
-      os.homedir(),
-      'Library',
-      'Application Support',
-      'app.dimo.dimo',
-      'bootstrap.json'
-    );
-  }
-  const xdgConfig = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
-  return path.join(xdgConfig, 'dimo', 'bootstrap.json');
-}
+import {
+  installSessionPermissionHandlers,
+  resolveDefaultIconPath,
+  WindowManager,
+} from './windows';
 
 function resolveRepoRoot(): string | undefined {
   if (app.isPackaged) {
@@ -56,36 +46,11 @@ function resolveRepoRoot(): string | undefined {
   return undefined;
 }
 
-function resolveDefaultDataDir(repoRoot?: string): string {
-  const explicit = process.env.DIMO_DATA_DIR?.trim();
-  if (explicit) {
-    return explicit;
-  }
-  try {
-    const bootstrapRaw = fs.readFileSync(resolveBootstrapConfigPath(), 'utf8');
-    const parsed = JSON.parse(bootstrapRaw) as { custom_data_dir?: unknown };
-    if (
-      typeof parsed.custom_data_dir === 'string' &&
-      parsed.custom_data_dir.trim().length > 0 &&
-      path.isAbsolute(parsed.custom_data_dir.trim())
-    ) {
-      return parsed.custom_data_dir.trim();
-    }
-  } catch {
-    // Ignore missing or unreadable bootstrap.json.
-  }
-  if (!app.isPackaged && repoRoot) {
-    return path.join(repoRoot, 'dev_assets');
-  }
-  if (process.platform === 'win32') {
-    const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
-    return path.join(appData, 'dimo', 'dimo', 'data');
-  }
-  if (process.platform === 'darwin') {
-    return path.join(os.homedir(), 'Library', 'Application Support', 'app.dimo.dimo');
-  }
-  const xdgData = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
-  return path.join(xdgData, 'dimo');
+function resolveCurrentDefaultDataDir(repoRoot?: string): string {
+  return resolveDefaultDataDir({
+    isPackaged: app.isPackaged,
+    repoRoot,
+  });
 }
 
 function applyRenderingAccelerationMode(dataDir: string): void {
@@ -113,8 +78,8 @@ function applyRenderingAccelerationMode(dataDir: string): void {
 }
 
 const APP_USER_MODEL_ID = app.isPackaged
-  ? 'com.dimo.desktop'
-  : 'com.dimo.desktop.dev';
+  ? DEFAULT_APP_USER_MODEL_ID
+  : `${DEFAULT_APP_USER_MODEL_ID}.dev`;
 
 // Must execute synchronously before `app.whenReady()`.
 app.setName('Dimo');
@@ -122,7 +87,7 @@ if (process.platform === 'win32') {
   app.setAppUserModelId(APP_USER_MODEL_ID);
 }
 registerPrivilegedSchemes(protocol);
-applyRenderingAccelerationMode(resolveDefaultDataDir(resolveRepoRoot()));
+applyRenderingAccelerationMode(resolveCurrentDefaultDataDir(resolveRepoRoot()));
 
 // Enable smooth Wayland/X11 Ozone detection on Linux when not explicitly set.
 if (process.platform === 'linux' && !process.env.ELECTRON_OZONE_PLATFORM_HINT) {
@@ -195,8 +160,9 @@ if (!gotLock) {
   let toast: DesktopToastManager | null = null;
   let chrome: DesktopChromeManager | null = null;
   let isQuitting = false;
+  let installingUpdate = false;
   let exitPrepPromise: Promise<void> | null = null;
-  let activeDataDir: string | undefined = process.env.DIMO_DATA_DIR?.trim() || undefined;
+  let activeDataDir: string | undefined = resolveEnvDataDir();
 
   deeplinks.registerProtocolClient(app);
 
@@ -206,12 +172,14 @@ if (!gotLock) {
     deeplinks.handleUrl(url);
   });
 
-  const uninstallCrashHandlers = installCrashHandlers({
+  const crashReporterOptions = {
     sidecar,
     appVersion: app.getVersion(),
     getDataDir: () =>
-      sidecar.getDataDir() ?? activeDataDir ?? resolveDefaultDataDir(resolveRepoRoot()),
-  });
+      sidecar.getDataDir() ?? activeDataDir ?? resolveCurrentDefaultDataDir(resolveRepoRoot()),
+  };
+  const recordCrash = createCrashRecorder(crashReporterOptions);
+  const uninstallCrashHandlers = installCrashHandlers(crashReporterOptions);
 
   const prepareForExit = async (): Promise<void> => {
     if (exitPrepPromise) {
@@ -235,6 +203,11 @@ if (!gotLock) {
     return exitPrepPromise;
   };
 
+  const prepareForUpdateInstall = async (): Promise<void> => {
+    installingUpdate = true;
+    await prepareForExit();
+  };
+
   const gracefulExit = async () => {
     try {
       await prepareForExit();
@@ -255,6 +228,9 @@ if (!gotLock) {
   });
 
   app.on('window-all-closed', () => {
+    if (isQuitting || installingUpdate) {
+      return;
+    }
     if (process.platform !== 'darwin' && !windows?.isTrayEnabled()) {
       void gracefulExit();
     }
@@ -282,7 +258,7 @@ if (!gotLock) {
       const preloadPath = resolvePreloadPath();
       const resourcesDir = resolveResourcesDir(repoRoot);
       const devUrl = process.env.DIMO_DEV_URL?.trim() || undefined;
-      activeDataDir = process.env.DIMO_DATA_DIR?.trim() || undefined;
+      activeDataDir = resolveEnvDataDir();
       const appVersion = app.getVersion();
 
       registerProtocolHandlers({
@@ -296,8 +272,41 @@ if (!gotLock) {
         resourcesDir,
         dataDir: activeDataDir,
         appVersion,
+        onUnexpectedExit: (info) => {
+          const summary = `dimo-server exited unexpectedly (code=${info.code ?? 'null'}, signal=${info.signal ?? 'null'}, willRestart=${info.willRestart})`;
+          recordCrash('electron-sidecar:unexpected-exit', summary);
+          windows?.broadcastEvent(SIDECAR_EXITED_EVENT, info);
+        },
+        onRestarted: (connection, attempt) => {
+          activeDataDir =
+            sidecar.getDataDir() ?? activeDataDir ?? resolveCurrentDefaultDataDir(repoRoot);
+          browserRpc?.stop();
+          browserRpc?.start();
+          windows?.broadcastEvent(SIDECAR_RESTARTED_EVENT, {
+            backend: connection,
+            attempt,
+          });
+        },
+        onRestartFailed: (error, attempt, exhausted) => {
+          recordCrash(
+            `electron-sidecar:restart-failed-${attempt}`,
+            error.message || String(error),
+            error.stack
+          );
+          if (exhausted) {
+            windows?.broadcastEvent(SIDECAR_EXITED_EVENT, {
+              code: null,
+              signal: null,
+              willRestart: false,
+              attempt,
+              maxAttempts: attempt,
+              exhausted: true,
+            });
+          }
+        },
       });
-      activeDataDir = sidecar.getDataDir() ?? activeDataDir ?? resolveDefaultDataDir(repoRoot);
+      activeDataDir =
+        sidecar.getDataDir() ?? activeDataDir ?? resolveCurrentDefaultDataDir(repoRoot);
 
       browserRpc?.start();
 
@@ -314,6 +323,15 @@ if (!gotLock) {
             assetScope,
           });
         },
+        onMainWindowLoaded: () => {
+          deeplinks.markMainWindowReady();
+        },
+        onMainWindowClosed: () => {
+          deeplinks.resetMainWindowReady();
+        },
+        onMainWindowClosedWithoutTray: () => {
+          toast?.destroy();
+        },
         onWindowClosed: (label, windowStillOpen) => {
           void sidecar.notifyWindowDestroyed(label, windowStillOpen).then(() => {
             if (isHostWindowLabel(label)) {
@@ -322,6 +340,11 @@ if (!gotLock) {
           });
         },
       });
+
+      installSessionPermissionHandlers(
+        session.defaultSession,
+        windows.getAllowedAppOrigin()
+      );
 
       toast = new DesktopToastManager({
         preloadPath,
@@ -340,7 +363,8 @@ if (!gotLock) {
 
       const updater = new DesktopUpdaterManager({
         currentVersion: appVersion,
-        beforeQuitForUpdate: prepareForExit,
+        deferInstall: true,
+        beforeQuitForUpdate: prepareForUpdateInstall,
       });
 
       // Hydrate persisted developer_mode from shared settings.json.

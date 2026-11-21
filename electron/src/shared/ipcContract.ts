@@ -1,6 +1,11 @@
 export const DESKTOP_APP_SCHEME = 'dimo-app';
 export const DESKTOP_ASSET_SCHEME = 'dimo-asset';
 export const DESKTOP_APP_ORIGIN = `${DESKTOP_APP_SCHEME}://localhost`;
+export const DEFAULT_APP_USER_MODEL_ID = 'com.dimo.app';
+export const SIDECAR_EXITED_EVENT = 'sidecar-exited';
+export const SIDECAR_RESTARTED_EVENT = 'sidecar-restarted';
+
+export type SidecarRuntimeStatus = 'running' | 'restarting' | 'stopped';
 
 export interface ElectronBackendConnectionInfo {
   baseUrl: string;
@@ -12,7 +17,8 @@ export interface BootstrapPayload {
   windowLabel: string;
   platform: NodeJS.Platform;
   appVersion: string;
-  backend: ElectronBackendConnectionInfo;
+  backend: ElectronBackendConnectionInfo | null;
+  sidecarStatus?: SidecarRuntimeStatus;
 }
 
 export const IPC_CHANNELS = {
@@ -29,6 +35,7 @@ export const IPC_CHANNELS = {
   WINDOW_START_DRAGGING: 'dimo:window:startDragging',
   WINDOW_SET_ZOOM: 'dimo:window:setZoom',
   WINDOW_RESIZED: 'dimo:window:resized',
+  DESKTOP_TOAST_SET_IGNORE_MOUSE_EVENTS: 'dimo:desktopToast:setIgnoreMouseEvents',
   DIALOG_OPEN: 'dimo:dialog:open',
   DIALOG_SAVE: 'dimo:dialog:save',
   FS_READ_FILE: 'dimo:fs:readFile',
@@ -71,6 +78,7 @@ export interface DesktopUpdateDownloadEventPayload {
 export const SERVER_DESKTOP_COMMANDS = new Set<string>([
   'plugin_dev_connection',
   'evacuate_user_data_before_update',
+  'record_shell_crash',
   // Backup
   'backup_create',
   'backup_inspect',

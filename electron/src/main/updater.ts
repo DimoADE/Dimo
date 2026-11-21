@@ -65,6 +65,13 @@ export interface DesktopUpdaterManagerOptions {
   relaunchApp?: () => void;
   exitApp?: (code?: number) => void;
   logger?: Pick<Console, 'info' | 'warn' | 'error'>;
+  platform?: NodeJS.Platform;
+  /**
+   * When true (production IPC mode), `install()` and `relaunch()` defer
+   * `beforeQuitForUpdate()` + `quitAndInstall()` via `setImmediate` so the
+   * IPC response reaches the renderer before its window is destroyed.
+   */
+  deferInstall?: boolean;
 }
 
 const DEFAULT_CHECK_TIMEOUT_MS = 15_000;
@@ -243,6 +250,7 @@ function defaultLoadAutoUpdater(): AutoUpdaterLike {
 export class DesktopUpdaterManager {
   private readonly options: DesktopUpdaterManagerOptions;
   private readonly logger: Pick<Console, 'info' | 'warn' | 'error'>;
+  private readonly platform: NodeJS.Platform;
   private readonly pending = new Map<string, PendingUpdateSession>();
   private updater: AutoUpdaterLike | null = null;
   private installStarted = false;
@@ -250,6 +258,11 @@ export class DesktopUpdaterManager {
   constructor(options: DesktopUpdaterManagerOptions) {
     this.options = options;
     this.logger = options.logger ?? console;
+    this.platform = options.platform ?? process.platform;
+  }
+
+  isInstalling(): boolean {
+    return this.installStarted;
   }
 
   private isPackaged(): boolean {
@@ -263,7 +276,7 @@ export class DesktopUpdaterManager {
       instance.autoDownload = false;
       instance.autoInstallOnAppQuit = false;
       instance.allowDowngrade = false;
-      if (process.platform === 'win32' && process.arch === 'arm64') {
+      if (this.platform === 'win32' && process.arch === 'arm64') {
         instance.channel = 'latest-arm64';
       }
       const devConfig = process.env.DIMO_UPDATER_DEV_CONFIG?.trim();
@@ -271,6 +284,11 @@ export class DesktopUpdaterManager {
         instance.forceDevUpdateConfig = true;
         instance.updateConfigPath = devConfig;
       }
+      // Native Squirrel.Mac / NSIS errors are emitted on the autoUpdater
+      // EventEmitter; attach a listener so they never crash the main process.
+      instance.on('error', (error: unknown) => {
+        this.logger.error('[electron:updater] autoUpdater error:', error);
+      });
       this.updater = instance;
     }
     return this.updater;
@@ -296,9 +314,19 @@ export class DesktopUpdaterManager {
       }, timeoutMs);
     });
 
+    const checkPromise = updater.checkForUpdates();
+    // Prevent unhandledRejection if timeoutPromise wins Promise.race and
+    // checkForUpdates() rejects asynchronously afterwards.
+    void checkPromise.catch((error: unknown) => {
+      this.logger.warn(
+        '[electron:updater] checkForUpdates rejected:',
+        error
+      );
+    });
+
     let result: UpdaterCheckResultLike | null;
     try {
-      result = await Promise.race([updater.checkForUpdates(), timeoutPromise]);
+      result = await Promise.race([checkPromise, timeoutPromise]);
     } finally {
       if (timer) {
         clearTimeout(timer);
@@ -348,6 +376,12 @@ export class DesktopUpdaterManager {
     }
 
     const updater = this.getUpdater();
+    if (this.platform === 'darwin') {
+      // MacUpdater only feeds the downloaded zip to Squirrel.Mac during
+      // downloadUpdate() when autoInstallOnAppQuit is true; keeping it false
+      // would defer nativeUpdater.checkForUpdates() until after app teardown.
+      updater.autoInstallOnAppQuit = true;
+    }
     const tracker = new ProgressDeltaTracker();
     session.downloading = true;
 
@@ -386,16 +420,32 @@ export class DesktopUpdaterManager {
     this.pending.delete(token);
     const updater = this.getUpdater();
 
-    try {
-      await this.options.beforeQuitForUpdate();
-      this.logger.info(
-        `[electron:updater] installing version ${session.version} via quitAndInstall`
-      );
-      updater.quitAndInstall(false, true);
-    } catch (error) {
-      this.installStarted = false;
-      throw error;
+    const runInstall = async () => {
+      try {
+        await this.options.beforeQuitForUpdate();
+        this.logger.info(
+          `[electron:updater] installing version ${session.version} via quitAndInstall`
+        );
+        updater.quitAndInstall(false, true);
+      } catch (error) {
+        this.installStarted = false;
+        throw error;
+      }
+    };
+
+    if (this.options.deferInstall) {
+      setImmediate(() => {
+        void runInstall().catch((error: unknown) => {
+          this.logger.error(
+            '[electron:updater] deferred quitAndInstall failed:',
+            error
+          );
+        });
+      });
+      return;
     }
+
+    await runInstall();
   }
 
   async close(token: string): Promise<void> {
@@ -419,10 +469,32 @@ export class DesktopUpdaterManager {
       return;
     }
     this.installStarted = true;
-    await this.options.beforeQuitForUpdate();
-    const doRelaunch = this.options.relaunchApp ?? (() => app.relaunch());
-    const doExit = this.options.exitApp ?? ((code = 0) => app.exit(code));
-    doRelaunch();
-    doExit(0);
+
+    const runRelaunch = async () => {
+      try {
+        await this.options.beforeQuitForUpdate();
+        const doRelaunch = this.options.relaunchApp ?? (() => app.relaunch());
+        const doExit = this.options.exitApp ?? ((code = 0) => app.exit(code));
+        doRelaunch();
+        doExit(0);
+      } catch (error) {
+        this.installStarted = false;
+        throw error;
+      }
+    };
+
+    if (this.options.deferInstall) {
+      setImmediate(() => {
+        void runRelaunch().catch((error: unknown) => {
+          this.logger.error(
+            '[electron:updater] deferred relaunch failed:',
+            error
+          );
+        });
+      });
+      return;
+    }
+
+    await runRelaunch();
   }
 }

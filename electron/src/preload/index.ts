@@ -164,7 +164,7 @@ function ensureDragDropListeners(): void {
 
 const dimoDesktopBridge = {
   platform: bootstrap.platform,
-  backend: Object.freeze({ ...bootstrap.backend }),
+  backend: bootstrap.backend ? Object.freeze({ ...bootstrap.backend }) : undefined,
 
   getAppVersion: (): Promise<string> =>
     ipcRenderer.invoke(IPC_CHANNELS.APP_VERSION),
@@ -343,6 +343,14 @@ const dimoDesktopBridge = {
     },
     relaunch: (): Promise<void> =>
       ipcRenderer.invoke(IPC_CHANNELS.UPDATER_RELAUNCH),
+  },
+
+  desktopToast: {
+    setIgnoreMouseEvents: (ignore: boolean): Promise<void> =>
+      ipcRenderer.invoke(
+        IPC_CHANNELS.DESKTOP_TOAST_SET_IGNORE_MOUSE_EVENTS,
+        Boolean(ignore)
+      ),
   },
 
   invoke: <T = unknown>(

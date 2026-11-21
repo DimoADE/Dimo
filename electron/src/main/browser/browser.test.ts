@@ -1,3 +1,7 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({
@@ -8,6 +12,9 @@ vi.mock('electron', () => ({
       clearCache: vi.fn().mockResolvedValue(undefined),
       on: vi.fn(),
     })),
+  },
+  shell: {
+    openExternal: vi.fn().mockResolvedValue(undefined),
   },
   webContents: {
     fromId: vi.fn(() => null),
@@ -27,6 +34,7 @@ import {
   isAllowedWebviewPartition,
   normalizeConsoleLevel,
   partitionForProfile,
+  resolveUniqueDownloadPath,
 } from './controller';
 
 describe('Electron browser M4 helpers', () => {
@@ -193,7 +201,7 @@ describe('Electron browser M4 helpers', () => {
     ).rejects.toBeInstanceOf(BrowserRpcError);
   });
 
-  it('blocks disallowed schemes in will-navigate on attached webviews and emits navigation.blocked', async () => {
+  it('blocks disallowed schemes in will-navigate and will-redirect on attached webviews', async () => {
     const events: Array<Record<string, unknown>> = [];
     const controller = new ElectronBrowserController({
       onEvent: (ev) => events.push(ev),
@@ -240,14 +248,16 @@ describe('Electron browser M4 helpers', () => {
     expect(events.some((e) => e.kind === 'tab.state')).toBe(true);
 
     const willNavigate = listeners.get('will-navigate');
+    const willRedirect = listeners.get('will-redirect');
     expect(willNavigate).toBeDefined();
+    expect(willRedirect).toBeDefined();
 
     // Allowed URL passes through
     const allowedEv = { preventDefault: vi.fn() };
     willNavigate!(allowedEv, 'https://example.com/next');
     expect(allowedEv.preventDefault).not.toHaveBeenCalled();
 
-    // Disallowed file:// URL is blocked and reports navigation.blocked
+    // Disallowed file:// URL is blocked in will-navigate
     const blockedEv = { preventDefault: vi.fn() };
     willNavigate!(blockedEv, 'file:///etc/passwd');
     expect(blockedEv.preventDefault).toHaveBeenCalledOnce();
@@ -256,5 +266,227 @@ describe('Electron browser M4 helpers', () => {
       tabId: 'tab-nav-guard',
       url: 'file:///etc/passwd',
     });
+
+    // Disallowed scheme in will-redirect is also blocked
+    const redirectEv = { preventDefault: vi.fn() };
+    willRedirect!(redirectEv, 'dimo-app://localhost/secret');
+    expect(redirectEv.preventDefault).toHaveBeenCalledOnce();
+    expect(events).toContainEqual({
+      kind: 'navigation.blocked',
+      tabId: 'tab-nav-guard',
+      url: 'dimo-app://localhost/secret',
+    });
+  });
+
+  it('preserves POST navigations and intercepts redirects via session.webRequest.onBeforeRequest', async () => {
+    const events: Array<Record<string, unknown>> = [];
+    const checkNavigation = vi.fn(async (url: string) => {
+      if (url.includes('blocked.test')) {
+        return { allowed: false, preferSystem: false };
+      }
+      if (url.includes('system.test')) {
+        return { allowed: true, preferSystem: true };
+      }
+      return { allowed: true, preferSystem: false };
+    });
+
+    const controller = new ElectronBrowserController({
+      onEvent: (ev) => events.push(ev),
+      checkNavigation,
+    });
+
+    let beforeRequestHandler:
+      | ((
+          details: { url: string; webContentsId?: number },
+          cb: (response: { cancel?: boolean }) => void
+        ) => void)
+      | undefined;
+    let permissionRequestHandler:
+      | ((wc: unknown, permission: string, cb: (allowed: boolean) => void) => void)
+      | undefined;
+    let permissionCheckHandler: (() => boolean) | undefined;
+
+    const listeners = new Map<string, (...args: unknown[]) => void>();
+    const loadURL = vi.fn().mockResolvedValue(undefined);
+    const fakeSession = {
+      on: vi.fn(),
+      setPermissionRequestHandler: vi.fn((fn) => {
+        permissionRequestHandler = fn;
+      }),
+      setPermissionCheckHandler: vi.fn((fn) => {
+        permissionCheckHandler = fn;
+      }),
+      webRequest: {
+        onBeforeRequest: vi.fn((_filter, handler) => {
+          beforeRequestHandler = handler;
+        }),
+      },
+    };
+    const fakeWc = {
+      id: 101,
+      isDestroyed: () => false,
+      getURL: () => 'https://example.com',
+      getTitle: () => 'Example',
+      isLoading: () => false,
+      loadURL,
+      session: fakeSession,
+      navigationHistory: {
+        canGoBack: () => false,
+        canGoForward: () => false,
+      },
+      on: vi.fn((event: string, cb: (...args: unknown[]) => void) => {
+        listeners.set(event, cb);
+      }),
+      once: vi.fn(),
+      removeListener: vi.fn(),
+      setWindowOpenHandler: vi.fn(),
+    };
+
+    const { webContents, shell } = await import('electron');
+    vi.mocked(webContents.fromId).mockReturnValueOnce(
+      fakeWc as unknown as Electron.WebContents
+    );
+
+    await controller.handleRpc('open', {
+      tabId: 'tab-post-safe',
+      url: 'https://example.com',
+      profileId: 'default',
+    });
+    controller.attachWebContents({ tabId: 'tab-post-safe', webContentsId: 101 });
+
+    // Permission handlers deny untrusted Host Browser webview requests
+    expect(permissionCheckHandler?.()).toBe(false);
+    const permCb = vi.fn();
+    permissionRequestHandler?.(fakeWc, 'media', permCb);
+    expect(permCb).toHaveBeenCalledWith(false);
+
+    // will-navigate does NOT preventDefault or replay via GET loadURL for http(s)
+    const postNavEvent = { preventDefault: vi.fn() };
+    listeners.get('will-navigate')!(postNavEvent, 'https://example.com/submit');
+    expect(postNavEvent.preventDefault).not.toHaveBeenCalled();
+    expect(loadURL).not.toHaveBeenCalled();
+
+    // webRequest.onBeforeRequest allows normal URL without cancelling
+    expect(beforeRequestHandler).toBeDefined();
+    const allowRes = await new Promise<{ cancel?: boolean }>((resolve) => {
+      beforeRequestHandler!(
+        { url: 'https://example.com/submit', webContentsId: 101 },
+        resolve
+      );
+    });
+    expect(allowRes).toEqual({ cancel: false });
+
+    // webRequest.onBeforeRequest cancels blocked URL (including 3xx redirect targets)
+    const blockRes = await new Promise<{ cancel?: boolean }>((resolve) => {
+      beforeRequestHandler!(
+        { url: 'https://blocked.test/landing', webContentsId: 101 },
+        resolve
+      );
+    });
+    expect(blockRes).toEqual({ cancel: true });
+    expect(events).toContainEqual({
+      kind: 'navigation.blocked',
+      tabId: 'tab-post-safe',
+      url: 'https://blocked.test/landing',
+    });
+
+    // webRequest.onBeforeRequest hands preferSystem URLs off to shell.openExternal
+    const sysRes = await new Promise<{ cancel?: boolean }>((resolve) => {
+      beforeRequestHandler!(
+        { url: 'https://system.test/oauth', webContentsId: 101 },
+        resolve
+      );
+    });
+    expect(sysRes).toEqual({ cancel: true });
+    expect(shell.openExternal).toHaveBeenCalledWith('https://system.test/oauth');
+  });
+
+  it('deduplicates colliding download filenames cleanly without overwriting existing files', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dimo-dl-'));
+    try {
+      // Pure helper deduplication + path traversal stripping
+      fs.writeFileSync(path.join(dir, 'report.pdf'), 'existing', 'utf8');
+      const reserved = new Set<string>([path.join(dir, 'report (1).pdf')]);
+      const resolved = resolveUniqueDownloadPath(dir, '../../report.pdf', reserved);
+      expect(resolved.filename).toBe('report (2).pdf');
+      expect(resolved.savePath).toBe(path.join(dir, 'report (2).pdf'));
+
+      // Live session will-download hook deduplicates simultaneous in-flight downloads
+      const events: Array<Record<string, unknown>> = [];
+      const controller = new ElectronBrowserController({
+        onEvent: (ev) => events.push(ev),
+        getDownloadsDir: () => dir,
+      });
+
+      let willDownloadHandler:
+        | ((ev: unknown, item: unknown, wc: unknown) => void)
+        | undefined;
+      const fakeSession = {
+        on: vi.fn((event: string, cb: (ev: unknown, item: unknown, wc: unknown) => void) => {
+          if (event === 'will-download') {
+            willDownloadHandler = cb;
+          }
+        }),
+      };
+      const fakeWc = {
+        id: 202,
+        isDestroyed: () => false,
+        getURL: () => 'https://example.com',
+        getTitle: () => 'Downloads',
+        isLoading: () => false,
+        session: fakeSession,
+        navigationHistory: { canGoBack: () => false, canGoForward: () => false },
+        on: vi.fn(),
+        once: vi.fn(),
+        removeListener: vi.fn(),
+        setWindowOpenHandler: vi.fn(),
+      };
+
+      const { webContents } = await import('electron');
+      vi.mocked(webContents.fromId).mockReturnValueOnce(
+        fakeWc as unknown as Electron.WebContents
+      );
+      await controller.handleRpc('open', {
+        tabId: 'tab-dl',
+        url: 'https://example.com',
+      });
+      controller.attachWebContents({ tabId: 'tab-dl', webContentsId: 202 });
+
+      const makeItem = (name: string) => {
+        let savedPath = '';
+        let doneCb: ((ev: unknown, state: string) => void) | undefined;
+        return {
+          getFilename: () => name,
+          getURL: () => `https://example.com/${name}`,
+          getTotalBytes: () => 100,
+          getReceivedBytes: () => 100,
+          isPaused: () => false,
+          setSavePath: vi.fn((p: string) => {
+            savedPath = p;
+          }),
+          getSavePath: () => savedPath,
+          on: vi.fn(),
+          once: vi.fn((ev: string, cb: (e: unknown, s: string) => void) => {
+            if (ev === 'done') doneCb = cb;
+          }),
+          finish: () => doneCb?.({}, 'completed'),
+        };
+      };
+
+      const item1 = makeItem('report.pdf');
+      const item2 = makeItem('report.pdf');
+      willDownloadHandler!({}, item1, fakeWc);
+      willDownloadHandler!({}, item2, fakeWc);
+
+      expect(item1.setSavePath).toHaveBeenCalledWith(path.join(dir, 'report (1).pdf'));
+      expect(item2.setSavePath).toHaveBeenCalledWith(path.join(dir, 'report (2).pdf'));
+      item1.finish();
+      item2.finish();
+      expect(
+        events.filter((e) => e.kind === 'download' && e.state === 'completed')
+      ).toHaveLength(2);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

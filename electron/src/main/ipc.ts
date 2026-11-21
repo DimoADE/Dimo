@@ -125,7 +125,8 @@ export function registerIpcHandlers(context: IpcContext): void {
       windowLabel,
       platform: process.platform,
       appVersion,
-      backend: sidecar.getConnection(),
+      backend: sidecar.getConnectionOrNull(),
+      sidecarStatus: sidecar.getStatus(),
     };
     event.returnValue = payload;
   });
@@ -179,7 +180,10 @@ export function registerIpcHandlers(context: IpcContext): void {
 
   ipcMain.handle(IPC_CHANNELS.WINDOW_SET_ZOOM, (event, scale: number) => {
     if (typeof scale === 'number' && Number.isFinite(scale) && scale > 0) {
-      event.sender.setZoomFactor(scale);
+      windows.setZoomFactor(scale);
+      if (!windows.getWindowForWebContents(event.sender)) {
+        event.sender.setZoomFactor(scale);
+      }
     }
   });
 
@@ -229,6 +233,13 @@ export function registerIpcHandlers(context: IpcContext): void {
       if (typeof name === 'string' && name.length > 0) {
         windows.broadcastEvent(name, payload);
       }
+    }
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.DESKTOP_TOAST_SET_IGNORE_MOUSE_EVENTS,
+    (_event, ignore: boolean) => {
+      toast.setIgnoreMouseEvents(Boolean(ignore));
     }
   );
 
@@ -423,6 +434,9 @@ export function registerIpcHandlers(context: IpcContext): void {
         case 'take_pending_model_router_import': {
           return deeplinks.takePendingModelRouterImport();
         }
+        case 'take_pending_desktop_toast_activation': {
+          return deeplinks.takePendingSessionActivation();
+        }
         case 'show_desktop_toast': {
           const payload = extractToastPayload(args);
           if (payload) {
@@ -483,6 +497,12 @@ export function registerIpcHandlers(context: IpcContext): void {
         }
         case 'electron_browser_bridge_status': {
           return { connected: browserRpc.isConnected() };
+        }
+        case 'fixture_delegate':
+        case 'fixture_reset': {
+          throw new Error(
+            `${cmd} is only available inside the E2E fixture transport`
+          );
         }
         default: {
           throw new Error(`Unsupported Electron shell command: ${cmd}`);

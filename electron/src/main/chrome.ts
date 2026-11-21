@@ -179,8 +179,11 @@ export class DesktopChromeManager {
     if (process.platform === 'darwin') {
       this.installMacOsMenu();
       this.installMacOsDockMenu();
-    } else if (process.platform === 'win32') {
-      this.installWindowsJumpList();
+    } else {
+      Menu.setApplicationMenu(null);
+      if (process.platform === 'win32') {
+        this.installWindowsJumpList();
+      }
     }
   }
 
@@ -399,79 +402,17 @@ export class DesktopChromeManager {
   }
 
   private installMacOsMenu(): void {
-    const template: MenuItemConstructorOptions[] = [
-      {
-        label: app.name || 'Dimo',
-        submenu: [
-          { role: 'about' },
-          { type: 'separator' },
-          {
-            label: '新建窗口',
-            accelerator: 'CmdOrCtrl+N',
-            click: () => this.options.windows.openAppWindow(),
-          },
-          {
-            label: '打开设置',
-            accelerator: 'CmdOrCtrl+,',
-            click: () => this.options.windows.openSettingsWindow('main'),
-          },
-          { type: 'separator' },
-          { role: 'services' },
-          { type: 'separator' },
-          { role: 'hide' },
-          { role: 'hideOthers' },
-          { role: 'unhide' },
-          { type: 'separator' },
-          {
-            label: '退出 Dimo',
-            accelerator: 'CmdOrCtrl+Q',
-            click: () => {
-              void this.options.onExitRequested();
-            },
-          },
-        ],
+    const template = buildMacOsMenuTemplate({
+      appName: app.name || 'Dimo',
+      onNewWindow: () => this.options.windows.openAppWindow(),
+      onOpenSettings: () =>
+        this.options.windows.openSettingsWindow(
+          this.options.windows.getFocusedWindowLabel()
+        ),
+      onExitRequested: () => {
+        void this.options.onExitRequested();
       },
-      {
-        label: '文件',
-        submenu: [
-          {
-            label: '新建窗口',
-            click: () => this.options.windows.openAppWindow(),
-          },
-          {
-            label: '打开设置',
-            click: () => this.options.windows.openSettingsWindow('main'),
-          },
-          { type: 'separator' },
-          { role: 'close' },
-        ],
-      },
-      {
-        label: '编辑',
-        submenu: [
-          { role: 'undo' },
-          { role: 'redo' },
-          { type: 'separator' },
-          { role: 'cut' },
-          { role: 'copy' },
-          { role: 'paste' },
-          { role: 'selectAll' },
-        ],
-      },
-      {
-        label: '显示',
-        submenu: [{ role: 'togglefullscreen' }],
-      },
-      {
-        label: '窗口',
-        submenu: [
-          { role: 'minimize' },
-          { role: 'zoom' },
-          { type: 'separator' },
-          { role: 'close' },
-        ],
-      },
-    ];
+    });
     Menu.setApplicationMenu(Menu.buildFromTemplate(template));
   }
 
@@ -486,7 +427,10 @@ export class DesktopChromeManager {
       },
       {
         label: '打开设置',
-        click: () => this.options.windows.openSettingsWindow('main'),
+        click: () =>
+          this.options.windows.openSettingsWindow(
+            this.options.windows.getFocusedWindowLabel()
+          ),
       },
     ]);
     app.dock.setMenu(dockMenu);
@@ -519,4 +463,89 @@ export class DesktopChromeManager {
       // Best-effort jump list registration.
     }
   }
+}
+
+export interface MacOsMenuTemplateOptions {
+  appName: string;
+  onNewWindow: () => void;
+  onOpenSettings: () => void;
+  onExitRequested: () => void;
+}
+
+export function buildMacOsMenuTemplate(
+  options: MacOsMenuTemplateOptions
+): MenuItemConstructorOptions[] {
+  return [
+    {
+      label: options.appName || 'Dimo',
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        {
+          label: '新建窗口',
+          accelerator: 'CmdOrCtrl+N',
+          click: options.onNewWindow,
+        },
+        {
+          label: '打开设置',
+          accelerator: 'CmdOrCtrl+,',
+          click: options.onOpenSettings,
+        },
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        {
+          label: '退出 Dimo',
+          accelerator: 'CmdOrCtrl+Q',
+          click: options.onExitRequested,
+        },
+      ],
+    },
+    {
+      label: '文件',
+      submenu: [
+        {
+          label: '新建窗口',
+          click: options.onNewWindow,
+        },
+        {
+          label: '打开设置',
+          click: options.onOpenSettings,
+        },
+        { type: 'separator' },
+        { role: 'close' },
+      ],
+    },
+    {
+      label: '编辑',
+      submenu: [
+        { role: 'undo' },
+        { role: 'redo' },
+        { type: 'separator' },
+        { role: 'cut' },
+        { role: 'copy' },
+        { role: 'paste' },
+        { role: 'pasteAndMatchStyle' },
+        { role: 'delete' },
+        { role: 'selectAll' },
+      ],
+    },
+    {
+      label: '显示',
+      submenu: [{ role: 'togglefullscreen' }],
+    },
+    {
+      label: '窗口',
+      submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        { type: 'separator' },
+        { role: 'front' },
+      ],
+    },
+  ];
 }

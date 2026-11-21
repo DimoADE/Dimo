@@ -129,10 +129,15 @@ export function extractLaunchActionFromArgs(
   return null;
 }
 
+type PendingProcessAction = 'open-settings' | 'new-window' | 'show-main';
+
 export class DeepLinkManager {
   private nextImportId = 1;
   private pendingImport: PendingModelRouterImport | null = null;
+  private pendingSessionActivation: ParsedSessionActivation | null = null;
+  private mainWindowReady = false;
   private readonly coldStartUrls: string[] = [];
+  private readonly pendingActions: PendingProcessAction[] = [];
   private handlers: DeepLinkRoutingHandlers | null = null;
 
   registerProtocolClient(app: App): void {
@@ -148,6 +153,16 @@ export class DeepLinkManager {
 
   attachHandlers(handlers: DeepLinkRoutingHandlers): void {
     this.handlers = handlers;
+    while (this.pendingActions.length > 0) {
+      const action = this.pendingActions.shift();
+      if (action === 'open-settings') {
+        handlers.openSettingsWindow();
+      } else if (action === 'new-window') {
+        handlers.openAppWindow();
+      } else if (action === 'show-main') {
+        handlers.showMainWindow();
+      }
+    }
     while (this.coldStartUrls.length > 0) {
       const next = this.coldStartUrls.shift();
       if (next) {
@@ -156,9 +171,28 @@ export class DeepLinkManager {
     }
   }
 
+  markMainWindowReady(): void {
+    this.mainWindowReady = true;
+    if (this.pendingSessionActivation && this.handlers) {
+      const pending = this.pendingSessionActivation;
+      this.pendingSessionActivation = null;
+      this.handlers.broadcastEvent(DESKTOP_TOAST_ACTIVATED_EVENT, pending);
+    }
+  }
+
+  resetMainWindowReady(): void {
+    this.mainWindowReady = false;
+  }
+
   takePendingModelRouterImport(): PendingModelRouterImport | null {
     const value = this.pendingImport;
     this.pendingImport = null;
+    return value;
+  }
+
+  takePendingSessionActivation(): ParsedSessionActivation | null {
+    const value = this.pendingSessionActivation;
+    this.pendingSessionActivation = null;
     return value;
   }
 
@@ -176,11 +210,19 @@ export class DeepLinkManager {
   ): void {
     const action = extractLaunchActionFromArgs(args);
     if (action === 'open-settings') {
-      this.handlers?.openSettingsWindow();
+      if (this.handlers) {
+        this.handlers.openSettingsWindow();
+      } else {
+        this.pendingActions.push('open-settings');
+      }
       return;
     }
     if (action === 'new-window' && !options.isStartup) {
-      this.handlers?.openAppWindow();
+      if (this.handlers) {
+        this.handlers.openAppWindow();
+      } else {
+        this.pendingActions.push('new-window');
+      }
       return;
     }
 
@@ -193,7 +235,11 @@ export class DeepLinkManager {
     }
 
     if (!options.isStartup) {
-      this.handlers?.showMainWindow();
+      if (this.handlers) {
+        this.handlers.showMainWindow();
+      } else {
+        this.pendingActions.push('show-main');
+      }
     }
   }
 
@@ -231,7 +277,11 @@ export class DeepLinkManager {
 
     const session = parseSessionActivation(rawUrl);
     if (session) {
-      handlers.broadcastEvent(DESKTOP_TOAST_ACTIVATED_EVENT, session);
+      if (this.mainWindowReady) {
+        handlers.broadcastEvent(DESKTOP_TOAST_ACTIVATED_EVENT, session);
+      } else {
+        this.pendingSessionActivation = session;
+      }
     }
   }
 }
