@@ -259,7 +259,11 @@ impl EditorConfig {
             cmd.arg(target);
         }
         // Note: Explorer exits non-zero even on success, so we only spawn.
-        cmd.spawn().map_err(|e| fail(e.to_string()))?;
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| fail(e.to_string()))?;
         Ok(())
     }
 
@@ -390,7 +394,10 @@ impl EditorConfig {
         let (executable, args) = self.resolve_command().await?;
 
         let mut cmd = utils::process::new_hidden_std_command(&executable, &args);
-        cmd.arg(path);
+        cmd.arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
         cmd.spawn().map_err(|e| EditorOpenError::LaunchFailed {
             executable: executable.to_string_lossy().into_owned(),
             details: e.to_string(),

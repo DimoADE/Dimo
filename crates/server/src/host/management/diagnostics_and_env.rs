@@ -396,8 +396,12 @@ where
 async fn spawn_agent_management_terminal(command: &str) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", "cmd", "/K", command])
+        let mut cmd = std::process::Command::new("cmd");
+        utils::process::configure_std_command_no_window(&mut cmd);
+        cmd.args(["/C", "start", "", "cmd", "/K", command])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .map(|_| ())
     }
@@ -409,6 +413,9 @@ async fn spawn_agent_management_terminal(command: &str) -> std::io::Result<()> {
         );
         std::process::Command::new("osascript")
             .args(["-e", &script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .map(|_| ())
     }
@@ -421,6 +428,9 @@ async fn spawn_agent_management_terminal(command: &str) -> std::io::Result<()> {
                 .is_some()
                 && std::process::Command::new(terminal)
                     .args(["-e", "sh", "-lc", &run])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
                     .spawn()
                     .map(|_| ())
                     .is_ok()
@@ -715,7 +725,11 @@ pub(super) async fn build_environment_diagnostics(
         check(
             "app_version",
             "agents.environmentDiagnosticAppVersion",
-            env!("CARGO_PKG_VERSION").to_string(),
+            std::env::var("DIMO_APP_VERSION")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string()),
             AgentEnvironmentDiagnosticLevel::Info,
             None,
         ),

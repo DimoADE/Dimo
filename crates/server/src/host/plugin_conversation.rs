@@ -723,6 +723,9 @@ fn ensure_git_repo(dir: &Path) -> Result<(), PluginConversationError> {
     }
     let status = utils::process::new_hidden_std_command("git", ["init"])
         .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map_err(store_failed)?;
     if !status.success() {

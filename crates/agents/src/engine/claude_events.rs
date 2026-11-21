@@ -4,7 +4,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{Arc, OnceLock, RwLock},
     time::Duration,
 };
 
@@ -479,6 +479,28 @@ pub(super) fn serialize_sidecar_blocks(
     (single_text, out)
 }
 
+static CONFIGURED_CLAUDE_DRIVER_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Registers a trusted packaged `claude-native-driver.mjs` path (for example
+/// from `dimo-server --resources-dir`) so release builds resolve it without
+/// relying solely on executable-relative guesses.
+pub fn register_claude_driver_script(path: PathBuf) {
+    if path.is_file() {
+        let _ = CONFIGURED_CLAUDE_DRIVER_SCRIPT.set(path);
+    }
+}
+
+fn exe_relative_claude_driver_candidates(exe_dir: &Path) -> [PathBuf; 6] {
+    [
+        exe_dir.join("scripts/claude-native-driver.mjs"),
+        exe_dir.join("../scripts/claude-native-driver.mjs"),
+        exe_dir.join("resources/scripts/claude-native-driver.mjs"),
+        exe_dir.join("_up_/scripts/claude-native-driver.mjs"),
+        exe_dir.join("../Resources/scripts/claude-native-driver.mjs"),
+        exe_dir.join("../Resources/_up_/scripts/claude-native-driver.mjs"),
+    ]
+}
+
 /// Resolves `scripts/claude-native-driver.mjs` strictly from trusted host/bundle locations.
 /// Never searches `spec.working_dir` so untrusted workspace repositories cannot hijack execution.
 pub fn resolve_claude_driver_script(spec: &EngineStartSpec) -> Result<PathBuf, EngineError> {
@@ -497,6 +519,9 @@ pub fn resolve_claude_driver_script(spec: &EngineStartSpec) -> Result<PathBuf, E
     {
         candidates.push(PathBuf::from(env_script));
     }
+    if let Some(configured) = CONFIGURED_CLAUDE_DRIVER_SCRIPT.get() {
+        candidates.push(configured.clone());
+    }
 
     #[cfg(debug_assertions)]
     candidates
@@ -505,11 +530,7 @@ pub fn resolve_claude_driver_script(spec: &EngineStartSpec) -> Result<PathBuf, E
     if let Ok(exe) = std::env::current_exe()
         && let Some(exe_dir) = exe.parent()
     {
-        candidates.push(exe_dir.join("scripts/claude-native-driver.mjs"));
-        candidates.push(exe_dir.join("resources/scripts/claude-native-driver.mjs"));
-        candidates.push(exe_dir.join("_up_/scripts/claude-native-driver.mjs"));
-        candidates.push(exe_dir.join("../Resources/scripts/claude-native-driver.mjs"));
-        candidates.push(exe_dir.join("../Resources/_up_/scripts/claude-native-driver.mjs"));
+        candidates.extend(exe_relative_claude_driver_candidates(exe_dir));
     }
 
     #[cfg(not(debug_assertions))]
@@ -1086,4 +1107,29 @@ pub(super) fn encode_claude_question_answers(
         out.insert(key, Value::String(labels.join(", ")));
     }
     Value::Object(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exe_relative_claude_driver_candidates;
+
+    #[test]
+    fn packaged_electron_resources_bin_layout_resolves_sibling_scripts_driver() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let bin_dir = root.path().join("resources").join("bin");
+        let scripts_dir = root.path().join("resources").join("scripts");
+        std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+        std::fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+        let driver = scripts_dir.join("claude-native-driver.mjs");
+        std::fs::write(&driver, "export {};\n").expect("write driver");
+
+        let found = exe_relative_claude_driver_candidates(&bin_dir)
+            .into_iter()
+            .find(|candidate| candidate.is_file())
+            .expect("packaged driver script should resolve from resources/bin");
+        assert_eq!(
+            found.canonicalize().expect("canonical found"),
+            driver.canonicalize().expect("canonical driver")
+        );
+    }
 }

@@ -449,7 +449,9 @@ where
     )
     .await?
     {
-        println!("Using the user-environment CLI that already matches the planned versions.");
+        tracing::info!(
+            "Using the user-environment CLI that already matches the planned versions."
+        );
         for component in &adopted.components {
             on_progress(
                 60,
@@ -502,7 +504,7 @@ where
         }
         Err(error) => {
             if native_engine {
-                println!(
+                tracing::info!(
                     "Installed native runtime; readiness check will be retried when a session starts ({error})"
                 );
                 on_progress(
@@ -510,7 +512,7 @@ where
                     &format!("[verify] deferred until session start: {error}"),
                 );
             } else {
-                println!(
+                tracing::info!(
                     "Installed CLI; ACP handshake will be retried when a session starts ({error})"
                 );
                 on_progress(
@@ -543,13 +545,13 @@ where
         )
     };
     if native_engine {
-        println!(
+        tracing::info!(
             "Installed {} native runtime {}",
             plan.agent_id.as_str(),
             installation.launch_lock.runtime_version
         );
     } else {
-        println!(
+        tracing::info!(
             "Installed {} runtime {} / ACP {}",
             plan.agent_id.as_str(),
             installation.launch_lock.runtime_version,
@@ -900,7 +902,7 @@ where
         )
         .await
         {
-            println!(
+            tracing::info!(
                 "Reusing {} {} at {}",
                 component.component_id,
                 existing.1,
@@ -1307,7 +1309,7 @@ where
     if let Some(runtime) = system.as_ref() {
         let detected_version = probe_version(&runtime.node, &["--version"]).await;
         if node_runtime_satisfies_requirements(detected_version.as_deref(), node_requirements) {
-            println!("Using system Node.js at {}", runtime.node.display());
+            tracing::info!("Using system Node.js at {}", runtime.node.display());
             return Ok(ResolvedNodeRuntime {
                 runtime: runtime.clone(),
                 is_managed: false,
@@ -1324,10 +1326,10 @@ where
             "System Node.js ({version_label}) at {} does not satisfy `{req_label}`; falling back to Dimo-managed Node.js {MANAGED_NODE_VERSION}",
             runtime.node.display()
         );
-        println!("{message}");
+        tracing::info!("{message}");
         on_progress(14, &format!("[env] {message}"));
     } else {
-        println!(
+        tracing::info!(
             "System Node.js is unavailable; falling back to Dimo-managed Node.js {MANAGED_NODE_VERSION}"
         );
         on_progress(
@@ -1361,7 +1363,7 @@ fn export_bootstrapped_node(runtime: &NodeRuntime) -> anyhow::Result<()> {
         anyhow::bail!("managed Node.js did not contain node or npm executables to export");
     }
     for command in published {
-        println!(
+        tracing::info!(
             "Exported {} to {}",
             command.command_name,
             command.shim_path.display()
@@ -1381,7 +1383,7 @@ fn export_bootstrapped_bun(bin_dir: &Path) -> anyhow::Result<()> {
         anyhow::bail!("managed Bun did not contain a bun executable to export");
     }
     for command in published {
-        println!(
+        tracing::info!(
             "Exported {} to {}",
             command.command_name,
             command.shim_path.display()
@@ -1403,10 +1405,12 @@ fn host_shell_family() -> ShellFamily {
 
 async fn resolve_uv_runtime(managed_artifacts_dir: &Path) -> anyhow::Result<PathBuf> {
     if let Some(uv) = utils::shell::resolve_executable_path("uv").await {
-        println!("Using system uv at {}", uv.display());
+        tracing::info!("Using system uv at {}", uv.display());
         return Ok(uv);
     }
-    println!("System uv is unavailable; falling back to Dimo-managed uv {MANAGED_UV_VERSION}");
+    tracing::info!(
+        "System uv is unavailable; falling back to Dimo-managed uv {MANAGED_UV_VERSION}"
+    );
     ensure_managed_uv(managed_artifacts_dir).await
 }
 
@@ -1419,18 +1423,18 @@ async fn resolve_bun_runtime(
         && let Some(version) = probe_version(&bun, &["--version"]).await
         && version_at_least(&version, ">=1.3.14")
     {
-        println!("Using system Bun {version} at {}", bun.display());
+        tracing::info!("Using system Bun {version} at {}", bun.display());
         #[cfg(windows)]
         sync_windows_npm_bun_binary(&bun, user_env).await;
         return Ok(bun);
     }
-    println!(
+    tracing::info!(
         "System Bun (>=1.3.14) is unavailable; falling back to Dimo-managed Bun {MANAGED_BUN_VERSION}"
     );
     let bun = match ensure_managed_bun(managed_artifacts_dir).await {
         Ok(path) => path,
         Err(download_error) => {
-            println!(
+            tracing::warn!(
                 "Managed Bun archive download failed ({download_error}); trying npm fallback..."
             );
             install_bun_via_npm_fallback(node, user_env)
@@ -1553,11 +1557,11 @@ async fn download_archive(url: &str, limit: usize) -> anyhow::Result<Vec<u8>> {
 async fn download_archive_from(urls: &[String], limit: usize) -> anyhow::Result<(String, Vec<u8>)> {
     let mut errors = Vec::new();
     for url in urls {
-        println!("GET {url}");
+        tracing::info!("GET {url}");
         match download_archive(url, limit).await {
             Ok(bytes) => return Ok((url.clone(), bytes)),
             Err(error) => {
-                println!("download failed: {url}: {error}");
+                tracing::warn!("download failed: {url}: {error}");
                 errors.push(format!("{url}: {error}"));
             }
         }
@@ -1574,7 +1578,7 @@ async fn ensure_managed_node(managed_artifacts_dir: &Path) -> anyhow::Result<Nod
     if tokio::fs::metadata(&runtime.node).await.is_ok()
         && tokio::fs::metadata(&runtime.npm).await.is_ok()
     {
-        println!(
+        tracing::info!(
             "Using managed Node.js {MANAGED_NODE_VERSION}: {}",
             runtime.node.display()
         );
@@ -1589,7 +1593,7 @@ async fn ensure_managed_node(managed_artifacts_dir: &Path) -> anyhow::Result<Nod
     let staging = base.join(format!(".staging-{}", Uuid::new_v4()));
     tokio::fs::create_dir_all(&staging).await?;
     let urls = managed_node_download_urls(&artifact);
-    println!("Downloading managed Node.js {MANAGED_NODE_VERSION} ({platform})");
+    tracing::info!("Downloading managed Node.js {MANAGED_NODE_VERSION} ({platform})");
     let result = async {
         let (url, bytes) = download_archive_from(&urls, MAX_MANAGED_TOOL_BYTES).await?;
         let actual = format!("{:x}", Sha256::digest(&bytes));
@@ -1636,7 +1640,7 @@ async fn ensure_managed_node(managed_artifacts_dir: &Path) -> anyhow::Result<Nod
         {
             anyhow::bail!("installed managed Node.js is missing node or npm");
         }
-        println!("Managed Node.js {MANAGED_NODE_VERSION} installed");
+        tracing::info!("Managed Node.js {MANAGED_NODE_VERSION} installed");
         Ok(runtime)
     }
     .await;

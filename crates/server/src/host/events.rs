@@ -16,7 +16,19 @@ use serde::Serialize;
 use tokio::{sync::broadcast, task::JoinHandle};
 use uuid::Uuid;
 
-const BUS_CAPACITY: usize = 4096;
+pub(crate) const BUS_CAPACITY: usize = 16_384;
+
+const PATCH_STREAM_PREFIXES: &[&str] = &[
+    "file-tree-stream",
+    "projects-stream",
+    "project-workspaces-stream",
+    "execution-processes-stream",
+    "diff-stream",
+    "conversation-stream",
+    "scratch-stream",
+    "slash-commands-stream",
+    "log-stream",
+];
 
 tokio::task_local! {
     static CURRENT_BUS: Arc<HostEventBus>;
@@ -289,6 +301,7 @@ pub struct HostEvent {
 #[derive(Clone)]
 pub struct HostEventBus {
     tx: broadcast::Sender<HostEvent>,
+    patch_tx: broadcast::Sender<HostEvent>,
     sequence: Arc<AtomicI64>,
     last_invalidation: Arc<RwLock<HashMap<String, HostEvent>>>,
     stream_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
@@ -304,8 +317,10 @@ impl Default for HostEventBus {
 impl HostEventBus {
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(BUS_CAPACITY);
+        let (patch_tx, _) = broadcast::channel(BUS_CAPACITY);
         Self {
             tx,
+            patch_tx,
             sequence: Arc::new(AtomicI64::new(0)),
             last_invalidation: Arc::new(RwLock::new(HashMap::new())),
             stream_tasks: Arc::new(Mutex::new(HashMap::new())),
@@ -407,13 +422,52 @@ impl HostEventBus {
             {
                 last.remove(&evict_key);
             }
-            last.insert(channel, event.clone());
+            last.insert(channel.clone(), event.clone());
+        }
+        if Self::is_patch_stream_channel(&channel) {
+            let _ = self.patch_tx.send(event.clone());
         }
         let _ = self.tx.send(event);
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<HostEvent> {
         self.tx.subscribe()
+    }
+
+    /// Subscribe exclusively to RFC 6902 patch-stream events, isolated from
+    /// high-volume best-effort bursts such as `terminal-output` and `logs://appended`.
+    pub fn subscribe_patch_streams(&self) -> broadcast::Receiver<HostEvent> {
+        self.patch_tx.subscribe()
+    }
+
+    pub fn is_patch_stream_channel(channel: &str) -> bool {
+        Self::descriptor(channel)
+            .is_some_and(|descriptor| PATCH_STREAM_PREFIXES.contains(&descriptor.prefix))
+    }
+
+    /// Return cached latest `Invalidation` events matching `channel` newer than
+    /// `after_sequence`, ordered by sequence. Used to recover after a broadcast lag.
+    pub fn latest_invalidations_for(
+        &self,
+        channel: &str,
+        exact: bool,
+        after_sequence: i64,
+    ) -> Vec<HostEvent> {
+        let Ok(last) = self.last_invalidation.read() else {
+            return Vec::new();
+        };
+        let prefix = format!("{channel}:");
+        let mut events = last
+            .values()
+            .filter(|event| {
+                event.sequence > after_sequence
+                    && (event.channel == channel
+                        || (!exact && event.channel.starts_with(&prefix)))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        events.sort_by_key(|event| event.sequence);
+        events
     }
 
     pub fn descriptor(channel: &str) -> Option<&'static HostEventChannel> {

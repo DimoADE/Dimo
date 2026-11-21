@@ -51,6 +51,11 @@ pub fn plan_host_upgrade(
 }
 
 pub fn apply_host_upgrade(plan: &HostUpgradePlan) -> Result<PathBuf, HostUpgradeError> {
+    if cfg!(windows) && is_running_exe_dir(&plan.install_dir) {
+        return Err(HostUpgradeError::Invalid(
+            "in-place host upgrade cannot overwrite the running Windows executable; stop dimo-server or use the desktop installer".into(),
+        ));
+    }
     verify_checksums(&plan.release_dir)?;
     let stamp = chrono::Utc::now().format("%Y%m%d%H%M%S").to_string();
     let snapshot = plan.snapshot_dir.join(stamp);
@@ -59,10 +64,17 @@ pub fn apply_host_upgrade(plan: &HostUpgradePlan) -> Result<PathBuf, HostUpgrade
     } else {
         fs::create_dir_all(&snapshot)?;
     }
-    for name in ["dimo-server", "dimo-mcp", "dimo-server.exe", "dimo-mcp.exe"] {
+    for name in [
+        "dimo-server",
+        "dimo-mcp",
+        "dimo-computer-helper",
+        "dimo-server.exe",
+        "dimo-mcp.exe",
+        "dimo-computer-helper.exe",
+    ] {
         let source = plan.release_dir.join(name);
         if source.is_file() {
-            fs::copy(source, plan.install_dir.join(name))?;
+            replace_binary(&source, &plan.install_dir.join(name))?;
         }
     }
     if plan.release_dir.join("web").is_dir() {
@@ -73,6 +85,43 @@ pub fn apply_host_upgrade(plan: &HostUpgradePlan) -> Result<PathBuf, HostUpgrade
         copy_dir(&plan.release_dir.join("web"), &web)?;
     }
     Ok(snapshot)
+}
+
+fn is_running_exe_dir(install_dir: &Path) -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let Some(exe_dir) = exe.parent() else {
+        return false;
+    };
+    let norm_install = fs::canonicalize(install_dir).unwrap_or_else(|_| install_dir.to_path_buf());
+    let norm_exe = fs::canonicalize(exe_dir).unwrap_or_else(|_| exe_dir.to_path_buf());
+    if cfg!(windows) {
+        norm_install
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&norm_exe.to_string_lossy())
+    } else {
+        norm_install == norm_exe
+    }
+}
+
+fn replace_binary(source: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        let file_name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("binary");
+        let staged = destination.with_file_name(format!(".{file_name}.upgrade.tmp"));
+        fs::copy(source, &staged)?;
+        fs::rename(&staged, destination)?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::copy(source, destination)?;
+        Ok(())
+    }
 }
 
 fn verify_checksums(release_dir: &Path) -> Result<(), HostUpgradeError> {

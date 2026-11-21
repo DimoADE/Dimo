@@ -852,6 +852,16 @@ pub fn terminate_std_child_group(child: &mut std::process::Child) {
             let _ = killpg(pgid, Signal::SIGKILL);
         }
     }
+    #[cfg(windows)]
+    {
+        let mut cmd = std::process::Command::new("taskkill");
+        cmd.args(["/F", "/T", "/PID", &child.id().to_string()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        configure_std_command_no_window(&mut cmd);
+        let _ = cmd.status();
+    }
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -889,12 +899,14 @@ pub async fn kill_process_group(child: &mut AsyncGroupChild) -> std::io::Result<
 
     #[cfg(windows)]
     if let Some(pid) = child.id() {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/T", "/PID", &pid.to_string()])
+        let mut cmd = tokio::process::Command::new("taskkill");
+        cmd.args(["/F", "/T", "/PID", &pid.to_string()])
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
-            .status();
+            .kill_on_drop(true);
+        configure_tokio_command_no_window(&mut cmd);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.status()).await;
     }
 
     let _ = child.kill().await;

@@ -427,8 +427,20 @@ async fn resolve_effective_proxy_source() -> String {
     }
 }
 
+fn runtime_app_version() -> String {
+    std::env::var("DIMO_APP_VERSION")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| utils::version::APP_VERSION.to_string())
+}
+
+fn is_desktop_mode() -> bool {
+    std::env::args().any(|arg| arg == "--desktop")
+}
+
 pub(super) async fn check_app_release() -> Result<Value, ApplicationError> {
-    let current_version = utils::version::APP_VERSION.to_string();
+    let current_version = runtime_app_version();
     let repository = std::env::var("DIMO_UPDATE_REPOSITORY")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -458,7 +470,7 @@ pub(super) async fn check_app_release() -> Result<Value, ApplicationError> {
                 latest_version: latest.clone(),
                 update_available: latest
                     .as_deref()
-                    .is_some_and(|latest| latest != current_version),
+                    .is_some_and(|latest| utils::version::is_newer(latest, &current_version)),
                 release_url: body
                     .get("html_url")
                     .and_then(Value::as_str)
@@ -528,7 +540,17 @@ struct HostUpgradeResult {
 }
 
 pub(super) async fn apply_host_upgrade() -> Result<Value, ApplicationError> {
-    let current = utils::version::APP_VERSION.to_string();
+    if is_desktop_mode() {
+        return Err(ApplicationError::bad_request(
+            "In-place host upgrade is unavailable in desktop mode; use the desktop application updater instead",
+        ));
+    }
+    if cfg!(windows) {
+        return Err(ApplicationError::bad_request(
+            "In-place host upgrade is not supported on Windows because running executables cannot be overwritten",
+        ));
+    }
+    let current = runtime_app_version();
     let latest = latest_release_version().await?;
     if !utils::version::is_newer(&latest, &current) {
         return Err(ApplicationError::bad_request(
@@ -676,15 +698,36 @@ fn extract_tar_gz(archive: &Path, destination: &Path) -> Result<(), String> {
 }
 
 fn schedule_host_restart() {
-    tokio::spawn(async {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let _ = std::process::Command::new("systemctl")
-            .args(["restart", "dimo-server.service"])
-            .status();
-        let _ = std::process::Command::new("systemctl")
-            .args(["--user", "restart", "dimo-server.service"])
-            .status();
-    });
+    if is_desktop_mode() {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let system_ok = tokio::process::Command::new("systemctl")
+                .args(["restart", "dimo-server.service"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await
+                .is_ok_and(|status| status.success());
+            if !system_ok {
+                let _ = tokio::process::Command::new("systemctl")
+                    .args(["--user", "restart", "dimo-server.service"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .await;
+            }
+        });
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        tracing::info!("host upgrade applied; restart dimo-server to load updated binaries");
+    }
 }
 
 pub(super) async fn worktree_cleanup(

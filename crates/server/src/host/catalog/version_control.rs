@@ -389,11 +389,13 @@ fn build_windows_cmd_args(gh_path: &Path, host: &str) -> Vec<String> {
 
 #[cfg(target_os = "windows")]
 fn spawn_visible_terminal(gh_path: &Path, host: &str, _command: &str) -> std::io::Result<()> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-    std::process::Command::new("cmd.exe")
+    let mut cmd = std::process::Command::new("cmd.exe");
+    utils::process::configure_std_command_no_window(&mut cmd);
+    cmd.args(["/C", "start", "", "cmd.exe"])
         .args(build_windows_cmd_args(gh_path, host))
-        .creation_flags(CREATE_NEW_CONSOLE)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .map(|_| ())
 }
@@ -406,6 +408,9 @@ fn spawn_visible_terminal(_gh_path: &Path, _host: &str, command: &str) -> std::i
     );
     std::process::Command::new("osascript")
         .args(["-e", &script])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .map(|_| ())
 }
@@ -417,6 +422,9 @@ fn spawn_visible_terminal(_gh_path: &Path, _host: &str, command: &str) -> std::i
         if which::which(terminal).is_ok()
             && std::process::Command::new(terminal)
                 .args(["-e", "sh", "-lc", &run])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .spawn()
                 .map(|_| ())
                 .is_ok()

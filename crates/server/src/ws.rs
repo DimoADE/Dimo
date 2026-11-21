@@ -52,6 +52,10 @@ enum ActiveSubscription {
         after_sequence: i64,
         exact: bool,
     },
+    PatchStream {
+        channel: String,
+        after_sequence: i64,
+    },
 }
 
 impl ActiveSubscription {
@@ -59,7 +63,8 @@ impl ActiveSubscription {
         match self {
             Self::Conversation { after_sequence, .. }
             | Self::WorkflowRun { after_sequence, .. }
-            | Self::HostEvent { after_sequence, .. } => *after_sequence,
+            | Self::HostEvent { after_sequence, .. }
+            | Self::PatchStream { after_sequence, .. } => *after_sequence,
         }
     }
 
@@ -67,7 +72,8 @@ impl ActiveSubscription {
         match self {
             Self::Conversation { after_sequence, .. }
             | Self::WorkflowRun { after_sequence, .. }
-            | Self::HostEvent { after_sequence, .. } => *after_sequence = sequence,
+            | Self::HostEvent { after_sequence, .. }
+            | Self::PatchStream { after_sequence, .. } => *after_sequence = sequence,
         }
     }
 }
@@ -158,6 +164,7 @@ async fn handle_socket<R>(
     keepalive_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let principal = credential.principal();
     let mut host_events = state.events.subscribe();
+    let mut patch_events = state.events.subscribe_patch_streams();
 
     loop {
         tokio::select! {
@@ -246,10 +253,72 @@ async fn handle_socket<R>(
                     Err(_) => break,
                 }
             }
+            patch_event = patch_events.recv() => {
+                let event = match patch_event {
+                    Ok(event) => event,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(
+                            skipped,
+                            "websocket patch stream receiver lagged; detaching active patch streams for snapshot resync"
+                        );
+                        if detach_lagged_patch_streams(
+                            skipped,
+                            &mut subscriptions,
+                            &mut patch_streams,
+                            &mut sender,
+                            ws_e2ee_key.as_ref(),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                };
+                let matches = subscriptions
+                    .iter()
+                    .filter(|(_, subscription)| match subscription {
+                        ActiveSubscription::PatchStream {
+                            channel,
+                            after_sequence,
+                        } => event.sequence > *after_sequence && *channel == event.channel,
+                        _ => false,
+                    })
+                    .map(|(id, _)| *id)
+                    .collect::<Vec<_>>();
+                for subscription_id in matches {
+                    if let Some(subscription) = subscriptions.get_mut(&subscription_id) {
+                        subscription.advance(event.sequence);
+                    }
+                    if send_message(
+                        &mut sender,
+                        SubscriptionServerMessage::Event {
+                            subscription_id,
+                            event: RemoteEvent {
+                                sequence: event.sequence,
+                                kind: event.channel.clone(),
+                                payload: event.payload.clone(),
+                            },
+                        },
+                        ws_e2ee_key.as_ref(),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
             host_event = host_events.recv() => {
                 let event = match host_event {
                     Ok(event) => event,
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(
+                            skipped,
+                            "websocket host event receiver lagged; reconciling durable subscriptions and invalidations"
+                        );
                         if has_durable_subscriptions(&subscriptions)
                             && reconcile_durable_subscriptions(
                                 state.as_ref(),
@@ -261,6 +330,18 @@ async fn handle_socket<R>(
                             )
                             .await
                             .is_err()
+                        {
+                            break;
+                        }
+                        if recover_lagged_host_events(
+                            state.as_ref(),
+                            skipped,
+                            &mut subscriptions,
+                            &mut sender,
+                            ws_e2ee_key.as_ref(),
+                        )
+                        .await
+                        .is_err()
                         {
                             break;
                         }
@@ -352,6 +433,104 @@ async fn handle_socket<R>(
     }
 }
 
+async fn detach_lagged_patch_streams<S>(
+    skipped: u64,
+    subscriptions: &mut HashMap<SubscriptionId, ActiveSubscription>,
+    patch_streams: &mut PatchStreamRegistry<'_>,
+    sender: &mut S,
+    e2ee_key: Option<&[u8; 32]>,
+) -> Result<(), ()>
+where
+    S: futures::Sink<Message> + Unpin,
+{
+    let lagged_ids = subscriptions
+        .iter()
+        .filter_map(|(id, subscription)| {
+            matches!(subscription, ActiveSubscription::PatchStream { .. }).then_some(*id)
+        })
+        .collect::<Vec<_>>();
+    for subscription_id in lagged_ids {
+        subscriptions.remove(&subscription_id);
+        patch_streams.release(&subscription_id);
+        send_message(
+            sender,
+            SubscriptionServerMessage::Detached {
+                subscription_id,
+                reason: format!(
+                    "patch stream lagged by {skipped} messages; reconnect to resync snapshot"
+                ),
+            },
+            e2ee_key,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn recover_lagged_host_events<R, S>(
+    state: &ServerState<R>,
+    skipped: u64,
+    subscriptions: &mut HashMap<SubscriptionId, ActiveSubscription>,
+    sender: &mut S,
+    e2ee_key: Option<&[u8; 32]>,
+) -> Result<(), ()>
+where
+    R: ConversationRepository + Send + Sync + 'static,
+    S: futures::Sink<Message> + Unpin,
+{
+    let host_subs = subscriptions
+        .iter()
+        .filter_map(|(id, subscription)| match subscription {
+            ActiveSubscription::HostEvent {
+                channel,
+                after_sequence,
+                exact,
+            } => Some((*id, channel.clone(), *after_sequence, *exact)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    for (subscription_id, channel, after_sequence, exact) in host_subs {
+        if crate::HostEventBus::is_patch_stream_channel(&channel) {
+            subscriptions.remove(&subscription_id);
+            send_message(
+                sender,
+                SubscriptionServerMessage::Detached {
+                    subscription_id,
+                    reason: format!(
+                        "event stream lagged by {skipped} messages; reconnect to resync snapshot"
+                    ),
+                },
+                e2ee_key,
+            )
+            .await?;
+            continue;
+        }
+        for event in state
+            .events
+            .latest_invalidations_for(&channel, exact, after_sequence)
+        {
+            if let Some(subscription) = subscriptions.get_mut(&subscription_id) {
+                subscription.advance(event.sequence);
+            }
+            send_message(
+                sender,
+                SubscriptionServerMessage::Event {
+                    subscription_id,
+                    event: RemoteEvent {
+                        sequence: event.sequence,
+                        kind: event.channel,
+                        payload: event.payload,
+                    },
+                },
+                e2ee_key,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 fn conversation_wake_target(channel: &str) -> Option<Option<uuid::Uuid>> {
     if channel == "conversation-events" {
         return Some(None);
@@ -378,7 +557,10 @@ where
         .iter()
         .filter(
             |(_, subscription)| match (subscription, conversation_filter) {
-                (ActiveSubscription::HostEvent { .. }, _) => false,
+                (
+                    ActiveSubscription::HostEvent { .. } | ActiveSubscription::PatchStream { .. },
+                    _,
+                ) => false,
                 (
                     ActiveSubscription::Conversation {
                         conversation_id, ..
@@ -394,7 +576,9 @@ where
         .collect::<Vec<_>>();
     for (subscription_id, subscription) in active {
         let bootstrap = match subscription {
-            ActiveSubscription::HostEvent { .. } => continue,
+            ActiveSubscription::HostEvent { .. } | ActiveSubscription::PatchStream { .. } => {
+                continue;
+            }
             ActiveSubscription::Conversation {
                 conversation_id,
                 after_sequence,
@@ -629,10 +813,9 @@ where
             let after_sequence = bootstrap.high_water_mark;
             subscriptions.insert(
                 request.subscription_id,
-                ActiveSubscription::HostEvent {
+                ActiveSubscription::PatchStream {
                     channel: channel.clone(),
                     after_sequence,
-                    exact: true,
                 },
             );
             let task_key =
@@ -648,10 +831,9 @@ where
             patch_streams.track(request.subscription_id, task_key);
             Ok((
                 bootstrap,
-                ActiveSubscription::HostEvent {
+                ActiveSubscription::PatchStream {
                     channel,
                     after_sequence,
-                    exact: true,
                 },
             ))
         }
@@ -998,5 +1180,84 @@ mod tests {
 
         server.abort();
         drop(headless);
+    }
+
+    #[tokio::test]
+    async fn patch_stream_receiver_is_isolated_from_terminal_output_bursts() {
+        let bus = crate::HostEventBus::new();
+        let mut host_rx = bus.subscribe();
+        let mut patch_rx = bus.subscribe_patch_streams();
+
+        bus.emit("projects-stream", serde_json::json!({ "seq": "before" }));
+        for i in 0..(crate::host::events::BUS_CAPACITY + 64) {
+            bus.emit("terminal-output:00000000-0000-0000-0000-000000000000", i);
+        }
+        bus.emit("projects-stream", serde_json::json!({ "seq": "after" }));
+
+        // The general host receiver lags under the terminal burst,
+        // while the dedicated patch receiver retains both patch events intact.
+        assert!(matches!(
+            host_rx.recv().await,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+        ));
+        let first = patch_rx.recv().await.expect("first patch event");
+        let second = patch_rx.recv().await.expect("second patch event");
+        assert_eq!(first.payload, serde_json::json!({ "seq": "before" }));
+        assert_eq!(second.payload, serde_json::json!({ "seq": "after" }));
+    }
+
+    #[tokio::test]
+    async fn detach_lagged_patch_streams_emits_detached_and_keeps_non_patch_subscriptions() {
+        let bus = crate::HostEventBus::new();
+        let mut patch_streams = PatchStreamRegistry::new(&bus);
+        let patch_sub_id = SubscriptionId::new();
+        let host_sub_id = SubscriptionId::new();
+        patch_streams.track(patch_sub_id, "projects-stream".to_string());
+
+        let mut subscriptions = HashMap::new();
+        subscriptions.insert(
+            patch_sub_id,
+            ActiveSubscription::PatchStream {
+                channel: "projects-stream".to_string(),
+                after_sequence: 1,
+            },
+        );
+        subscriptions.insert(
+            host_sub_id,
+            ActiveSubscription::HostEvent {
+                channel: "theme-changed".to_string(),
+                after_sequence: 1,
+                exact: false,
+            },
+        );
+
+        let (mut sink, rx) = futures::channel::mpsc::unbounded::<Message>();
+        detach_lagged_patch_streams(42, &mut subscriptions, &mut patch_streams, &mut sink, None)
+            .await
+            .expect("detach lagged patch streams");
+        drop(sink);
+        let sent = rx.collect::<Vec<_>>().await;
+
+        assert!(!subscriptions.contains_key(&patch_sub_id));
+        assert!(subscriptions.contains_key(&host_sub_id));
+        assert_eq!(sent.len(), 1);
+        let Message::Text(text) = &sent[0] else {
+            panic!("expected text websocket frame");
+        };
+        let parsed: SubscriptionServerMessage =
+            serde_json::from_str(text).expect("parse server message");
+        match parsed {
+            SubscriptionServerMessage::Detached {
+                subscription_id,
+                reason,
+            } => {
+                assert_eq!(subscription_id, patch_sub_id);
+                assert!(
+                    reason.contains("42"),
+                    "reason should mention skipped message count"
+                );
+            }
+            other => panic!("expected Detached message, got {other:?}"),
+        }
     }
 }
