@@ -628,6 +628,19 @@ fn is_dimo_published_shim(contents: &[u8]) -> bool {
     shim_marker_owner(contents).is_some() || toolchain_shim_marker_owner(contents).is_some()
 }
 
+/// Whether `path` is a Dimo-published toolchain shim (`node`, `npm`, `npx`, `bun`, ...).
+pub fn path_is_dimo_toolchain_shim(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() > MAX_SHIM_BYTES {
+        return false;
+    }
+    fs::read(path)
+        .ok()
+        .is_some_and(|contents| toolchain_shim_marker_owner(&contents).is_some())
+}
+
 /// Remove shims Dimo published whose target no longer exists.
 ///
 /// A shim outlives the installation it points at: the managed tree is deleted,
@@ -1943,6 +1956,35 @@ mod tests {
         } else {
             assert_eq!(toolchain_command_path(bin, "bun"), bin.join("bun"));
             assert_eq!(toolchain_command_path(bin, "uv"), bin.join("uv"));
+        }
+    }
+
+    #[test]
+    fn path_is_dimo_toolchain_shim_distinguishes_dimo_shims_from_user_node() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let toolchain = temp.path().join("node-24");
+        fs::create_dir_all(&toolchain).unwrap();
+        let node_bin = toolchain_command_path(&toolchain, "node");
+        fs::write(&node_bin, "fake-node").unwrap();
+
+        let published =
+            publish_user_toolchain_commands(&home, &toolchain, &["node"], host_shell_for_test())
+                .unwrap();
+        assert_eq!(published.len(), 1);
+        assert!(path_is_dimo_toolchain_shim(&published[0].shim_path));
+
+        let user_node = temp.path().join("user-node.cmd");
+        fs::write(&user_node, "@echo off\r\necho v22.22.3\r\n").unwrap();
+        assert!(!path_is_dimo_toolchain_shim(&user_node));
+        assert!(!path_is_dimo_toolchain_shim(&temp.path().join("missing")));
+    }
+
+    fn host_shell_for_test() -> ShellFamily {
+        if cfg!(windows) {
+            ShellFamily::Windows
+        } else {
+            ShellFamily::Posix
         }
     }
 }

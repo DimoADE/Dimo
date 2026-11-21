@@ -334,4 +334,98 @@ describe('empty tab bar prevention', () => {
 
     api.dispose();
   });
+
+  it('closes remembered background browser tabs when Dockview removes the panel, but preserves them during layout resets', async () => {
+    const backendTransport = await import('@/lib/backendTransport');
+    const backendSpy = vi
+      .spyOn(backendTransport, 'backendCall')
+      .mockResolvedValue({ ok: true });
+    const lifetime = await import('@/features/host-browser/browserPanelLifetime');
+    lifetime.clearAllBrowserSurfaces();
+
+    useLayoutStore.getState().resetLayout();
+    const projectKey = useLayoutStore.getState().currentProjectKey;
+    const api = createApi();
+    const isResettingRef = { current: false };
+    const lastDropTargetZoneRef: { current: DropTargetZone } = {
+      current: null,
+    };
+    const cleanup = attachDockviewWorkspaceListeners(api, {
+      apiRef: { current: api },
+      dockviewRootEl: null,
+      isResettingRef,
+      isCollapsedRef: { current: false },
+      lastDropTargetZoneRef,
+      layoutChangeTimerRef: { current: null },
+      lastSelfHealAtRef: { current: 0 },
+      registerDndGuard: (dockApi) =>
+        registerDockviewOverlayDropGuard(dockApi, lastDropTargetZoneRef),
+      applyArrangement: vi.fn(),
+      setSerializedLayout: vi.fn(),
+      setRightPanelWidth: vi.fn(),
+    });
+
+    const { welcome } = buildWelcomeAndSessionGroup(api);
+    const resetBrowserId = 'plugin:dimo.browser/browser:reset-keep';
+    const resetPanel = api.addPanel({
+      id: resetBrowserId,
+      component: 'plugin-panel',
+      title: 'Keep On Reset',
+      position: { referenceGroup: welcome.group, direction: 'within' },
+    });
+    const resetKey = lifetime.browserPanelSurfaceKey(
+      projectKey,
+      resetBrowserId,
+      'dockview'
+    );
+    lifetime.rememberBrowserSurface(
+      resetKey,
+      { tabId: 'tab-reset-keep', url: 'https://example.com/keep' },
+      'dimo.browser'
+    );
+
+    isResettingRef.current = true;
+    api.removePanel(resetPanel);
+    isResettingRef.current = false;
+
+    expect(backendSpy).not.toHaveBeenCalled();
+    expect(lifetime.recallBrowserSurface(resetKey)?.tabId).toBe(
+      'tab-reset-keep'
+    );
+
+    const closedBrowserId = 'plugin:dimo.browser/browser:bg-close';
+    const closedPanel = api.addPanel({
+      id: closedBrowserId,
+      component: 'plugin-panel',
+      title: 'Background Browser',
+      position: { referenceGroup: welcome.group, direction: 'within' },
+    });
+    const closedKey = lifetime.browserPanelSurfaceKey(
+      projectKey,
+      closedBrowserId,
+      'dockview'
+    );
+    lifetime.rememberBrowserSurface(
+      closedKey,
+      { tabId: 'tab-bg-close', url: 'https://example.com/bg' },
+      'dimo.browser'
+    );
+
+    api.removePanel(closedPanel);
+
+    expect(backendSpy).toHaveBeenCalledWith('plugin_invoke_contribution', {
+      pluginId: 'dimo.browser',
+      handler: 'browser.dispatch',
+      input: {
+        operation: 'tab.close',
+        input: { tabId: 'tab-bg-close' },
+      },
+    });
+    expect(lifetime.recallBrowserSurface(closedKey)).toBeUndefined();
+
+    backendSpy.mockRestore();
+    lifetime.clearAllBrowserSurfaces();
+    cleanup();
+    api.dispose();
+  });
 });

@@ -7,7 +7,7 @@ import {
   useState,
 } from 'react';
 import { UNSAFE_LocationContext } from 'react-router-dom';
-import { listen } from '@tauri-apps/api/event';
+import { backendListen } from '@/lib/backendTransport';
 import {
   ChevronDown,
   Laptop,
@@ -48,7 +48,7 @@ import { AppSurfaceHost } from '@/components/plugins/AppSurfaceHost';
 import { contributionIconComponent } from '@/components/plugins/contributionIcon';
 import { createBackendAppSurfaceTransport } from '@/lib/api/appSurfaceTransport';
 import { createPluginControlApi } from '@/lib/api/plugins';
-import { tauriBackendTransport } from '@/lib/transport';
+import { getLocalDesktopTransport } from '@/lib/transport';
 import {
   localProvisionerSurfaces,
   prefillProvisionerSettings,
@@ -149,9 +149,12 @@ function useLocalProvisioners() {
   const [panels, setPanels] = useState<LocalProvisionerSurface[]>([]);
   const [openId, setOpenId] = useState<string | null>(null);
   const [surfaceReloadKey, setSurfaceReloadKey] = useState(0);
-  const api = useMemo(() => createPluginControlApi(tauriBackendTransport), []);
+  const api = useMemo(
+    () => createPluginControlApi(getLocalDesktopTransport()),
+    []
+  );
   const surfaceTransport = useMemo(
-    () => createBackendAppSurfaceTransport(tauriBackendTransport),
+    () => createBackendAppSurfaceTransport(getLocalDesktopTransport()),
     []
   );
 
@@ -341,7 +344,7 @@ export function RemoteClientSettings() {
   useEffect(() => {
     let cancelled = false;
     let stop: (() => void) | undefined;
-    void listen('host-client-changed', () => {
+    void backendListen<void>('host-client-changed', () => {
       if (!cancelled) void loadStatus().catch(() => undefined);
     })
       .then((unlisten) => {

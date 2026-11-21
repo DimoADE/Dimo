@@ -42,6 +42,34 @@ pub(crate) struct ServerState<R> {
     pub(crate) events: Arc<crate::HostEventBus>,
     pub(crate) plugin_control_plane: Option<Arc<plugins::PluginControlPlane>>,
     pub(crate) idempotency_ledger: Option<crate::SqliteIdempotencyLedger>,
+    pub(crate) desktop: Option<crate::desktop::DesktopRuntimeState>,
+}
+
+impl<R> ServerState<R> {
+    pub(crate) async fn is_credential_active(
+        &self,
+        credential: &AuthenticatedCredential,
+    ) -> Result<bool, AuthStoreError> {
+        if self.desktop.is_some() && credential.is_host_console_owner() {
+            return Ok(true);
+        }
+        self.auth.is_active(credential).await
+    }
+
+    pub(crate) async fn authenticate_bearer_token(
+        &self,
+        token: &str,
+        headers: &HeaderMap,
+    ) -> Result<Option<AuthenticatedCredential>, AuthStoreError> {
+        if let Some(desktop) = self.desktop.as_ref()
+            && !headers.contains_key("x-forwarded-for")
+            && !headers.contains_key("x-real-ip")
+            && desktop.token_digest.verifies(token)
+        {
+            return Ok(Some(AuthenticatedCredential::host_console_owner()));
+        }
+        self.auth.authenticate(token).await
+    }
 }
 
 pub struct ServerRuntime<R> {
@@ -194,6 +222,7 @@ where
                 events,
                 plugin_control_plane: None,
                 idempotency_ledger: None,
+                desktop: None,
             }),
         }
     }
@@ -234,8 +263,20 @@ impl ServerRuntime<application::SqliteConversationRepository> {
                 events: host.events.clone(),
                 plugin_control_plane: Some(host.plugin_control_plane.clone()),
                 idempotency_ledger: None,
+                desktop: None,
             }),
         }
+    }
+
+    pub fn with_desktop(mut self, desktop: crate::desktop::DesktopRuntimeState) -> Self {
+        if let Some(state) = Arc::get_mut(&mut self.state) {
+            state.desktop = Some(desktop);
+            let desktop_electron = CapabilityId::new("desktop.electron");
+            if !state.capabilities.capabilities.contains(&desktop_electron) {
+                state.capabilities.capabilities.push(desktop_electron);
+            }
+        }
+        self
     }
 }
 
@@ -279,7 +320,7 @@ where
                 Arc::clone(&self.state),
                 require_token::<R>,
             ));
-        Router::new()
+        let app = Router::new()
             .route("/health", get(health::<R>))
             .route("/api/v1/e2ee/handshake", get(health::<R>))
             .route("/api/v1/auth/pairings/redeem", post(redeem_pairing::<R>))
@@ -307,10 +348,17 @@ where
             .nest(
                 "/api/pulse",
                 crate::pulse_http::pulse_router::<R>(Arc::clone(&self.state)),
-            )
+            );
+        let mut app = app
             .fallback(get(static_asset::<R>))
-            .with_state(Arc::clone(&self.state))
-            .layer(middleware::from_fn(crate::e2ee::e2ee_middleware))
+            .with_state(Arc::clone(&self.state));
+        if let Some(desktop) = self.state.desktop.clone() {
+            app = app.nest(
+                "/api/v1/desktop",
+                crate::desktop::routes::desktop_router(desktop),
+            );
+        }
+        app.layer(middleware::from_fn(crate::e2ee::e2ee_middleware))
             .layer(middleware::from_fn_with_state(
                 Arc::clone(&self.state),
                 enforce_origin::<R>,
@@ -633,12 +681,12 @@ fn apply_cors_headers(headers: &mut HeaderMap, origin: &str) {
     }
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_static("GET, POST, DELETE, OPTIONS"),
+        HeaderValue::from_static("GET, POST, PUT, PATCH, DELETE, OPTIONS"),
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,
         HeaderValue::from_static(
-            "authorization, content-type, x-dimo-protocol-version, x-dimo-e2ee, x-dimo-e2ee-client-pub, x-dimo-e2ee-server-pub, x-dimo-e2ee-session, x-dimo-e2ee-auth",
+            "authorization, content-type, x-dimo-protocol-version, x-dimo-window-label, x-dimo-e2ee, x-dimo-e2ee-client-pub, x-dimo-e2ee-server-pub, x-dimo-e2ee-session, x-dimo-e2ee-auth",
         ),
     );
     headers.insert(
@@ -827,7 +875,10 @@ pub(crate) async fn require_token<R>(
                 .and_then(ws_token_from_protocols)
         });
     if let Some(candidate) = candidate {
-        match state.auth.authenticate(&candidate).await {
+        match state
+            .authenticate_bearer_token(&candidate, request.headers())
+            .await
+        {
             Ok(Some(credential)) => {
                 if let Some(device_id) = credential.device_id {
                     let ip_address = extract_client_ip(request.headers(), state.config.listen_addr);

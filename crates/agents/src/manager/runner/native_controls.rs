@@ -25,7 +25,11 @@ fn build_select_choice(
     opt
 }
 
-fn build_mode_state(spec: &EngineModeSpec, yolo: bool) -> SessionModeState {
+fn build_mode_state(
+    spec: &EngineModeSpec,
+    yolo: bool,
+    configured_default: Option<&str>,
+) -> SessionModeState {
     let modes = spec
         .modes
         .iter()
@@ -42,11 +46,16 @@ fn build_mode_state(spec: &EngineModeSpec, yolo: bool) -> SessionModeState {
             mode
         })
         .collect();
-    let initial = if yolo {
-        spec.yolo_mode_id.clone()
-    } else {
-        spec.default_mode_id.clone()
-    };
+    let initial = configured_default
+        .filter(|id| spec.modes.iter().any(|choice| choice.id == *id))
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if yolo {
+                spec.yolo_mode_id.clone()
+            } else {
+                spec.default_mode_id.clone()
+            }
+        });
     SessionModeState::new(initial, modes)
 }
 
@@ -187,13 +196,31 @@ impl AgentConnectionRunner {
         crate::launch_program_available(&resolved)
     }
 
+    fn merged_native_env(&self) -> HashMap<String, String> {
+        let mut merged_env: HashMap<String, String> = self
+            .snapshot
+            .launch_lock
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (k, v) in &self.snapshot.env {
+            merged_env.insert(k.clone(), v.clone());
+        }
+        merged_env
+    }
+
     pub(in crate::manager) async fn populate_native_capabilities(
         &self,
         driver: &dyn NativeEngineDriver,
     ) {
         let yolo = *self.auto_approve_mode.lock().await == AgentAutoApproveMode::Yolo;
         let engine_caps = driver.capabilities();
-        let modes_state = build_mode_state(&engine_caps.modes, yolo);
+        let merged_env = self.merged_native_env();
+        let configured_mode = driver
+            .resolve_default_mode(&merged_env)
+            .and_then(|mode| driver.normalize_mode(&mode));
+        let modes_state = build_mode_state(&engine_caps.modes, yolo, configured_mode.as_deref());
         let extra_opts = engine_caps
             .effort
             .as_ref()
@@ -336,17 +363,13 @@ impl AgentConnectionRunner {
         };
         let yolo = *self.auto_approve_mode.lock().await == AgentAutoApproveMode::Yolo;
         let engine_caps = driver.capabilities();
-        let mut modes = build_mode_state(&engine_caps.modes, yolo);
-
-        let mut merged_env: HashMap<String, String> = self
-            .snapshot
-            .launch_lock
-            .env
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        for (k, v) in &self.snapshot.env {
-            merged_env.insert(k.clone(), v.clone());
+        let merged_env = self.merged_native_env();
+        let configured_mode = driver
+            .resolve_default_mode(&merged_env)
+            .and_then(|mode| driver.normalize_mode(&mode));
+        let mut modes = build_mode_state(&engine_caps.modes, yolo, configured_mode.as_deref());
+        if modes.current_mode_id.0.as_ref() == engine_caps.modes.yolo_mode_id {
+            *self.auto_approve_mode.lock().await = AgentAutoApproveMode::Yolo;
         }
         driver.apply_env_to_models(&mut models, &merged_env);
         let default_model_env = merged_env
@@ -425,11 +448,11 @@ impl AgentConnectionRunner {
         tool_name == "ExitPlanMode" || tool_name.eq_ignore_ascii_case("exit_plan_mode")
     }
 
-    pub(in crate::manager) async fn is_session_in_plan_mode(
-        &self,
+    pub(in crate::manager) async fn session_controls_in_plan_mode(
+        session_controls: &RwLock<HashMap<AgentSessionId, SessionControlState>>,
         session_id: AgentSessionId,
     ) -> bool {
-        let controls = self.session_controls.read().await;
+        let controls = session_controls.read().await;
         let Some(entry) = controls.get(&session_id) else {
             return false;
         };
@@ -441,6 +464,13 @@ impl AgentConnectionRunner {
             return true;
         }
         current_select_option_value(&entry.config_options, "mode").as_deref() == Some("plan")
+    }
+
+    pub(in crate::manager) async fn is_session_in_plan_mode(
+        &self,
+        session_id: AgentSessionId,
+    ) -> bool {
+        Self::session_controls_in_plan_mode(&self.session_controls, session_id).await
     }
 
     pub(in crate::manager) async fn apply_native_mode_change(
@@ -457,7 +487,7 @@ impl AgentConnectionRunner {
             let mut auto_guard = self.auto_approve_mode.lock().await;
             if normalized == yolo_mode_id {
                 *auto_guard = AgentAutoApproveMode::Yolo;
-            } else {
+            } else if *auto_guard == AgentAutoApproveMode::Yolo {
                 *auto_guard = AgentAutoApproveMode::Off;
             }
         }
@@ -612,7 +642,7 @@ impl AgentConnectionRunner {
             let mut auto_guard = self.auto_approve_mode.lock().await;
             if exp_norm == yolo_mode_id {
                 *auto_guard = AgentAutoApproveMode::Yolo;
-            } else {
+            } else if *auto_guard == AgentAutoApproveMode::Yolo {
                 *auto_guard = AgentAutoApproveMode::Off;
             }
         }
@@ -690,5 +720,104 @@ impl AgentConnectionRunner {
         };
 
         (model, effort, effective_mode)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        AgentId, auto_approve_mode_for_launch,
+        engine::{ClaudeNativeDriver, CodexNativeDriver, NativeEngineDriver},
+    };
+
+    #[test]
+    fn claude_resolve_default_mode_reads_all_configured_modes_and_launch_policy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings_path = dir.path().join("settings.json");
+        let mut env = HashMap::new();
+        env.insert(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+        );
+        let driver = ClaudeNativeDriver::new();
+        let claude_id = AgentId::parse("claude_code").expect("agent id");
+
+        for (configured, expected_mode, expected_auto) in [
+            (
+                "bypassPermissions",
+                "bypassPermissions",
+                AgentAutoApproveMode::Yolo,
+            ),
+            ("acceptEdits", "acceptEdits", AgentAutoApproveMode::Off),
+            ("plan", "plan", AgentAutoApproveMode::Off),
+            ("default", "default", AgentAutoApproveMode::Off),
+        ] {
+            std::fs::write(
+                &settings_path,
+                serde_json::json!({ "permissions": { "defaultMode": configured } }).to_string(),
+            )
+            .expect("write settings.json");
+            let resolved = driver.resolve_default_mode(&env);
+            assert_eq!(resolved.as_deref(), Some(expected_mode));
+            assert_eq!(
+                auto_approve_mode_for_launch(&claude_id, &env),
+                expected_auto
+            );
+
+            let state = build_mode_state(
+                &driver.capabilities().modes,
+                expected_auto == AgentAutoApproveMode::Yolo,
+                resolved.as_deref(),
+            );
+            assert_eq!(state.current_mode_id.0.as_ref(), expected_mode);
+        }
+    }
+
+    #[test]
+    fn codex_resolve_default_mode_reads_config_toml_and_env() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        let mut env = HashMap::new();
+        env.insert(
+            "CODEX_HOME".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+        );
+        let driver = CodexNativeDriver::new();
+        let codex_id = AgentId::parse("codex").expect("agent id");
+
+        std::fs::write(
+            &config_path,
+            "approval_policy = \"never\"\nsandbox_mode = \"danger-full-access\"\n",
+        )
+        .expect("write config.toml");
+        assert_eq!(
+            driver.resolve_default_mode(&env).as_deref(),
+            Some("full-access")
+        );
+        assert_eq!(
+            auto_approve_mode_for_launch(&codex_id, &env),
+            AgentAutoApproveMode::Yolo
+        );
+
+        std::fs::write(&config_path, "sandbox_mode = \"read-only\"\n").expect("write config.toml");
+        assert_eq!(driver.resolve_default_mode(&env).as_deref(), Some("plan"));
+        assert_eq!(
+            auto_approve_mode_for_launch(&codex_id, &env),
+            AgentAutoApproveMode::Off
+        );
+
+        env.insert(
+            "INITIAL_AGENT_MODE".to_string(),
+            "agent-full-access".to_string(),
+        );
+        assert_eq!(
+            driver.resolve_default_mode(&env).as_deref(),
+            Some("full-access")
+        );
+        assert_eq!(
+            auto_approve_mode_for_launch(&codex_id, &env),
+            AgentAutoApproveMode::Yolo
+        );
     }
 }

@@ -87,10 +87,6 @@ export function createManualChunks(id: string): string | undefined {
     return 'vendor-dockview';
   }
 
-  if (normalizedId.includes('/node_modules/@tauri-apps/')) {
-    return 'vendor-tauri';
-  }
-
   if (
     normalizedId.includes('/node_modules/@xyflow/') ||
     /\/node_modules\/d3(?:-[^/]+)?\//.test(normalizedId)

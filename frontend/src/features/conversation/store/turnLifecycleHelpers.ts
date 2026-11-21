@@ -370,7 +370,8 @@ export function maxLiveRowRevision(
 export function appendLiveText(
   liveText: Record<string, LiveTextOverlay>,
   settledAssistantRowIds: Record<string, true>,
-  op: Extract<ConversationRowOp, { op: 'append_text' }>
+  op: Extract<ConversationRowOp, { op: 'append_text' }>,
+  options?: { allowSameRevision?: boolean; liveSequence?: bigint | null }
 ): Record<string, LiveTextOverlay> {
   if (settledAssistantRowIds[op.row_id]) {
     return liveText;
@@ -378,13 +379,33 @@ export function appendLiveText(
   const rowId = op.row_id;
   const revision = toBigInt(op.revision);
   const existing = liveText[rowId];
-  if (existing && revision <= existing.revision) return liveText; // already applied
+  const incomingLiveSeq = options?.liveSequence ?? null;
+  if (existing) {
+    if (incomingLiveSeq !== null && existing.liveSequence !== undefined) {
+      if (incomingLiveSeq <= existing.liveSequence) return liveText;
+    } else if (
+      options?.allowSameRevision
+        ? revision < existing.revision
+        : revision <= existing.revision
+    ) {
+      return liveText; // already applied
+    }
+  }
   const base = existing ?? { text: '', reasoning: '', revision: 0n };
+  const nextLiveSequence =
+    incomingLiveSeq !== null
+      ? incomingLiveSeq
+      : existing?.liveSequence !== undefined
+        ? existing.liveSequence
+        : undefined;
   const next: LiveTextOverlay = {
     text: op.stream === 'text' ? base.text + op.delta : base.text,
     reasoning:
       op.stream === 'reasoning' ? base.reasoning + op.delta : base.reasoning,
-    revision,
+    revision: revision > base.revision ? revision : base.revision,
+    ...(nextLiveSequence !== undefined
+      ? { liveSequence: nextLiveSequence }
+      : {}),
     ...(existing?.patchedRevision !== undefined &&
     existing.patchedRevision > revision
       ? { patchedRevision: existing.patchedRevision }

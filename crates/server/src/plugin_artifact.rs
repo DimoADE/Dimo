@@ -50,15 +50,7 @@ async fn serve_plugin_artifact(
     let Ok(bytes) = tokio::fs::read(file).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let content_type = if path.ends_with(".js") || path.ends_with(".mjs") {
-        "text/javascript; charset=utf-8"
-    } else if path.ends_with(".css") {
-        "text/css; charset=utf-8"
-    } else if path.ends_with(".json") {
-        "application/json"
-    } else {
-        "application/octet-stream"
-    };
+    let content_type = content_type_for_path(&path);
     (
         [
             (axum::http::header::CONTENT_TYPE, content_type),
@@ -68,4 +60,36 @@ async fn serve_plugin_artifact(
         bytes,
     )
         .into_response()
+}
+
+fn content_type_for_path(path: &str) -> &'static str {
+    let ext = path
+        .rsplit('.')
+        .next()
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    match ext.as_str() {
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" | "map" => "application/json; charset=utf-8",
+        "html" | "htm" => "text/html; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "wasm" => "application/wasm",
+        "txt" | "md" => "text/plain; charset=utf-8",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "ogg" => "audio/ogg",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        _ => "application/octet-stream",
+    }
 }

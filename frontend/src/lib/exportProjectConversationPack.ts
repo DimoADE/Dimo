@@ -1,6 +1,7 @@
 import { toast } from '@/components/ui/toast';
 import { conversationApi } from '@/features/conversation/conversationApi';
 import i18n from '@/i18n';
+import { getDesktopShell } from '@/lib/desktopShell';
 import { conversationExportFileStem } from '@/lib/exportConversation';
 import { pickHostDirectory } from '@/lib/hostFs';
 import { getBackendTransport } from '@/lib/transport';
@@ -59,9 +60,11 @@ export async function exportProjectConversationPack(
       usedNames.add(filename.toLowerCase());
 
       if (directory) {
-        const { writeTextFile } = await import('@tauri-apps/plugin-fs');
-        const { join } = await import('@tauri-apps/api/path');
-        await writeTextFile(await join(directory, filename), content);
+        const shell = getDesktopShell();
+        await shell.fs.writeTextFile(
+          await shell.path.join(directory, filename),
+          content
+        );
       } else {
         downloadMarkdown(filename, content);
       }

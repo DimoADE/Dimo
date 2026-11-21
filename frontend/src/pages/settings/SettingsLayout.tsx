@@ -163,7 +163,7 @@ export const SETTINGS_NAV_GROUPS: Omit<SettingsNavGroup, 'id'>[] = [
         path: '/settings/web-service',
         labelKey: 'webService',
         icon: Globe,
-        anyOf: ['desktop.tauri', 'device.pair'],
+        anyOf: ['desktop.electron', 'desktop.tauri', 'device.pair'],
       },
       {
         path: '/settings/logs',

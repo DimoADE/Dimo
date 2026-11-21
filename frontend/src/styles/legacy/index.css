@@ -7824,6 +7824,73 @@ html.dark {
     gap: 6px;
   }
 
+  .composer-status-actor {
+    display: inline-flex;
+    max-width: 140px;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 7px 1px 3px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 9999px;
+    background: var(--surface-control);
+    color: var(--text-primary);
+    font-size: 0.75rem;
+    font-weight: 500;
+    line-height: 1.125rem;
+  }
+
+  .composer-status-actor--interactive {
+    cursor: pointer;
+    transition:
+      background-color 120ms ease-out,
+      border-color 120ms ease-out;
+  }
+
+  .composer-status-actor--interactive:hover {
+    border-color: var(--border-strong);
+    background: var(--surface-control-hover);
+  }
+
+  .composer-status-actor-avatar {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .composer-status-actor-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .composer-status-overflow-toggle {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 5px 12px;
+    border: 0;
+    border-top: 1px solid var(--border-subtle);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    font-weight: 500;
+    line-height: 1rem;
+    cursor: pointer;
+    transition:
+      background-color 120ms ease-out,
+      color 120ms ease-out;
+  }
+
+  .composer-status-overflow-toggle:hover {
+    background: var(--surface-control-hover);
+    color: var(--text-primary);
+  }
+
   .composer-status-title {
     min-width: 0;
     overflow: hidden;
@@ -10341,7 +10408,7 @@ html.dark {
   }
 }
 
-html.tauri-desktop[data-host-platform='macos'] .window-chrome {
+html.electron-desktop[data-host-platform='macos'] .window-chrome {
   padding-left: 4.75rem;
 }
 
@@ -10349,19 +10416,48 @@ html.tauri-desktop[data-host-platform='macos'] .window-chrome {
   display: none;
 }
 
-html.tauri-desktop[data-host-platform='macos'] .window-chrome-leading-rule {
+html.electron-desktop[data-host-platform='macos'] .window-chrome-leading-rule {
   display: block;
 }
 
-html.tauri-desktop.host-windows .window-chrome {
+html.electron-desktop.host-windows .window-chrome {
   padding-right: 6.5rem;
 }
 
-/* Window dragging uses Tauri's runtime data-tauri-drag-region / startDragging()
-   instead of CSS app-region so Windows WebView2 avoids creating native
-   cutout HWNDs and calling SetDraggableRegions across WH_CALLWNDPROC hooks. */
-[data-tauri-drag-region] img {
+/* Electron Chromium uses native CSS app-region dragging on frameless titlebars. */
+[data-window-drag-region] img,
+.dimo-window-drag img {
   -webkit-user-drag: none;
+}
+
+html.electron-desktop [data-window-drag-region],
+html.electron-desktop .dimo-window-drag {
+  -webkit-app-region: drag;
+}
+
+html.electron-desktop
+  :is([data-window-drag-region], .dimo-window-drag)
+  :is(
+    button,
+    a,
+    input,
+    select,
+    textarea,
+    label,
+    [role='button'],
+    [role='menuitem'],
+    [role='combobox'],
+    [role='tab'],
+    [role='radio'],
+    [role='switch'],
+    [role='option'],
+    [data-no-drag]
+  ),
+html.electron-desktop [data-no-drag],
+html.electron-desktop [data-no-drag] *,
+html.electron-desktop .desktop-window-controls,
+html.electron-desktop .desktop-window-controls * {
+  -webkit-app-region: no-drag;
 }
 
 html.host-windows :where(.legacy-design) .tahoe-glass,

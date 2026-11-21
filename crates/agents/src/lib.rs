@@ -139,9 +139,10 @@ pub use capability::AcpCapabilityNormalizer;
 pub use cli_exposure::{
     CliExposureError, PublishedCliCommand, ShellFamily, ensure_user_cli_path,
     export_managed_bun_to_user_environment, export_managed_node_to_user_environment,
-    publish_managed_runtime_cli, publish_user_toolchain_commands, published_cli_shim_agent,
-    published_cli_shim_target, remove_managed_runtime_cli, remove_orphaned_cli_shims,
-    resolve_user_runtime_command, resolve_user_runtime_commands, switch_managed_runtime_cli,
+    path_is_dimo_toolchain_shim, publish_managed_runtime_cli, publish_user_toolchain_commands,
+    published_cli_shim_agent, published_cli_shim_target, remove_managed_runtime_cli,
+    remove_orphaned_cli_shims, resolve_user_runtime_command, resolve_user_runtime_commands,
+    switch_managed_runtime_cli,
 };
 pub use codex_auth::{
     CODEX_AUTH_MODES, CodexAuthModeProjection, apply_codex_auth_mode, project_codex_auth_mode,
@@ -289,8 +290,8 @@ pub use native_config::{
 };
 pub use npm_registry::{
     ExternalChangeVerdict, NpmRegistryHttpFetcher, NpmVerificationOutcome, fetch_npm_latest,
-    fetch_npm_package_requirements, is_npm_package_payload_path, npm_range_allows,
-    overlay_npx_latest_from_npm, overlay_npx_latest_versions,
+    fetch_npm_node_engine, fetch_npm_package_requirements, is_npm_package_payload_path,
+    npm_range_allows, overlay_npx_latest_from_npm, overlay_npx_latest_versions,
     plan_runtime_acp_compatibility_warning, runtime_acp_compatibility_warning, split_npm_spec,
     verify_external_component_change, verify_npm_component_file,
 };
@@ -368,7 +369,8 @@ pub use user_environment::{
     AgentUpdateCheckInput, ObservedUserComponent, PlannedPreflightUpdate,
     UserEnvironmentAdoptDecision, UserEnvironmentLayout, compose_agent_update_check,
     decide_user_environment_adopt, existing_path_satisfies_component, npm_global_install_args,
-    npm_global_install_args_with_registry, npm_install_permission_denied, npm_prefix_is_writable,
+    npm_global_install_args_with_registry, npm_install_permission_denied,
+    npm_install_resource_busy, npm_install_unsupported_node_engine, npm_prefix_is_writable,
     npm_shim_candidates, observed_satisfies_profile, plan_required_components,
     planned_preflight_updates, profile_required_versions, resolve_npm_shim, uv_distribution_name,
 };

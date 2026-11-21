@@ -11,18 +11,20 @@ use agents::{
     AgentAutoApproveMode, AgentConnectionId, AgentConnectionLaunch, AgentConnectionManager,
     AgentId, BuiltInProfile, BuiltInProfileCatalog, InstallCandidateSource, InstallEnvironment,
     InstallPlanner, InstallPlanningInput, LockedInstallSource, MANAGED_BUN_VERSION,
-    MANAGED_NODE_VERSION, MANAGED_UV_VERSION, ObservedUserComponent, OfficialRegistryHttpFetcher,
-    PlannedDistributionKind, PlannedInstallComponent, ProfileComponent, ProfileTopology,
-    RegistryCache, RegistrySnapshotClient, ResolvedInstallPlan, SessionLaunchLock, ShellFamily,
-    SystemClock, UserEnvironmentAdoptDecision, UserEnvironmentLayout, current_platform,
-    decide_user_environment_adopt, existing_path_satisfies_component,
-    export_managed_bun_to_user_environment, export_managed_node_to_user_environment,
-    managed_bun_artifact, managed_bun_download_urls, managed_node_artifact,
-    managed_node_download_urls, managed_uv_artifact, managed_uv_download_urls,
-    node_verified_for_install, npm_global_install_args_with_registry,
-    npm_install_permission_denied, npm_package_name as npm_spec_name, overlay_npx_latest_from_npm,
-    plan_required_components, registry_target_for_built_in_update, resolve_npm_shim,
-    uv_verified_for_install, verify_artifact_bytes, version_at_least,
+    MANAGED_NODE_VERSION, MANAGED_UV_VERSION, NpmRegistryHttpFetcher, ObservedUserComponent,
+    OfficialRegistryHttpFetcher, PlannedDistributionKind, PlannedInstallComponent,
+    ProfileComponent, ProfileInstallSource, ProfileTopology, RegistryCache, RegistrySnapshotClient,
+    ResolvedInstallPlan, SessionLaunchLock, ShellFamily, SystemClock, UserEnvironmentAdoptDecision,
+    UserEnvironmentLayout, current_platform, decide_user_environment_adopt,
+    existing_path_satisfies_component, export_managed_bun_to_user_environment,
+    export_managed_node_to_user_environment, fetch_npm_node_engine, managed_bun_artifact,
+    managed_bun_download_urls, managed_node_artifact, managed_node_download_urls,
+    managed_uv_artifact, managed_uv_download_urls, node_verified_for_install,
+    npm_global_install_args_with_registry, npm_install_permission_denied,
+    npm_install_resource_busy, npm_install_unsupported_node_engine,
+    npm_package_name as npm_spec_name, npm_range_allows, overlay_npx_latest_from_npm,
+    path_is_dimo_toolchain_shim, plan_required_components, registry_target_for_built_in_update,
+    resolve_npm_shim, uv_verified_for_install, verify_artifact_bytes, version_at_least,
 };
 use api_types::AgentSource;
 use chrono::Utc;
@@ -341,18 +343,28 @@ where
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve the home directory"))?;
     let managed_artifacts = utils::path::managed_artifacts_directory(&home, data_dir);
+    let node_requirements = if plan
+        .components
+        .iter()
+        .any(|component| component.distribution_kind == PlannedDistributionKind::Npx)
+    {
+        plan_node_requirements(plan).await
+    } else {
+        Vec::new()
+    };
     let node = if plan
         .components
         .iter()
         .any(|component| component.distribution_kind == PlannedDistributionKind::Npx)
     {
-        let resolved = resolve_node_runtime(&managed_artifacts).await?;
+        let resolved =
+            resolve_node_runtime(&managed_artifacts, &node_requirements, &mut on_progress).await?;
         on_progress(
             16,
             &format!(
                 "[env] node={} | npm={}",
-                resolved.node.display(),
-                resolved.npm.display()
+                resolved.runtime.node.display(),
+                resolved.runtime.npm.display()
             ),
         );
         Some(resolved)
@@ -370,8 +382,10 @@ where
     } else {
         None
     };
-    if let Some(runtime) = node.as_ref() {
-        utils::shell::expose_user_bin_to_process_path(&runtime.bin_dir);
+    if let Some(resolved) = node.as_ref()
+        && (!resolved.is_managed || resolved.exported_to_user_path)
+    {
+        utils::shell::expose_user_bin_to_process_path(&resolved.runtime.bin_dir);
     }
     if let Some(executable) = uv.as_ref().and_then(|path| path.parent()) {
         utils::shell::expose_user_bin_to_process_path(executable);
@@ -388,8 +402,16 @@ where
         ),
     );
     let mut user_env = UserEnvironmentLayout::for_current_user(&home);
-    user_env =
-        user_env.with_live_npm_prefix_if_writable(live_npm_global_prefix(node.as_ref()).await);
+    let live_prefix = if node.as_ref().is_some_and(|resolved| resolved.is_managed) {
+        live_npm_global_prefix(None).await.filter(|prefix| {
+            !prefix.starts_with(&managed_artifacts) && !live_prefix_has_bundled_node(prefix)
+        })
+    } else {
+        live_npm_global_prefix(node.as_ref().map(|resolved| &resolved.runtime))
+            .await
+            .filter(|prefix| !prefix.starts_with(&managed_artifacts))
+    };
+    user_env = user_env.with_live_npm_prefix_if_writable(live_prefix);
     on_progress(
         35,
         &format!(
@@ -400,7 +422,12 @@ where
     );
     prepare_user_environment(&user_env).await?;
     let _bun = if profile_requires_bun(&plan.agent_id) {
-        let resolved = resolve_bun_runtime(&managed_artifacts, node.as_ref(), &user_env).await?;
+        let resolved = resolve_bun_runtime(
+            &managed_artifacts,
+            node.as_ref().map(|resolved| &resolved.runtime),
+            &user_env,
+        )
+        .await?;
         on_progress(36, &format!("[env] bun={}", resolved.display()));
         if let Some(executable) = resolved.parent() {
             utils::shell::expose_user_bin_to_process_path(executable);
@@ -409,8 +436,18 @@ where
     } else {
         None
     };
-    let installation = if let Some(adopted) =
-        try_adopt_at_home(&plan.agent_id, plan, &user_env, Some(&home)).await?
+    let managed_node_bin_dir = node
+        .as_ref()
+        .filter(|resolved| resolved.is_managed)
+        .map(|resolved| resolved.runtime.bin_dir.as_path());
+    let installation = if let Some(adopted) = try_adopt_at_home(
+        &plan.agent_id,
+        plan,
+        &user_env,
+        Some(&home),
+        managed_node_bin_dir,
+    )
+    .await?
     {
         println!("Using the user-environment CLI that already matches the planned versions.");
         for component in &adopted.components {
@@ -432,7 +469,8 @@ where
         install_plan(
             plan,
             &mut user_env,
-            node.as_ref(),
+            node.as_ref().map(|resolved| &resolved.runtime),
+            managed_node_bin_dir,
             uv.as_deref(),
             &mut on_progress,
         )
@@ -733,8 +771,9 @@ async fn try_adopt_at_home(
     plan: &ResolvedInstallPlan,
     user_env: &UserEnvironmentLayout,
     home: Option<&Path>,
+    extra_node_bin_dir: Option<&Path>,
 ) -> anyhow::Result<Option<InstalledPlan>> {
-    try_adopt_with_options(agent_id, plan, user_env, home, true).await
+    try_adopt_with_options(agent_id, plan, user_env, home, true, extra_node_bin_dir).await
 }
 
 async fn try_adopt_with_options(
@@ -743,6 +782,7 @@ async fn try_adopt_with_options(
     user_env: &UserEnvironmentLayout,
     home: Option<&Path>,
     check_system_path: bool,
+    extra_node_bin_dir: Option<&Path>,
 ) -> anyhow::Result<Option<InstalledPlan>> {
     let catalog = BuiltInProfileCatalog::bundled();
     let Some(profile) = catalog.profile(agent_id) else {
@@ -788,7 +828,7 @@ async fn try_adopt_with_options(
             if agents::launch_program_is_legacy_acp_shim(agent_id, &path) {
                 return Ok(None);
             }
-            let version = probe_version(&path, candidate.version_args)
+            let version = probe_version_with_path(&path, candidate.version_args, extra_node_bin_dir)
                 .await
                 .unwrap_or_default();
             if version.is_empty() {
@@ -829,7 +869,11 @@ async fn try_adopt_with_options(
         component.sha256 = Some(file_sha256(&component.absolute_path).await?);
     }
     Ok(Some(build_installed_plan(
-        agent_id, plan, user_env, components,
+        agent_id,
+        plan,
+        user_env,
+        components,
+        extra_node_bin_dir,
     )?))
 }
 
@@ -837,6 +881,7 @@ async fn install_plan<F>(
     plan: &ResolvedInstallPlan,
     user_env: &mut UserEnvironmentLayout,
     node: Option<&NodeRuntime>,
+    managed_node_bin_dir: Option<&Path>,
     uv: Option<&Path>,
     on_progress: &mut F,
 ) -> anyhow::Result<InstalledPlan>
@@ -847,7 +892,14 @@ where
     for component in &plan.components {
         let version_args =
             component_version_args(&plan.agent_id, &component.component_id, &component.command);
-        if let Some(existing) = existing_component(&plan.agent_id, component, version_args).await {
+        if let Some(existing) = existing_component(
+            &plan.agent_id,
+            component,
+            version_args,
+            managed_node_bin_dir,
+        )
+        .await
+        {
             println!(
                 "Reusing {} {} at {}",
                 component.component_id,
@@ -882,7 +934,7 @@ where
                 install_binary(&plan.agent_id, component, user_env, on_progress).await?
             }
         };
-        let version = probe_version(&path, version_args)
+        let version = probe_version_with_path(&path, version_args, managed_node_bin_dir)
             .await
             .unwrap_or_else(|| component.version.clone());
         on_progress(
@@ -904,7 +956,13 @@ where
     for component in &mut components {
         component.sha256 = Some(file_sha256(&component.absolute_path).await?);
     }
-    build_installed_plan(&plan.agent_id, plan, user_env, components)
+    build_installed_plan(
+        &plan.agent_id,
+        plan,
+        user_env,
+        components,
+        managed_node_bin_dir,
+    )
 }
 
 fn ensure_installation_matches_plan(
@@ -932,6 +990,7 @@ fn build_installed_plan(
     plan: &ResolvedInstallPlan,
     user_env: &UserEnvironmentLayout,
     components: Vec<InstalledComponent>,
+    managed_node_bin_dir: Option<&Path>,
 ) -> anyhow::Result<InstalledPlan> {
     let runtime = components.iter().find(|component| {
         matches!(
@@ -965,7 +1024,11 @@ fn build_installed_plan(
         );
     }
     let mut env = BTreeMap::new();
-    let mut path_entries = user_env.path_entries();
+    let mut path_entries = Vec::new();
+    if let Some(node_bin) = managed_node_bin_dir {
+        path_entries.push(node_bin.to_path_buf());
+    }
+    path_entries.extend(user_env.path_entries());
     path_entries.extend(
         components
             .iter()
@@ -974,6 +1037,8 @@ fn build_installed_plan(
     path_entries.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
     ));
+    let mut seen_paths = std::collections::HashSet::new();
+    path_entries.retain(|entry| !entry.as_os_str().is_empty() && seen_paths.insert(entry.clone()));
     env.insert(
         "PATH".to_string(),
         std::env::join_paths(path_entries)?
@@ -1033,6 +1098,7 @@ async fn existing_component(
     agent_id: &AgentId,
     component: &PlannedInstallComponent,
     version_args: &[&str],
+    extra_node_bin_dir: Option<&Path>,
 ) -> Option<(PathBuf, String)> {
     if version_args.is_empty() {
         return None;
@@ -1047,7 +1113,7 @@ async fn existing_component(
     if agents::launch_program_is_legacy_acp_shim(agent_id, &path) {
         return None;
     }
-    let version = probe_version(&path, version_args).await?;
+    let version = probe_version_with_path(&path, version_args, extra_node_bin_dir).await?;
     existing_path_satisfies_component(&component.component_id, &version, &component.version)
         .then_some((path, version))
 }
@@ -1138,17 +1204,149 @@ async fn discover_system_node_runtime() -> Option<NodeRuntime> {
     Some(NodeRuntime { node, npm, bin_dir })
 }
 
-async fn resolve_node_runtime(managed_artifacts_dir: &Path) -> anyhow::Result<NodeRuntime> {
-    if let Some(runtime) = discover_system_node_runtime().await {
-        println!("Using system Node.js at {}", runtime.node.display());
-        return Ok(runtime);
+#[derive(Debug, Clone)]
+struct ResolvedNodeRuntime {
+    runtime: NodeRuntime,
+    is_managed: bool,
+    exported_to_user_path: bool,
+}
+
+fn live_prefix_has_bundled_node(prefix: &Path) -> bool {
+    if cfg!(windows) {
+        prefix.join("node.exe").is_file() || prefix.join("node.cmd").is_file()
+    } else {
+        prefix.join("bin").join("node").is_file()
     }
-    println!(
-        "System Node.js is unavailable; falling back to Dimo-managed Node.js {MANAGED_NODE_VERSION}"
-    );
+}
+
+fn profile_node_requirements(plan: &ResolvedInstallPlan) -> Vec<String> {
+    let mut requirements = Vec::new();
+    let catalog = BuiltInProfileCatalog::bundled();
+    let Some(profile) = catalog.profile(&plan.agent_id) else {
+        return requirements;
+    };
+    for source in &profile.install_sources {
+        if let ProfileInstallSource::Npx {
+            node_requirement, ..
+        } = source
+        {
+            let req = node_requirement.trim();
+            if !req.is_empty() && !requirements.iter().any(|existing| existing == req) {
+                requirements.push(req.to_string());
+            }
+        }
+    }
+    for dep in profile.dependencies {
+        if dep.required && dep.executable.eq_ignore_ascii_case("node") {
+            let req = dep.requirement.trim();
+            if !req.is_empty() && !requirements.iter().any(|existing| existing == req) {
+                requirements.push(req.to_string());
+            }
+        }
+    }
+    requirements
+}
+
+async fn plan_node_requirements(plan: &ResolvedInstallPlan) -> Vec<String> {
+    let mut requirements = profile_node_requirements(plan);
+    let fetcher = NpmRegistryHttpFetcher::new();
+    for component in &plan.components {
+        if component.distribution_kind != PlannedDistributionKind::Npx {
+            continue;
+        }
+        let package = npm_spec_name(&component.resolved_source);
+        let version = component.version.trim();
+        if package.is_empty() || version.is_empty() {
+            continue;
+        }
+        if let Ok(Some(engine)) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fetch_npm_node_engine(&fetcher, &package, version),
+        )
+        .await
+        {
+            let req = engine.trim();
+            if !req.is_empty() && !requirements.iter().any(|existing| existing == req) {
+                requirements.push(req.to_string());
+            }
+        }
+    }
+    requirements
+}
+
+fn node_runtime_satisfies_requirements(
+    detected_version: Option<&str>,
+    requirements: &[String],
+) -> bool {
+    let Some(version) = detected_version
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    if requirements.is_empty() {
+        return true;
+    }
+    requirements
+        .iter()
+        .all(|requirement| npm_range_allows(requirement, version))
+}
+
+async fn resolve_node_runtime<F>(
+    managed_artifacts_dir: &Path,
+    node_requirements: &[String],
+    on_progress: &mut F,
+) -> anyhow::Result<ResolvedNodeRuntime>
+where
+    F: FnMut(u8, &str),
+{
+    let system = discover_system_node_runtime().await;
+    let system_is_dimo_shim = system
+        .as_ref()
+        .is_some_and(|runtime| path_is_dimo_toolchain_shim(&runtime.node));
+    if let Some(runtime) = system.as_ref() {
+        let detected_version = probe_version(&runtime.node, &["--version"]).await;
+        if node_runtime_satisfies_requirements(detected_version.as_deref(), node_requirements) {
+            println!("Using system Node.js at {}", runtime.node.display());
+            return Ok(ResolvedNodeRuntime {
+                runtime: runtime.clone(),
+                is_managed: false,
+                exported_to_user_path: false,
+            });
+        }
+        let version_label = detected_version.as_deref().unwrap_or("unknown");
+        let req_label = if node_requirements.is_empty() {
+            "a working Node.js runtime".to_string()
+        } else {
+            node_requirements.join(", ")
+        };
+        let message = format!(
+            "System Node.js ({version_label}) at {} does not satisfy `{req_label}`; falling back to Dimo-managed Node.js {MANAGED_NODE_VERSION}",
+            runtime.node.display()
+        );
+        println!("{message}");
+        on_progress(14, &format!("[env] {message}"));
+    } else {
+        println!(
+            "System Node.js is unavailable; falling back to Dimo-managed Node.js {MANAGED_NODE_VERSION}"
+        );
+        on_progress(
+            14,
+            &format!(
+                "[env] System Node.js is unavailable; downloading Dimo-managed Node.js {MANAGED_NODE_VERSION}"
+            ),
+        );
+    }
     let runtime = ensure_managed_node(managed_artifacts_dir).await?;
-    export_bootstrapped_node(&runtime)?;
-    Ok(runtime)
+    let should_export = system.is_none() || system_is_dimo_shim;
+    if should_export {
+        export_bootstrapped_node(&runtime)?;
+    }
+    Ok(ResolvedNodeRuntime {
+        runtime,
+        is_managed: true,
+        exported_to_user_path: should_export,
+    })
 }
 
 fn export_bootstrapped_node(runtime: &NodeRuntime) -> anyhow::Result<()> {

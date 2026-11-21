@@ -53,11 +53,13 @@ impl EventService {
     }
 
     /// Creates the writer-only `after_connect` hook function using [`db::ReadPool`]
-    /// directly so update hooks never allocate a hidden secondary SQLite pool.
+    /// and [`db::CommitVisibilityFence`] so update hooks never allocate a hidden
+    /// secondary SQLite pool and never race ahead of WAL transaction commits.
     pub fn create_hook(
         msg_store: Arc<MsgStore>,
         entry_count: Arc<RwLock<usize>>,
         reader: db::ReadPool,
+        commit_fence: db::CommitVisibilityFence,
     ) -> impl for<'a> Fn(
         &'a mut sqlx::sqlite::SqliteConnection,
     ) -> std::pin::Pin<
@@ -69,76 +71,129 @@ impl EventService {
             let msg_store_for_hook = msg_store.clone();
             let entry_count_for_hook = entry_count.clone();
             let reader_for_hook = reader.clone();
+            let commit_fence_for_hook = commit_fence.clone();
             Box::pin(async move {
                 let mut handle = conn.lock_handle().await?;
                 let runtime_handle = tokio::runtime::Handle::current();
+                let pending_deletes: Arc<std::sync::Mutex<Vec<json_patch::Patch>>> =
+                    Arc::new(std::sync::Mutex::new(Vec::new()));
+                let pending_updates: Arc<
+                    std::sync::Mutex<Vec<(HookTables, SqliteOperation, i64)>>,
+                > = Arc::new(std::sync::Mutex::new(Vec::new()));
+
                 handle.set_preupdate_hook({
-                    let msg_store_for_preupdate = msg_store_for_hook.clone();
+                    let pending_deletes = pending_deletes.clone();
                     move |preupdate: sqlx::sqlite::PreupdateHookResult<'_>| {
                         if preupdate.operation != SqliteOperation::Delete {
                             return;
                         }
 
-                        match preupdate.table {
-                            "projects" => {
-                                if let Ok(value) = preupdate.get_old_column_value(0)
-                                    && let Ok(project_id) = <Uuid as Decode<Sqlite>>::decode(value)
-                                {
-                                    let patch = project_patch::remove(project_id);
-                                    msg_store_for_preupdate.push_patch(patch);
-                                }
-                            }
-                            "workspaces" => {
-                                if let Ok(value) = preupdate.get_old_column_value(0)
-                                    && let Ok(workspace_id) =
-                                        <Uuid as Decode<Sqlite>>::decode(value)
-                                {
-                                    let patch = workspace_patch::remove(workspace_id);
-                                    msg_store_for_preupdate.push_patch(patch);
-                                }
-                            }
-                            "execution_processes" => {
-                                if let Ok(value) = preupdate.get_old_column_value(0)
-                                    && let Ok(process_id) = <Uuid as Decode<Sqlite>>::decode(value)
-                                {
-                                    let patch = execution_process_patch::remove(process_id);
-                                    msg_store_for_preupdate.push_patch(patch);
-                                }
-                            }
+                        let patch = match preupdate.table {
+                            "projects" => preupdate
+                                .get_old_column_value(0)
+                                .ok()
+                                .and_then(|value| <Uuid as Decode<Sqlite>>::decode(value).ok())
+                                .map(project_patch::remove),
+                            "workspaces" => preupdate
+                                .get_old_column_value(0)
+                                .ok()
+                                .and_then(|value| <Uuid as Decode<Sqlite>>::decode(value).ok())
+                                .map(workspace_patch::remove),
+                            "execution_processes" => preupdate
+                                .get_old_column_value(0)
+                                .ok()
+                                .and_then(|value| <Uuid as Decode<Sqlite>>::decode(value).ok())
+                                .map(execution_process_patch::remove),
                             "scratch" => {
                                 // Composite key: need both id (column 0) and scratch_type (column 1)
-                                if let Ok(id_val) = preupdate.get_old_column_value(0)
-                                    && let Ok(scratch_id) = <Uuid as Decode<Sqlite>>::decode(id_val)
-                                    && let Ok(type_val) = preupdate.get_old_column_value(1)
-                                    && let Ok(type_str) =
-                                        <String as Decode<Sqlite>>::decode(type_val)
-                                {
-                                    let patch = scratch_patch::remove(scratch_id, &type_str);
-                                    msg_store_for_preupdate.push_patch(patch);
-                                }
+                                preupdate
+                                    .get_old_column_value(0)
+                                    .ok()
+                                    .and_then(|value| <Uuid as Decode<Sqlite>>::decode(value).ok())
+                                    .zip(
+                                        preupdate
+                                            .get_old_column_value(1)
+                                            .ok()
+                                            .and_then(|value| {
+                                                <String as Decode<Sqlite>>::decode(value).ok()
+                                            }),
+                                    )
+                                    .map(|(scratch_id, type_str)| {
+                                        scratch_patch::remove(scratch_id, &type_str)
+                                    })
                             }
-                            _ => {}
+                            _ => None,
+                        };
+                        if let Some(patch) = patch
+                            && let Ok(mut pending) = pending_deletes.lock()
+                        {
+                            pending.push(patch);
                         }
                     }
                 });
 
-                handle.set_update_hook(move |hook: sqlx::sqlite::UpdateHookResult<'_>| {
-                    let runtime_handle = runtime_handle.clone();
-                    let entry_count_for_hook = entry_count_for_hook.clone();
-                    let msg_store_for_hook = msg_store_for_hook.clone();
-                    let read_pool = reader_for_hook.as_pool().clone();
+                handle.set_update_hook({
+                    let pending_updates = pending_updates.clone();
+                    move |hook: sqlx::sqlite::UpdateHookResult<'_>| {
+                        if hook.operation == SqliteOperation::Delete {
+                            // Deletions handled in preupdate hook for reliable data capture
+                            return;
+                        }
+                        if let Ok(table) = HookTables::from_str(hook.table)
+                            && let Ok(mut pending) = pending_updates.lock()
+                        {
+                            pending.push((table, hook.operation.clone(), hook.rowid));
+                        }
+                    }
+                });
 
-                    if let Ok(table) = HookTables::from_str(hook.table) {
-                        let rowid = hook.rowid;
-                        runtime_handle.spawn(async move {
-                            let record_type: RecordTypes = match (table, hook.operation.clone()) {
+                handle.set_rollback_hook({
+                    let pending_deletes = pending_deletes.clone();
+                    let pending_updates = pending_updates.clone();
+                    move || {
+                        if let Ok(mut deletes) = pending_deletes.lock() {
+                            deletes.clear();
+                        }
+                        if let Ok(mut updates) = pending_updates.lock() {
+                            updates.clear();
+                        }
+                    }
+                });
+
+                handle.set_commit_hook(move || {
+                    let deletes = pending_deletes
+                        .lock()
+                        .map(|mut pending| std::mem::take(&mut *pending))
+                        .unwrap_or_default();
+                    let updates = pending_updates
+                        .lock()
+                        .map(|mut pending| std::mem::take(&mut *pending))
+                        .unwrap_or_default();
+                    if deletes.is_empty() && updates.is_empty() {
+                        return true;
+                    }
+
+                    let msg_store = msg_store_for_hook.clone();
+                    let entry_count = entry_count_for_hook.clone();
+                    let read_pool = reader_for_hook.as_pool().clone();
+                    let commit_fence = commit_fence_for_hook.clone();
+
+                    runtime_handle.spawn(async move {
+                        // Wait until the single writer connection finishes publishing the WAL
+                        // commit frame and returns to WritePool so ReadPool always observes
+                        // committed inserts and non-stale updates.
+                        commit_fence.wait_for_commit().await;
+
+                        for patch in deletes {
+                            msg_store.push_patch(patch);
+                        }
+
+                        for (table, operation, rowid) in updates {
+                            let record_type: RecordTypes = match (table, operation.clone()) {
                                 (HookTables::Projects, SqliteOperation::Delete)
                                 | (HookTables::Workspaces, SqliteOperation::Delete)
                                 | (HookTables::ExecutionProcesses, SqliteOperation::Delete)
-                                | (HookTables::Scratch, SqliteOperation::Delete) => {
-                                    // Deletions handled in preupdate hook for reliable data capture
-                                    return;
-                                }
+                                | (HookTables::Scratch, SqliteOperation::Delete) => continue,
                                 (HookTables::Projects, _) => {
                                     match Project::find_by_rowid(&read_pool, rowid).await {
                                         Ok(Some(project)) => RecordTypes::Project(project),
@@ -148,7 +203,7 @@ impl EventService {
                                         },
                                         Err(e) => {
                                             tracing::error!("Failed to fetch project: {:?}", e);
-                                            return;
+                                            continue;
                                         }
                                     }
                                 }
@@ -161,7 +216,7 @@ impl EventService {
                                                 "Failed to fetch workspace: {:?}",
                                                 e
                                             );
-                                            return;
+                                            continue;
                                         }
                                     }
                                 }
@@ -178,7 +233,7 @@ impl EventService {
                                                 "Failed to fetch execution_process: {:?}",
                                                 e
                                             );
-                                            return;
+                                            continue;
                                         }
                                     }
                                 }
@@ -192,13 +247,13 @@ impl EventService {
                                         },
                                         Err(e) => {
                                             tracing::error!("Failed to fetch scratch: {:?}", e);
-                                            return;
+                                            continue;
                                         }
                                     }
                                 }
                             };
 
-                            let db_op: &str = match hook.operation {
+                            let db_op: &str = match operation {
                                 SqliteOperation::Insert => "insert",
                                 SqliteOperation::Delete => "delete",
                                 SqliteOperation::Update => "update",
@@ -209,64 +264,60 @@ impl EventService {
                                 RecordTypes::Project(project) => {
                                     let patch = project_patch::sync_visible(
                                         project,
-                                        matches!(hook.operation, SqliteOperation::Insert),
+                                        matches!(operation, SqliteOperation::Insert),
                                     );
-                                    msg_store_for_hook.push_patch(patch);
-                                    return;
+                                    msg_store.push_patch(patch);
+                                    continue;
                                 }
                                 RecordTypes::Scratch(scratch) => {
-                                    let patch = match hook.operation {
+                                    let patch = match operation {
                                         SqliteOperation::Insert => scratch_patch::add(scratch),
                                         SqliteOperation::Update => scratch_patch::replace(scratch),
                                         _ => scratch_patch::replace(scratch),
                                     };
-                                    msg_store_for_hook.push_patch(patch);
-                                    return;
+                                    msg_store.push_patch(patch);
+                                    continue;
                                 }
                                 RecordTypes::DeletedScratch {
                                     scratch_id: Some(scratch_id),
                                     scratch_type: Some(scratch_type_str),
                                     ..
                                 } => {
-                                    let patch = scratch_patch::remove(*scratch_id, scratch_type_str);
-                                    msg_store_for_hook.push_patch(patch);
-                                    return;
+                                    let patch =
+                                        scratch_patch::remove(*scratch_id, scratch_type_str);
+                                    msg_store.push_patch(patch);
+                                    continue;
                                 }
                                 RecordTypes::Workspace(workspace) => {
-                                    // Emit workspace patch with status
                                     if let Ok(Some(workspace_with_status)) =
                                         Workspace::find_by_id_with_status(&read_pool, workspace.id)
                                             .await
                                     {
-                                        let patch = match hook.operation {
+                                        let patch = match operation {
                                             SqliteOperation::Insert => {
                                                 workspace_patch::add(&workspace_with_status)
                                             }
                                             _ => workspace_patch::replace(&workspace_with_status),
                                         };
-                                        msg_store_for_hook.push_patch(patch);
+                                        msg_store.push_patch(patch);
                                     }
-                                    return;
+                                    continue;
                                 }
                                 RecordTypes::DeletedWorkspace { .. } => {
-                                    return;
+                                    continue;
                                 }
                                 RecordTypes::ExecutionProcess(process) => {
-                                    let patch = match hook.operation {
+                                    let patch = match operation {
                                         SqliteOperation::Insert => {
                                             execution_process_patch::add(process)
                                         }
                                         SqliteOperation::Update => {
                                             execution_process_patch::replace(process)
                                         }
-                                        _ => execution_process_patch::replace(process), // fallback
+                                        _ => execution_process_patch::replace(process),
                                     };
-                                    msg_store_for_hook.push_patch(patch);
+                                    msg_store.push_patch(patch);
 
-                                    // Workspace running/errored status reflects only setup/cleanup
-                                    // scripts (see WORKSPACE_STATUS_SELECT); skip the recompute +
-                                    // broadcast for other processes (e.g. frequent coding-agent
-                                    // output updates), which never change that status.
                                     let affects_workspace_status = matches!(
                                         process.run_reason,
                                         ExecutionProcessRunReason::SetupScript
@@ -276,7 +327,7 @@ impl EventService {
                                         && let Err(err) =
                                             EventService::push_workspace_update_for_session(
                                                 &read_pool,
-                                                msg_store_for_hook.clone(),
+                                                msg_store.clone(),
                                                 process.session_id,
                                             )
                                             .await
@@ -286,8 +337,7 @@ impl EventService {
                                             err
                                         );
                                     }
-
-                                    return;
+                                    continue;
                                 }
                                 RecordTypes::DeletedExecutionProcess {
                                     process_id: Some(process_id),
@@ -295,13 +345,13 @@ impl EventService {
                                     ..
                                 } => {
                                     let patch = execution_process_patch::remove(*process_id);
-                                    msg_store_for_hook.push_patch(patch);
+                                    msg_store.push_patch(patch);
 
                                     if let Some(session_id) = session_id
                                         && let Err(err) =
                                             EventService::push_workspace_update_for_session(
                                                 &read_pool,
-                                                msg_store_for_hook.clone(),
+                                                msg_store.clone(),
                                                 *session_id,
                                             )
                                             .await
@@ -311,17 +361,16 @@ impl EventService {
                                             err
                                         );
                                     }
-
-                                    return;
+                                    continue;
                                 }
                                 _ => {}
                             }
 
                             // Fallback: use the old entries format for other record types
                             let next_entry_count = {
-                                let mut entry_count = entry_count_for_hook.write().await;
-                                *entry_count += 1;
-                                *entry_count
+                                let mut count = entry_count.write().await;
+                                *count += 1;
+                                *count
                             };
 
                             let event_patch: EventPatch = EventPatch {
@@ -333,15 +382,17 @@ impl EventService {
                                 },
                             };
 
-                            let patch =
-                                serde_json::from_value(json!([
-                                    serde_json::to_value(event_patch).unwrap()
-                                ]))
-                                .unwrap();
+                            let patch = serde_json::from_value(json!([
+                                serde_json::to_value(event_patch).unwrap()
+                            ]))
+                            .unwrap();
 
-                            msg_store_for_hook.push_patch(patch);
-                        });
-                    }
+                            msg_store.push_patch(patch);
+                        }
+                    });
+
+                    // Allow SQLite to commit the transaction.
+                    true
                 });
 
                 Ok(())

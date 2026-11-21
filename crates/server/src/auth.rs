@@ -243,11 +243,13 @@ pub struct AuthenticatedCredential {
     pub scopes: BTreeSet<String>,
 }
 
+pub(crate) const HOST_CONSOLE_OWNER_CREDENTIAL_ID: &str = "local-host-owner";
+
 impl AuthenticatedCredential {
     /// The Host console owner. It can issue any pairing preset; it is not a device.
     pub fn host_console_owner() -> Self {
         Self {
-            credential_id: "local-host-owner".to_owned(),
+            credential_id: HOST_CONSOLE_OWNER_CREDENTIAL_ID.to_owned(),
             kind: CredentialKind::Server,
             subject: "server-owner".to_owned(),
             device_id: None,
@@ -256,6 +258,11 @@ impl AuthenticatedCredential {
                 .map(|scope| (*scope).to_owned())
                 .collect(),
         }
+    }
+
+    pub fn is_host_console_owner(&self) -> bool {
+        self.kind == CredentialKind::Server
+            && self.credential_id == HOST_CONSOLE_OWNER_CREDENTIAL_ID
     }
 
     pub fn principal(&self) -> Principal {

@@ -6,11 +6,13 @@ import {
 } from 'react';
 
 import type { BackendTransport } from './backendTransport';
-import { tauriBackendTransport } from './tauriTransport';
-import { mountBackendTransport } from './transportRegistry';
+import {
+  fallbackDesktopTransport,
+  mountBackendTransport,
+} from './transportRegistry';
 
 const BackendTransportContext = createContext<BackendTransport>(
-  tauriBackendTransport
+  fallbackDesktopTransport
 );
 
 export function BackendTransportProvider({

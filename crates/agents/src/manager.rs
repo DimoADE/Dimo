@@ -182,6 +182,9 @@ pub enum AgentConnectionCommand {
         permission_id: String,
         response: AgentPermissionResponse,
     },
+    SetAutoApproveMode {
+        mode: AgentAutoApproveMode,
+    },
     RespondElicitation {
         elicitation_id: String,
         response: AgentElicitationResponse,
@@ -375,6 +378,7 @@ struct ManagedAgentConnection {
     cmd_tx: mpsc::Sender<AgentConnectionCommand>,
     capabilities: Arc<RwLock<AcpCapabilitySnapshot>>,
     session_map: Arc<RwLock<HashMap<AgentSessionId, String>>>,
+    session_controls: Arc<RwLock<HashMap<AgentSessionId, SessionControlState>>>,
     last_activity: Arc<Mutex<Instant>>,
     active_prompt: Arc<Mutex<Option<(AgentSessionId, AgentPromptId)>>>,
     pending_permissions: Arc<Mutex<HashMap<String, PendingPermission>>>,
@@ -463,6 +467,7 @@ impl AgentConnectionManager {
         .with_idle_compaction(Arc::clone(&self.idle_compaction));
         let capabilities = Arc::clone(&runner.capabilities);
         let session_map = Arc::clone(&runner.session_map);
+        let session_controls = Arc::clone(&runner.session_controls);
         let last_activity = Arc::clone(&runner.last_activity);
         let active_prompt = Arc::clone(&runner.active_prompt);
         let pending_permissions = Arc::clone(&runner.pending_permissions);
@@ -492,6 +497,7 @@ impl AgentConnectionManager {
                 cmd_tx,
                 capabilities,
                 session_map,
+                session_controls,
                 last_activity,
                 active_prompt,
                 pending_permissions,
@@ -688,6 +694,53 @@ impl AgentConnectionManager {
             },
         )
         .await
+    }
+
+    pub async fn set_auto_approve_mode(
+        &self,
+        connection_id: AgentConnectionId,
+        mode: AgentAutoApproveMode,
+    ) -> AgentResult<()> {
+        if let Some(connection) = self.connections.lock().await.get_mut(&connection_id) {
+            connection.snapshot.auto_approve_mode = mode;
+        }
+        self.send_command(
+            connection_id,
+            AgentConnectionCommand::SetAutoApproveMode { mode },
+        )
+        .await
+    }
+
+    pub async fn permission_allows_auto_approve_persistence(
+        &self,
+        connection_id: AgentConnectionId,
+        permission_id: AgentPermissionId,
+    ) -> bool {
+        let handles = {
+            let guard = self.connections.lock().await;
+            guard.get(&connection_id).map(|connection| {
+                (
+                    Arc::clone(&connection.pending_permissions),
+                    Arc::clone(&connection.session_controls),
+                )
+            })
+        };
+        let Some((pending_permissions, session_controls)) = handles else {
+            return true;
+        };
+        let perm_key = permission_id.to_string();
+        let entry = {
+            let guard = pending_permissions.lock().await;
+            guard
+                .get(&perm_key)
+                .map(|pending| (pending.title.clone(), pending.session_id))
+        };
+        let Some((title, session_id)) = entry else {
+            return true;
+        };
+        !(AgentConnectionRunner::is_plan_approval_tool(&title)
+            || AgentConnectionRunner::session_controls_in_plan_mode(&session_controls, session_id)
+                .await)
     }
 
     pub async fn respond_elicitation(

@@ -1,5 +1,5 @@
 import { lazy, useEffect, type ComponentType } from 'react';
-import { Navigate, Route, Routes } from 'react-router-dom';
+import { Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 
 import { MainLegacyScope } from '@/app/MainLegacyScope';
 import { revealDesktopWindowAfterPaint } from '@/lib/revealDesktopWindow';
@@ -14,15 +14,15 @@ import {
   loadLogsSettings,
   loadMcpSettings,
   loadPluginDetailPage,
+  loadPluginSettingsPage,
   loadPluginsPage,
   loadShortcutSettings,
   loadSkillsSettings,
   loadSystemSettings,
   loadVersionControlSettings,
-  loadWebServiceSettings,
   loadWorktreeSettings,
+  loadWebServiceSettings,
 } from '@/lib/settingsPreload';
-import { PluginSettingsPage } from '@/pages/settings/PluginSettingsPage';
 import { SettingsLayout } from '@/pages/settings/SettingsLayout';
 
 function lazyNamed<
@@ -32,6 +32,10 @@ function lazyNamed<
   return lazy(() => load().then((mod) => ({ default: mod[name] })));
 }
 
+const PluginSettingsPage = lazyNamed(
+  loadPluginSettingsPage,
+  'PluginSettingsPage'
+);
 const PluginsPage = lazyNamed(loadPluginsPage, 'PluginsPage');
 const PluginDetailPage = lazyNamed(loadPluginDetailPage, 'PluginDetailPage');
 const MarketplacePluginDetailPage = lazyNamed(
@@ -70,7 +74,25 @@ const WebServiceSettings = lazyNamed(
 );
 
 export function SettingsAppRoutes() {
+  const navigate = useNavigate();
+
   useEffect(() => revealDesktopWindowAfterPaint(), []);
+
+  useEffect(() => {
+    const handleNavigate = (event: Event) => {
+      if (!(event instanceof CustomEvent)) return;
+      const target =
+        typeof event.detail?.path === 'string' ? event.detail.path.trim() : '';
+      if (!target.startsWith('/settings') && !target.startsWith('/plugins')) {
+        return;
+      }
+      event.preventDefault();
+      navigate(target, { replace: true });
+    };
+    window.addEventListener('dimo:settings-navigate', handleNavigate);
+    return () =>
+      window.removeEventListener('dimo:settings-navigate', handleNavigate);
+  }, [navigate]);
 
   return (
     <Routes>

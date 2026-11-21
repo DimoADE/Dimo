@@ -9,6 +9,7 @@ import {
   agentManagementApi,
   agentManagementErrorMessage as errorMessage,
 } from '@/features/agent-management';
+import { openExternalUrl } from '@/lib/desktopShell';
 
 type LoginStatus = 'idle' | 'requesting' | 'polling' | 'success' | 'error';
 
@@ -228,14 +229,5 @@ async function copyCode(
     toast.success(t('settings:agents.codexDeviceCopied'));
   } catch {
     toast.error(t('settings:agents.codexDeviceCopyFailed'));
-  }
-}
-
-async function openExternalUrl(url: string): Promise<void> {
-  try {
-    const { open } = await import('@tauri-apps/plugin-shell');
-    await open(url);
-  } catch {
-    window.open(url, '_blank', 'noopener,noreferrer');
   }
 }

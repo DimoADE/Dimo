@@ -211,117 +211,136 @@ fn resolve_windows_program(program: &Path) -> Option<PathBuf> {
 
 /// Build a tokio command that stays hidden on Windows, including `.cmd`/`.bat`
 /// wrappers such as npm-installed CLIs.
+///
+/// Defaults `stdin` to `Stdio::null()` so background subprocesses never inherit
+/// the daemon's stdin handle (which can deadlock on Windows when stdin is a
+/// synchronous pipe). Callers that need piped stdin can override `.stdin(...)`.
 pub fn new_hidden_tokio_command(
     program: impl AsRef<Path>,
     args: impl IntoIterator<Item = impl AsRef<OsStr>>,
 ) -> tokio::process::Command {
     let program = program.as_ref();
 
-    #[cfg(windows)]
-    {
-        // `std::fs::canonicalize` returns verbatim (`\\?\`) paths on Windows.
-        // `CreateProcess` accepts those paths, but cmd.exe does not reliably
-        // resolve them when invoking npm's .cmd/.bat shims.
-        let simplified = prefer_direct_spawn_executable(dunce::simplified(program));
-        let program = prefer_windows_spawnable_executable(&simplified).unwrap_or(simplified);
-        if is_windows_batch_script(&program) {
-            let mut command = tokio::process::Command::new("cmd.exe");
-            configure_tokio_command_no_window(&mut command);
-            command
-                .arg("/d")
-                .arg("/c")
-                .arg("call")
-                .arg(&program)
-                .args(args);
-            return command;
-        }
-        if let Some(resolved) = resolve_windows_program(&program) {
-            let resolved = prefer_direct_spawn_executable(resolved);
-            if is_windows_batch_script(&resolved) {
+    let mut command = {
+        #[cfg(windows)]
+        {
+            // `std::fs::canonicalize` returns verbatim (`\\?\`) paths on Windows.
+            // `CreateProcess` accepts those paths, but cmd.exe does not reliably
+            // resolve them when invoking npm's .cmd/.bat shims.
+            let simplified = prefer_direct_spawn_executable(dunce::simplified(program));
+            let program = prefer_windows_spawnable_executable(&simplified).unwrap_or(simplified);
+            if is_windows_batch_script(&program) {
                 let mut command = tokio::process::Command::new("cmd.exe");
                 configure_tokio_command_no_window(&mut command);
                 command
                     .arg("/d")
                     .arg("/c")
                     .arg("call")
-                    .arg(&resolved)
+                    .arg(&program)
                     .args(args);
-                return command;
+                command
+            } else if let Some(resolved) = resolve_windows_program(&program) {
+                let resolved = prefer_direct_spawn_executable(resolved);
+                if is_windows_batch_script(&resolved) {
+                    let mut command = tokio::process::Command::new("cmd.exe");
+                    configure_tokio_command_no_window(&mut command);
+                    command
+                        .arg("/d")
+                        .arg("/c")
+                        .arg("call")
+                        .arg(&resolved)
+                        .args(args);
+                    command
+                } else {
+                    let mut command = tokio::process::Command::new(&resolved);
+                    configure_tokio_command_no_window(&mut command);
+                    command.args(args);
+                    command
+                }
+            } else {
+                let mut command = tokio::process::Command::new(&program);
+                configure_tokio_command_no_window(&mut command);
+                command.args(args);
+                command
             }
-            let mut command = tokio::process::Command::new(&resolved);
+        }
+
+        #[cfg(not(windows))]
+        {
+            let mut command = tokio::process::Command::new(program);
             configure_tokio_command_no_window(&mut command);
             command.args(args);
-            return command;
+            command
         }
-        let mut command = tokio::process::Command::new(&program);
-        configure_tokio_command_no_window(&mut command);
-        command.args(args);
-        command
-    }
+    };
 
-    #[cfg(not(windows))]
-    {
-        let mut command = tokio::process::Command::new(program);
-        configure_tokio_command_no_window(&mut command);
-        command.args(args);
-        command
-    }
+    command.stdin(std::process::Stdio::null());
+    command
 }
 
 /// Build a std command that stays hidden on Windows, including `.cmd`/`.bat`
 /// wrappers such as npm-installed CLIs.
+///
+/// Defaults `stdin` to `Stdio::null()` so background subprocesses never inherit
+/// the daemon's stdin handle. Callers that need piped stdin can override `.stdin(...)`.
 pub fn new_hidden_std_command(
     program: impl AsRef<Path>,
     args: impl IntoIterator<Item = impl AsRef<OsStr>>,
 ) -> std::process::Command {
     let program = program.as_ref();
 
-    #[cfg(windows)]
-    {
-        let simplified = prefer_direct_spawn_executable(dunce::simplified(program));
-        let program = prefer_windows_spawnable_executable(&simplified).unwrap_or(simplified);
-        if is_windows_batch_script(&program) {
-            let mut command = std::process::Command::new("cmd.exe");
-            configure_std_command_no_window(&mut command);
-            command
-                .arg("/d")
-                .arg("/c")
-                .arg("call")
-                .arg(&program)
-                .args(args);
-            return command;
-        }
-        if let Some(resolved) = resolve_windows_program(&program) {
-            let resolved = prefer_direct_spawn_executable(resolved);
-            if is_windows_batch_script(&resolved) {
+    let mut command = {
+        #[cfg(windows)]
+        {
+            let simplified = prefer_direct_spawn_executable(dunce::simplified(program));
+            let program = prefer_windows_spawnable_executable(&simplified).unwrap_or(simplified);
+            if is_windows_batch_script(&program) {
                 let mut command = std::process::Command::new("cmd.exe");
                 configure_std_command_no_window(&mut command);
                 command
                     .arg("/d")
                     .arg("/c")
                     .arg("call")
-                    .arg(&resolved)
+                    .arg(&program)
                     .args(args);
-                return command;
+                command
+            } else if let Some(resolved) = resolve_windows_program(&program) {
+                let resolved = prefer_direct_spawn_executable(resolved);
+                if is_windows_batch_script(&resolved) {
+                    let mut command = std::process::Command::new("cmd.exe");
+                    configure_std_command_no_window(&mut command);
+                    command
+                        .arg("/d")
+                        .arg("/c")
+                        .arg("call")
+                        .arg(&resolved)
+                        .args(args);
+                    command
+                } else {
+                    let mut command = std::process::Command::new(&resolved);
+                    configure_std_command_no_window(&mut command);
+                    command.args(args);
+                    command
+                }
+            } else {
+                let mut command = std::process::Command::new(&program);
+                configure_std_command_no_window(&mut command);
+                command.args(args);
+                command
             }
-            let mut command = std::process::Command::new(&resolved);
+        }
+
+        #[cfg(not(windows))]
+        {
+            let mut command = std::process::Command::new(program);
             configure_std_command_no_window(&mut command);
             command.args(args);
-            return command;
+            command
         }
-        let mut command = std::process::Command::new(&program);
-        configure_std_command_no_window(&mut command);
-        command.args(args);
-        command
-    }
+    };
 
-    #[cfg(not(windows))]
-    {
-        let mut command = std::process::Command::new(program);
-        configure_std_command_no_window(&mut command);
-        command.args(args);
-        command
-    }
+    command.stdin(std::process::Stdio::null());
+    command
 }
 
 #[cfg(windows)]
@@ -713,6 +732,88 @@ pub fn group_spawn_no_window_with_job(
         None => ProcessTreeJob::noop(),
     };
     Ok((child, job))
+}
+
+struct TerminateJobOnDrop(Option<ProcessTreeJob>);
+
+impl Drop for TerminateJobOnDrop {
+    fn drop(&mut self) {
+        if let Some(job) = self.0.take() {
+            let _ = job.terminate();
+        }
+    }
+}
+
+/// Spawn a command in a hidden process group / Win32 Job Object and wait up to
+/// `timeout` for its exit status and piped stdout/stderr.
+///
+/// On timeout or cancellation, the entire OS process tree (including any
+/// detached grandchildren spawned via `.cmd` wrappers) is atomically
+/// terminated before returning.
+pub async fn run_command_output_with_timeout(
+    command: &mut tokio::process::Command,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    use tokio::io::AsyncReadExt as _;
+
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let (mut child, job) = group_spawn_no_window_with_job(command)?;
+    let mut stdout_pipe = child
+        .inner()
+        .stdout
+        .take()
+        .ok_or_else(|| std::io::Error::other("child stdout pipe unavailable"))?;
+    let mut stderr_pipe = child
+        .inner()
+        .stderr
+        .take()
+        .ok_or_else(|| std::io::Error::other("child stderr pipe unavailable"))?;
+    let mut job_guard = TerminateJobOnDrop(Some(job));
+
+    let outcome = tokio::time::timeout(timeout, async {
+        let read_out = async {
+            let mut buf = Vec::new();
+            stdout_pipe.read_to_end(&mut buf).await?;
+            Ok::<Vec<u8>, std::io::Error>(buf)
+        };
+        let read_err = async {
+            let mut buf = Vec::new();
+            stderr_pipe.read_to_end(&mut buf).await?;
+            Ok::<Vec<u8>, std::io::Error>(buf)
+        };
+        tokio::try_join!(child.wait(), read_out, read_err)
+    })
+    .await;
+
+    match outcome {
+        Ok(Ok((status, stdout, stderr))) => {
+            if let Some(job) = job_guard.0.take() {
+                job.close();
+            }
+            Ok(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            })
+        }
+        Ok(Err(err)) => {
+            let _ = child.start_kill();
+            drop(job_guard);
+            Err(err)
+        }
+        Err(_) => {
+            let _ = child.start_kill();
+            drop(job_guard);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "command timed out",
+            ))
+        }
+    }
 }
 
 /// Put a `std::process::Command` in its own process group so a later
@@ -1405,6 +1506,63 @@ mod tests {
         assert!(
             !is_alive(grandchild_pid),
             "TerminateJobObject + CloseHandle must reap orphaned grandchild even after parent shell exited"
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn run_command_output_with_timeout_terminates_grandchild_tree_on_timeout() {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, STILL_ACTIVE},
+            System::Threading::{
+                GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            },
+        };
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("child.pid");
+        let ps_cmd = format!(
+            "$p = Start-Process -FilePath 'ping.exe' -ArgumentList '-n','60','127.0.0.1' -WindowStyle Hidden -PassThru; Set-Content -Path '{}' -Value $p.Id -NoNewline; Wait-Process -Id $p.Id",
+            pid_file.display()
+        );
+        let mut command = new_hidden_tokio_command(
+            "powershell.exe",
+            ["-NoProfile", "-NonInteractive", "-Command", &ps_cmd],
+        );
+        let err = super::run_command_output_with_timeout(
+            &mut command,
+            std::time::Duration::from_millis(900),
+        )
+        .await
+        .expect_err("command waiting on ping should time out");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+
+        let child_pid: u32 = fs::read_to_string(&pid_file)
+            .expect("read grandchild pid")
+            .trim()
+            .parse()
+            .expect("parse grandchild pid");
+
+        let is_alive = |pid: u32| unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return false;
+            }
+            let mut code: u32 = 0;
+            let ok = GetExitCodeProcess(handle, &mut code);
+            let _ = CloseHandle(handle);
+            ok != 0 && code == STILL_ACTIVE as u32
+        };
+
+        for _ in 0..40 {
+            if !is_alive(child_pid) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            !is_alive(child_pid),
+            "run_command_output_with_timeout must kill grandchild process on timeout"
         );
     }
 }

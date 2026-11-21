@@ -30,7 +30,35 @@ import {
   type ConversationScrollToTurnDetail,
 } from '@/lib/conversationScroll';
 import { bindConversationSummaryMarquee } from '@/components/logs/conversationSummaryMarquee';
-import { buildTimelineVirtualEntries } from '@/components/logs/assistantVirtualSlices';
+import {
+  buildTimelineVirtualEntries,
+  type TimelineVirtualEntry,
+} from '@/components/logs/assistantVirtualSlices';
+
+function estimateVirtualEntrySize(
+  entry: TimelineVirtualEntry | undefined,
+  visibleTimelineItems: readonly ConversationTimelineItem[]
+): number {
+  if (!entry) return ESTIMATED_CONVERSATION_ROW_HEIGHT;
+  if (entry.slice) {
+    if (
+      entry.slice.kind === 'process-fold' ||
+      entry.slice.kind === 'status'
+    ) {
+      return 36;
+    }
+    if (entry.slice.kind === 'block') {
+      if (entry.key.includes(':md:')) {
+        return entry.slice.inExpandedFold ? 84 : 128;
+      }
+      return entry.slice.inExpandedFold ? 36 : 48;
+    }
+  }
+  const item = visibleTimelineItems[entry.timelineIndex];
+  if (!item) return ESTIMATED_CONVERSATION_ROW_HEIGHT;
+  if (item.kind === 'side') return 64;
+  return item.item.turn.role === 'user' ? 72 : ESTIMATED_CONVERSATION_ROW_HEIGHT;
+}
 import {
   CONVERSATION_OPEN_SETTLE_PASSES,
   CONVERSATION_TAIL_RESCUE_PASSES,
@@ -137,6 +165,7 @@ export function useTimelineScrollController({
     index: number;
     align: 'start' | 'center' | 'end' | 'auto';
   } | null>(null);
+  const skipNextPrependAdjustRef = useRef(false);
   const [visibleTailSession, setVisibleTailSession] = useState<{
     sessionId: string | null;
     count: number;
@@ -250,7 +279,8 @@ export function useTimelineScrollController({
   const rowVirtualizer = useVirtualizer<HTMLDivElement, HTMLDivElement>({
     count: virtualEntries.length,
     getScrollElement: () => containerRef.current,
-    estimateSize: () => ESTIMATED_CONVERSATION_ROW_HEIGHT,
+    estimateSize: (index) =>
+      estimateVirtualEntrySize(virtualEntries[index], visibleTimelineItems),
     getItemKey: (index) => virtualEntries[index]?.key ?? index,
     overscan: OVERSCAN,
     scrollMargin,
@@ -274,9 +304,16 @@ export function useTimelineScrollController({
   const jumpToVirtualIndex = useCallback(
     (index: number, align: 'start' | 'center' | 'end' | 'auto' = 'start') => {
       if (index < 0 || index >= virtualEntries.length) return;
-      const jump = () => {
-        if (align === 'start') {
-          const start = rowVirtualizer.measurementsCache[index]?.start;
+      let pass = 0;
+      const jump = (targetIndex: number) => {
+        const currentPass = pass;
+        pass += 1;
+        if (align === 'start' && currentPass > 0) {
+          const list = virtualListRef.current;
+          if (list) {
+            remeasureMountedVirtualRows(list, rowVirtualizer.resizeItem);
+          }
+          const start = rowVirtualizer.measurementsCache[targetIndex]?.start;
           if (typeof start === 'number') {
             rowVirtualizer.scrollToOffset(startAlignedVirtualOffset(start), {
               align: 'start',
@@ -285,7 +322,7 @@ export function useTimelineScrollController({
             return;
           }
         }
-        rowVirtualizer.scrollToIndex(index, {
+        rowVirtualizer.scrollToIndex(targetIndex, {
           align,
           behavior: 'auto',
         });
@@ -382,6 +419,7 @@ export function useTimelineScrollController({
       }
       if (index < visibleTimelineStartIndex) {
         pendingJumpTimelineIndexRef.current = { index, align };
+        skipNextPrependAdjustRef.current = true;
         setVisibleTailSession((current) => {
           const baseEpoch =
             current.sessionId === sessionId ? current.revealEpoch : 0;
@@ -453,6 +491,7 @@ export function useTimelineScrollController({
     followTailRef.current = true;
     setIsFollowingTail(true);
     pendingJumpTimelineIndexRef.current = null;
+    skipNextPrependAdjustRef.current = false;
   }, [sessionId]);
 
   useEffect(() => {
@@ -469,16 +508,19 @@ export function useTimelineScrollController({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [panelRef]);
 
-  const updateAtBottomState = useCallback(() => {
-    if (!followTailRef.current) return;
-    if (openSettlePassesRef.current > 0) return;
-    const container = containerRef.current;
-    if (!container) return;
-    const next = isConversationNearBottom(container);
-    if (isAtBottomRef.current === next) return;
-    isAtBottomRef.current = next;
-    onAtBottomChange?.(next);
-  }, [onAtBottomChange]);
+  const updateAtBottomState = useCallback(
+    (trustedUserScroll: boolean) => {
+      if (!followTailRef.current || !trustedUserScroll) return;
+      if (openSettlePassesRef.current > 0) return;
+      const container = containerRef.current;
+      if (!container) return;
+      const next = isConversationNearBottom(container);
+      if (isAtBottomRef.current === next) return;
+      isAtBottomRef.current = next;
+      onAtBottomChange?.(next);
+    },
+    [onAtBottomChange]
+  );
 
   const updateActiveIndex = useCallback(() => {
     const container = containerRef.current;
@@ -550,10 +592,10 @@ export function useTimelineScrollController({
       const scrollHeight = container.scrollHeight;
       lastScrollTopRef.current = scrollTop;
       lastScrollHeightRef.current = scrollHeight;
+      const trustedUserScroll =
+        event.nativeEvent.isTrusted && programmaticScrollDepthRef.current === 0;
       const intent = conversationFollowIntent({
-        trustedUserScroll:
-          event.nativeEvent.isTrusted &&
-          programmaticScrollDepthRef.current === 0,
+        trustedUserScroll,
         previousScrollTop: previous,
         scrollTop,
         nearBottom: isConversationNearBottom(container),
@@ -571,8 +613,7 @@ export function useTimelineScrollController({
         onAtBottomChange?.(true);
       }
       if (
-        event.nativeEvent.isTrusted &&
-        programmaticScrollDepthRef.current === 0 &&
+        trustedUserScroll &&
         shouldLoadOlderTimelinePage({
           hasEarlier: hasEarlierTimeline,
           isAtBottom: isAtBottomRef.current,
@@ -582,7 +623,7 @@ export function useTimelineScrollController({
       ) {
         loadEarlierTimeline();
       }
-      updateAtBottomState();
+      updateAtBottomState(trustedUserScroll);
       updateActiveIndex();
     },
     [
@@ -751,11 +792,20 @@ export function useTimelineScrollController({
   useLayoutEffect(() => {
     const container = containerRef.current;
     const list = virtualListRef.current;
+    const win = virtualWindowRef.current;
     if (!container || !list) return;
     updateScrollMargin();
     let viewportHeight = container.clientHeight;
-    const observer = new ResizeObserver(() => {
+    const observer = new ResizeObserver((entries) => {
       updateScrollMargin();
+      const windowResized = win != null && entries.some((e) => e.target === win);
+      if (windowResized) {
+        remeasureMountedVirtualRows(list, rowVirtualizer.resizeItem);
+        const winHeight = win.offsetHeight;
+        setPaintedWindowHeight((current) =>
+          Math.abs(current - winHeight) > 1 ? winHeight : current
+        );
+      }
       const nextHeight = container.clientHeight;
       if (nextHeight === viewportHeight) return;
       const revealed = viewportHeight === 0 && nextHeight > 0;
@@ -783,6 +833,7 @@ export function useTimelineScrollController({
     });
     observer.observe(container);
     observer.observe(list);
+    if (win) observer.observe(win);
     return () => observer.disconnect();
   }, [pinToBottom, rowVirtualizer, sideRowsLength, updateScrollMargin]);
 
@@ -814,7 +865,13 @@ export function useTimelineScrollController({
     }
     const sessionChanged = rawSessionChanged || firstNonEmptyForSession;
     const combinedPrependEpoch = olderTurnsPrependEpoch + effectiveRevealEpoch;
-    const prepended = combinedPrependEpoch > previousPrependEpochRef.current;
+    const skipPrependAdjust = skipNextPrependAdjustRef.current;
+    if (skipPrependAdjust) {
+      skipNextPrependAdjustRef.current = false;
+    }
+    const prepended =
+      !skipPrependAdjust &&
+      combinedPrependEpoch > previousPrependEpochRef.current;
     const container = containerRef.current;
     if (container) {
       const nextTop = scrollTopAfterPrepend({
@@ -894,11 +951,20 @@ export function useTimelineScrollController({
     virtualEntries.length,
   ]);
 
+  const virtualStartIndex = virtualRows[0]?.index ?? -1;
+  const virtualEndIndex = virtualRows[virtualRows.length - 1]?.index ?? -1;
+
   useLayoutEffect(() => {
     const list = virtualListRef.current;
     if (!list || virtualEntries.length === 0) return;
     remeasureMountedVirtualRows(list, rowVirtualizer.resizeItem);
-  }, [rowVirtualizer, virtualEntries]);
+  }, [
+    rowVirtualizer,
+    virtualEntries,
+    virtualRows.length,
+    virtualStartIndex,
+    virtualEndIndex,
+  ]);
 
   useLayoutEffect(() => {
     const height = virtualWindowRef.current?.offsetHeight ?? 0;
@@ -910,13 +976,15 @@ export function useTimelineScrollController({
   useLayoutEffect(() => {
     const container = containerRef.current;
     if (!container || virtualRows.length === 0) return;
+    const liveWindowHeight =
+      virtualWindowRef.current?.offsetHeight || paintedWindowHeight;
     const next = scrollTopToRevealVirtualWindow({
       scrollTop: container.scrollTop,
       viewportHeight: container.clientHeight,
       scrollHeight: container.scrollHeight,
       windowStart: virtualRows[0]?.start,
       scrollMargin,
-      windowHeight: paintedWindowHeight,
+      windowHeight: liveWindowHeight,
       followTail: followTailRef.current,
     });
     if (next == null) {

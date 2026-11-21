@@ -2521,6 +2521,13 @@ export default function ComputerUseSettingsView({
       ) as Record<string, unknown>;
 
       const tryRenewedTauriInvoke = async (): Promise<unknown> => {
+        const electronBackend = (
+          globalThis as unknown as {
+            dimoDesktop?: {
+              backend?: { baseUrl?: string; token?: string };
+            };
+          }
+        ).dimoDesktop?.backend;
         const tauriInternals = (
           globalThis as unknown as {
             __TAURI_INTERNALS__?: {
@@ -2531,8 +2538,12 @@ export default function ComputerUseSettingsView({
             };
           }
         ).__TAURI_INTERNALS__;
-        if (typeof tauriInternals?.invoke !== 'function') {
-          throw new Error('Tauri internals unavailable');
+        const hasElectron = Boolean(
+          electronBackend?.baseUrl?.trim() && electronBackend?.token?.trim()
+        );
+        const hasTauri = typeof tauriInternals?.invoke === 'function';
+        if (!hasElectron && !hasTauri) {
+          throw new Error('Host invoke bridge unavailable');
         }
         const pluginId = environment?.pluginId || 'dimo-plugin-computer-use';
         let surfaceId = environment?.surfaceId || 'computer-use';
@@ -2541,7 +2552,32 @@ export default function ComputerUseSettingsView({
           command: string,
           args: Record<string, unknown>
         ) => {
-          const res = (await tauriInternals.invoke!('application_call', {
+          if (hasElectron) {
+            const baseUrl = electronBackend!.baseUrl!.trim().replace(/\/+$/, '');
+            const token = electronBackend!.token!.trim();
+            const response = await fetch(
+              `${baseUrl}/api/v1/call/${encodeURIComponent(command)}`,
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${token}`,
+                },
+                body: JSON.stringify({
+                  operation_id: globalThis.crypto.randomUUID(),
+                  args,
+                }),
+              }
+            );
+            if (!response.ok) {
+              throw new Error(`Host command ${command} failed (${response.status})`);
+            }
+            const envelope = (await response.json()) as { data?: unknown } | unknown;
+            return envelope && typeof envelope === 'object' && 'data' in envelope
+              ? (envelope as { data: unknown }).data
+              : envelope;
+          }
+          const res = (await tauriInternals!.invoke!('application_call', {
             command,
             operationId: globalThis.crypto.randomUUID(),
             args,

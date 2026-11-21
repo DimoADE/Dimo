@@ -601,7 +601,7 @@ async function probeWebHostHealth(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 1_500);
   try {
-    const response = await fetch(`${origin.replace(/\/+$/, '')}/api/health`, {
+    const response = await fetch(`${origin.replace(/\/+$/, '')}/health`, {
       method: 'GET',
       signal: controller.signal,
     });
@@ -1595,6 +1595,7 @@ export function AccountHostConfigSyncBridge(): null {
     if (!accountKey || !user) return;
     let disposed = false;
     let unlistenAgents: (() => void) | undefined;
+    let unlistenHostClient: (() => void) | undefined;
 
     const handlePreferenceStorage = (event: StorageEvent) => {
       if (
@@ -1625,9 +1626,21 @@ export function AccountHostConfigSyncBridge(): null {
       })
       .catch(() => undefined);
 
+    void backendListen<void>('host-client-changed', () => {
+      if (!disposed) {
+        scheduleAutoSync();
+      }
+    })
+      .then((stop) => {
+        if (disposed) stop();
+        else unlistenHostClient = stop;
+      })
+      .catch(() => undefined);
+
     return () => {
       disposed = true;
       unlistenAgents?.();
+      unlistenHostClient?.();
       window.removeEventListener('storage', handlePreferenceStorage);
       window.removeEventListener(SETTINGS_CHANGED_EVENT, handleSettingsChanged);
       window.removeEventListener('host-client-changed', handleSettingsChanged);

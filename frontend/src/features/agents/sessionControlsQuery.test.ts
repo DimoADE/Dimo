@@ -3,9 +3,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentSessionControlsSnapshot } from 'shared/types';
 import {
   composerSessionControlDisplay,
+  invalidateAgentSessionControlsCaches,
   liveSessionControlsSnapshot,
   loadAgentSessionControlsCatalog,
   mergeCreateSessionControls,
+  preferSessionControlValues,
   publishLiveSessionControls,
   sessionControlsQueryKey,
   sessionControlsSchemaQueryKey,
@@ -367,5 +369,74 @@ describe('loadAgentSessionControlsCatalog', () => {
       CONTROLS
     );
     expect(refreshCapabilityCatalog).toHaveBeenCalledWith('grok');
+  });
+});
+
+describe('preferSessionControlValues & invalidateAgentSessionControlsCaches', () => {
+  it('keeps catalog current_mode over stale workspace live current_mode while preserving offered config values', () => {
+    const catalog: AgentSessionControlsSnapshot = {
+      modes: [
+        { id: 'default', label: 'Default', description: null },
+        { id: 'bypassPermissions', label: 'Bypass', description: null },
+      ],
+      current_mode: 'bypassPermissions',
+      config_options: [
+        {
+          key: 'effort',
+          label: 'Effort',
+          category: 'thought_level',
+          value: 'high',
+          choices: [
+            { value: 'low', label: 'Low' },
+            { value: 'high', label: 'High' },
+          ],
+        },
+      ],
+    };
+    const staleWorkspaceLive: AgentSessionControlsSnapshot = {
+      modes: catalog.modes,
+      current_mode: 'default',
+      config_options: [
+        {
+          key: 'effort',
+          label: 'Effort',
+          category: 'thought_level',
+          value: 'low',
+          choices: [
+            { value: 'low', label: 'Low' },
+            { value: 'high', label: 'High' },
+          ],
+        },
+      ],
+    };
+
+    const resolved = preferSessionControlValues(catalog, staleWorkspaceLive);
+    expect(resolved?.current_mode).toBe('bypassPermissions');
+    expect(
+      resolved?.config_options.find((opt) => opt.key === 'effort')?.value
+    ).toBe('low');
+  });
+
+  it('removes workspace live and schema caches when native config changes', () => {
+    const client = new QueryClient();
+    publishLiveSessionControls(client, {
+      agentType: 'claude_code',
+      workspaceId: 'workspace-1',
+      controls: CONTROLS,
+    });
+    client.setQueryData(sessionControlsQueryKey('claude_code', null), CONTROLS);
+
+    invalidateAgentSessionControlsCaches(client, 'claude_code');
+
+    expect(
+      client.getQueryData(sessionControlsQueryKey('claude_code', 'workspace-1'))
+    ).toBeUndefined();
+    expect(
+      client.getQueryData(sessionControlsSchemaQueryKey('claude_code'))
+    ).toBeUndefined();
+    expect(
+      client.getQueryState(sessionControlsQueryKey('claude_code', null))
+        ?.isInvalidated
+    ).toBe(true);
   });
 });

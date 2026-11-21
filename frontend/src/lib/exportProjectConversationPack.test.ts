@@ -22,8 +22,21 @@ vi.mock('@/features/conversation/conversationApi', () => ({
   conversationApi: { exportMarkdown },
 }));
 vi.mock('@/lib/hostFs', () => ({ pickHostDirectory }));
-vi.mock('@tauri-apps/plugin-fs', () => ({ writeTextFile }));
-vi.mock('@tauri-apps/api/path', () => ({ join }));
+vi.mock('@/lib/desktopShell', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/lib/desktopShell')>();
+  return {
+    ...actual,
+    getDesktopShell: () => {
+      const shell = actual.getDesktopShell();
+      return {
+        ...shell,
+        fs: { ...shell.fs, writeTextFile },
+        path: { ...shell.path, join },
+      };
+    },
+  };
+});
 vi.mock('@/components/ui/toast', () => ({
   toast: { success: toastSuccess, error: toastError },
 }));

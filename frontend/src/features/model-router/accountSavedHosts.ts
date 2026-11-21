@@ -1,4 +1,3 @@
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
 
 import {
@@ -8,7 +7,7 @@ import {
   type SyncableHostProfile,
 } from '@/lib/api';
 import { backendListen } from '@/lib/backendTransport';
-import { isTauriClient } from '@/lib/desktopShell';
+import { getDesktopWindowLabel, isTauriClient } from '@/lib/desktopShell';
 import {
   savedHostAddress,
   savedHostSource,
@@ -105,7 +104,7 @@ function enqueueSyncTask<T>(task: () => Promise<T>): Promise<T> {
 
 function isPrimarySyncCoordinatorWindow(): boolean {
   try {
-    const label = getCurrentWindow().label;
+    const label = getDesktopWindowLabel();
     return !label || label === 'main';
   } catch {
     return true;

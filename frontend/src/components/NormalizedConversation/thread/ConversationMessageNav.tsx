@@ -183,12 +183,6 @@ export function ConversationMessageNav({
     };
     pendingClientYRef.current = null;
     lastScrubbedIndexRef.current = null;
-
-    try {
-      event.currentTarget.setPointerCapture(event.pointerId);
-    } catch {
-      // Ignore synthetic events in non-browser test environments
-    }
   };
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -199,7 +193,14 @@ export function ConversationMessageNav({
       return;
     }
 
-    session.didDrag = true;
+    if (!session.didDrag) {
+      session.didDrag = true;
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId);
+      } catch {
+        // Ignore synthetic events in non-browser test environments
+      }
+    }
     pendingClientYRef.current = event.clientY;
 
     if (rafIdRef.current !== null) return;

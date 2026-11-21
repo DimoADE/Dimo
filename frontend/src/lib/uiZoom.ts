@@ -1,6 +1,7 @@
+import { getDesktopShell } from '@/lib/desktopShell';
 import { persistFrontendPreference } from '@/lib/frontendPreferences';
 import { readLocalStorage, writeLocalStorage } from '@/lib/safeStorage';
-import { isTauriDesktopShell } from '@/utils/platform';
+import { isDesktopShell } from '@/utils/platform';
 
 /**
  * UI zoom (P3): a frontend-only, localStorage-persisted scale for readability.
@@ -31,9 +32,8 @@ async function applyNativeWebviewZoom(
   generation: number
 ): Promise<void> {
   try {
-    const { getCurrentWebview } = await import('@tauri-apps/api/webview');
     if (generation !== nativeZoomGeneration) return;
-    await getCurrentWebview().setZoom(scale);
+    await getDesktopShell().window.setZoom(scale);
   } catch {
     if (generation !== nativeZoomGeneration) return;
     applyCssFontScale(scale);
@@ -53,7 +53,7 @@ export function applyUiZoom(scale: number): void {
   root.style.setProperty('--ui-zoom', String(scale));
 
   const generation = ++nativeZoomGeneration;
-  if (isTauriDesktopShell()) {
+  if (isDesktopShell()) {
     root.style.removeProperty('font-size');
     void applyNativeWebviewZoom(scale, generation);
     return;

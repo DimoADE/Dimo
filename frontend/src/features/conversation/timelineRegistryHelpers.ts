@@ -222,7 +222,8 @@ function minBatchOpRev(ops: readonly ConversationRowOp[]): bigint | null {
 
 function coalesceBatchOps(
   ops: readonly ConversationRowOp[],
-  hasExplicitPreviousSequence: boolean
+  hasExplicitPreviousSequence: boolean,
+  allowSameRevisionAppend = false
 ): ConversationRowOp[] {
   if (ops.length <= 1) return ops.slice();
   const minRev = hasExplicitPreviousSequence ? null : minBatchOpRev(ops);
@@ -240,7 +241,9 @@ function coalesceBatchOps(
       (hasExplicitPreviousSequence ||
         minRev === null ||
         batchOpRev(prev) > minRev) &&
-      batchOpRev(op) > batchOpRev(prev)
+      (allowSameRevisionAppend
+        ? batchOpRev(op) >= batchOpRev(prev)
+        : batchOpRev(op) > batchOpRev(prev))
     ) {
       out[out.length - 1] = {
         ...prev,
@@ -285,10 +288,25 @@ export function coalescePendingRowOpBatches(
     if (prev && areContiguousPureAppendBatches(prev, batch)) {
       const nextSeq = toBigIntSeq(batch.last_sequence, 0n);
       const prevSeq = toBigIntSeq(prev.last_sequence, 0n);
+      const nextLiveSeq =
+        batch.live_sequence != null
+          ? toBigIntSeq(batch.live_sequence, 0n)
+          : null;
+      const prevLiveSeq =
+        prev.live_sequence != null ? toBigIntSeq(prev.live_sequence, 0n) : null;
+      const mergedLiveSeq =
+        prevLiveSeq !== null && nextLiveSeq !== null
+          ? nextLiveSeq > prevLiveSeq
+            ? batch.live_sequence
+            : prev.live_sequence
+          : (batch.live_sequence ?? prev.live_sequence);
       mergedBatches[mergedBatches.length - 1] = {
         ...prev,
         last_sequence:
           nextSeq > prevSeq ? batch.last_sequence : prev.last_sequence,
+        ...(mergedLiveSeq !== undefined
+          ? { live_sequence: mergedLiveSeq }
+          : {}),
         ops: [...prev.ops, ...batch.ops],
       };
       continue;
@@ -297,9 +315,15 @@ export function coalescePendingRowOpBatches(
   }
   return mergedBatches.map((batch) => {
     if (batch.ops.length <= 1) return batch;
+    const isUnpersisted =
+      batch.live_sequence != null ||
+      (batch.previous_sequence != null &&
+        toBigIntSeq(batch.previous_sequence, -1n) ===
+          toBigIntSeq(batch.last_sequence, 0n));
     const coalescedOps = coalesceBatchOps(
       batch.ops,
-      batch.previous_sequence != null
+      batch.previous_sequence != null,
+      isUnpersisted
     );
     return coalescedOps.length === batch.ops.length
       ? batch

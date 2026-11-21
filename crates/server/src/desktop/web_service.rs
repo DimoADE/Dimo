@@ -1,0 +1,971 @@
+use std::{
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{Arc, LazyLock},
+};
+
+use axum::Router;
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use local_deployment::pty::PtyService;
+use sqlx::SqlitePool;
+use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
+use uuid::Uuid;
+
+use super::error::DesktopError;
+
+#[derive(Clone)]
+pub struct DesktopWebServiceContext {
+    pub pool: SqlitePool,
+    pub host: crate::HostRuntime,
+    pub pty: PtyService,
+    pub resources_dir: Option<PathBuf>,
+    pub static_asset_resolver: Option<crate::StaticAssetResolver>,
+    pub server_version: String,
+}
+
+const SETTINGS_FILE_NAME: &str = "web-service-settings.json";
+const SETTINGS_SECTION: &str = "web_service";
+const DEFAULT_PORT: u16 = 17891;
+
+static WEB_SERVICE_RUNTIME: LazyLock<Mutex<Option<WebServiceRuntime>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+#[derive(Debug)]
+struct WebServiceRuntime {
+    port: u16,
+    address: String,
+    addresses: Vec<String>,
+    listen_addresses: Vec<utils::net::AdvertisedListenAddress>,
+    allow_lan: bool,
+    started_at: String,
+    handles: Vec<JoinHandle<()>>,
+    serves_web_ui: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebServiceConfig {
+    pub port: u16,
+    pub token: Option<String>,
+    pub auto_start: bool,
+    #[serde(default)]
+    pub allow_lan: bool,
+}
+
+impl Default for WebServiceConfig {
+    fn default() -> Self {
+        Self {
+            port: DEFAULT_PORT,
+            token: None,
+            auto_start: true,
+            allow_lan: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebServerStatus {
+    pub running: bool,
+    pub port: u16,
+    pub address: Option<String>,
+    #[serde(default)]
+    pub addresses: Vec<String>,
+    #[serde(default)]
+    pub listen_addresses: Vec<utils::net::AdvertisedListenAddress>,
+    pub token_configured: bool,
+    pub started_at: Option<String>,
+    pub message: Option<String>,
+    #[serde(default)]
+    pub host_id: Option<String>,
+    #[serde(default)]
+    pub reachability: Vec<remote_protocol::ReachabilityOrigin>,
+    #[serde(default)]
+    pub serves_web_ui: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortProbeResult {
+    pub port: u16,
+    pub available: bool,
+    pub message: Option<String>,
+}
+
+fn legacy_settings_path() -> PathBuf {
+    utils::assets::asset_dir().join(SETTINGS_FILE_NAME)
+}
+
+fn validate_port(port: u16) -> Result<(), DesktopError> {
+    if port == 0 {
+        return Err(DesktopError::BadRequest(
+            "Web service port must be between 1 and 65535".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_config(mut config: WebServiceConfig) -> Result<WebServiceConfig, DesktopError> {
+    validate_port(config.port)?;
+    config.token = config
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    Ok(config)
+}
+
+async fn load_config() -> Result<WebServiceConfig, DesktopError> {
+    if let Some(config) = services::services::settings_store::read_section(
+        &utils::assets::settings_path(),
+        SETTINGS_SECTION,
+    )
+    .await
+    .map_err(|error| DesktopError::Internal(error.to_string()))?
+    {
+        return normalize_config(config);
+    }
+
+    let legacy_path = legacy_settings_path();
+    let config = if legacy_path.exists() {
+        let content = tokio::fs::read_to_string(&legacy_path)
+            .await
+            .map_err(|error| {
+                DesktopError::Internal(format!(
+                    "Failed to read web service settings {}: {error}",
+                    legacy_path.display()
+                ))
+            })?;
+        serde_json::from_str(&content).map_err(|error| {
+            DesktopError::Internal(format!(
+                "Invalid web service settings {}: {error}",
+                legacy_path.display()
+            ))
+        })?
+    } else {
+        WebServiceConfig::default()
+    };
+    services::services::settings_store::write_section(
+        &utils::assets::settings_path(),
+        SETTINGS_SECTION,
+        &config,
+    )
+    .await
+    .map_err(|error| DesktopError::Internal(error.to_string()))?;
+    normalize_config(config)
+}
+
+async fn save_config(config: &WebServiceConfig) -> Result<WebServiceConfig, DesktopError> {
+    let config = normalize_config(config.clone())?;
+    services::services::settings_store::write_section(
+        &utils::assets::settings_path(),
+        SETTINGS_SECTION,
+        &config,
+    )
+    .await
+    .map_err(|error| DesktopError::Internal(error.to_string()))?;
+    Ok(config)
+}
+
+fn advertised_listen_addresses(
+    port: u16,
+    allow_lan: bool,
+) -> Vec<utils::net::AdvertisedListenAddress> {
+    utils::net::advertised_listen_addresses(port, allow_lan)
+}
+
+fn advertised_addresses(port: u16, allow_lan: bool) -> Vec<String> {
+    advertised_listen_addresses(port, allow_lan)
+        .into_iter()
+        .map(|address| address.origin)
+        .collect()
+}
+
+#[cfg(test)]
+fn reachability_from_addresses(addresses: &[String]) -> Vec<remote_protocol::ReachabilityOrigin> {
+    super::host_tunnel::merge_host_reachability(addresses, Vec::new())
+}
+
+async fn composed_reachability(addresses: &[String]) -> Vec<remote_protocol::ReachabilityOrigin> {
+    super::host_tunnel::merge_host_reachability(
+        addresses,
+        super::host_tunnel::published_origins().await,
+    )
+}
+
+async fn load_or_create_host_id() -> Result<String, DesktopError> {
+    tokio::task::spawn_blocking(|| {
+        utils::assets::load_or_create_host_id(&utils::assets::asset_dir())
+    })
+    .await
+    .map_err(|error| DesktopError::Internal(format!("Failed to persist host identity: {error}")))?
+    .map_err(|error| DesktopError::Internal(format!("Failed to persist host identity: {error}")))
+}
+
+fn resolve_static_root(resources_dir: Option<&std::path::Path>) -> Option<PathBuf> {
+    if let Ok(root) = std::env::var("DIMO_STATIC_ROOT") {
+        let path = PathBuf::from(root);
+        if path.join("index.html").is_file() {
+            return Some(path);
+        }
+    }
+    let mut roots = Vec::new();
+    if let Some(dir) = resources_dir {
+        roots.push(dir.join("frontend-dist"));
+        roots.push(dir.join("../frontend-dist"));
+        roots.push(dir.join("web"));
+        roots.push(dir.join("../web"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let mut current = exe.parent().map(PathBuf::from);
+        while let Some(dir) = current {
+            roots.push(dir.join("frontend-dist"));
+            roots.push(dir.join("web"));
+            roots.push(dir.join("frontend/dist"));
+            current = dir.parent().map(PathBuf::from);
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut current = Some(cwd);
+        while let Some(dir) = current {
+            roots.push(dir.join("frontend-dist"));
+            roots.push(dir.join("web"));
+            roots.push(dir.join("frontend/dist"));
+            current = dir.parent().map(PathBuf::from);
+        }
+    }
+    roots
+        .into_iter()
+        .find(|path| path.join("index.html").is_file())
+}
+
+fn issue_host_token() -> crate::ServerToken {
+    crate::ServerToken::new(format!(
+        "vbx_{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    ))
+}
+
+async fn status_from_runtime(config: WebServiceConfig) -> WebServerStatus {
+    let host_id = load_or_create_host_id().await.ok();
+    let snapshot = {
+        let runtime = WEB_SERVICE_RUNTIME.lock().await;
+        runtime.as_ref().map(|runtime| {
+            (
+                runtime.port,
+                runtime.address.clone(),
+                runtime.addresses.clone(),
+                runtime.listen_addresses.clone(),
+                runtime.started_at.clone(),
+                runtime.serves_web_ui,
+            )
+        })
+    };
+    if let Some((port, address, addresses, listen_addresses, started_at, serves_web_ui)) = snapshot
+    {
+        let reachability = composed_reachability(&addresses).await;
+        return WebServerStatus {
+            running: true,
+            port,
+            address: Some(address),
+            addresses,
+            listen_addresses,
+            token_configured: config.token.is_some(),
+            started_at: Some(started_at),
+            message: None,
+            host_id,
+            reachability,
+            serves_web_ui,
+        };
+    }
+
+    WebServerStatus {
+        running: false,
+        port: config.port,
+        address: None,
+        addresses: Vec::new(),
+        listen_addresses: Vec::new(),
+        token_configured: config.token.is_some(),
+        started_at: None,
+        message: None,
+        host_id,
+        reachability: Vec::new(),
+        serves_web_ui: true,
+    }
+}
+
+pub async fn get_web_service_config() -> Result<WebServiceConfig, DesktopError> {
+    load_config().await
+}
+
+pub async fn update_web_service_config(
+    ctx: &DesktopWebServiceContext,
+    config: WebServiceConfig,
+) -> Result<WebServiceConfig, DesktopError> {
+    let previous = load_config().await?;
+    let normalized = normalize_config(config)?;
+    if let Some(raw) = normalized.token.as_deref() {
+        let token = crate::ServerToken::try_new(raw.to_string()).map_err(|_| {
+            DesktopError::BadRequest(
+                "Host token must contain at least 32 characters with mixed values".to_string(),
+            )
+        })?;
+        crate::SqliteTokenHashStore::new(ctx.pool.clone())
+            .provision(Some(token))
+            .await
+            .map_err(|error| DesktopError::Internal(error.to_string()))?;
+    }
+    let mut saved = save_config(&normalized).await?;
+    let running = WEB_SERVICE_RUNTIME.lock().await.is_some();
+    if running && (previous.allow_lan != saved.allow_lan || previous.port != saved.port) {
+        stop_web_server_with_config(saved.clone()).await;
+        match start_web_server(ctx).await {
+            Ok(status) => {
+                if status.running && status.port != saved.port {
+                    saved.port = status.port;
+                }
+            }
+            Err(error) => {
+                let _ = save_config(&previous).await;
+                let _ = start_web_server(ctx).await;
+                return Err(error);
+            }
+        }
+    }
+    Ok(saved)
+}
+
+pub async fn get_web_server_status() -> Result<WebServerStatus, DesktopError> {
+    let config = load_config().await?;
+    Ok(status_from_runtime(config).await)
+}
+
+pub async fn start_web_server(ctx: &DesktopWebServiceContext) -> Result<WebServerStatus, DesktopError> {
+    let mut config = load_config().await?;
+    let pool = ctx.pool.clone();
+    let store = crate::SqliteTokenHashStore::new(pool.clone());
+    let supplied = config
+        .token
+        .as_deref()
+        .and_then(|value| crate::ServerToken::try_new(value.to_string()).ok());
+    let provisioned = store
+        .provision(supplied)
+        .await
+        .map_err(|error| DesktopError::Internal(error.to_string()))?;
+    if let Some(issued) = provisioned.issued_token {
+        config.token = Some(issued.expose_once());
+        config = save_config(&config).await?;
+    }
+    {
+        let runtime = WEB_SERVICE_RUNTIME.lock().await;
+        if let Some(current) = runtime.as_ref()
+            && current.allow_lan == config.allow_lan
+            && current.port == config.port
+        {
+            drop(runtime);
+            return Ok(status_from_runtime(config).await);
+        }
+    }
+    if WEB_SERVICE_RUNTIME.lock().await.is_some() {
+        stop_web_server_with_config(config.clone()).await;
+    }
+    validate_port(config.port)?;
+    let (listeners, local_addr) =
+        bind_web_service_listeners_with_fallback(config.port, config.allow_lan).await?;
+    let bound_port = local_addr.port();
+    if bound_port != config.port {
+        config.port = bound_port;
+        config = save_config(&config).await?;
+    }
+    let listen = std::net::SocketAddr::from((
+        if config.allow_lan {
+            std::net::Ipv4Addr::UNSPECIFIED
+        } else {
+            std::net::Ipv4Addr::LOCALHOST
+        },
+        bound_port,
+    ));
+    let host_id = load_or_create_host_id().await?;
+    let advertised = advertised_addresses(bound_port, config.allow_lan);
+    let mut server_config = crate::ServerConfig::default()
+        .with_listen_addr(listen, config.allow_lan)
+        .map_err(|error| DesktopError::BadRequest(error.to_string()))?
+        .with_host_identity(host_id, composed_reachability(&advertised).await);
+    if !ctx.server_version.trim().is_empty() {
+        server_config.server_version = ctx.server_version.clone();
+    }
+    let static_root = resolve_static_root(ctx.resources_dir.as_deref());
+    let serves_web_ui = if let Some(static_root) = static_root {
+        server_config = server_config.with_static_root(static_root);
+        true
+    } else if let Some(resolver) = ctx.static_asset_resolver.clone() {
+        server_config = server_config.with_static_asset_resolver(resolver);
+        true
+    } else {
+        false
+    };
+    let runtime = crate::ServerRuntime::from_host(
+        server_config,
+        Arc::new(crate::SqliteServerAuth::new(ctx.pool.clone())),
+        ctx.host.clone(),
+        ctx.pty.clone(),
+    );
+    start_web_server_with_bound_listeners(
+        config,
+        listeners,
+        local_addr,
+        runtime.router(),
+        serves_web_ui,
+    )
+    .await
+}
+
+const MAX_PORT_FALLBACK_ATTEMPTS: u16 = 100;
+
+async fn bind_web_service_listeners_with_fallback(
+    start_port: u16,
+    allow_lan: bool,
+) -> Result<(Vec<TcpListener>, SocketAddr), DesktopError> {
+    let mut last_conflict = None;
+    for offset in 0..MAX_PORT_FALLBACK_ATTEMPTS {
+        let Some(candidate_port) = start_port.checked_add(offset) else {
+            break;
+        };
+        if candidate_port == 0 {
+            continue;
+        }
+        match bind_web_service_listeners(candidate_port, allow_lan).await {
+            Ok((listeners, local_addr)) => {
+                if candidate_port != start_port {
+                    tracing::info!(
+                        "Web service port {} is in use, automatically fell back to port {}",
+                        start_port,
+                        local_addr.port()
+                    );
+                }
+                return Ok((listeners, local_addr));
+            }
+            Err(error @ DesktopError::Conflict(_)) => {
+                last_conflict = Some(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_conflict.unwrap_or_else(|| {
+        DesktopError::Conflict(format!(
+            "Failed to bind web service starting from port {start_port}"
+        ))
+    }))
+}
+
+async fn bind_web_service_listeners(
+    port: u16,
+    allow_lan: bool,
+) -> Result<(Vec<TcpListener>, SocketAddr), DesktopError> {
+    let bind_ip = crate::ServerConfig::bind_ip(allow_lan);
+    match TcpListener::bind((bind_ip, port)).await {
+        Ok(listener) => {
+            let local_addr = listener.local_addr().map_err(|error| {
+                DesktopError::Internal(format!("Failed to read web service address: {error}"))
+            })?;
+            Ok((vec![listener], local_addr))
+        }
+        Err(error) if !allow_lan => Err(DesktopError::Conflict(format!(
+            "Failed to bind web service on {bind_ip}:{port}: {error}"
+        ))),
+        Err(wildcard_error) => {
+            let loopback_listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
+                .await
+                .map_err(|_| {
+                    DesktopError::Conflict(format!(
+                        "Failed to bind web service on {bind_ip}:{port}: {wildcard_error}"
+                    ))
+                })?;
+            let local_addr = loopback_listener.local_addr().map_err(|error| {
+                DesktopError::Internal(format!("Failed to read web service address: {error}"))
+            })?;
+            let bound_port = local_addr.port();
+            let mut listeners = vec![loopback_listener];
+            let candidate_lan_ips = advertised_listen_addresses(bound_port, true)
+                .into_iter()
+                .filter(|item| item.interface != "loopback" && item.family == "ipv4")
+                .filter_map(|item| item.ip.parse::<std::net::Ipv4Addr>().ok())
+                .collect::<Vec<_>>();
+            for lan_ip in &candidate_lan_ips {
+                if let Ok(listener) = TcpListener::bind((*lan_ip, bound_port)).await {
+                    listeners.push(listener);
+                }
+            }
+            if !candidate_lan_ips.is_empty() && listeners.len() == 1 {
+                return Err(DesktopError::Conflict(format!(
+                    "Failed to bind web service on {bind_ip}:{port}: {wildcard_error}"
+                )));
+            }
+            Ok((listeners, local_addr))
+        }
+    }
+}
+
+#[cfg(test)]
+async fn start_web_server_with_router(
+    mut config: WebServiceConfig,
+    service_router: Router,
+    serves_web_ui: bool,
+) -> Result<WebServerStatus, DesktopError> {
+    validate_port(config.port)?;
+
+    {
+        let runtime = WEB_SERVICE_RUNTIME.lock().await;
+        if runtime.is_some() {
+            drop(runtime);
+            return Ok(status_from_runtime(config).await);
+        }
+    }
+
+    let (listeners, local_addr) =
+        bind_web_service_listeners_with_fallback(config.port, config.allow_lan).await?;
+    config.port = local_addr.port();
+    start_web_server_with_bound_listeners(
+        config,
+        listeners,
+        local_addr,
+        service_router,
+        serves_web_ui,
+    )
+    .await
+}
+
+async fn start_web_server_with_bound_listeners(
+    config: WebServiceConfig,
+    listeners: Vec<TcpListener>,
+    local_addr: SocketAddr,
+    service_router: Router,
+    serves_web_ui: bool,
+) -> Result<WebServerStatus, DesktopError> {
+    let listen_addresses = advertised_listen_addresses(local_addr.port(), config.allow_lan);
+    let addresses = listen_addresses
+        .iter()
+        .map(|item| item.origin.clone())
+        .collect::<Vec<_>>();
+    let address = addresses
+        .first()
+        .cloned()
+        .unwrap_or_else(|| format!("http://{local_addr}"));
+    let started_at = Utc::now().to_rfc3339();
+    let mut handles = Vec::with_capacity(listeners.len());
+    for listener in listeners {
+        let router = service_router.clone();
+        handles.push(tokio::spawn(async move {
+            let listener = axum::serve::ListenerExt::tap_io(listener, |tcp_stream| {
+                let _ = tcp_stream.set_nodelay(true);
+            });
+            if let Err(error) = axum::serve(listener, router).await {
+                tracing::warn!("Dimo web service stopped with error: {}", error);
+            }
+        }));
+    }
+
+    let mut runtime = WEB_SERVICE_RUNTIME.lock().await;
+    *runtime = Some(WebServiceRuntime {
+        port: local_addr.port(),
+        address,
+        addresses,
+        listen_addresses,
+        allow_lan: config.allow_lan,
+        started_at,
+        handles,
+        serves_web_ui,
+    });
+    drop(runtime);
+    super::host_tunnel::sync_relay().await;
+
+    Ok(status_from_runtime(config).await)
+}
+
+pub async fn stop_web_server() -> Result<WebServerStatus, DesktopError> {
+    let config = load_config().await?;
+    Ok(stop_web_server_with_config(config).await)
+}
+
+async fn stop_web_server_with_config(config: WebServiceConfig) -> WebServerStatus {
+    let removed = {
+        let mut runtime = WEB_SERVICE_RUNTIME.lock().await;
+        runtime.take()
+    };
+    if let Some(runtime) = removed {
+        for handle in runtime.handles {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+    super::host_tunnel::stop_quick_tunnel().await;
+    status_from_runtime(config).await
+}
+
+pub async fn probe_web_service_port(port: u16) -> Result<PortProbeResult, DesktopError> {
+    validate_port(port)?;
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    match TcpListener::bind(addr).await {
+        Ok(listener) => {
+            drop(listener);
+            Ok(PortProbeResult {
+                port,
+                available: true,
+                message: None,
+            })
+        }
+        Err(error) => Ok(PortProbeResult {
+            port,
+            available: false,
+            message: Some(error.to_string()),
+        }),
+    }
+}
+
+pub async fn generate_web_service_token(
+    pool: &SqlitePool,
+) -> Result<WebServiceConfig, DesktopError> {
+    let mut config = load_config().await?;
+    let plaintext = issue_host_token().expose_once();
+    let store = crate::SqliteTokenHashStore::new(pool.clone());
+    let persisted = crate::ServerToken::try_new(plaintext.clone())
+        .map_err(|error| DesktopError::Internal(error.to_string()))?;
+    store
+        .provision(Some(persisted))
+        .await
+        .map_err(|error| DesktopError::Internal(error.to_string()))?;
+    config.token = Some(plaintext);
+    save_config(&config).await
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateHostPairingRequest {
+    pub preset: Option<String>,
+    #[serde(default)]
+    pub ttl_seconds: Option<i64>,
+}
+
+pub async fn create_host_device_pairing(
+    pool: &SqlitePool,
+    request: CreateHostPairingRequest,
+) -> Result<remote_protocol::IssuedPairingInvitation, DesktopError> {
+    let preset = match request.preset.as_deref() {
+        None | Some("") => remote_protocol::DevicePermissionPreset::Workstation,
+        Some("companion") => remote_protocol::DevicePermissionPreset::Companion,
+        Some("workstation") => remote_protocol::DevicePermissionPreset::Workstation,
+        Some(other) => {
+            return Err(DesktopError::BadRequest(format!(
+                "unknown pairing preset: {other}"
+            )));
+        }
+    };
+    use crate::ServerAuth;
+    let auth = crate::SqliteServerAuth::new(pool.clone());
+    let creator = crate::AuthenticatedCredential::host_console_owner();
+    let challenge = auth
+        .create_pairing(
+            &creator,
+            remote_protocol::CreatePairingRequest {
+                preset: Some(preset),
+                requested_scopes: Vec::new(),
+                ttl_seconds: request.ttl_seconds,
+            },
+        )
+        .await
+        .map_err(|error| DesktopError::Internal(error.to_string()))?;
+    // A device that pairs expects to find this Host again after a restart.
+    if let Ok(mut config) = load_config().await
+        && !config.auto_start
+    {
+        config.auto_start = true;
+        save_config(&config).await?;
+    }
+    let host_id = load_or_create_host_id().await?;
+    let addresses = {
+        let runtime = WEB_SERVICE_RUNTIME.lock().await;
+        runtime
+            .as_ref()
+            .map(|current| current.addresses.clone())
+            .unwrap_or_default()
+    };
+    let reachability = composed_reachability(&addresses).await;
+    let payload = remote_protocol::PairingInvitationPayload::from_challenge(
+        host_id,
+        preset,
+        &challenge,
+        reachability,
+    );
+    let issued = remote_protocol::IssuedPairingInvitation::from_payload(challenge, payload);
+    let code_for_beacon = issued.connection_code.clone();
+    let host_id_for_beacon = issued.host_id.clone();
+    tokio::spawn(async move {
+        super::host_tunnel::publish_pairing_code_beacon(
+            &code_for_beacon,
+            &host_id_for_beacon,
+        )
+        .await;
+    });
+    Ok(issued)
+}
+
+pub async fn list_host_devices(
+    pool: &SqlitePool,
+) -> Result<Vec<crate::PairedDeviceRecord>, DesktopError> {
+    use crate::ServerAuth;
+    let auth = crate::SqliteServerAuth::new(pool.clone());
+    auth.list_devices(&crate::AuthenticatedCredential::host_console_owner())
+        .await
+        .map_err(|error| DesktopError::Internal(error.to_string()))
+}
+
+pub async fn list_host_connect_requests(
+    pool: &SqlitePool,
+) -> Result<Vec<remote_protocol::PendingDeviceConnectRequest>, DesktopError> {
+    use crate::ServerAuth;
+    let auth = crate::SqliteServerAuth::new(pool.clone());
+    auth.list_connect_requests(&crate::AuthenticatedCredential::host_console_owner())
+        .await
+        .map_err(|error| DesktopError::Internal(error.to_string()))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RespondHostConnectRequest {
+    pub request_id: String,
+    pub approve: bool,
+}
+
+pub async fn respond_host_connect_request(
+    pool: &SqlitePool,
+    request: RespondHostConnectRequest,
+) -> Result<(), DesktopError> {
+    let request_id = request
+        .request_id
+        .parse::<remote_protocol::PairingId>()
+        .map_err(|error| DesktopError::BadRequest(format!("invalid connect request id: {error}")))?;
+    use crate::ServerAuth;
+    let auth = crate::SqliteServerAuth::new(pool.clone());
+    auth.respond_connect_request(
+        &crate::AuthenticatedCredential::host_console_owner(),
+        request_id,
+        request.approve,
+    )
+    .await
+    .map_err(|error| DesktopError::Internal(error.to_string()))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RevokeHostDeviceRequest {
+    pub device_id: String,
+}
+
+pub async fn revoke_host_device(
+    pool: &SqlitePool,
+    request: RevokeHostDeviceRequest,
+) -> Result<remote_protocol::RevokeDeviceResponse, DesktopError> {
+    let device_id = request
+        .device_id
+        .parse::<remote_protocol::DeviceId>()
+        .map_err(|error| DesktopError::BadRequest(format!("invalid device id: {error}")))?;
+    use crate::ServerAuth;
+    let auth = crate::SqliteServerAuth::new(pool.clone());
+    auth.revoke_device(
+        &crate::AuthenticatedCredential::host_console_owner(),
+        device_id,
+    )
+    .await
+    .map_err(|error| DesktopError::Internal(error.to_string()))
+}
+
+/// Revokes the phones and computers admitted through the Dimo account of this Host, so
+/// signing out disconnects them on every path (LAN and relay).
+pub async fn revoke_account_linked_devices(pool: &SqlitePool) -> Result<u64, DesktopError> {
+    let auth = crate::SqliteServerAuth::new(pool.clone());
+    auth.revoke_account_linked_devices(&crate::AuthenticatedCredential::host_console_owner())
+        .await
+        .map_err(|error| DesktopError::Internal(error.to_string()))
+}
+
+pub(crate) async fn listening_port() -> Option<u16> {
+    WEB_SERVICE_RUNTIME
+        .lock()
+        .await
+        .as_ref()
+        .map(|runtime| runtime.port)
+}
+
+pub async fn ensure_listening(
+    ctx: &DesktopWebServiceContext,
+) -> Result<WebServerStatus, DesktopError> {
+    if WEB_SERVICE_RUNTIME.lock().await.is_some() {
+        let config = load_config().await?;
+        super::host_tunnel::sync_relay().await;
+        return Ok(status_from_runtime(config).await);
+    }
+    start_web_server(ctx).await
+}
+
+pub async fn ensure_web_service_autostart(
+    ctx: &DesktopWebServiceContext,
+) -> Result<(), DesktopError> {
+    let config = load_config().await?;
+    if config.auto_start || super::host_tunnel::should_keep_listening().await {
+        start_web_server(ctx).await?;
+    } else {
+        super::host_tunnel::sync_relay().await;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{net::TcpListener as StdTcpListener, time::Duration};
+
+    use axum::Router;
+
+    use super::{
+        WebServiceConfig, advertised_addresses, advertised_listen_addresses,
+        reachability_from_addresses, start_web_server_with_router, stop_web_server_with_config,
+    };
+
+    #[test]
+    fn advertised_lan_addresses_exclude_loopback_from_reachability() {
+        let addresses = advertised_addresses(17891, true);
+        let reachability = reachability_from_addresses(&addresses);
+        assert!(
+            addresses
+                .iter()
+                .any(|address| address.contains("127.0.0.1"))
+        );
+        assert!(
+            reachability
+                .iter()
+                .all(|item| !item.origin.contains("127.0.0.1"))
+        );
+    }
+
+    #[test]
+    fn advertised_addresses_without_lan_are_loopback_only() {
+        assert_eq!(
+            advertised_addresses(17891, false),
+            vec!["http://127.0.0.1:17891".to_string()]
+        );
+        let listen = advertised_listen_addresses(17891, false);
+        assert_eq!(listen.len(), 1);
+        assert_eq!(listen[0].interface, "loopback");
+        assert_eq!(listen[0].family, "ipv4");
+    }
+
+    static TEST_RUNTIME_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn starting_web_service_returns_the_running_status_without_hanging() {
+        let _guard = TEST_RUNTIME_LOCK.lock().await;
+        let port = StdTcpListener::bind(("127.0.0.1", 0))
+            .expect("an ephemeral test port should be available")
+            .local_addr()
+            .expect("test listener should expose its address")
+            .port();
+        let config = WebServiceConfig {
+            port,
+            token: None,
+            auto_start: false,
+            allow_lan: false,
+        };
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(2),
+            start_web_server_with_router(config.clone(), Router::new(), false),
+        )
+        .await;
+
+        // Always release a listener that may have been created before the
+        // command stalled, so this regression test remains deterministic.
+        let _ = stop_web_server_with_config(config).await;
+
+        let status = outcome
+            .expect("start_web_server should return instead of hanging")
+            .expect("start_web_server should succeed on an available port");
+        assert!(status.running);
+        assert!(status.address.is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn toggling_allow_lan_rebinds_port_immediately_without_losing_service() {
+        let _guard = TEST_RUNTIME_LOCK.lock().await;
+        let port = StdTcpListener::bind(("127.0.0.1", 0))
+            .expect("an ephemeral test port should be available")
+            .local_addr()
+            .expect("test listener should expose its address")
+            .port();
+        let loopback_config = WebServiceConfig {
+            port,
+            token: None,
+            auto_start: false,
+            allow_lan: false,
+        };
+        let lan_config = WebServiceConfig {
+            port,
+            token: None,
+            auto_start: false,
+            allow_lan: true,
+        };
+
+        let first = start_web_server_with_router(loopback_config.clone(), Router::new(), true)
+            .await
+            .expect("initial loopback start");
+        assert!(first.running);
+
+        let stopped = stop_web_server_with_config(lan_config.clone()).await;
+        assert!(!stopped.running);
+
+        let second = start_web_server_with_router(lan_config.clone(), Router::new(), true)
+            .await
+            .expect("lan start immediately after stop");
+        assert!(second.running);
+
+        let _ = stop_web_server_with_config(loopback_config.clone()).await;
+        let third = start_web_server_with_router(loopback_config.clone(), Router::new(), true)
+            .await
+            .expect("loopback start immediately after lan stop");
+        assert!(third.running);
+
+        let _ = stop_web_server_with_config(loopback_config).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn starting_web_service_automatically_falls_back_to_next_available_port_when_occupied() {
+        let _guard = TEST_RUNTIME_LOCK.lock().await;
+        let occupied_first =
+            StdTcpListener::bind(("127.0.0.1", 0)).expect("first occupied port should bind");
+        let base_port = occupied_first
+            .local_addr()
+            .expect("first occupied listener should expose address")
+            .port();
+        let _occupied_second =
+            StdTcpListener::bind(("127.0.0.1", base_port.saturating_add(1))).ok();
+
+        let config = WebServiceConfig {
+            port: base_port,
+            token: None,
+            auto_start: false,
+            allow_lan: false,
+        };
+
+        let status = start_web_server_with_router(config.clone(), Router::new(), true)
+            .await
+            .expect("web service should fall back to a subsequent free port instead of failing");
+        let _ = stop_web_server_with_config(config).await;
+
+        assert!(status.running);
+        assert!(
+            status.port > base_port,
+            "expected fallback port > {base_port}, got {}",
+            status.port
+        );
+        assert_eq!(
+            status.address.as_deref(),
+            Some(format!("http://127.0.0.1:{}", status.port).as_str())
+        );
+    }
+}

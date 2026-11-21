@@ -7,7 +7,6 @@ import {
   waitFor,
   within,
 } from '@testing-library/react';
-import { open } from '@tauri-apps/plugin-dialog';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -32,12 +31,30 @@ const webviewMock = vi.hoisted(() => ({
   unlisten: vi.fn(),
 }));
 
+const dialogOpenMock = vi.hoisted(() => vi.fn());
+
 vi.mock('@/components/ui/toast', () => ({ toast: toastMock }));
-vi.mock('@tauri-apps/api/webview', () => ({
-  getCurrentWebview: () => ({
-    onDragDropEvent: webviewMock.onDragDropEvent,
-  }),
-}));
+vi.mock('@/lib/desktopShell', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/lib/desktopShell')>();
+  return {
+    ...actual,
+    getDesktopShell: () => {
+      const shell = actual.getDesktopShell();
+      return {
+        ...shell,
+        dialog: {
+          ...shell.dialog,
+          open: dialogOpenMock,
+        },
+        window: {
+          ...shell.window,
+          onDragDropEvent: webviewMock.onDragDropEvent,
+        },
+      };
+    },
+  };
+});
 
 const plugin = {
   id: 'office',
@@ -401,7 +418,7 @@ describe('product plugin experience', () => {
   });
 
   it('refreshes the catalog immediately after adding a packaged plugin', async () => {
-    vi.mocked(open).mockResolvedValue(drawioPlugin.sourcePath);
+    dialogOpenMock.mockResolvedValue(drawioPlugin.sourcePath);
     let catalogRequests = 0;
     let resolveInitialCatalog: ((value: unknown) => void) | undefined;
     const call = vi.fn(async (command: string) => {
@@ -484,7 +501,7 @@ describe('product plugin experience', () => {
       mcpCount: 1,
       mcpServers: ['dimo-workflow-mcp'],
     };
-    vi.mocked(open).mockResolvedValue(incoming.sourcePath);
+    dialogOpenMock.mockResolvedValue(incoming.sourcePath);
     const call = vi.fn(async (command: string) => {
       if (command === 'plugin_control_catalog') {
         return { plugins: [incoming], runtimes: [] };

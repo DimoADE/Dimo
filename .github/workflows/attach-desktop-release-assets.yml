@@ -51,7 +51,7 @@ jobs:
           if [ -f "$NOTES_FILE" ]; then
             NOTES_ARGS=(--notes-file "$NOTES_FILE")
           fi
-          node scripts/generate-updater-manifest.js \
+          node scripts/generate-tauri-bridge-manifest.js \
             --artifacts-dir updater-artifacts \
             --output-dir updater-release \
             --repository "$RELEASE_REPOSITORY" \

@@ -18,7 +18,11 @@ export {
   useBackendTransport,
 } from './BackendTransportProvider';
 export { useBackendCapabilities } from './useBackendCapabilities';
-export { TauriTransport, tauriBackendTransport } from './tauriTransport';
+export {
+  ElectronTransport,
+  getElectronBackendTransport,
+  type ElectronTransportOptions,
+} from './electronTransport';
 export { WebTransport, type WebTransportOptions } from './webTransport';
 export {
   RemoteDesktopTransport,
@@ -28,6 +32,8 @@ export { BoundHostTransport } from './boundHostTransport';
 export {
   configureBackendTransport,
   configuredBackendTransport,
+  fallbackDesktopTransport,
   getBackendTransport,
+  getLocalDesktopTransport,
   mountBackendTransport,
 } from './transportRegistry';

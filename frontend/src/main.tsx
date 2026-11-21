@@ -26,7 +26,7 @@ import { warmDefaultSettingsSurface } from '@/lib/settingsPreload';
 import { i18nReady } from '@/i18n';
 // Import modal type definitions
 import './types/modals';
-import { isTauriDesktopShell } from '@/utils/platform';
+import { isDesktopShell } from '@/utils/platform';
 import { DesktopHostBootstrap } from './DesktopHostBootstrap';
 import { getAppRouteMode } from './appRouteMode';
 
@@ -90,7 +90,7 @@ void i18nReady.finally(() => {
     <React.StrictMode>
       <QueryClientProvider client={queryClient}>
         <React.Suspense fallback={null}>
-          {isTauriDesktopShell() ? (
+          {isDesktopShell() ? (
             <DesktopHostBootstrap>
               <App />
             </DesktopHostBootstrap>

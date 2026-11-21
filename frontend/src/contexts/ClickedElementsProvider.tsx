@@ -304,10 +304,7 @@ function formatClickedMarkdown(
   const redlineSelector = payload.clickedElement?.dataset?.['redlineSelector'];
   const redlineComputedCss =
     payload.clickedElement?.dataset?.['redlineComputedCss'];
-  const sourceLabel =
-    payload.trigger === 'tauri-inspector'
-      ? 'From Tauri App selection:'
-      : 'From preview click:';
+  const sourceLabel = 'From preview click:';
 
   // Use first component in effective chain as the "selected start"
   const first = effectiveChain[0];

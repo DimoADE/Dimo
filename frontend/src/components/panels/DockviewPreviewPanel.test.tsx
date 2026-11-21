@@ -59,6 +59,7 @@ vi.mock('@/lib/api/misc', async (importOriginal) => {
 vi.mock('@/utils/platform', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/utils/platform')>()),
   isTauriDesktopShell: platform.isTauriDesktopShell,
+  isDesktopShell: platform.isTauriDesktopShell,
   isMac: platform.isMac,
 }));
 

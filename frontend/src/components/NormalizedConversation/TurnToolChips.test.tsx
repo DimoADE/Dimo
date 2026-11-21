@@ -187,4 +187,150 @@ describe('TurnToolChips integration in TurnActivity', () => {
     ).toHaveAttribute('aria-expanded', 'true');
     expect(screen.getByTestId('tool-detail-entry')).toBeInTheDocument();
   });
+
+  it('folds failed tools inside the collapsed batch while keeping the bottom file diff summary visible', () => {
+    render(
+      <TurnActivity
+        turnId="turn-collapsed-errors"
+        timestamp="2026-10-12T00:00:00.000Z"
+        workspacePath="/workspace/app"
+        items={[
+          makeToolItem(0, 'Edit', {
+            file_path: '/workspace/app/src/ok.ts',
+            old_string: 'const a = 1;',
+            new_string: 'const a = 2;',
+          }),
+          makeToolItem(
+            1,
+            'bash',
+            { command: 'git status --short' },
+            JSON.stringify({ exit_code: 1, stderr: 'bad flag' }),
+            true
+          ),
+          makeToolItem(
+            2,
+            'Edit',
+            {
+              file_path: '/workspace/app/shared/types.ts',
+              old_string: 'missing',
+              new_string: 'updated',
+            },
+            'TargetContent not found',
+            true
+          ),
+        ]}
+        attempt={{ id: 'ws-1', container_ref: '/workspace/app' } as never}
+        task={null}
+      />
+    );
+
+    const header = screen.getByRole('button', {
+      name: '运行 1 个命令、已改 2 个文件',
+    });
+    expect(header).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByTestId('turn-tool-chip-row')).not.toBeInTheDocument();
+    expect(screen.queryByText(/git status --short/)).not.toBeInTheDocument();
+    expect(screen.queryByText('工具调用失败')).not.toBeInTheDocument();
+
+    const diffBar = screen.getByTestId('turn-tool-diff-chips');
+    expect(within(diffBar).getByText('ok.ts')).toBeInTheDocument();
+
+    fireEvent.click(header);
+    expect(header).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getAllByTestId('turn-tool-chip-row')).toHaveLength(3);
+    expect(screen.getByText(/git status --short/)).toBeInTheDocument();
+    expect(screen.getByText('工具调用失败')).toBeInTheDocument();
+  });
+
+  it('renders synthesized unified_diff counts and honors precomputed stats when diff_truncated is true', () => {
+    const antigravityEdit: IndexedTurnItem = {
+      index: 0,
+      item: {
+        kind: 'tool',
+        use: {
+          type: 'tool_use',
+          tool_use_id: 'agy-1',
+          tool_name: '0e17fa2c-d6bb-4fae-af74-b91e1221654e:258',
+          kind: 'edit',
+          input_preview: JSON.stringify({
+            file_path: '/workspace/app/src/messageTurnTool.ts',
+            unified_diff: [
+              '--- a/src/messageTurnTool.ts',
+              '+++ b/src/messageTurnTool.ts',
+              '@@ -10,2 +10,3 @@',
+              '-const oldLine = 1;',
+              '+const newLine = 2;',
+              '+const extraLine = 3;',
+            ].join('\n'),
+          }),
+          meta: null,
+        },
+        result: {
+          type: 'tool_result',
+          tool_use_id: 'agy-1',
+          output_preview: 'Edited file',
+          is_error: false,
+          agent_stats: null,
+        },
+      },
+    };
+
+    const largeTruncatedEdit: IndexedTurnItem = {
+      index: 1,
+      item: {
+        kind: 'tool',
+        use: {
+          type: 'tool_use',
+          tool_use_id: 'agy-2',
+          tool_name: 'Running edit_file',
+          kind: 'edit',
+          input_preview: JSON.stringify({
+            file_path: '/workspace/app/src/largeFile.ts',
+            unified_diff: [
+              '--- a/src/largeFile.ts',
+              '+++ b/src/largeFile.ts',
+              '@@ -1,1 +1,420 @@',
+              '-const legacy = true;',
+              '+const rewritten = true;',
+            ].join('\n'),
+            additions: 420,
+            deletions: 17,
+            diff_truncated: true,
+          }),
+          meta: null,
+        },
+        result: {
+          type: 'tool_result',
+          tool_use_id: 'agy-2',
+          output_preview: 'Edited large file',
+          is_error: false,
+          agent_stats: null,
+        },
+      },
+    };
+
+    render(
+      <TurnActivity
+        turnId="turn-synthesized-diffs"
+        timestamp="2026-10-12T00:00:00.000Z"
+        workspacePath="/workspace/app"
+        items={[antigravityEdit, largeTruncatedEdit]}
+        attempt={{ id: 'ws-1', container_ref: '/workspace/app' } as never}
+        task={null}
+      />
+    );
+
+    const diffBar = screen.getByTestId('turn-tool-diff-chips');
+    const firstChip = within(diffBar).getByRole('button', {
+      name: '查看 src/messageTurnTool.ts 的变更',
+    });
+    expect(firstChip).toHaveTextContent('+2');
+    expect(firstChip).toHaveTextContent('-1');
+
+    const secondChip = within(diffBar).getByRole('button', {
+      name: '查看 src/largeFile.ts 的变更',
+    });
+    expect(secondChip).toHaveTextContent('+420');
+    expect(secondChip).toHaveTextContent('-17');
+  });
 });

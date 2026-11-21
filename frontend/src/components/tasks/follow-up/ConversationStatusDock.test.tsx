@@ -703,4 +703,99 @@ describe('ConversationStatusDock', () => {
     expect(onCancel).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(cancelButton).not.toBeDisabled());
   });
+
+  it('renders bot actor identity chip (avatar + name) and opens member session on click', () => {
+    const onOpenSession = vi.fn();
+    render(
+      <ConversationStatusDock
+        notices={[
+          {
+            id: 'conv-bot-1:err-403',
+            kind: 'turn-error',
+            actor: {
+              id: 'conv-bot-1',
+              name: 'CodeReviewer',
+              avatar: <span data-testid="bot-avatar-1">CR</span>,
+              onOpenSession,
+            },
+            error: {
+              message: 'HTTP 403 Forbidden',
+              code: '403',
+              raw: '403 Forbidden: API key rejected',
+              kind: 'auth_required',
+            },
+            onReload: vi.fn(),
+          },
+        ]}
+      />
+    );
+
+    const chip = screen.getByTestId('status-notice-actor-conv-bot-1');
+    expect(within(chip).getByTestId('bot-avatar-1')).toBeInTheDocument();
+    expect(chip).toHaveTextContent('CodeReviewer');
+
+    fireEvent.click(chip);
+    expect(onOpenSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the latest 2 notices by default and expands/collapses overflow when maxVisibleCount=2', () => {
+    render(
+      <ConversationStatusDock
+        maxVisibleCount={2}
+        notices={[
+          {
+            id: 'conv-3:err',
+            kind: 'turn-error',
+            actor: { id: 'conv-3', name: 'Bot Gamma' },
+            error: {
+              message: 'HTTP 403 Forbidden (Gamma)',
+              code: '403',
+              raw: null,
+              kind: 'service_error',
+            },
+          },
+          {
+            id: 'conv-2:err',
+            kind: 'turn-error',
+            actor: { id: 'conv-2', name: 'Bot Beta' },
+            error: {
+              message: 'HTTP 403 Forbidden (Beta)',
+              code: '403',
+              raw: null,
+              kind: 'service_error',
+            },
+          },
+          {
+            id: 'conv-1:err',
+            kind: 'turn-error',
+            actor: { id: 'conv-1', name: 'Bot Alpha' },
+            error: {
+              message: 'HTTP 403 Forbidden (Alpha)',
+              code: '403',
+              raw: null,
+              kind: 'service_error',
+            },
+          },
+        ]}
+      />
+    );
+
+    const dock = screen.getByTestId('conversation-status-dock');
+    expect(within(dock).getByText('Bot Gamma')).toBeInTheDocument();
+    expect(within(dock).getByText('Bot Beta')).toBeInTheDocument();
+    expect(within(dock).queryByText('Bot Alpha')).not.toBeInTheDocument();
+
+    const toggle = screen.getByTestId('conversation-status-overflow-toggle');
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(toggle).toHaveTextContent('还有 1 条通知');
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(within(dock).getByText('Bot Alpha')).toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(within(dock).queryByText('Bot Alpha')).not.toBeInTheDocument();
+  });
 });
+

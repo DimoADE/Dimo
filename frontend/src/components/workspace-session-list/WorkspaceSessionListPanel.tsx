@@ -34,10 +34,14 @@ import {
   useHideDefaultWorkspace,
   useHideInactiveSessions,
 } from '@/lib/sessionListFilters';
-import { removeSessionsFromWorkspaceCaches } from '@/lib/sessionQueryCache';
+import {
+  markReviewSessionViewed,
+  removeSessionsFromWorkspaceCaches,
+} from '@/lib/sessionQueryCache';
 import { useKanbanSessionMutations } from '@/components/kanban/session-hub/useKanbanSessionMutations';
 import {
   getBulkDeleteSessionSummary,
+  sessionCompletesWhenViewed,
   sessionListAgentKey,
   toggleStringValue,
 } from '@/components/kanban/session-hub/utils';
@@ -160,6 +164,11 @@ function WorkspaceSessionListPanel(_props: IDockviewPanelProps) {
 
   const openSession = useCallback(
     (session: KanbanProjectSessionRecord) => {
+      if (sessionCompletesWhenViewed(session)) {
+        void markReviewSessionViewed(queryClient, session.id, {
+          workspaceId: session.workspace.id,
+        });
+      }
       openSessionTab({
         sessionId: session.id,
         workspaceId: session.workspace.id,
@@ -179,6 +188,7 @@ function WorkspaceSessionListPanel(_props: IDockviewPanelProps) {
       navigate,
       openSessionTab,
       projectId,
+      queryClient,
       setActiveWorktree,
     ]
   );

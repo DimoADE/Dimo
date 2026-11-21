@@ -4025,6 +4025,80 @@ describe('conversationStore (row-op dumb container)', () => {
     );
     expect(textOf(assistant?.turn.blocks ?? [])).toBe('Part 1 Part 2 Part 3');
   });
+
+  it('applies unpersisted live deltas at loadedLastSequence and ignores already-overlaid live_sequence', () => {
+    const detail = emptyDetail([
+      userRow('t1', 'hello', 10n),
+      assistantRow('t1', [{ type: 'text', text: 'already-' }], 10n, 'streaming'),
+    ]);
+    detail.timeline.last_sequence = 10n;
+    detail.timeline.live_sequence = 5n;
+
+    let state = conversationStoreReducer(emptyConversationStoreState, {
+      type: 'load_success',
+      conversationId: CONVERSATION_ID,
+      detail,
+    });
+    expect(entryOf(state).loadedLastSequence).toBe(10n);
+    expect(entryOf(state).loadedLiveSequence).toBe(5n);
+
+    // Pre-open unpersisted batch (live_sequence <= 5n) must not duplicate text.
+    state = conversationStoreReducer(state, {
+      type: 'row_ops',
+      batch: batch(
+        [
+          {
+            op: 'append_text',
+            row_id: 't1:assistant',
+            revision: 10n,
+            stream: 'text',
+            delta: 'already-',
+          },
+        ],
+        10n,
+        { previous_sequence: 10n, live_sequence: 5n }
+      ),
+    });
+
+    // Consecutive post-open unpersisted chunks at revision 10n must all append.
+    state = conversationStoreReducer(state, {
+      type: 'row_ops',
+      batch: batch(
+        [
+          {
+            op: 'append_text',
+            row_id: 't1:assistant',
+            revision: 10n,
+            stream: 'text',
+            delta: 'next-',
+          },
+        ],
+        10n,
+        { previous_sequence: 10n, live_sequence: 6n }
+      ),
+    });
+    state = conversationStoreReducer(state, {
+      type: 'row_ops',
+      batch: batch(
+        [
+          {
+            op: 'append_text',
+            row_id: 't1:assistant',
+            revision: 10n,
+            stream: 'text',
+            delta: 'tail',
+          },
+        ],
+        10n,
+        { previous_sequence: 10n, live_sequence: 7n }
+      ),
+    });
+
+    const assistant = timelineTurnsForEntry(entryOf(state)).find(
+      (row) => row.turn.role === 'assistant'
+    );
+    expect(textOf(assistant?.turn.blocks ?? [])).toBe('already-next-tail');
+  });
 });
 
 function textOf(blocks: ContentBlock[]): string {

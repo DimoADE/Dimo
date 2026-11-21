@@ -16,16 +16,14 @@ import {
 } from '@/lib/backendTransport';
 import type { BackendTransport } from './backendTransport';
 import { BackendTransportProvider } from './BackendTransportProvider';
-import { tauriBackendTransport } from './tauriTransport';
-import { mountBackendTransport } from './transportRegistry';
-
-vi.mock('@tauri-apps/api/core', () => {
-  throw new Error('feature tests must not import @tauri-apps/api');
-});
+import {
+  fallbackDesktopTransport,
+  mountBackendTransport,
+} from './transportRegistry';
 
 describe('BackendTransport conversation tracer', () => {
   afterEach(() => {
-    configureBackendTransport(tauriBackendTransport);
+    configureBackendTransport(fallbackDesktopTransport);
   });
 
   it('lists conversations through an injected transport without importing Tauri', async () => {

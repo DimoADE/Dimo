@@ -775,6 +775,10 @@ impl AgentConnectionRunner {
                             *self.last_activity.lock().await = Instant::now();
                             self.respond_pending_permission(&permission_id, response).await;
                         }
+                        Some(AgentConnectionCommand::SetAutoApproveMode { mode }) => {
+                            *self.last_activity.lock().await = Instant::now();
+                            self.set_connection_auto_approve_mode(mode).await;
+                        }
                         Some(AgentConnectionCommand::RespondElicitation { elicitation_id, response }) => {
                             *self.last_activity.lock().await = Instant::now();
                             self.respond_pending_elicitation(&elicitation_id, response).await;

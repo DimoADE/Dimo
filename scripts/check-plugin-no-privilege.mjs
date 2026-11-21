@@ -44,7 +44,7 @@ export const HOST_ID_ALLOWLIST = new Map([
 ]);
 
 // Host source roots scanned by Rule B.
-const HOST_SCAN_ROOTS = ["crates", "src-tauri/src", "frontend/src", "shared", "packages"];
+const HOST_SCAN_ROOTS = ["crates", "electron/src", "frontend/src", "shared", "packages"];
 
 const CODE_EXTENSIONS = new Set([".rs", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);
 const PLUGIN_CODE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);

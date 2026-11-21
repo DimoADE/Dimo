@@ -97,6 +97,7 @@ export type AgentPermissionResponse =
       kind: 'selected';
       option_id: string;
       persist?: boolean;
+      persist_for_agent?: boolean;
       expected_revision?: number;
     }
   | { kind: 'cancelled' };

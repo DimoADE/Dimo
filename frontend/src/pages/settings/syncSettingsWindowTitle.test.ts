@@ -1,27 +1,35 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const setTitle = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
-const getCurrentWindow = vi.hoisted(() =>
-  vi.fn(() => ({
-    label: 'settings',
-    setTitle,
-  }))
-);
+const getWindowLabel = vi.hoisted(() => vi.fn(() => 'settings'));
 
-vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow,
-}));
+vi.mock('@/lib/desktopShell', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/lib/desktopShell')>();
+  return {
+    ...actual,
+    getDesktopShell: () => {
+      const shell = actual.getDesktopShell();
+      return {
+        ...shell,
+        getWindowLabel,
+        window: {
+          ...shell.window,
+          getLabel: async () => getWindowLabel(),
+          setTitle,
+        },
+      };
+    },
+  };
+});
 
 import { syncSettingsWindowTitle } from './syncSettingsWindowTitle';
 
 describe('syncSettingsWindowTitle', () => {
   beforeEach(() => {
     setTitle.mockClear();
-    getCurrentWindow.mockReset();
-    getCurrentWindow.mockReturnValue({
-      label: 'settings',
-      setTitle,
-    });
+    getWindowLabel.mockReset();
+    getWindowLabel.mockReturnValue('settings');
   });
 
   it('sets the native title only on the settings window', async () => {
@@ -31,10 +39,7 @@ describe('syncSettingsWindowTitle', () => {
   });
 
   it('does not retitle the main window', async () => {
-    getCurrentWindow.mockReturnValue({
-      label: 'main',
-      setTitle,
-    });
+    getWindowLabel.mockReturnValue('main');
 
     await syncSettingsWindowTitle('Settings');
 
@@ -42,8 +47,8 @@ describe('syncSettingsWindowTitle', () => {
   });
 
   it('ignores missing native window APIs', async () => {
-    getCurrentWindow.mockImplementation(() => {
-      throw new Error('not a Tauri window');
+    getWindowLabel.mockImplementation(() => {
+      throw new Error('not a desktop window');
     });
 
     await expect(syncSettingsWindowTitle('Settings')).resolves.toBeUndefined();

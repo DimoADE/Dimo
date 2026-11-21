@@ -48,10 +48,6 @@ import type {
 } from './base';
 import { sessionsApi } from './sessions';
 import { isBotCollaborationSession } from '@/lib/hideBotSessions';
-import type {
-  RedlineDocument,
-  TauriInspectorStatus,
-} from '@/features/tauri-inspector/tauriInspector';
 
 // Task Attempts / Workspaces APIs
 // Note: frontend uses "attemptsApi" but Rust commands use "workspace" prefix
@@ -69,45 +65,6 @@ export const attemptsApi = {
     backendCall('cancel_workspace_initialization', { workspaceId }),
   retryInitialization: (workspaceId: string): Promise<Workspace> =>
     backendCall('retry_workspace_initialization', { workspaceId }),
-  getTauriInspectorStatus: async (
-    attemptId: string
-  ): Promise<TauriInspectorStatus> => {
-    return desktopShellCall<TauriInspectorStatus>(
-      'get_tauri_inspector_status',
-      {
-        workspaceId: attemptId,
-      }
-    );
-  },
-
-  installTauriInspector: async (
-    attemptId: string
-  ): Promise<TauriInspectorStatus> => {
-    return desktopShellCall<TauriInspectorStatus>('install_tauri_inspector', {
-      workspaceId: attemptId,
-    });
-  },
-
-  controlTauriInspector: async (
-    attemptId: string,
-    action: 'activate' | 'deactivate'
-  ): Promise<void> => {
-    return desktopShellCall<void>('control_tauri_inspector', {
-      workspaceId: attemptId,
-      action,
-    });
-  },
-
-  takeTauriInspectorCapture: async (
-    attemptId: string
-  ): Promise<RedlineDocument | null> => {
-    return desktopShellCall<RedlineDocument | null>(
-      'take_tauri_inspector_capture',
-      {
-        workspaceId: attemptId,
-      }
-    );
-  },
 
   getChildren: async (attemptId: string): Promise<TaskRelationships> => {
     return backendCall<TaskRelationships>('get_workspace_children', {

@@ -1173,9 +1173,10 @@ pub(super) fn codex_capabilities(engine_id: &str) -> EngineCapabilities {
 
 pub(super) fn codex_normalize_mode(raw: &str) -> Option<String> {
     match raw.trim() {
-        "yolo" | "bypassPermissions" | "full-access" | "auto" => Some("full-access".to_string()),
-        "default" | "acceptEdits" => Some("default".to_string()),
-        "plan" => Some("plan".to_string()),
+        "yolo" | "bypassPermissions" | "full-access" | "agent-full-access"
+        | "danger-full-access" | "dangerFullAccess" | "auto" => Some("full-access".to_string()),
+        "default" | "acceptEdits" | "workspace-write" | "agent" => Some("default".to_string()),
+        "plan" | "read-only" | "readOnly" => Some("plan".to_string()),
         _ => None,
     }
 }
@@ -1258,6 +1259,23 @@ pub(super) fn resolve_codex_default_model(env: &HashMap<String, String>) -> Opti
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+}
+
+pub(super) fn resolve_codex_default_mode(env: &HashMap<String, String>) -> Option<String> {
+    if let Some(explicit) = env
+        .get("INITIAL_AGENT_MODE")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(codex_normalize_mode)
+    {
+        return Some(explicit);
+    }
+    let codex_home = resolve_codex_home_dir(env)?;
+    let raw = std::fs::read_to_string(codex_home.join("config.toml")).ok()?;
+    crate::auth_mode::codex_initial_agent_mode_from_toml(&raw)
+        .as_deref()
+        .and_then(codex_normalize_mode)
 }
 
 pub(super) fn is_official_openai_base_url(raw_url: &str) -> bool {

@@ -1,5 +1,6 @@
 packages:
   - frontend
+  - electron
   - packages/*
   - plugins/*
   # Duplicate @dimo/plugin-workflow-creator name plus unpublished vendored
@@ -10,6 +11,7 @@ onlyBuiltDependencies:
   - '@astryxdesign/cli'
   - '@astryxdesign/core'
   - core-js
+  - electron
   - esbuild
 
 overrides:

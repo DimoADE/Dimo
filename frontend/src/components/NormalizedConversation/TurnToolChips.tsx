@@ -472,14 +472,12 @@ export function TurnToolChipsBatch({
   label,
   diffs,
   onOpenDiff,
-  collapsedErrors,
   children,
 }: {
   expansionKeys: string[];
   label: string;
   diffs?: readonly TurnToolDiffChip[];
   onOpenDiff?: (diff: TurnToolDiffChip) => void;
-  collapsedErrors?: ReactNode;
   children: ReactNode;
 }) {
   const id = useId();
@@ -522,8 +520,6 @@ export function TurnToolChipsBatch({
         >
           {children}
         </div>
-      ) : collapsedErrors ? (
-        <div className="conv-tool-chips-list">{collapsedErrors}</div>
       ) : null}
 
       {diffs && diffs.length > 0 ? (

@@ -1,8 +1,12 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
-  ChevronRight,
+  Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  Copy,
   FileText,
   Globe2,
   SquareTerminal,
@@ -14,6 +18,8 @@ import type {
   AgentPermissionResponse,
   ConversationPermissionView,
 } from 'shared/types';
+import type { StatusNoticeActor } from '@/contexts/ConversationStatusContext';
+import { StatusNoticeActorChip } from '@/components/tasks/follow-up/StatusNoticeActorChip';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -27,28 +33,132 @@ import {
   type PermissionAllowScope,
 } from './permissionRequestPresentation';
 
+export type PermissionStackControl = {
+  index: number;
+  total: number;
+  onPrev: () => void;
+  onNext: () => void;
+};
+
+export type PermissionStackItem = {
+  request: ConversationPermissionView;
+  actor?: StatusNoticeActor | null;
+  responding?: boolean;
+  onRespond: (permissionId: string, response: AgentPermissionResponse) => void;
+};
+
 /**
- * Inline, answerable permission request (Dimo style — docked at the bottom of
- * the message stream, not a blocking modal). Renders the *real* ACP tool-call
- * detail behind the request (file-edit before/after, command, file locations)
- * so the user can review exactly what the agent will do before allowing it,
- * then answer with the agent's own permission options. All data comes from the
- * live/persisted `permission_requested` event — nothing is synthesized.
- *
- * Visual: an opaque Tahoe content surface with a quiet hairline. Permission
- * scope is progressive: the safest one-shot approval stays primary while
- * broader agent-provided scopes live in the adjacent menu.
+ * Stacked Capsule dock for 1..N pending permission requests.
+ * Single requests render a standalone Capsule bar; multiple concurrent requests
+ * collapse into a layered deck with a tabular `1 / N` stepper so the stream
+ * never gets pushed off-screen.
+ */
+export function PermissionRequestStack({
+  items,
+}: {
+  items: PermissionStackItem[];
+}) {
+  const [activeId, setActiveId] = useState<string | null>(null);
+
+  const activeIndex = useMemo(() => {
+    if (items.length === 0) return 0;
+    if (activeId) {
+      const idx = items.findIndex(
+        (item) => item.request.permission_id === activeId
+      );
+      if (idx >= 0) return idx;
+    }
+    return 0;
+  }, [items, activeId]);
+
+  useEffect(() => {
+    if (items.length === 0) {
+      if (activeId !== null) setActiveId(null);
+      return;
+    }
+    if (!activeId || !items.some((i) => i.request.permission_id === activeId)) {
+      setActiveId(items[0].request.permission_id);
+    }
+  }, [items, activeId]);
+
+  if (items.length === 0) return null;
+
+  const current = items[activeIndex] ?? items[0];
+  const count = items.length;
+
+  const step = (delta: number) => {
+    if (count <= 1) return;
+    const nextIndex = (activeIndex + delta + count) % count;
+    setActiveId(items[nextIndex].request.permission_id);
+  };
+
+  if (count === 1) {
+    return (
+      <PermissionRequestCard
+        key={current.request.permission_id}
+        request={current.request}
+        actor={current.actor}
+        responding={current.responding}
+        onRespond={current.onRespond}
+      />
+    );
+  }
+
+  return (
+    <div
+      className="permission-capsule-stack"
+      data-testid="permission-capsule-stack"
+    >
+      {count > 2 ? (
+        <div
+          className="permission-capsule-stack-rim permission-capsule-stack-rim--back"
+          aria-hidden="true"
+        />
+      ) : null}
+      <div
+        className="permission-capsule-stack-rim permission-capsule-stack-rim--front"
+        aria-hidden="true"
+      />
+      <PermissionRequestCard
+        key={current.request.permission_id}
+        request={current.request}
+        actor={current.actor}
+        responding={current.responding}
+        onRespond={current.onRespond}
+        stack={{
+          index: activeIndex,
+          total: count,
+          onPrev: () => step(-1),
+          onNext: () => step(1),
+        }}
+      />
+    </div>
+  );
+}
+
+/**
+ * Inline, answerable permission request in Capsule form (Dimo style — compact
+ * title-first bar docked at the bottom of the message stream, with an upward
+ * detail drawer for commands/diffs/paths so full inspection stays one click away).
  */
 export function PermissionRequestCard({
   request,
+  actor,
   onRespond,
   responding = false,
+  stack,
 }: {
   request: ConversationPermissionView;
+  actor?: StatusNoticeActor | null;
   onRespond: (permissionId: string, response: AgentPermissionResponse) => void;
   responding?: boolean;
+  stack?: PermissionStackControl;
 }) {
   const { t } = useTranslation(['conversation', 'common']);
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  useEffect(() => {
+    setDetailsOpen(false);
+  }, [request.permission_id]);
   const pending = request.status === 'pending';
   const options = request.options ?? [];
   const detail = useMemo(
@@ -69,124 +179,234 @@ export function PermissionRequestCard({
     { scope: 'session', label: t('permissionRequestCard.allowSession') },
     { scope: 'always', label: t('permissionRequestCard.allowAlways') },
   ];
-  const respondWithOption = (option: AgentPermissionOption, persist = false) =>
+
+  const primaryTitle =
+    detail.heading ?? detail.subtitle ?? t('permissionRequestCard.title');
+  const secondaryLine = resolveSecondaryLine({
+    primaryTitle,
+    fallbackTitle: t('permissionRequestCard.title'),
+    heading: detail.heading,
+    subtitle: detail.subtitle,
+    primaryPath: detail.primaryPath,
+    command: detail.command,
+  });
+  const hasDetails = Boolean(detail.body);
+
+  const respondWithOption = (
+    option: AgentPermissionOption,
+    scope: PermissionAllowScope = 'once'
+  ) =>
     onRespond(request.permission_id, {
       kind: 'selected',
       option_id: option.id,
-      ...(persist ? { persist: true } : {}),
+      ...(scope !== 'once' ? { persist: true } : {}),
+      ...(scope === 'always' ? { persist_for_agent: true } : {}),
       ...(typeof request.revision === 'number' && request.revision > 0
         ? { expected_revision: request.revision }
         : {}),
     });
   const respondWithScope = (scope: PermissionAllowScope) => {
     const option = resolvePermissionAllowOption(options, scope);
-    if (option) respondWithOption(option, scope !== 'once');
+    if (option) respondWithOption(option, scope);
   };
 
   return (
-    <section className="permission-request-card conv-entry-item w-full rounded-lg border border-border bg-[var(--conv-surface-card)] px-4 py-3.5 text-sm">
-      <div className="min-w-0">
-        <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
-          <PermissionTypeIcon className="h-4 w-4" aria-hidden="true" />
-          <span>{t(`permissionRequestCard.types.${permissionType.key}`)}</span>
+    <section className="permission-request-card conv-entry-item text-sm">
+      {hasDetails && detailsOpen ? (
+        <div
+          className="permission-capsule-drawer"
+          data-testid="permission-capsule-drawer"
+        >
+          {detail.body}
         </div>
-        <h3 className="mt-3 text-sm font-semibold text-foreground">
-          {detail.heading ?? t('permissionRequestCard.title')}
-        </h3>
-        {detail.subtitle || detail.body ? (
-          <div className="permission-request-preview-wrap mt-1" tabIndex={0}>
-            <div className="permission-request-preview">
-              {detail.subtitle ? (
-                <p className="text-sm leading-5 text-foreground">
-                  {detail.subtitle}
-                </p>
-              ) : null}
-              {detail.body ? <div className="mt-1">{detail.body}</div> : null}
-            </div>
+      ) : null}
+
+      <div className="permission-capsule-bar">
+        {actor ? <StatusNoticeActorChip actor={actor} /> : null}
+        <span
+          className={cn(
+            'permission-capsule-type-pill',
+            permissionType.pillClass
+          )}
+        >
+          <PermissionTypeIcon className="h-3 w-3" aria-hidden="true" />
+          <span>{t(`permissionRequestCard.types.${permissionType.key}`)}</span>
+        </span>
+
+        <div className="permission-capsule-summary">
+          <h3 className="permission-capsule-title" title={primaryTitle}>
+            {primaryTitle}
+          </h3>
+          {secondaryLine ? (
+            <p className="permission-capsule-subtitle" title={secondaryLine}>
+              {secondaryLine}
+            </p>
+          ) : null}
+        </div>
+
+        {stack && stack.total > 1 ? (
+          <div
+            className="permission-capsule-stepper"
+            data-testid="permission-capsule-stepper"
+          >
+            <button
+              type="button"
+              className="permission-capsule-step-btn"
+              onClick={stack.onPrev}
+              aria-label={t('permissionRequestCard.prevRequest')}
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+            </button>
+            <span className="px-1 tabular-nums">
+              {stack.index + 1} / {stack.total}
+            </span>
+            <button
+              type="button"
+              className="permission-capsule-step-btn"
+              onClick={stack.onNext}
+              aria-label={t('permissionRequestCard.nextRequest')}
+            >
+              <ChevronRight className="h-3.5 w-3.5" />
+            </button>
           </div>
         ) : null}
 
-        {pending ? (
-          <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
+        <div className="permission-capsule-actions">
+          {hasDetails ? (
             <Button
               type="button"
               size="sm"
-              variant="outline"
-              disabled={responding}
-              onClick={() =>
-                rejectOption
-                  ? respondWithOption(rejectOption)
-                  : onRespond(request.permission_id, { kind: 'cancelled' })
+              variant="ghost"
+              className="h-7 gap-1 px-2 text-xs text-muted-foreground hover:text-foreground"
+              aria-expanded={detailsOpen}
+              aria-label={
+                detailsOpen
+                  ? t('permissionRequestCard.collapseDetails')
+                  : t('permissionRequestCard.details')
               }
+              onClick={() => setDetailsOpen((open) => !open)}
             >
-              {t('permissionRequestCard.reject')}
+              {detailsOpen ? (
+                <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+              ) : (
+                <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+              )}
+              <span>{t('permissionRequestCard.details')}</span>
             </Button>
-            {primaryAllow ? (
-              <div
-                className="permission-request-allow-group inline-flex items-stretch"
-                role="group"
-                aria-label={t('permissionRequestCard.allowActions')}
+          ) : null}
+
+          {pending ? (
+            <>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-7 px-2.5 text-xs"
+                disabled={responding}
+                onClick={() =>
+                  rejectOption
+                    ? respondWithOption(rejectOption)
+                    : onRespond(request.permission_id, { kind: 'cancelled' })
+                }
               >
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={responding}
-                  className="rounded-r-none"
-                  onClick={() => respondWithScope('once')}
+                {t('permissionRequestCard.reject')}
+              </Button>
+              {primaryAllow ? (
+                <div
+                  className="permission-request-allow-group inline-flex items-stretch"
+                  role="group"
+                  aria-label={t('permissionRequestCard.allowActions')}
                 >
-                  {t('permissionRequestCard.allow')}
-                </Button>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      type="button"
-                      size="sm"
-                      disabled={responding}
-                      className="w-8 rounded-l-none border-l border-l-primary-foreground/20 px-0"
-                      aria-label={t('permissionRequestCard.expandAllow')}
-                    >
-                      <ChevronDown className="h-3.5 w-3.5" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent
-                    align="end"
-                    side="top"
-                    className="w-[min(280px,calc(100vw-24px))] p-1.5"
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={responding}
+                    className="h-7 rounded-r-none px-2.5 text-xs"
+                    onClick={() => respondWithScope('once')}
                   >
-                    {allowScopes.map(({ scope, label }) => {
-                      const option = resolvePermissionAllowOption(
-                        options,
-                        scope
-                      );
-                      return (
-                        <DropdownMenuItem
-                          key={scope}
-                          disabled={responding || !option}
-                          className="px-2.5 py-2"
-                          onSelect={() => respondWithScope(scope)}
-                        >
-                          {label}
-                        </DropdownMenuItem>
-                      );
-                    })}
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
-            ) : null}
-          </div>
-        ) : (
-          <div className="mt-2 text-xs text-muted-foreground">
-            {t('permissionRequestCard.responded')}
-          </div>
-        )}
+                    {t('permissionRequestCard.allow')}
+                  </Button>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        type="button"
+                        size="sm"
+                        disabled={responding}
+                        className="h-7 w-7 rounded-l-none border-l border-l-primary-foreground/20 px-0"
+                        aria-label={t('permissionRequestCard.expandAllow')}
+                      >
+                        <ChevronDown className="h-3.5 w-3.5" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent
+                      align="end"
+                      side="top"
+                      className="w-[min(280px,calc(100vw-24px))] p-1.5"
+                    >
+                      {allowScopes.map(({ scope, label }) => {
+                        const option = resolvePermissionAllowOption(
+                          options,
+                          scope
+                        );
+                        return (
+                          <DropdownMenuItem
+                            key={scope}
+                            disabled={responding || !option}
+                            className="px-2.5 py-2"
+                            onSelect={() => respondWithScope(scope)}
+                          >
+                            {label}
+                          </DropdownMenuItem>
+                        );
+                      })}
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              ) : null}
+            </>
+          ) : (
+            <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+              <Check className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>{t('permissionRequestCard.responded')}</span>
+            </span>
+          )}
+        </div>
       </div>
     </section>
   );
 }
 
+function resolveSecondaryLine({
+  primaryTitle,
+  fallbackTitle,
+  heading,
+  subtitle,
+  primaryPath,
+  command,
+}: {
+  primaryTitle: string;
+  fallbackTitle: string;
+  heading: string | null;
+  subtitle: string | null;
+  primaryPath: string | null;
+  command: string | null;
+}): string | null {
+  if (heading && subtitle && subtitle !== heading) {
+    return subtitle;
+  }
+  if (primaryPath && !primaryTitle.includes(primaryPath)) {
+    return primaryPath;
+  }
+  if (primaryTitle === fallbackTitle && command) {
+    return command;
+  }
+  return null;
+}
+
 type PermissionType = {
   key: 'file' | 'terminal' | 'web' | 'tool';
   icon: LucideIcon;
+  pillClass?: string;
 };
 
 function permissionTypeFor(kind: string | null): PermissionType {
@@ -196,21 +416,33 @@ function permissionTypeFor(kind: string | null): PermissionType {
       normalized.includes(value)
     )
   ) {
-    return { key: 'terminal', icon: SquareTerminal };
+    return {
+      key: 'terminal',
+      icon: SquareTerminal,
+      pillClass: 'permission-capsule-type-pill--terminal',
+    };
   }
   if (
     ['file', 'read', 'write', 'edit', 'delete', 'move', 'copy', 'patch'].some(
       (value) => normalized.includes(value)
     )
   ) {
-    return { key: 'file', icon: FileText };
+    return {
+      key: 'file',
+      icon: FileText,
+      pillClass: 'permission-capsule-type-pill--file',
+    };
   }
   if (
     ['web', 'browser', 'fetch', 'http', 'url'].some((value) =>
       normalized.includes(value)
     )
   ) {
-    return { key: 'web', icon: Globe2 };
+    return {
+      key: 'web',
+      icon: Globe2,
+      pillClass: 'permission-capsule-type-pill--web',
+    };
   }
   return { key: 'tool', icon: Wrench };
 }
@@ -219,6 +451,8 @@ type ParsedDetail = {
   kind: string | null;
   heading: string | null;
   subtitle: string | null;
+  primaryPath: string | null;
+  command: string | null;
   body: React.ReactNode | null;
 };
 
@@ -509,8 +743,10 @@ function parseToolDetail(
       kind: inferPermissionKind(null, trimmedTitle, null),
       heading: null,
       subtitle: trimmedTitle,
+      primaryPath: null,
+      command: null,
       body: reasonText ? (
-        <pre className="overflow-x-auto whitespace-pre-wrap rounded-md bg-muted/40 px-2.5 py-1.5 font-mono text-xs text-foreground">
+        <pre className="overflow-x-auto whitespace-pre-wrap rounded-md border border-[var(--border-subtle)] bg-[var(--surface-content)] px-2.5 py-1.5 font-mono text-xs text-foreground">
           {reasonText}
         </pre>
       ) : null,
@@ -549,16 +785,19 @@ function parseToolDetail(
     command
   );
   const blocks: React.ReactNode[] = [];
+  let primaryPath: string | null = null;
 
   // 1) Content blocks (diffs, text, terminal output) carry the richest preview.
   const content = Array.isArray(fields?.content) ? fields!.content! : [];
   content.forEach((raw, index) => {
     const block = raw as Record<string, unknown>;
     if (block?.type === 'diff') {
+      const path = typeof block.path === 'string' ? block.path : '(file)';
+      if (!primaryPath && path !== '(file)') primaryPath = path;
       blocks.push(
         <DiffPreview
           key={`diff-${index}`}
-          path={typeof block.path === 'string' ? block.path : '(file)'}
+          path={path}
           oldText={typeof block.oldText === 'string' ? block.oldText : ''}
           newText={typeof block.newText === 'string' ? block.newText : ''}
         />
@@ -570,7 +809,7 @@ function parseToolDetail(
       blocks.push(
         <pre
           key={`text-${index}`}
-          className="overflow-x-auto whitespace-pre-wrap rounded-md bg-muted/40 px-2.5 py-1.5 font-mono text-xs text-foreground"
+          className="overflow-x-auto whitespace-pre-wrap rounded-md border border-[var(--border-subtle)] bg-[var(--surface-content)] px-2.5 py-1.5 font-mono text-xs text-foreground"
         >
           {text}
         </pre>
@@ -583,6 +822,7 @@ function parseToolDetail(
   if (blocks.length === 0) {
     const inputDiffs = extractInputDiffs(effectiveInput);
     inputDiffs.forEach((item, index) => {
+      if (!primaryPath && item.path !== '(file)') primaryPath = item.path;
       blocks.push(
         <DiffPreview
           key={`input-diff-${index}`}
@@ -598,11 +838,7 @@ function parseToolDetail(
   // 3) Command preview from rawInput/input when no content block surfaced one.
   if (blocks.length === 0 && command) {
     blocks.push(
-      <div key="command" className="rounded-md bg-muted/40 px-2.5 py-1.5">
-        <code className="block max-w-full overflow-x-auto whitespace-pre-wrap break-words font-mono text-xs text-foreground">
-          {command}
-        </code>
-      </div>
+      <CommandWell key="command" command={command} toolName={toolName} />
     );
   }
 
@@ -611,6 +847,9 @@ function parseToolDetail(
   const paths = locations
     .map((loc) => loc?.path)
     .filter((p): p is string => typeof p === 'string' && p.length > 0);
+  if (!primaryPath && paths.length > 0) {
+    primaryPath = paths[0];
+  }
   if (paths.length > 0) {
     blocks.push(
       <ul
@@ -626,15 +865,65 @@ function parseToolDetail(
     );
   }
 
-  // Raw JSON dumps are developer-facing noise — when nothing structured is
-  // recognized the title alone describes the request.
   return {
     kind,
     heading,
     subtitle,
+    primaryPath,
+    command,
     body:
       blocks.length > 0 ? <div className="space-y-1.5">{blocks}</div> : null,
   };
+}
+
+function CommandWell({
+  command,
+  toolName,
+}: {
+  command: string;
+  toolName: string | null;
+}) {
+  const { t } = useTranslation(['conversation', 'common']);
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(command).then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1500);
+      });
+    }
+  };
+
+  return (
+    <div className="permission-capsule-code-well">
+      <div className="permission-capsule-code-head">
+        <span className="truncate font-mono">{toolName || 'Command'}</span>
+        <button
+          type="button"
+          onClick={handleCopy}
+          className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-[var(--surface-control-hover)] hover:text-foreground"
+        >
+          {copied ? (
+            <Check className="h-3 w-3" aria-hidden="true" />
+          ) : (
+            <Copy className="h-3 w-3" aria-hidden="true" />
+          )}
+          <span>
+            {copied
+              ? t('permissionRequestCard.copied')
+              : t('permissionRequestCard.copy')}
+          </span>
+        </button>
+      </div>
+      <div className="permission-capsule-cmd-row">
+        <span className="permission-capsule-cmd-prompt">$</span>
+        <code className="min-w-0 flex-1 whitespace-pre-wrap break-words">
+          {command}
+        </code>
+      </div>
+    </div>
+  );
 }
 
 function extractText(block: Record<string, unknown>): string | null {
@@ -677,33 +966,35 @@ function DiffPreview({
   unifiedDiff?: string;
 }) {
   const { t } = useTranslation(['conversation', 'common']);
-  const [open, setOpen] = useState(Boolean(unifiedDiff));
+  const [open, setOpen] = useState(true);
   const isNew = !unifiedDiff && !oldText;
   return (
-    <div className="rounded-md bg-muted/30">
+    <div className="permission-capsule-code-well">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-xs"
+        className="permission-capsule-code-head w-full text-left"
         aria-expanded={open}
       >
-        <ChevronRight
-          className={cn(
-            'h-3 w-3 shrink-0 transition-transform',
-            open && 'rotate-90'
-          )}
-        />
-        <span className="truncate font-mono text-foreground">{path}</span>
-        <span className="ml-auto shrink-0 text-muted-foreground">
+        <span className="flex min-w-0 items-center gap-1.5">
+          <ChevronRight
+            className={cn(
+              'h-3 w-3 shrink-0 transition-transform',
+              open && 'rotate-90'
+            )}
+          />
+          <span className="truncate font-mono text-foreground">{path}</span>
+        </span>
+        <span className="shrink-0 text-muted-foreground">
           {isNew
             ? t('permissionRequestCard.newFile')
             : t('permissionRequestCard.modified')}
         </span>
       </button>
       {open ? (
-        <div className="space-y-1 px-2.5 pb-2">
+        <div className="space-y-1.5 p-2">
           {unifiedDiff ? (
-            <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded border border-border/60 bg-muted/40 px-2 py-1 font-mono text-[11px] text-foreground">
+            <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded border border-[var(--border-subtle)] bg-[var(--surface-topbar)] px-2 py-1.5 font-mono text-[11px] text-foreground">
               {unifiedDiff}
             </pre>
           ) : (
@@ -743,12 +1034,12 @@ function DiffPane({
 }) {
   return (
     <div>
-      <div className="mb-0.5 text-[10px] uppercase tracking-wide text-warning/70">
+      <div className="mb-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
         {label}
       </div>
       <pre
         className={cn(
-          'max-h-64 overflow-auto whitespace-pre-wrap rounded border px-2 py-1 font-mono text-[11px]',
+          'max-h-52 overflow-auto whitespace-pre-wrap rounded border px-2 py-1.5 font-mono text-[11px]',
           tone === 'del'
             ? 'border-destructive/25 bg-destructive/5 text-destructive'
             : 'border-success/25 bg-success/5 text-success'

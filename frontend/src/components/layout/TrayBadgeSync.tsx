@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 
-import { desktopShellCall, isTauriClient } from '@/lib/desktopShell';
+import { desktopShellCall, isLocalDesktopHost } from '@/lib/desktopShell';
 import { useWindowProjectsStore } from '@/stores/useWindowProjectsStore';
 
 /**
@@ -15,7 +15,7 @@ export function TrayBadgeSync() {
   );
 
   useEffect(() => {
-    if (!isTauriClient()) return;
+    if (!isLocalDesktopHost()) return;
     void desktopShellCall('update_tray_badge', { count: unread }).catch(
       () => {}
     );

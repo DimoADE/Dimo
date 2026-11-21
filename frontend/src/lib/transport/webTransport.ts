@@ -152,6 +152,7 @@ export class WebTransport implements BackendTransport {
   private visibilityListener: (() => void) | undefined;
   private onlineListener: (() => void) | undefined;
   private readonly subscriptions = new Map<string, ActiveSubscription>();
+  private readonly readyResolvers = new Map<string, () => void>();
 
   constructor(options: WebTransportOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
@@ -223,6 +224,7 @@ export class WebTransport implements BackendTransport {
           if (closed) return;
           closed = true;
           if (!subscription) return;
+          this.resolveReady(request.subscription_id);
           subscription.queue.close();
           if (
             this.subscriptions.get(request.subscription_id) === subscription
@@ -295,10 +297,22 @@ export class WebTransport implements BackendTransport {
       this.socket.close();
       this.socket = undefined;
     }
+    for (const resolve of this.readyResolvers.values()) {
+      resolve();
+    }
+    this.readyResolvers.clear();
     for (const subscription of this.subscriptions.values()) {
       subscription.queue.close();
     }
     this.subscriptions.clear();
+  }
+
+  private resolveReady(subscriptionId: string): void {
+    const resolver = this.readyResolvers.get(subscriptionId);
+    if (resolver) {
+      this.readyResolvers.delete(subscriptionId);
+      resolver();
+    }
   }
 
   private async request(
@@ -353,8 +367,11 @@ export class WebTransport implements BackendTransport {
       this.awaitingPong = false;
       this.startKeepalive();
       for (const subscription of this.subscriptions.values()) {
-        // Host event sequences belong to one process and restart from zero.
-        if (subscription.request.resource === 'host_event') {
+        // Process-scoped streams restart their HostEventBus sequence from zero.
+        if (
+          subscription.request.resource === 'host_event' ||
+          subscription.request.resource === 'patch_stream'
+        ) {
           subscription.cursor = 0n;
         }
         this.sendAttach(subscription);
@@ -415,12 +432,17 @@ export class WebTransport implements BackendTransport {
         this.onAuthError?.(err);
       }
       if (!message.subscription_id) {
+        for (const resolve of this.readyResolvers.values()) {
+          resolve();
+        }
+        this.readyResolvers.clear();
         for (const [id, active] of this.subscriptions.entries()) {
           this.subscriptions.delete(id);
           active.queue.error(err);
         }
         return;
       }
+      this.resolveReady(message.subscription_id);
       const failed = this.subscriptions.get(message.subscription_id);
       if (!failed) {
         return;
@@ -429,6 +451,7 @@ export class WebTransport implements BackendTransport {
       failed.queue.error(err);
       return;
     }
+    this.resolveReady(message.subscription_id);
     const subscription = this.subscriptions.get(message.subscription_id);
     if (!subscription || message.type === 'ready') {
       return;
@@ -480,15 +503,54 @@ export class WebTransport implements BackendTransport {
     let retryAttempts = 0;
     let currentIterator: AsyncIterator<RemoteEvent> | undefined;
 
-    const createIterator = () =>
+    const createIterator = (subscriptionId = randomUUID()) =>
       this.subscribe({
-        subscription_id: randomUUID(),
+        subscription_id: subscriptionId,
         resource: 'host_event',
         channel,
         after_sequence: 0n,
       } as SubscriptionRequest)[Symbol.asyncIterator]();
 
-    currentIterator = createIterator();
+    const initialSubscriptionId = randomUUID();
+    const shouldAwaitReady = this.socket?.readyState === WebSocket.OPEN;
+    let readyTimer: ReturnType<typeof setTimeout> | undefined;
+    const readyPromise = shouldAwaitReady
+      ? new Promise<void>((resolve) => {
+          const finish = () => {
+            if (readyTimer !== undefined) {
+              clearTimeout(readyTimer);
+              readyTimer = undefined;
+            }
+            this.readyResolvers.delete(initialSubscriptionId);
+            resolve();
+          };
+          this.readyResolvers.set(initialSubscriptionId, finish);
+          readyTimer = setTimeout(finish, 500);
+        })
+      : Promise.resolve();
+
+    currentIterator = createIterator(initialSubscriptionId);
+
+    const isNonRetriableError = (err: unknown): boolean => {
+      if (!(err instanceof WebTransportError)) {
+        return false;
+      }
+      if (
+        err.status === 400 ||
+        err.status === 401 ||
+        err.status === 403 ||
+        err.status === 404
+      ) {
+        return true;
+      }
+      return (
+        err.code === 'unauthorized' ||
+        err.code === 'forbidden' ||
+        err.code === 'not_found' ||
+        err.code === 'bad_request' ||
+        err.code === 'invalid_request'
+      );
+    };
 
     const run = async (initialIterator: AsyncIterator<RemoteEvent>) => {
       let iterator: AsyncIterator<RemoteEvent> | undefined = initialIterator;
@@ -524,10 +586,7 @@ export class WebTransport implements BackendTransport {
             `[WebTransport] Host event listener "${channel}" interrupted:`,
             err
           );
-          if (
-            err instanceof WebTransportError &&
-            (err.code === 'unauthorized' || err.status === 401)
-          ) {
+          if (isNonRetriableError(err)) {
             return;
           }
           const delay = Math.min(500 * 2 ** retryAttempts, 8_000);
@@ -543,9 +602,11 @@ export class WebTransport implements BackendTransport {
     };
 
     void run(currentIterator);
+    await readyPromise;
 
     return () => {
       stopped = true;
+      this.resolveReady(initialSubscriptionId);
       if (retryTimer !== undefined) {
         clearTimeout(retryTimer);
         retryTimer = undefined;

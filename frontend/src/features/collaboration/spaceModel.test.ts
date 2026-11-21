@@ -1107,6 +1107,34 @@ describe('DM streaming draft replacement and space event/round helpers', () => {
     ]);
   });
 
+  it('does not overwrite an unrelated turn-less streaming draft when a persisted reply with turnId arrives', () => {
+    const merged = mergeDirectSpaceMessages(
+      [
+        {
+          id: 'draft-other',
+          seq: 1,
+          origin: 'agent',
+          streaming: true,
+          envelope: { content: '另一条仍在流式输出的内容...' },
+        },
+      ],
+      [
+        {
+          id: 'msg-turn-2',
+          seq: 2,
+          origin: 'agent',
+          turnId: 'turn-2',
+          envelope: { content: '第二轮的完整回复' },
+        },
+      ],
+      true
+    );
+    expect(merged.map((message) => message.id)).toEqual([
+      'draft-other',
+      'msg-turn-2',
+    ]);
+  });
+
   it('parses kind and generation from collaboration space changed events', () => {
     expect(
       parseSpaceChangedEvent({

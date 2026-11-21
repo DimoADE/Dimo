@@ -59,7 +59,7 @@ const EXTERNAL_LINKS = [
 function NavDivider() {
   return (
     <div
-      data-tauri-drag-region
+      data-window-drag-region
       className="mx-2 h-6 w-px bg-border/60"
       role="separator"
       aria-orientation="vertical"
@@ -133,10 +133,10 @@ export function Navbar() {
 
   return (
     <div className="window-chrome relative border-b bg-[var(--surface-topbar)]">
-      <div data-tauri-drag-region className="absolute inset-0" />
-      <div data-tauri-drag-region className="relative z-10 w-full px-3">
-        <div data-tauri-drag-region className="flex items-center h-12 py-2">
-          <div data-tauri-drag-region className="flex-1 flex items-center">
+      <div data-window-drag-region className="absolute inset-0" />
+      <div data-window-drag-region className="relative z-10 w-full px-3">
+        <div data-window-drag-region className="flex items-center h-12 py-2">
+          <div data-window-drag-region className="flex-1 flex items-center">
             <Link to="/local-projects">
               <Logo size="window" />
             </Link>
@@ -186,7 +186,7 @@ export function Navbar() {
           </div>
 
           <div
-            data-tauri-drag-region
+            data-window-drag-region
             className="flex flex-1 items-center justify-end gap-1"
           >
             {projectId ? (

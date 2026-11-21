@@ -1,0 +1,29 @@
+{
+  "name": "@dimo/electron",
+  "version": "0.5.2",
+  "private": true,
+  "description": "Dimo Electron desktop shell",
+  "author": "Dimo",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "build": "tsup",
+    "dev:watch": "tsup --watch",
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "start": "electron .",
+    "package:dir": "electron-builder --dir --config electron-builder.yml --publish never",
+    "package": "electron-builder --config electron-builder.yml --publish never"
+  },
+  "devDependencies": {
+    "@electron/notarize": "^3.1.2",
+    "@types/node": "^26.1.2",
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.2",
+    "vitest": "^2.1.9"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11"
+  }
+}

@@ -1,237 +1,58 @@
 const assert = require("node:assert/strict");
-const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
 const ROOT = path.join(__dirname, "..");
-const INSTALLER_DIR = path.join(ROOT, "src-tauri", "installer");
-const ASSETS_DIR = path.join(INSTALLER_DIR, "assets");
+const ELECTRON_DIR = path.join(ROOT, "electron");
+const BUILD_DIR = path.join(ELECTRON_DIR, "build");
+const ICONS_DIR = path.join(BUILD_DIR, "icons");
 
-function readBmpInfo(filePath) {
-  const buf = fs.readFileSync(filePath);
-  assert.equal(buf.toString("ascii", 0, 2), "BM", `${filePath} must be BMP`);
-  const pixelOffset = buf.readUInt32LE(10);
-  const width = buf.readInt32LE(18);
-  const rawHeight = buf.readInt32LE(22);
-  const height = Math.abs(rawHeight);
-  const bpp = buf.readUInt16LE(28);
-  assert.equal(bpp, 24, `${filePath} must be 24-bit RGB BMP`);
-  const rowStride = Math.floor((width * 3 + 3) / 4) * 4;
-
-  function getRgb(x, y) {
-    const bmpY = rawHeight > 0 ? height - 1 - y : y;
-    const idx = pixelOffset + bmpY * rowStride + x * 3;
-    return [buf[idx + 2], buf[idx + 1], buf[idx]];
-  }
-
-  return { width, height, getRgb };
-}
-
-test("Windows installer logo BMPs exist for every DPI bucket at integer sizes", () => {
-  // Large logo 64 @ 100/125/150/200% -> 64/80/96/128; small logo 48 -> 48/60/72/96.
-  const sizes = [48, 60, 64, 72, 80, 96, 128];
-  const themes = [
-    { name: "light", bg: [255, 255, 255], squircleLight: false },
-    { name: "dark", bg: [31, 31, 31], squircleLight: true },
-  ];
-  for (const theme of themes) {
-    for (const size of sizes) {
-      const name = `icon-${theme.name}-${size}.bmp`;
-      const bmp = readBmpInfo(path.join(ASSETS_DIR, name));
-      assert.equal(bmp.width, size, `${name} width`);
-      assert.equal(bmp.height, size, `${name} height`);
-      assert.deepEqual(bmp.getRgb(0, 0), theme.bg, `${name} corner = window background`);
-      // A point inside the squircle near its top rim: light-on-dark for the dark theme.
-      const [r, g, b] = bmp.getRgb(Math.round(size / 2), Math.round(size * 0.14));
-      const luma = (r + g + b) / 3;
-      if (theme.squircleLight) {
-        assert.ok(luma > 180, `${name} dark-theme logo must be light (got ${luma})`);
-      } else {
-        assert.ok(luma < 80, `${name} light-theme logo must be dark (got ${luma})`);
-      }
-    }
-  }
-});
-
-test("Windows Tauri config wires the custom installer template", () => {
-  const winConf = JSON.parse(
-    fs.readFileSync(path.join(ROOT, "src-tauri", "tauri.windows.conf.json"), "utf8"),
+test("Electron builder config wires icons, DMG background, NSIS hook, and notarization scripts", () => {
+  const builderYml = fs.readFileSync(
+    path.join(ELECTRON_DIR, "electron-builder.yml"),
+    "utf8",
   );
-  assert.equal(winConf.bundle.windows.nsis.template, "installer/installer.nsi");
-  assert.equal(winConf.bundle.windows.nsis.installerHooks, "installer/hooks.nsh");
-  assert.deepEqual(winConf.bundle.windows.nsis.languages, ["SimpChinese", "English"]);
-
-  const baseConf = JSON.parse(
-    fs.readFileSync(path.join(ROOT, "src-tauri", "tauri.conf.json"), "utf8"),
-  );
-  assert.equal(
-    baseConf.plugins?.updater?.windows?.installMode,
-    "basicUi",
-    "Windows updater must use basicUi so custom installer pages are shown on update restart",
+  assert.match(builderYml, /from:\s+build\/icons/);
+  assert.match(builderYml, /icon:\s+build\/icons\/icon\.ico/);
+  assert.match(builderYml, /icon:\s+build\/icons\/icon\.icns/);
+  assert.match(builderYml, /icon:\s+build\/icons\/128x128@2x\.png/);
+  assert.match(builderYml, /include:\s+build\/installer\.nsh/);
+  assert.match(builderYml, /background:\s+build\/dmg-background\.png/);
+  assert.match(builderYml, /afterPack:\s+\.\/build\/afterPack\.js/);
+  assert.match(builderYml, /afterSign:\s+\.\/build\/afterSign\.js/);
+  assert.doesNotMatch(
+    builderYml,
+    /src-tauri/,
+    "electron-builder.yml must not reference removed src-tauri assets",
   );
 });
 
-test("Windows NSIS installer stops companion processes and renders custom UI on updates", () => {
-  const nsi = fs.readFileSync(path.join(INSTALLER_DIR, "installer.nsi"), "utf8");
-  assert.match(nsi, /!macro\s+KillCompanionProcess\s+executableName/);
-  assert.match(nsi, /!macro\s+StopAllDimoProcesses/);
-  assert.match(nsi, /!insertmacro\s+KillCompanionProcess\s+"dimo-mcp\.exe"/);
-  assert.match(nsi, /!insertmacro\s+KillCompanionProcess\s+"dimo-workflow-mcp\.exe"/);
-  assert.match(nsi, /!insertmacro\s+KillCompanionProcess\s+"dimo-computer-helper\.exe"/);
-  const stopMacroMatches = nsi.match(/!insertmacro\s+StopAllDimoProcesses/g) || [];
-  assert.equal(
-    stopMacroMatches.length,
-    3,
-    "StopAllDimoProcesses must be invoked in install, reinstall-uninstall, and uninstall sections",
-  );
-
-  const pages = fs.readFileSync(path.join(INSTALLER_DIR, "pages.nsh"), "utf8");
-  const pageMainBlock = pages.slice(
-    pages.indexOf("Function DimoPageMain"),
-    pages.indexOf("Function DimoApplyPhase"),
-  );
-  assert.doesNotMatch(
-    pageMainBlock,
-    /\$UpdateMode\s*=\s*1/,
-    "DimoPageMain must not abort when $UpdateMode = 1",
-  );
-  const pageFinishBlock = pages.slice(
-    pages.indexOf("Function DimoPageFinish"),
-    pages.indexOf("Function DimoPageFinishLeave"),
-  );
-  assert.doesNotMatch(
-    pageFinishBlock,
-    /\$UpdateMode\s*=\s*1/,
-    "DimoPageFinish must not abort when $UpdateMode = 1",
-  );
-  const guiInitBlock = pages.slice(
-    pages.indexOf("Function ${UN}DimoGuiInit"),
-    pages.indexOf("Function ${UN}DimoBuildChrome"),
-  );
-  assert.doesNotMatch(
-    guiInitBlock,
-    /\$PassiveMode\s*=\s*1/,
-    "DimoGuiInit must initialize custom frameless window even in passive mode",
-  );
+test("Electron packaging assets and hook scripts exist", () => {
+  for (const rel of [
+    "icons/icon.ico",
+    "icons/icon.icns",
+    "icons/128x128@2x.png",
+    "icons/icon.png",
+    "dmg-background.png",
+    "installer.nsh",
+    "entitlements.mac.plist",
+    "afterPack.js",
+    "afterSign.js",
+  ]) {
+    const filePath = path.join(BUILD_DIR, rel);
+    assert.ok(fs.existsSync(filePath), `missing packaging asset ${rel}`);
+    assert.ok(fs.statSync(filePath).size > 0, `empty packaging asset ${rel}`);
+  }
+  assert.ok(fs.existsSync(path.join(ICONS_DIR, "32x32.png")));
 });
 
-test("Windows NSIS custom template compiles cleanly with makensis when available", (t) => {
-  // Windows: Tauri's bundled NSIS. Elsewhere: makensis on PATH plus a folder of
-  // Tauri's NSIS helpers (utils.nsh, FileAssociation.nsh, English.nsh,
-  // SimpChinese.nsh, plugins/nsis_tauri_utils.dll) in DIMO_NSIS_HELPER_DIR.
-  const makensisCandidates = [
-    path.join(ROOT, "target", ".tauri", "NSIS", "makensis.exe"),
-    process.env.LOCALAPPDATA
-      ? path.join(process.env.LOCALAPPDATA, "tauri", "NSIS", "makensis.exe")
-      : "",
-    process.platform !== "win32" ? "/usr/bin/makensis" : "",
-    process.platform !== "win32" ? "/usr/local/bin/makensis" : "",
-  ].filter(Boolean);
-  const makensis = makensisCandidates.find((p) => fs.existsSync(p));
-  const nsisHelperDir =
-    process.env.DIMO_NSIS_HELPER_DIR ||
-    path.join(ROOT, "target", "release", "nsis", "x64");
-
-  if (!makensis || !fs.existsSync(path.join(nsisHelperDir, "utils.nsh"))) {
-    t.skip("makensis or Tauri NSIS helper scripts not present in this environment");
-    return;
-  }
-
-  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "dimo-nsis-test-"));
-  try {
-    for (const helper of [
-      "utils.nsh",
-      "FileAssociation.nsh",
-      "English.nsh",
-      "SimpChinese.nsh",
-    ]) {
-      fs.copyFileSync(
-        path.join(nsisHelperDir, helper),
-        path.join(scratch, helper),
-      );
-    }
-    const dummyBin = path.join(scratch, "dimo.exe");
-    fs.writeFileSync(dummyBin, "MZ");
-    const outExe = path.join(scratch, "Dimo-setup-test.exe");
-    const hooksPath = path.join(INSTALLER_DIR, "hooks.nsh");
-    const pluginsDir = fs.existsSync(path.join(nsisHelperDir, "plugins"))
-      ? path.join(nsisHelperDir, "plugins")
-      : path.join(path.dirname(makensis), "Plugins", "x86-unicode", "additional");
-    let tpl = fs.readFileSync(
-      path.join(INSTALLER_DIR, "installer.nsi"),
-      "utf8",
-    );
-    tpl = tpl
-      .replace(/\{\{compression\}\}/g, "none")
-      .replace(
-        /\{\{#if installer_hooks\}\}[\s\S]*?\{\{\/if\}\}/g,
-        `!include "${hooksPath}"`,
-      )
-      .replace(/\{\{manufacturer\}\}/g, "dimo")
-      .replace(/\{\{product_name\}\}/g, "Dimo")
-      .replace(/\{\{version\}\}/g, "0.3.0")
-      .replace(/\{\{version_with_build\}\}/g, "0.3.0.0")
-      .replace(/\{\{homepage\}\}/g, "")
-      .replace(/\{\{install_mode\}\}/g, "currentUser")
-      .replace(/\{\{license\}\}/g, "")
-      .replace(
-        /\{\{installer_icon\}\}/g,
-        path.join(ROOT, "src-tauri", "icons", "icon.ico"),
-      )
-      .replace(/\{\{sidebar_image\}\}/g, "")
-      .replace(/\{\{header_image\}\}/g, "")
-      .replace(/\{\{main_binary_name\}\}/g, "dimo")
-      .replace(/\{\{main_binary_path\}\}/g, dummyBin)
-      .replace(/\{\{bundle_id\}\}/g, "com.dimo.app")
-      .replace(/\{\{copyright\}\}/g, "")
-      .replace(/\{\{out_file\}\}/g, outExe)
-      .replace(/\{\{arch\}\}/g, "x64")
-      .replace(/\{\{additional_plugins_path\}\}/g, pluginsDir)
-      .replace(/\{\{allow_downgrades\}\}/g, "true")
-      .replace(/\{\{display_language_selector\}\}/g, "false")
-      .replace(/\{\{install_webview2_mode\}\}/g, "downloadBootstrapper")
-      .replace(/\{\{webview2_installer_args\}\}/g, "/silent")
-      .replace(/\{\{webview2_bootstrapper_path\}\}/g, "")
-      .replace(/\{\{webview2_installer_path\}\}/g, "")
-      .replace(/\{\{minimum_webview2_version\}\}/g, "")
-      .replace(/\{\{uninstaller_sign_cmd\}\}/g, "")
-      .replace(/\{\{estimated_size\}\}/g, "1024")
-      .replace(/\{\{start_menu_folder\}\}/g, "")
-      .replace(
-        /\{\{#each languages\}\}[\s\S]*?\{\{\/each\}\}/g,
-        '!insertmacro MUI_LANGUAGE "SimpChinese"\n!insertmacro MUI_LANGUAGE "English"',
-      )
-      .replace(
-        /\{\{#each language_files\}\}[\s\S]*?\{\{\/each\}\}/g,
-        `!include "${path.join(scratch, "English.nsh")}"\n!include "${path.join(scratch, "SimpChinese.nsh")}"`,
-      )
-      .replace(
-        /\{\{#each file_associations[\s\S]*?\{\{\/each\}\}\s*\{\{\/each\}\}/g,
-        "",
-      )
-      .replace(/\{\{#each [\s\S]*?\{\{\/each\}\}/g, "");
-
-    const renderedNsi = path.join(scratch, "installer.nsi");
-    fs.writeFileSync(renderedNsi, tpl, "utf8");
-    if (process.env.DIMO_NSIS_KEEP_RENDERED) {
-      fs.copyFileSync(renderedNsi, process.env.DIMO_NSIS_KEEP_RENDERED);
-    }
-    const output = execFileSync(makensis, ["-INPUTCHARSET", "UTF8", renderedNsi], {
-      cwd: scratch,
-      encoding: "utf8",
-    });
-    assert.doesNotMatch(
-      output,
-      /warning 6000|warning 6001/i,
-      `makensis emitted variable warnings:\n${output}`,
-    );
-    assert.ok(fs.existsSync(outExe), "makensis must produce output installer");
-    if (process.env.DIMO_NSIS_KEEP_OUTPUT) {
-      fs.copyFileSync(outExe, process.env.DIMO_NSIS_KEEP_OUTPUT);
-    }
-  } finally {
-    fs.rmSync(scratch, { recursive: true, force: true });
-  }
+test("Windows NSIS custom hook stops companion processes and preserves user data", () => {
+  const nsh = fs.readFileSync(path.join(BUILD_DIR, "installer.nsh"), "utf8");
+  assert.match(nsh, /dimo-server\.exe/);
+  assert.match(nsh, /dimo-mcp\.exe/);
+  assert.match(nsh, /dimo-workflow-mcp\.exe/);
+  assert.match(nsh, /dimo-computer-helper\.exe/);
+  assert.match(nsh, /customInit/);
+  assert.match(nsh, /customUnInit/);
 });

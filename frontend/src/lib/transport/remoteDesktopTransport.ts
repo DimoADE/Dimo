@@ -1,10 +1,127 @@
 import { randomUUID } from '@/utils/randomUUID';
+import { getDesktopShell } from '@/lib/desktopShell';
 import type {
   BackendTransport,
   RemoteEvent,
   ServerCapabilities,
   SubscriptionRequest,
 } from './backendTransport';
+import { getElectronBackendTransport } from './electronTransport';
+
+const REMOTE_HOST_EVENT_CHANNEL = 'dimo://remote-host-event';
+const REMOTE_SUBSCRIPTION_EVENT_CHANNEL = 'dimo://remote-subscription-event';
+
+type RemoteHostEventEnvelope = {
+  windowLabel?: string;
+  targets?: string[];
+  channel?: string;
+  payload?: unknown;
+};
+
+type WireRemoteEvent = Omit<RemoteEvent, 'sequence'> & {
+  sequence: number | bigint | string;
+};
+
+type RemoteSubscriptionEventEnvelope = {
+  subscriptionId?: string;
+  event?: WireRemoteEvent;
+};
+
+function normalizeRemoteSequence(value: number | bigint | string | undefined): bigint {
+  if (typeof value === 'bigint') {
+    return value;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return BigInt(Math.trunc(value));
+  }
+  if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
+    return BigInt(value.trim());
+  }
+  return 0n;
+}
+
+function createSharedChannelMultiplexer<T>(channel: string) {
+  const listeners = new Set<(envelope: T) => void>();
+  let unlistenPromise: Promise<() => void> | null = null;
+  let activeUnlisten: (() => void) | null = null;
+  let epoch = 0;
+
+  const attachIfNeeded = async () => {
+    if (unlistenPromise) {
+      await unlistenPromise;
+      return;
+    }
+    const currentEpoch = ++epoch;
+    unlistenPromise = getElectronBackendTransport()
+      .listen<T>(channel, (envelope) => {
+        for (const listener of Array.from(listeners)) {
+          listener(envelope);
+        }
+      })
+      .then((unlisten) => {
+        if (currentEpoch !== epoch || listeners.size === 0) {
+          unlisten();
+          return () => undefined;
+        }
+        activeUnlisten = unlisten;
+        return unlisten;
+      })
+      .catch((error) => {
+        if (currentEpoch === epoch) {
+          unlistenPromise = null;
+          activeUnlisten = null;
+        }
+        throw error;
+      });
+    await unlistenPromise;
+  };
+
+  return {
+    async subscribe(listener: (envelope: T) => void): Promise<() => void> {
+      listeners.add(listener);
+      try {
+        await attachIfNeeded();
+      } catch (error) {
+        listeners.delete(listener);
+        throw error;
+      }
+      let removed = false;
+      return () => {
+        if (removed) return;
+        removed = true;
+        listeners.delete(listener);
+        if (listeners.size === 0) {
+          epoch += 1;
+          const cleanup = activeUnlisten;
+          activeUnlisten = null;
+          unlistenPromise = null;
+          cleanup?.();
+        }
+      };
+    },
+    resetForTests() {
+      epoch += 1;
+      listeners.clear();
+      const cleanup = activeUnlisten;
+      activeUnlisten = null;
+      unlistenPromise = null;
+      cleanup?.();
+    },
+  };
+}
+
+const remoteHostEventMux = createSharedChannelMultiplexer<RemoteHostEventEnvelope>(
+  REMOTE_HOST_EVENT_CHANNEL
+);
+const remoteSubscriptionEventMux =
+  createSharedChannelMultiplexer<RemoteSubscriptionEventEnvelope>(
+    REMOTE_SUBSCRIPTION_EVENT_CHANNEL
+  );
+
+export function resetRemoteDesktopMultiplexersForTests(): void {
+  remoteHostEventMux.resetForTests();
+  remoteSubscriptionEventMux.resetForTests();
+}
 
 export type RemoteDesktopProfile = {
   profileId: string;
@@ -33,18 +150,15 @@ export interface RemoteDesktopBridge {
   ): AsyncIterable<RemoteEvent>;
 }
 
-const tauriBridge: RemoteDesktopBridge = {
+export const electronRemoteDesktopBridge: RemoteDesktopBridge = {
   async connect(profile) {
-    const { tauriInvoke } = await import('@/lib/tauriApi');
-    await tauriInvoke('remote_desktop_connect', { profile });
+    await getDesktopShell().invoke('remote_desktop_connect', { profile });
   },
   async disconnect(profileId) {
-    const { tauriInvoke } = await import('@/lib/tauriApi');
-    await tauriInvoke('remote_desktop_disconnect', { profileId });
+    await getDesktopShell().invoke('remote_desktop_disconnect', { profileId });
   },
   async call(profileId, command, args, operationId) {
-    const { tauriInvoke } = await import('@/lib/tauriApi');
-    return tauriInvoke('remote_desktop_call', {
+    return getDesktopShell().invoke('remote_desktop_call', {
       profileId,
       command,
       args: args ?? {},
@@ -52,110 +166,173 @@ const tauriBridge: RemoteDesktopBridge = {
     });
   },
   async capabilities(profileId) {
-    const { tauriInvoke } = await import('@/lib/tauriApi');
-    return tauriInvoke('remote_desktop_capabilities', { profileId });
+    return getDesktopShell().invoke<ServerCapabilities>(
+      'remote_desktop_capabilities',
+      { profileId }
+    );
   },
   async listen(profileId, event, handler) {
-    const { tauriInvoke, tauriListen } = await import('@/lib/tauriApi');
-    const unlisten = await tauriListen(
-      `remote-desktop:${profileId}:${event}`,
-      handler
-    );
-    const subscriptionId = randomUUID();
-    await tauriInvoke('remote_desktop_listen', {
-      profileId,
-      event,
-      subscriptionId,
+    const expectedChannel = `remote-desktop:${profileId}:${event}`;
+    const currentLabel = getDesktopShell().getWindowLabel();
+    const unlisten = await remoteHostEventMux.subscribe((envelope) => {
+      if (!envelope || envelope.channel !== expectedChannel) {
+        return;
+      }
+      if (
+        Array.isArray(envelope.targets) &&
+        envelope.targets.length > 0 &&
+        !envelope.targets.includes(currentLabel) &&
+        envelope.windowLabel !== currentLabel
+      ) {
+        return;
+      }
+      handler(envelope.payload);
     });
+    const subscriptionId = randomUUID();
+    try {
+      await getDesktopShell().invoke('remote_desktop_listen', {
+        profileId,
+        event,
+        subscriptionId,
+      });
+    } catch (error) {
+      unlisten();
+      throw error;
+    }
     return () => {
       unlisten();
-      void tauriInvoke('remote_desktop_cancel_subscription', {
+      void getDesktopShell().invoke('remote_desktop_cancel_subscription', {
         subscriptionId,
       });
     };
   },
   subscribe(profileId, request) {
-    return subscribeRemoteDesktop(profileId, request);
+    return subscribeRemoteDesktopViaElectron(profileId, request);
   },
 };
 
-function subscribeRemoteDesktop(
+function getDefaultRemoteDesktopBridge(): RemoteDesktopBridge {
+  return electronRemoteDesktopBridge;
+}
+
+function subscribeRemoteDesktopViaElectron(
   profileId: string,
   request: SubscriptionRequest
 ): AsyncIterable<RemoteEvent> {
   return {
     [Symbol.asyncIterator]: (): AsyncIterator<RemoteEvent> => {
       const queue: RemoteEvent[] = [];
+      let failure: Error | null = null;
       let wake: (() => void) | undefined;
       let closed = false;
       let started = false;
       let cancelled = false;
+      let unlisten: (() => void) | undefined;
       const subscriptionId = randomUUID();
+
+      const wakeConsumer = () => {
+        const pendingWake = wake;
+        wake = undefined;
+        pendingWake?.();
+      };
 
       const cancelSubscription = async () => {
         if (cancelled) return;
         cancelled = true;
         closed = true;
-        const pendingWake = wake;
-        wake = undefined;
-        pendingWake?.();
+        wakeConsumer();
+        unlisten?.();
+        unlisten = undefined;
         if (!started) return;
-        const { tauriInvoke } = await import('@/lib/tauriApi');
-        await tauriInvoke('remote_desktop_cancel_subscription', {
-          subscriptionId,
-        });
+        await getDesktopShell()
+          .invoke('remote_desktop_cancel_subscription', {
+            subscriptionId,
+          })
+          .catch(() => undefined);
       };
 
       return {
         next: async (): Promise<IteratorResult<RemoteEvent>> => {
+          if (failure && queue.length === 0) {
+            const err = failure;
+            failure = null;
+            await cancelSubscription();
+            throw err;
+          }
           if (closed && queue.length === 0) {
             return { value: undefined, done: true };
           }
           if (!started) {
             started = true;
-            const [{ Channel }, { tauriInvoke }] = await Promise.all([
-              import('@tauri-apps/api/core'),
-              import('@/lib/tauriApi'),
-            ]);
+            unlisten = await remoteSubscriptionEventMux.subscribe(
+              (envelope) => {
+                if (!envelope || envelope.subscriptionId !== subscriptionId) {
+                  return;
+                }
+                const rawEvent = envelope.event;
+                if (!rawEvent) return;
+                if (rawEvent.kind === 'subscription_closed') {
+                  closed = true;
+                  wakeConsumer();
+                  return;
+                }
+                if (rawEvent.kind === 'subscription_error') {
+                  const payload = rawEvent.payload as
+                    | { message?: unknown; code?: unknown }
+                    | undefined;
+                  const message =
+                    typeof payload?.message === 'string' &&
+                    payload.message.trim().length > 0
+                      ? payload.message
+                      : 'Remote subscription failed';
+                  failure = new Error(message);
+                  closed = true;
+                  wakeConsumer();
+                  return;
+                }
+                if (closed) return;
+                queue.push({
+                  ...rawEvent,
+                  sequence: normalizeRemoteSequence(rawEvent.sequence),
+                });
+                wakeConsumer();
+              }
+            );
             if (closed) {
+              await cancelSubscription();
               return { value: undefined, done: true };
             }
-            const channel = new Channel<RemoteEvent>();
-            channel.onmessage = (event) => {
-              if (event.kind === 'subscription_closed') {
-                closed = true;
-                const pendingWake = wake;
-                wake = undefined;
-                pendingWake?.();
-                return;
-              }
-              if (closed) return;
-              queue.push(event);
-              const pendingWake = wake;
-              wake = undefined;
-              pendingWake?.();
-            };
-            await tauriInvoke('remote_desktop_subscribe', {
-              profileId,
-              subscriptionId,
-              request: {
-                ...request,
-                subscription_id: subscriptionId,
-                ...('after_sequence' in request
-                  ? { after_sequence: Number(request.after_sequence) }
-                  : {}),
-              },
-              onEvent: channel,
-            });
+            try {
+              await getDesktopShell().invoke('remote_desktop_subscribe', {
+                profileId,
+                subscriptionId,
+                request: {
+                  ...request,
+                  subscription_id: subscriptionId,
+                  ...('after_sequence' in request
+                    ? { after_sequence: Number(request.after_sequence) }
+                    : {}),
+                },
+              });
+            } catch (error) {
+              await cancelSubscription();
+              throw error;
+            }
             if (closed) {
               await cancelSubscription();
               return { value: undefined, done: true };
             }
           }
-          while (!closed || queue.length > 0) {
+          while (!closed || queue.length > 0 || failure !== null) {
             const next = queue.shift();
             if (next) {
               return { value: next, done: false };
+            }
+            if (failure) {
+              const err = failure;
+              failure = null;
+              await cancelSubscription();
+              throw err;
             }
             if (closed) break;
             await new Promise<void>((resolve) => {
@@ -201,7 +378,7 @@ export class RemoteDesktopTransport implements BackendTransport {
 
   static async connect(
     profile: RemoteDesktopProfile,
-    bridge: RemoteDesktopBridge = tauriBridge
+    bridge: RemoteDesktopBridge = getDefaultRemoteDesktopBridge()
   ): Promise<RemoteDesktopTransport> {
     await bridge.connect(profile);
     return new RemoteDesktopTransport(
@@ -213,7 +390,7 @@ export class RemoteDesktopTransport implements BackendTransport {
 
   static attach(
     profile: { profileId: string; baseUrl: string },
-    bridge: RemoteDesktopBridge = tauriBridge
+    bridge: RemoteDesktopBridge = getDefaultRemoteDesktopBridge()
   ): RemoteDesktopTransport {
     return new RemoteDesktopTransport(
       profile.profileId,
@@ -233,6 +410,23 @@ export class RemoteDesktopTransport implements BackendTransport {
       args,
       options?.operationId
     );
+  }
+
+  async stream<T>(
+    command: string,
+    args: Record<string, unknown>,
+    onMessage: (message: unknown) => void
+  ): Promise<T> {
+    const result = await this.call(command, args);
+    if (result && typeof result === 'object' && 'events' in result) {
+      const events = (result as { events?: unknown }).events;
+      if (Array.isArray(events)) {
+        for (const event of events) {
+          onMessage(event);
+        }
+      }
+    }
+    return result as T;
   }
 
   capabilities(): Promise<ServerCapabilities> {

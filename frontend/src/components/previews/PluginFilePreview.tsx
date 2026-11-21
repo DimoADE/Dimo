@@ -37,18 +37,30 @@ export function PluginFilePreview({ filePath }: { filePath: string }) {
           return;
         }
         setProvider(result.pluginId);
-        setPreviewUrl(
-          result.previewUrl ??
-            (result.port !== null &&
-            result.leaseId !== null &&
-            result.capabilityToken !== null
-              ? (configuredBackendTransport.artifactPreviewUrl?.({
-                  leaseId: result.leaseId,
-                  capabilityToken: result.capabilityToken,
-                  loopbackPort: result.port,
-                }) ?? null)
-              : null)
-        );
+        const leasedUrl =
+          result.port !== null &&
+          result.leaseId !== null &&
+          result.capabilityToken !== null
+            ? (configuredBackendTransport.artifactPreviewUrl?.({
+                leaseId: result.leaseId,
+                capabilityToken: result.capabilityToken,
+                loopbackPort: result.port,
+              }) ?? null)
+            : null;
+        let resolvedPreviewUrl = result.previewUrl ?? leasedUrl;
+        if (resolvedPreviewUrl && resolvedPreviewUrl.startsWith('/')) {
+          if (leasedUrl && /^https?:\/\//i.test(leasedUrl)) {
+            resolvedPreviewUrl = leasedUrl;
+          } else {
+            const origin = (
+              configuredBackendTransport as { origin?: string }
+            ).origin;
+            if (origin) {
+              resolvedPreviewUrl = `${origin.replace(/\/+$/, '')}${resolvedPreviewUrl}`;
+            }
+          }
+        }
+        setPreviewUrl(resolvedPreviewUrl);
         setError(result.errorMessage ?? result.errorCode);
         if (acquired && result.leaseId) {
           const leaseId = result.leaseId;

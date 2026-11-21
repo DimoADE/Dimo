@@ -126,10 +126,18 @@ impl AcpClientBridge {
             )));
         }
 
+        let force_manual = AgentConnectionRunner::is_plan_approval_tool(&request.title)
+            || AgentConnectionRunner::session_controls_in_plan_mode(
+                &self.session_controls,
+                session_id,
+            )
+            .await;
         let configured = *self.auto_approve_mode.lock().await;
         let auto_approve_mode =
             effective_auto_approve_mode(configured, &self.session_controls, session_id).await;
-        if let Some(response) = decide_auto_permission_response(auto_approve_mode, &request) {
+        if !force_manual
+            && let Some(response) = decide_auto_permission_response(auto_approve_mode, &request)
+        {
             send_manager_event(
                 &self.event_tx,
                 AgentConnectionManagerEvent {
@@ -163,7 +171,8 @@ impl AcpClientBridge {
         );
 
         let configured = *self.auto_approve_mode.lock().await;
-        if let Some(response) = decide_auto_permission_response(configured, &request)
+        if !force_manual
+            && let Some(response) = decide_auto_permission_response(configured, &request)
             && let Some(pending) = self
                 .pending_permissions
                 .lock()

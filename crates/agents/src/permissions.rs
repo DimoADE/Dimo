@@ -78,6 +78,10 @@ pub enum AgentPermissionResponse {
         /// Not part of the ACP option itself; stripped before the agent sees the outcome.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         persist: bool,
+        /// Host-side: persist auto-approval for this agent across all future sessions.
+        /// Not part of the ACP option itself; stripped before the agent sees the outcome.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        persist_for_agent: bool,
         /// Optional optimistic concurrency token matching `AgentPermissionRequest::revision`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional, type = "number")]
@@ -91,6 +95,7 @@ impl AgentPermissionResponse {
         Self::Selected {
             option_id: option_id.into(),
             persist: false,
+            persist_for_agent: false,
             expected_revision: None,
         }
     }
@@ -99,6 +104,7 @@ impl AgentPermissionResponse {
         Self::Selected {
             option_id: option_id.into(),
             persist: false,
+            persist_for_agent: false,
             expected_revision: Some(expected_revision),
         }
     }
@@ -107,17 +113,31 @@ impl AgentPermissionResponse {
         Self::Selected {
             option_id: option_id.into(),
             persist: true,
+            persist_for_agent: false,
             expected_revision: None,
         }
     }
 
-    /// "始终允许" / ACP `allow_always` both mean: answer this request and YOLO the rest.
+    pub fn selected_persist_for_agent(option_id: impl Into<String>) -> Self {
+        Self::Selected {
+            option_id: option_id.into(),
+            persist: true,
+            persist_for_agent: true,
+            expected_revision: None,
+        }
+    }
+
+    /// "始终允许" / ACP `allow_always` both mean: answer this request and auto-approve the rest.
     pub fn should_persist_auto_approve(&self, options: &[AgentPermissionOption]) -> bool {
         match self {
             Self::Selected {
-                option_id, persist, ..
+                option_id,
+                persist,
+                persist_for_agent,
+                ..
             } => {
                 *persist
+                    || *persist_for_agent
                     || options.iter().any(|option| {
                         option.id == *option_id
                             && option.kind == AgentPermissionOptionKind::AllowAlways
@@ -125,6 +145,17 @@ impl AgentPermissionResponse {
             }
             Self::Cancelled => false,
         }
+    }
+
+    /// True only when the user explicitly chose agent-wide persistence across future sessions.
+    pub fn should_persist_agent_auto_approve(&self) -> bool {
+        matches!(
+            self,
+            Self::Selected {
+                persist_for_agent: true,
+                ..
+            }
+        )
     }
 
     pub fn option_id(&self) -> Option<&str> {
@@ -411,5 +442,28 @@ mod tests {
         let without_rev = AgentPermissionResponse::selected("accept");
         let encoded_without = serde_json::to_value(&without_rev).expect("serialize plain");
         assert!(encoded_without.get("expected_revision").is_none());
+        assert!(encoded_without.get("persist_for_agent").is_none());
+    }
+
+    #[test]
+    fn persist_for_agent_distinguishes_session_from_agent_scope() {
+        let options = vec![
+            option("allow-once", AgentPermissionOptionKind::AllowOnce),
+            option("allow-always", AgentPermissionOptionKind::AllowAlways),
+        ];
+        let session_only = AgentPermissionResponse::selected_persist("allow-always");
+        assert!(session_only.should_persist_auto_approve(&options));
+        assert!(!session_only.should_persist_agent_auto_approve());
+
+        let agent_wide = AgentPermissionResponse::selected_persist_for_agent("allow-once");
+        assert!(agent_wide.should_persist_auto_approve(&options));
+        assert!(agent_wide.should_persist_agent_auto_approve());
+
+        let encoded = serde_json::to_value(&agent_wide).expect("serialize agent persist");
+        assert_eq!(encoded["persist"], true);
+        assert_eq!(encoded["persist_for_agent"], true);
+        let decoded: AgentPermissionResponse =
+            serde_json::from_value(encoded).expect("deserialize agent persist");
+        assert_eq!(decoded, agent_wide);
     }
 }

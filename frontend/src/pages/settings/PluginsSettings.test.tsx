@@ -1,4 +1,3 @@
-import { open } from '@tauri-apps/plugin-dialog';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
@@ -12,6 +11,26 @@ import type {
 import { toast } from '@/components/ui/toast';
 import { PluginsSettings, type PluginEcosystem } from './PluginsSettings';
 import { renderWithQueryClient as render } from '@/test/QueryClientHarness';
+
+const dialogOpenMock = vi.hoisted(() => vi.fn());
+
+vi.mock('@/lib/desktopShell', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/lib/desktopShell')>();
+  return {
+    ...actual,
+    getDesktopShell: () => {
+      const shell = actual.getDesktopShell();
+      return {
+        ...shell,
+        dialog: {
+          ...shell.dialog,
+          open: dialogOpenMock,
+        },
+      };
+    },
+  };
+});
 
 vi.mock('@/components/ui/toast', () => ({
   toast: {
@@ -399,7 +418,7 @@ function renderSettings(
 
 describe('PluginsSettings', () => {
   beforeEach(() => {
-    vi.mocked(open).mockReset();
+    dialogOpenMock.mockReset();
     vi.mocked(toast.error).mockReset();
     localStorage.clear();
   });
@@ -534,7 +553,7 @@ describe('PluginsSettings', () => {
       screen.getByRole('switch', { name: '启用 Research Toolkit' })
     ).toBeDisabled();
     expect(screen.getByText('远程只读')).toBeVisible();
-    expect(open).not.toHaveBeenCalled();
+    expect(dialogOpenMock).not.toHaveBeenCalled();
     expect(backend.call).not.toHaveBeenCalledWith('plugin_dev_connection');
   });
 
@@ -988,7 +1007,7 @@ describe('PluginsSettings', () => {
 
   it('previews a Dimo ZIP and requires an explicit same-id replacement decision', async () => {
     const user = userEvent.setup();
-    vi.mocked(open).mockResolvedValue('/Users/me/new-research.zip');
+    dialogOpenMock.mockResolvedValue('/Users/me/new-research.zip');
     const preview = {
       plugin: catalog.plugins[1],
       conflict: {

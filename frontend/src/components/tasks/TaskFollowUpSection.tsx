@@ -66,7 +66,7 @@ import {
 import { canonicalSessionAgentId } from '@/lib/sessionQueryCache';
 import { ConversationStatusDock } from './follow-up/ConversationStatusDock';
 import { AgentQuestionCard } from './follow-up/AgentQuestionCard';
-import { PermissionRequestCard } from '@/components/NormalizedConversation/conversation/PermissionRequestCard';
+import { PermissionRequestStack } from '@/components/NormalizedConversation/conversation/PermissionRequestCard';
 import { RateLimitRecoveryBanner } from '@/components/NormalizedConversation/RateLimitRecoveryBanner';
 import { sanitizeDependentConfigValues } from './follow-up/SessionConfigOptionSelectors';
 import {
@@ -1345,14 +1345,7 @@ export function TaskFollowUpSection({
           overlay={
             pendingPermissions.length > 0 || visibleAgentQuestion ? (
               <div className="space-y-2">
-                {pendingPermissions.map((permission) => (
-                  <PermissionRequestCard
-                    key={permission.request.permission_id}
-                    request={permission.request}
-                    responding={permission.responding}
-                    onRespond={permission.onRespond}
-                  />
-                ))}
+                <PermissionRequestStack items={pendingPermissions} />
                 {visibleAgentQuestion ? (
                   <AgentQuestionCard
                     key={visibleAgentQuestion.request.question_id}

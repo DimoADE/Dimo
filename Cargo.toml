@@ -27,7 +27,6 @@ members = [
     "crates/remote-protocol",
     "crates/application",
     "crates/server",
-    "src-tauri",
 ]
 
 [workspace.dependencies]

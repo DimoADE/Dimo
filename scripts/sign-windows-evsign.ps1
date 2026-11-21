@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
-    [string] $BundleRoot
+    [string] $BundleRoot,
+    [switch] $TopLevelOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -29,8 +30,13 @@ if ($actualSha256 -ne $cliSha256) {
     throw "EVSign CLI checksum mismatch: expected $cliSha256, got $actualSha256"
 }
 
-$artifacts = Get-ChildItem $BundleRoot -Recurse -File |
-    Where-Object { $_.Extension -in '.exe', '.msi' }
+$artifacts = if ($TopLevelOnly) {
+    Get-ChildItem $BundleRoot -File |
+        Where-Object { $_.Extension -in '.exe', '.msi' }
+} else {
+    Get-ChildItem $BundleRoot -Recurse -File |
+        Where-Object { $_.Extension -in '.exe', '.msi' }
+}
 if ($artifacts.Count -eq 0) {
     throw "No Windows installers were produced under $BundleRoot"
 }
@@ -68,7 +74,7 @@ foreach ($artifact in $artifacts) {
             throw 'TAURI_SIGNING_PRIVATE_KEY is required to refresh updater signatures after Authenticode signing.'
         }
 
-        & pnpm exec tauri signer sign $artifact.FullName
+        & pnpm dlx @tauri-apps/cli@2.10.0 signer sign $artifact.FullName
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to refresh the updater signature for $($artifact.Name)"
         }

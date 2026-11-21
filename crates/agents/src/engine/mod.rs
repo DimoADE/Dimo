@@ -1128,6 +1128,11 @@ pub trait NativeEngineDriver: Send + Sync + 'static {
         None
     }
 
+    /// Resolves the engine's native default permission mode from local configuration.
+    fn resolve_default_mode(&self, _env: &HashMap<String, String>) -> Option<String> {
+        None
+    }
+
     /// Returns configured alias targets (e.g. `sonnet -> <provider-model>`) for model consistency validation.
     fn model_aliases(&self, _env: &HashMap<String, String>) -> HashMap<String, String> {
         HashMap::new()

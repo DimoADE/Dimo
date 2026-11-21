@@ -1143,6 +1143,14 @@ pub async fn dispatch_native_config_write(
         .await
         .map_err(|error| bad(error.to_string()))?;
     sync_native_config_auth_summary(pool, &scope, &request.agent_id, &request.fields).await?;
+    if request.fields.keys().any(|key| {
+        matches!(
+            key.as_str(),
+            "permission_mode" | "approval_policy" | "sandbox_mode"
+        )
+    }) {
+        clear_saved_mode_session_default(pool, &request.agent_id).await?;
+    }
     invalidate("agent-management-snapshot-invalidated");
     serialize(map_native_config_view(request.agent_id, result.snapshot))
 }
@@ -1173,8 +1181,19 @@ pub async fn dispatch_native_config_file_write(
         )
         .await
         .map_err(|error| bad(error.to_string()))?;
+    clear_saved_mode_session_default(pool, &request.agent_id).await?;
     invalidate("agent-management-snapshot-invalidated");
     serialize(map_native_config_view(request.agent_id, result.snapshot))
+}
+
+async fn clear_saved_mode_session_default(
+    pool: &SqlitePool,
+    agent_id: &AgentId,
+) -> Result<(), ApplicationError> {
+    db::models::agent_management::SessionDefaultRepository::new(pool.clone())
+        .delete_option(agent_id, "mode")
+        .await
+        .map_err(|error| ApplicationError::internal(error.to_string()))
 }
 
 async fn native_config_view(

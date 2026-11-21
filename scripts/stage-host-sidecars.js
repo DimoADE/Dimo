@@ -107,13 +107,17 @@ function sweepRetiredStagedSidecars(destinationDir, baseFileName) {
   }
 }
 
-function copySidecar(name, sourcePath, destinationDir, triple) {
+const ELECTRON_SIDECAR_BINS = [
+  "dimo-server",
+  "dimo-mcp",
+  "dimo-workflow-mcp",
+];
+
+function copyBinaryAtomic(sourcePath, destinationDir, baseFileName) {
   if (!isBuiltSidecar(sourcePath)) {
     throw new Error(`missing or empty sidecar ${sourcePath}`);
   }
-  const ext = process.platform === "win32" ? ".exe" : "";
   fs.mkdirSync(destinationDir, { recursive: true });
-  const baseFileName = `${name}-${triple}${ext}`;
   sweepRetiredStagedSidecars(destinationDir, baseFileName);
 
   const to = path.join(destinationDir, baseFileName);
@@ -152,24 +156,77 @@ function copySidecar(name, sourcePath, destinationDir, triple) {
   if (!isBuiltSidecar(to)) {
     throw new Error(`staged sidecar is empty: ${to}`);
   }
+  return to;
 }
 
-function main(env = process.env) {
+function copySidecar(name, sourcePath, destinationDir, triple, platform = process.platform) {
+  const ext = platform === "win32" ? ".exe" : "";
+  const baseFileName = `${name}-${triple}${ext}`;
+  return copyBinaryAtomic(sourcePath, destinationDir, baseFileName);
+}
+
+function copyPlainSidecar(name, sourcePath, destinationDir, platform = process.platform) {
+  const baseFileName = sidecarFileName(name, platform);
+  return copyBinaryAtomic(sourcePath, destinationDir, baseFileName);
+}
+
+function stageElectronSidecars({
+  repo,
+  env = process.env,
+  hostTriple,
+  platform = process.platform,
+  destinationDir,
+} = {}) {
+  const resolvedRepo = repo || path.resolve(__dirname, "..");
+  const { binDir, nativeBinDir } = resolveSidecarBinDir({
+    repo: resolvedRepo,
+    env,
+    hostTriple,
+  });
+  const targetDir =
+    destinationDir || path.join(resolvedRepo, "electron", "resources", "bin");
+  const staged = [];
+  for (const name of ELECTRON_SIDECAR_BINS) {
+    const src = resolveSidecarSource(name, binDir, nativeBinDir, platform);
+    staged.push(copyPlainSidecar(name, src, targetDir, platform));
+  }
+  return staged;
+}
+
+function parseCliArgs(argv) {
+  let target = null;
+  let profile = null;
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "--electron") {
+      // Accepted for backwards compatibility; Electron staging is the default.
+    } else if (arg === "--target" && argv[i + 1]) {
+      target = argv[i + 1];
+      i += 1;
+    } else if (arg.startsWith("--target=")) {
+      target = arg.slice("--target=".length);
+    } else if (arg === "--profile" && argv[i + 1]) {
+      profile = argv[i + 1];
+      i += 1;
+    } else if (arg.startsWith("--profile=")) {
+      profile = arg.slice("--profile=".length);
+    }
+  }
+  return { target, profile };
+}
+
+function main(env = process.env, argv = process.argv.slice(2)) {
+  const parsed = parseCliArgs(argv);
+  const effectiveEnv = {
+    ...env,
+    ...(parsed.target ? { DIMO_BUILD_TARGET: parsed.target } : {}),
+    ...(parsed.profile ? { CARGO_PROFILE: parsed.profile } : {}),
+  };
   const repo = path.resolve(__dirname, "..");
-  const { triple, binDir, nativeBinDir } = resolveSidecarBinDir({ repo, env });
-  const sidecarDir = path.join(repo, "src-tauri", "binaries");
-  copySidecar(
-    "dimo-mcp",
-    resolveSidecarSource("dimo-mcp", binDir, nativeBinDir),
-    sidecarDir,
-    triple,
-  );
-  copySidecar(
-    "dimo-workflow-mcp",
-    resolveSidecarSource("dimo-workflow-mcp", binDir, nativeBinDir),
-    sidecarDir,
-    triple,
-  );
+  const staged = stageElectronSidecars({ repo, env: effectiveEnv });
+  for (const file of staged) {
+    console.log(`[stage-electron-sidecars] staged ${file}`);
+  }
 }
 
 if (require.main === module) {
@@ -177,8 +234,11 @@ if (require.main === module) {
 }
 
 module.exports = {
+  ELECTRON_SIDECAR_BINS,
   main,
   copySidecar,
+  copyPlainSidecar,
+  stageElectronSidecars,
   isBuiltSidecar,
   resolveSidecarBinDir,
   resolveSidecarSource,

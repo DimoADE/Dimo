@@ -186,7 +186,11 @@ export function mapPermissionResponseToApprovalDecision(
   response: AgentPermissionResponse
 ): 'allow_once' | 'allow_always' | 'deny' {
   if (response.kind === 'selected') {
-    if (response.persist || response.option_id === 'allow_always') {
+    if (
+      response.persist ||
+      response.persist_for_agent ||
+      response.option_id === 'allow_always'
+    ) {
       return 'allow_always';
     }
     if (

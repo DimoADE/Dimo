@@ -616,4 +616,112 @@ mod tests {
             .expect("rollback");
         drop(writer_conn);
     }
+
+    #[tokio::test]
+    async fn stream_projects_raw_emits_live_patch_after_project_create_and_update() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let msg_store = Arc::new(MsgStore::new());
+        let entry_count = Arc::new(tokio::sync::RwLock::new(0));
+        let db = DBService::new_at_with_reader_hook(dir.path(), {
+            let msg_store = msg_store.clone();
+            let entry_count = entry_count.clone();
+            move |reader, commit_fence| {
+                EventService::create_hook(msg_store, entry_count, reader, commit_fence)
+            }
+        })
+        .await
+        .expect("db service with hook");
+        let events = EventService::new(db.clone(), msg_store);
+        crate::services::project::ProjectService::new()
+            .ensure_home_project(&db.pool, &crate::services::repo::RepoService::new())
+            .await
+            .expect("ensure home project");
+
+        let mut stream = events
+            .stream_projects_raw()
+            .await
+            .expect("stream_projects_raw");
+        let _initial = stream.next().await.expect("initial patch").expect("ok");
+        let _ready = stream.next().await.expect("ready").expect("ok");
+
+        // Rolled-back inserts must not emit phantom patches.
+        let rolled_back_id = Uuid::new_v4();
+        let mut tx = db.pool.begin().await.expect("begin tx");
+        db::models::project::Project::create(
+            &mut *tx,
+            &CreateProject {
+                name: "Rolled Back Project".to_string(),
+                root_path: dir.path().join("rolled_back").to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            rolled_back_id,
+        )
+        .await
+        .expect("insert in tx");
+        tx.rollback().await.expect("rollback tx");
+
+        async fn next_matching_patch(
+            stream: &mut futures::stream::BoxStream<'static, Result<LogMsg, std::io::Error>>,
+            needle: &str,
+            forbidden: &str,
+        ) -> serde_json::Value {
+            for _ in 0..8 {
+                let patch_msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
+                    .await
+                    .unwrap_or_else(|_| panic!("timed out waiting for patch containing {needle}"))
+                    .expect("stream open")
+                    .expect("ok patch");
+                let LogMsg::JsonPatch(patch) = patch_msg else {
+                    panic!("expected JsonPatch, got {patch_msg:?}");
+                };
+                let patch_json = serde_json::to_value(&patch).expect("serialize patch");
+                let serialized = patch_json.to_string();
+                assert!(
+                    !serialized.contains(forbidden),
+                    "rolled-back project must never appear in stream: {patch_json}"
+                );
+                if serialized.contains(needle) {
+                    return patch_json;
+                }
+            }
+            panic!("did not observe patch containing {needle}");
+        }
+
+        let rolled_back_str = rolled_back_id.to_string();
+        for idx in 0..10 {
+            let project_id = Uuid::new_v4();
+            db::models::project::Project::create(
+                &db.pool,
+                &CreateProject {
+                    name: format!("Live Project {idx}"),
+                    root_path: dir
+                        .path()
+                        .join(format!("p{idx}"))
+                        .to_string_lossy()
+                        .into_owned(),
+                    ..Default::default()
+                },
+                project_id,
+            )
+            .await
+            .expect("create project");
+
+            next_matching_patch(&mut stream, &project_id.to_string(), &rolled_back_str).await;
+
+            // Verify immediate UPDATE emits the committed new name (never stale pre-commit row).
+            let renamed = format!("Renamed Project {idx}");
+            db::models::project::Project::update(
+                &db.pool,
+                project_id,
+                &db::models::project::UpdateProject {
+                    name: Some(renamed.clone()),
+                    default_main_branch: None,
+                },
+            )
+            .await
+            .expect("update project");
+
+            next_matching_patch(&mut stream, &renamed, &rolled_back_str).await;
+        }
+    }
 }

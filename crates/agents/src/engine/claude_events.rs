@@ -789,6 +789,12 @@ pub(super) fn resolve_claude_default_model(env: &HashMap<String, String>) -> Opt
         .map(str::to_string)
 }
 
+pub(super) fn resolve_claude_default_mode(env: &HashMap<String, String>) -> Option<String> {
+    crate::end_turn_usage::read_claude_default_permission_mode(env)
+        .as_deref()
+        .and_then(claude_normalize_mode)
+}
+
 fn is_claude_alias_id(id: &str) -> bool {
     matches!(
         id.trim().to_ascii_lowercase().as_str(),

@@ -179,6 +179,8 @@ impl NativeTabs for UnavailableNative {
 struct TabRecord {
     tab: BrowserTab,
     bounds: BrowserBounds,
+    last_surface_seq: u64,
+    surface_lock: Arc<tokio::sync::Mutex<()>>,
     incarnation: u64,
     nav_epoch: u64,
     /// Standing share for this tab. Origin changes rebind the grant; only
@@ -376,14 +378,15 @@ impl BrowserService {
     }
 
     pub async fn reset_local_data(&self) {
-        let tab_ids: Vec<String> = {
+        let removed_tabs: Vec<(String, Arc<tokio::sync::Mutex<()>>)> = {
             let mut tabs = self.tabs.lock().unwrap_or_else(|p| p.into_inner());
-            let ids = tabs.keys().cloned().collect();
-            tabs.clear();
-            ids
+            tabs.drain()
+                .map(|(tab_id, record)| (tab_id, record.surface_lock))
+                .collect()
         };
         self.evals.reset();
-        for tab_id in tab_ids {
+        for (tab_id, surface_lock) in removed_tabs {
+            let _guard = surface_lock.lock().await;
             let _ = self.native.close(&tab_id).await;
         }
         let _ = self.native.reset_all().await;
@@ -432,6 +435,8 @@ impl BrowserService {
             TabRecord {
                 tab: tab.clone(),
                 bounds,
+                last_surface_seq: 0,
+                surface_lock: Arc::new(tokio::sync::Mutex::new(())),
                 incarnation: 1,
                 nav_epoch: 0,
                 share_level,
@@ -584,6 +589,8 @@ impl BrowserService {
             TabRecord {
                 tab: tab.clone(),
                 bounds,
+                last_surface_seq: 0,
+                surface_lock: Arc::new(tokio::sync::Mutex::new(())),
                 incarnation: 1,
                 nav_epoch: 0,
                 share_level,
@@ -649,6 +656,15 @@ impl BrowserService {
             .expect("browser tabs")
             .get(tab_id)
             .map(|record| record.tab.clone())
+            .ok_or_else(|| BrowserHostError::new("browser_no_such_tab", format!("no tab {tab_id}")))
+    }
+
+    fn surface_lock(&self, tab_id: &str) -> Result<Arc<tokio::sync::Mutex<()>>, BrowserHostError> {
+        self.tabs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(tab_id)
+            .map(|record| Arc::clone(&record.surface_lock))
             .ok_or_else(|| BrowserHostError::new("browser_no_such_tab", format!("no tab {tab_id}")))
     }
 
@@ -824,17 +840,20 @@ pub async fn dispatch(
         }
         "profile.clear" => {
             let profile_id = required_string(&input, "profileId")?;
-            let tab_ids: Vec<String> = {
-                let tabs = service.tabs.lock().unwrap_or_else(|p| p.into_inner());
-                tabs.values()
+            let removed_tabs: Vec<(String, Arc<tokio::sync::Mutex<()>>)> = {
+                let mut tabs = service.tabs.lock().unwrap_or_else(|p| p.into_inner());
+                let ids: Vec<String> = tabs
+                    .values()
                     .filter(|record| record.tab.profile_id == profile_id)
                     .map(|record| record.tab.tab_id.clone())
+                    .collect();
+                ids.into_iter()
+                    .filter_map(|id| tabs.remove(&id).map(|record| (id, record.surface_lock)))
                     .collect()
             };
-            for tab_id in tab_ids {
+            for (tab_id, surface_lock) in removed_tabs {
+                let _guard = surface_lock.lock().await;
                 let _ = service.native.close(&tab_id).await;
-                let mut tabs = service.tabs.lock().unwrap_or_else(|p| p.into_inner());
-                tabs.remove(&tab_id);
             }
             service.native.clear_profile(&profile_id).await?;
             Ok(json!({ "cleared": true, "profileId": profile_id }))
@@ -847,17 +866,20 @@ pub async fn dispatch(
                     "the default profile cannot be removed",
                 ));
             }
-            let tab_ids: Vec<String> = {
-                let tabs = service.tabs.lock().unwrap_or_else(|p| p.into_inner());
-                tabs.values()
+            let removed_tabs: Vec<(String, Arc<tokio::sync::Mutex<()>>)> = {
+                let mut tabs = service.tabs.lock().unwrap_or_else(|p| p.into_inner());
+                let ids: Vec<String> = tabs
+                    .values()
                     .filter(|record| record.tab.profile_id == profile_id)
                     .map(|record| record.tab.tab_id.clone())
+                    .collect();
+                ids.into_iter()
+                    .filter_map(|id| tabs.remove(&id).map(|record| (id, record.surface_lock)))
                     .collect()
             };
-            for tab_id in tab_ids {
+            for (tab_id, surface_lock) in removed_tabs {
+                let _guard = surface_lock.lock().await;
                 let _ = service.native.close(&tab_id).await;
-                let mut tabs = service.tabs.lock().unwrap_or_else(|p| p.into_inner());
-                tabs.remove(&tab_id);
             }
             let mut settings = service.settings();
             settings.profiles.retain(|p| p.id != profile_id);
@@ -908,11 +930,16 @@ pub async fn dispatch(
         }
         "tab.close" => {
             let tab_id = required_string(&input, "tabId")?;
-            service.native.close(&tab_id).await?;
-            {
+            let removed = {
                 let mut tabs = service.tabs.lock().unwrap_or_else(|p| p.into_inner());
-                tabs.remove(&tab_id);
-            }
+                tabs.remove(&tab_id)
+            };
+            let _guard = if let Some(record) = removed.as_ref() {
+                Some(record.surface_lock.lock().await)
+            } else {
+                None
+            };
+            service.native.close(&tab_id).await?;
             Ok(json!({ "ok": true, "tabId": tab_id }))
         }
         "tab.list" => {
@@ -934,8 +961,12 @@ pub async fn dispatch(
                 ));
             }
             service.enforce_url_policy(&parsed)?;
-            let _ = service.tab(&tab_id)?;
-            service.native.navigate(&tab_id, &url).await?;
+            let surface_lock = service.surface_lock(&tab_id)?;
+            {
+                let _guard = surface_lock.lock().await;
+                let _ = service.tab(&tab_id)?;
+                service.native.navigate(&tab_id, &url).await?;
+            }
             {
                 let mut tabs = service.tabs.lock().unwrap_or_else(|p| p.into_inner());
                 if let Some(record) = tabs.get_mut(&tab_id) {
@@ -1134,12 +1165,28 @@ pub async fn dispatch(
                     BrowserHostError::new("browser_invalid", "bounds is required")
                 })?)
                 .map_err(|error| BrowserHostError::new("browser_invalid", error.to_string()))?;
-            let _ = service.tab(&tab_id)?;
+            let seq = input.get("seq").and_then(Value::as_u64);
+            let surface_lock = service.surface_lock(&tab_id)?;
+            let _guard = surface_lock.lock().await;
+            {
+                let tabs = service.tabs.lock().unwrap_or_else(|p| p.into_inner());
+                let record = tabs.get(&tab_id).ok_or_else(|| {
+                    BrowserHostError::new("browser_no_such_tab", format!("no tab {tab_id}"))
+                })?;
+                if let Some(seq) = seq
+                    && seq <= record.last_surface_seq
+                {
+                    return Ok(json!({ "ok": true, "stale": true }));
+                }
+            }
             service.native.set_bounds(&tab_id, &bounds).await?;
             {
                 let mut tabs = service.tabs.lock().unwrap_or_else(|p| p.into_inner());
                 if let Some(record) = tabs.get_mut(&tab_id) {
                     record.bounds = bounds;
+                    if let Some(seq) = seq {
+                        record.last_surface_seq = record.last_surface_seq.max(seq);
+                    }
                 }
             }
             Ok(json!({ "ok": true }))
@@ -3118,5 +3165,165 @@ mod tests {
             .await
             .expect("list after reset");
         assert_eq!(listed["tabs"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn surface_set_serializes_with_close_and_rejects_stale_seq() {
+        use tokio::sync::Notify;
+
+        struct OrderingNative {
+            events: Mutex<Vec<String>>,
+            close_gate: Arc<Notify>,
+            close_started: Arc<Notify>,
+        }
+
+        #[async_trait]
+        impl NativeTabs for OrderingNative {
+            async fn open(
+                &self,
+                _tab_id: &str,
+                _url: &str,
+                _bounds: &BrowserBounds,
+                _profile_id: &str,
+            ) -> Result<(), BrowserHostError> {
+                Ok(())
+            }
+            async fn navigate(&self, _tab_id: &str, _url: &str) -> Result<(), BrowserHostError> {
+                self.events.lock().unwrap().push("navigate".into());
+                Ok(())
+            }
+            async fn close(&self, _tab_id: &str) -> Result<(), BrowserHostError> {
+                self.events.lock().unwrap().push("close:start".into());
+                self.close_started.notify_one();
+                self.close_gate.notified().await;
+                self.events.lock().unwrap().push("close:end".into());
+                Ok(())
+            }
+            async fn set_bounds(
+                &self,
+                _tab_id: &str,
+                bounds: &BrowserBounds,
+            ) -> Result<(), BrowserHostError> {
+                self.events
+                    .lock()
+                    .unwrap()
+                    .push(format!("bounds:{}", bounds.visible));
+                Ok(())
+            }
+            async fn eval(
+                &self,
+                _tab_id: &str,
+                _expression: &str,
+            ) -> Result<String, BrowserHostError> {
+                Ok("{}".into())
+            }
+            async fn current_url(&self, _tab_id: &str) -> Result<String, BrowserHostError> {
+                Ok("https://example.test/".into())
+            }
+            async fn go_back(&self, _tab_id: &str) -> Result<(), BrowserHostError> {
+                Ok(())
+            }
+            async fn go_forward(&self, _tab_id: &str) -> Result<(), BrowserHostError> {
+                Ok(())
+            }
+            async fn reload(&self, _tab_id: &str) -> Result<(), BrowserHostError> {
+                Ok(())
+            }
+            async fn set_zoom(&self, _tab_id: &str, _factor: f64) -> Result<(), BrowserHostError> {
+                Ok(())
+            }
+            async fn open_devtools(&self, _tab_id: &str) -> Result<(), BrowserHostError> {
+                Ok(())
+            }
+            async fn set_device(
+                &self,
+                _tab_id: &str,
+                _device: &str,
+            ) -> Result<(), BrowserHostError> {
+                Ok(())
+            }
+            async fn inject(&self, _tab_id: &str, _script: &str) -> Result<(), BrowserHostError> {
+                Ok(())
+            }
+        }
+
+        let close_gate = Arc::new(Notify::new());
+        let close_started = Arc::new(Notify::new());
+        let native = Arc::new(OrderingNative {
+            events: Mutex::new(Vec::new()),
+            close_gate: Arc::clone(&close_gate),
+            close_started: Arc::clone(&close_started),
+        });
+        let service = Arc::new(BrowserService::new(native.clone(), true));
+        let tab = dispatch(
+            &service,
+            "dimo.browser",
+            "tab.create",
+            json!({ "url": "https://example.test/" }),
+        )
+        .await
+        .expect("open");
+        let tab_id = tab["tabId"].as_str().unwrap().to_owned();
+
+        // Newer seq hides the tab; older seq trying to show it must be ignored.
+        dispatch(
+            &service,
+            "dimo.browser",
+            "surface.set",
+            json!({
+                "tabId": tab_id,
+                "seq": 2,
+                "bounds": { "x": 0, "y": 0, "width": 1, "height": 1, "scale": 1, "visible": false }
+            }),
+        )
+        .await
+        .expect("hide");
+        dispatch(
+            &service,
+            "dimo.browser",
+            "surface.set",
+            json!({
+                "tabId": tab_id,
+                "seq": 1,
+                "bounds": { "x": 10, "y": 10, "width": 800, "height": 600, "scale": 1, "visible": true }
+            }),
+        )
+        .await
+        .expect("stale show");
+        assert_eq!(*native.events.lock().unwrap(), vec!["bounds:false"]);
+
+        // Starting tab.close must block any concurrent surface.set from resurrecting bounds.
+        let svc_close = Arc::clone(&service);
+        let close_tab_id = tab_id.clone();
+        let close_task = tokio::spawn(async move {
+            dispatch(
+                &svc_close,
+                "dimo.browser",
+                "tab.close",
+                json!({ "tabId": close_tab_id }),
+            )
+            .await
+        });
+        close_started.notified().await;
+
+        let res = dispatch(
+            &service,
+            "dimo.browser",
+            "surface.set",
+            json!({
+                "tabId": tab_id,
+                "seq": 3,
+                "bounds": { "x": 10, "y": 10, "width": 800, "height": 600, "scale": 1, "visible": true }
+            }),
+        )
+        .await;
+        assert!(res.is_err(), "surface.set during/after tab.close must fail");
+        close_gate.notify_one();
+        close_task.await.unwrap().expect("close");
+
+        assert_eq!(
+            *native.events.lock().unwrap(),
+            vec!["bounds:false", "close:start", "close:end"]
+        );
     }
 }

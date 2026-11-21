@@ -106,17 +106,27 @@ vi.mock('./PluginsSettings', () => ({
   ),
 }));
 
-vi.mock('@/lib/tauriApi', async (importOriginal) => {
-  const original = await importOriginal<typeof import('@/lib/tauriApi')>();
+vi.mock('@/lib/desktopShell', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('@/lib/desktopShell')>();
   return {
     ...original,
-    tauriInvoke: tauriInvokeMock,
-    tauriListen: vi.fn(
-      async (event: string, listener: (event: unknown) => void) => {
-        tauriListeners.set(event, listener);
-        return vi.fn();
-      }
-    ),
+    getDesktopShell: () => {
+      const shell = original.getDesktopShell();
+      return {
+        ...shell,
+        invoke: tauriInvokeMock,
+        events: {
+          ...shell.events,
+          listen: vi.fn(
+            async (event: string, listener: (event: unknown) => void) => {
+              tauriListeners.set(event, listener);
+              return vi.fn();
+            }
+          ),
+        },
+      };
+    },
   };
 });
 

@@ -1,21 +1,20 @@
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { toast } from '@/components/ui/toast';
 import { hostClientApi, settingsWindowApi } from '@/lib/api';
-import { useTauriClient } from '@/lib/desktopShell';
+import { backendListen } from '@/lib/backendTransport';
+import {
+  getDesktopWindowLabel,
+  useTauriClient,
+} from '@/lib/desktopShell';
 import { isHostAppWindowLabel } from '@/lib/hostBoundWindow';
 
 const HOST_CLIENT_CHANGED = 'host-client-changed';
 const HOST_UPDATE_SETTINGS_PATH = '/settings/web-service';
 
 function currentWindowLabel(): string {
-  try {
-    return getCurrentWindow().label;
-  } catch {
-    return 'main';
-  }
+  return getDesktopWindowLabel();
 }
 
 export function useRemoteHostReleaseUpdateToast() {
@@ -68,10 +67,10 @@ export function useRemoteHostReleaseUpdateToast() {
     };
 
     void check();
-    void import('@/lib/tauriApi')
-      .then(({ tauriListen }) =>
-        tauriListen(HOST_CLIENT_CHANGED, () => void check())
-      )
+    const listenPromise = backendListen<void>(HOST_CLIENT_CHANGED, () => {
+      void check();
+    });
+    void listenPromise
       .then((fn) => {
         if (cancelled) fn();
         else unlisten = fn;

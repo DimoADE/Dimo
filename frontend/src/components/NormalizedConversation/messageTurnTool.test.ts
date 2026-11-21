@@ -378,6 +378,29 @@ describe('toolBlockToNormalizedEntry', () => {
     });
   });
 
+  it('gives an opaque UUID:seq tool id a clean label or MCP tool name', () => {
+    const plain = toolBlockToNormalizedEntry(
+      use('0e17fa2c-d6bb-4fae-af74-b91e1221654e:258', { foo: 'bar' }),
+      null,
+      null
+    );
+    expect(plain.entry_type).toMatchObject({
+      action_type: { action: 'tool', tool_name: '工具调用' },
+    });
+
+    const withMcp = toolBlockToNormalizedEntry(
+      {
+        ...use('0e17fa2c-d6bb-4fae-af74-b91e1221654e:259', { foo: 'bar' }),
+        meta: { mcp: { server: 'github', tool: 'search_code' } },
+      },
+      null,
+      null
+    );
+    expect(withMcp.entry_type).toMatchObject({
+      action_type: { action: 'tool', tool_name: 'search_code' },
+    });
+  });
+
   it('maps a structured edit to a file_edit diff card (not a read or a generic card)', () => {
     const entry = toolBlockToNormalizedEntry(
       use('call_abc123def456', {

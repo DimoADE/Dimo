@@ -1,10 +1,12 @@
-import { Badge } from '@astryxdesign/core/Badge';
 import { AtSign, Paperclip, Sparkles } from 'lucide-react';
+import { PermissionRequestStack } from '@/components/NormalizedConversation/conversation/PermissionRequestCard';
 import { Button } from '@/components/ui/button';
 import { Slot } from '@/components/plugins/Slot';
 import { ActionBarUtilityButtons } from '@/components/tasks/follow-up/ActionBarUtilityButtons';
+import { AgentQuestionCard } from '@/components/tasks/follow-up/AgentQuestionCard';
 import { ComposerPrimaryActionButton } from '@/components/tasks/follow-up/ComposerPrimaryActionButton';
 import { ComposerTabDock } from '@/components/tasks/follow-up/ComposerTabDock';
+import { ConversationStatusDock } from '@/components/tasks/follow-up/ConversationStatusDock';
 import { SessionComposerFrame } from '@/components/tasks/follow-up/SessionComposerFrame';
 import {
   SessionComposerAttachmentDrawer,
@@ -20,7 +22,7 @@ import {
   getActiveComposerDraftTargetId,
   registerComposerDraftTarget,
 } from '@/lib/composerDraftTargets';
-import { displayName } from '../spaceModel';
+import { displayName, type SpaceMember } from '../spaceModel';
 import { CollaborationReplyCapsule } from '../CollaborationReplyCapsule';
 import {
   isAutomateSlashCommand,
@@ -37,13 +39,17 @@ import { PulseRuleProposalCard } from '../PulseRuleProposalCard';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BotSpaceSessionSettings } from './BotSpaceSessionSettings';
 import { useCollaborationSpacePick } from './SpaceContext';
+import { useSpaceMemberNotices } from './useSpaceMemberNotices';
 
 const COMPOSER_DOCK_PICK_KEYS = [
+  'activeBotConversationId',
+  'activeBotTimeline',
   'activeDirectThreadId',
   'attachedImages',
   'composerContainerRef',
   'composerFileInputRef',
   'draft',
+  'getMemberAvatar',
   'handleAttachFiles',
   'handleComposerFileSelect',
   'handleDelaySpaceQueuedMessage',
@@ -55,10 +61,12 @@ const COMPOSER_DOCK_PICK_KEYS = [
   'isBotSessionLoading',
   'isEnhancingPrompt',
   'isPrivateChatActive',
+  'pendingApprovalCardIds',
   'promptEnhancementEnabled',
   'replaceDraftRef',
   'replyingTo',
   'repoIds',
+  'selectMemberForPreview',
   'selected',
   'send',
   'sending',
@@ -75,11 +83,14 @@ const COMPOSER_DOCK_PICK_KEYS = [
 
 export const ComposerDock = memo(function ComposerDock() {
   const {
+    activeBotConversationId,
+    activeBotTimeline,
     activeDirectThreadId,
     attachedImages,
     composerContainerRef,
     composerFileInputRef,
     draft,
+    getMemberAvatar,
     handleAttachFiles,
     handleComposerFileSelect,
     handleDelaySpaceQueuedMessage,
@@ -91,10 +102,12 @@ export const ComposerDock = memo(function ComposerDock() {
     isBotSessionLoading,
     isEnhancingPrompt,
     isPrivateChatActive,
+    pendingApprovalCardIds,
     promptEnhancementEnabled,
     replaceDraftRef,
     replyingTo,
     repoIds,
+    selectMemberForPreview,
     selected,
     send,
     sending,
@@ -114,6 +127,33 @@ export const ComposerDock = memo(function ComposerDock() {
   );
   const composerDisabled = sending || showBotSessionLoadingNotice;
   const isEditable = Boolean(selected) && !composerDisabled;
+
+  const handleOpenMemberSession = useCallback(
+    (member: SpaceMember) => {
+      if (!selected?.space_id) return;
+      selectMemberForPreview(selected.space_id, member);
+    },
+    [selectMemberForPreview, selected?.space_id]
+  );
+
+  const {
+    priorityNotices,
+    tabNotices,
+    pendingPermissions,
+    pendingQuestions,
+    dismissQuestion,
+  } = useSpaceMemberNotices({
+    spaceId: selected?.space_id ?? null,
+    members: visibleRoster,
+    isPrivateChatActive,
+    activeBotConversationId,
+    activeBotTimelineTurns: activeBotTimeline?.timeline ?? null,
+    activeBotSideRows: activeBotTimeline?.sideRows ?? null,
+    isBotSessionLoading,
+    getMemberAvatar,
+    onOpenMemberSession: handleOpenMemberSession,
+    excludePermissionIds: pendingApprovalCardIds,
+  });
 
   const draftRef = useRef(draft);
   draftRef.current = draft;
@@ -385,6 +425,7 @@ export const ComposerDock = memo(function ComposerDock() {
                 }
                 queuedMessages={spaceQueuedMessages}
                 delayedMessages={userDelayedSpaceMessages}
+                notices={tabNotices}
                 onEditQueuedMessage={handleEditSpaceQueuedMessage}
                 onDeleteQueuedMessage={(message) => {
                   void handleDeleteSpaceQueuedMessage(message);
@@ -403,36 +444,28 @@ export const ComposerDock = memo(function ComposerDock() {
               />
             }
             status={
-              showBotSessionLoadingNotice ? (
-                <div
-                  className="conversation-status-dock"
-                  data-testid="conversation-status-dock"
-                  data-placement="composer"
-                  aria-live="polite"
-                >
-                  <div className="composer-status-surface rounded-[var(--radius-composer,0.75rem)]">
-                    <div
-                      className="composer-status-row text-xs"
-                      data-tone="info"
-                      role="status"
-                    >
-                      <div className="composer-status-header">
-                        <div className="composer-status-heading">
-                          <p className="composer-status-title text-foreground">
-                            正在加载Bot会话...
-                          </p>
-                          <Badge
-                            className="composer-status-badge"
-                            variant="info"
-                            label={t(
-                              'conversation:statusDock.infoBadge',
-                              'Notice'
-                            )}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </div>
+              <ConversationStatusDock
+                dismissalScope={
+                  activeDirectThreadId ?? selected.space_id ?? null
+                }
+                notices={priorityNotices}
+                maxVisibleCount={2}
+              />
+            }
+            overlay={
+              pendingPermissions.length > 0 || pendingQuestions.length > 0 ? (
+                <div className="space-y-2" data-testid="space-composer-overlay">
+                  <PermissionRequestStack items={pendingPermissions} />
+                  {pendingQuestions.map((question) => (
+                    <AgentQuestionCard
+                      key={question.dismissKey}
+                      request={question.request}
+                      actor={question.actor}
+                      responding={question.responding}
+                      onRespond={question.onRespond}
+                      onDismiss={() => dismissQuestion(question.dismissKey)}
+                    />
+                  ))}
                 </div>
               ) : null
             }

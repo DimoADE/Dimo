@@ -155,19 +155,7 @@ struct WorktreeCleanupStatus {
     should_prompt: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CrashReportMeta {
-    id: String,
-    created_at_ms: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CrashReportsInfo {
-    repository: Option<String>,
-    reports: Vec<CrashReportMeta>,
-}
+use crate::dto::{CrashReportMeta, CrashReportsInfo};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -262,6 +250,16 @@ fn apply_proxy(settings: &PersistedProxy) {
     );
 }
 
+/// Apply the persisted system proxy setting to process environment variables.
+/// Must run before building reqwest clients or spawning ACP agents.
+pub async fn init_system_proxy() {
+    capture_inherited_proxy();
+    match load_system_store().await {
+        Ok(store) => apply_proxy(&store.proxy),
+        Err(error) => tracing::warn!(%error, "Failed to load system proxy settings on startup"),
+    }
+}
+
 pub(super) fn get_log_settings() -> Result<Value, ApplicationError> {
     let settings = load_log_settings();
     serialize(LogSettingsView {
@@ -282,13 +280,41 @@ pub(super) fn set_log_settings(args: Value) -> Result<Value, ApplicationError> {
         serde_json::to_vec_pretty(&settings).map_err(internal_error)?,
     )
     .map_err(internal_error)?;
+    let live_settings = crate::desktop::logging::LogSettings {
+        level: map_log_level(settings.level),
+        targets: settings
+            .targets
+            .iter()
+            .map(|item| crate::desktop::logging::TargetDirective {
+                target: item.target.clone(),
+                level: map_log_level(item.level),
+            })
+            .collect(),
+    };
+    crate::desktop::logging::apply_live_settings(&live_settings);
     current_host_events().emit("log-settings://changed", &settings);
     serialize(settings)
+}
+
+fn map_log_level(level: LogLevel) -> crate::desktop::logging::LogLevel {
+    match level {
+        LogLevel::All => crate::desktop::logging::LogLevel::All,
+        LogLevel::Off => crate::desktop::logging::LogLevel::Off,
+        LogLevel::Error => crate::desktop::logging::LogLevel::Error,
+        LogLevel::Warn => crate::desktop::logging::LogLevel::Warn,
+        LogLevel::Info => crate::desktop::logging::LogLevel::Info,
+        LogLevel::Debug => crate::desktop::logging::LogLevel::Debug,
+        LogLevel::Trace => crate::desktop::logging::LogLevel::Trace,
+    }
 }
 
 pub(super) async fn get_recent_logs(args: Value) -> Result<Value, ApplicationError> {
     let args: LimitArgs = parse(args).unwrap_or(LimitArgs { limit: None });
     let limit = args.limit.unwrap_or(500).clamp(1, 5_000);
+    let live_records = crate::desktop::logging::recent_logs(limit);
+    if !live_records.is_empty() {
+        return serialize(live_records);
+    }
     let dir = utils::assets::logs_dir();
     let mut records = Vec::new();
     if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
@@ -302,7 +328,7 @@ pub(super) async fn get_recent_logs(args: Value) -> Result<Value, ApplicationErr
                     records.push(LogRecord {
                         seq: index as u64,
                         timestamp_ms: 0,
-                        level: "info",
+                        level: "INFO",
                         target: path
                             .file_name()
                             .map(|name| name.to_string_lossy().into_owned())
@@ -777,6 +803,7 @@ pub(super) async fn clear_local_app_data(
     let _ = remove_path_if_exists(&utils::assets::profiles_path());
     let _ = remove_path_if_exists(&utils::cache_dir());
     ExecutorConfigs::reload();
+    domains.agent_management_runtime.reset().await;
     db::reset_local_database(&domains.pool)
         .await
         .map_err(internal_error)?;
@@ -1005,6 +1032,11 @@ pub(crate) fn validate_target_data_dir(
             "Data directory path cannot contain '..' traversal segments",
         ));
     }
+    if utils::assets::is_inside_macos_app_bundle(&path) {
+        return Err(ApplicationError::bad_request(
+            "Target data directory cannot be inside a macOS .app bundle",
+        ));
+    }
     if is_strict_subdirectory(&path, current_data_dir) {
         return Err(ApplicationError::bad_request(
             "Target data directory cannot be inside the current data directory",
@@ -1193,5 +1225,19 @@ mod tests {
             serde_json::from_str(r#"{"rendering":{"acceleration_mode":"disable_gpu"}}"#)
                 .expect("older system section");
         assert!(!missing.developer_mode);
+    }
+
+    #[test]
+    fn validate_target_data_dir_rejects_macos_app_bundle() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let current = temp.path().join("current_data");
+        std::fs::create_dir_all(&current).expect("create current");
+        let bundle_target = temp
+            .path()
+            .join("Dimo.app")
+            .join("Contents")
+            .join("MacOS")
+            .join("data");
+        assert!(validate_target_data_dir(&bundle_target.to_string_lossy(), &current).is_err());
     }
 }

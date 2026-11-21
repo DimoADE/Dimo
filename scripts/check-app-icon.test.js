@@ -224,7 +224,7 @@ function readIcnsEntries(filePath) {
 }
 
 test('desktop PNG icons are inset squircles', () => {
-  const iconsDir = path.join(__dirname, '..', 'src-tauri', 'icons');
+  const iconsDir = path.join(__dirname, '..', 'electron', 'build', 'icons');
   assertSquircleIcon(path.join(iconsDir, 'icon.png'), 512);
   assertSquircleIcon(path.join(iconsDir, '128x128.png'), 128);
   assertSquircleIcon(path.join(iconsDir, '128x128@2x.png'), 256);
@@ -335,7 +335,7 @@ function assertWindowsSquircleBuffer(data, expectedSize, label) {
 }
 
 test('Windows ICO frames are inset squircles with fuller mark fill', () => {
-  const icoPath = path.join(__dirname, '..', 'src-tauri', 'icons', 'icon.ico');
+  const icoPath = path.join(__dirname, '..', 'electron', 'build', 'icons', 'icon.ico');
   for (const size of [32, 48, 128, 256]) {
     assertWindowsSquircleBuffer(
       extractIcoPng(icoPath, size),
@@ -346,7 +346,7 @@ test('Windows ICO frames are inset squircles with fuller mark fill', () => {
 });
 
 test('Windows ICO mark is larger than the macOS/Linux PNG mark', () => {
-  const iconsDir = path.join(__dirname, '..', 'src-tauri', 'icons');
+  const iconsDir = path.join(__dirname, '..', 'electron', 'build', 'icons');
   const png = readPngRgba(path.join(iconsDir, '128x128@2x.png'));
   const ico = decodePngRgba(
     extractIcoPng(path.join(iconsDir, 'icon.ico'), 256),
@@ -361,7 +361,7 @@ test('Windows ICO mark is larger than the macOS/Linux PNG mark', () => {
 });
 
 test('Windows caption ICO sizes keep a DWM-safe transparent margin', () => {
-  const icoPath = path.join(__dirname, '..', 'src-tauri', 'icons', 'icon.ico');
+  const icoPath = path.join(__dirname, '..', 'electron', 'build', 'icons', 'icon.ico');
   for (const [size, margin] of [
     [16, 2],
     [20, 2],
@@ -385,7 +385,7 @@ test('Windows caption ICO sizes keep a DWM-safe transparent margin', () => {
 });
 
 test('Windows Store logos are inset squircles with fuller mark fill', () => {
-  const iconsDir = path.join(__dirname, '..', 'src-tauri', 'icons');
+  const iconsDir = path.join(__dirname, '..', 'electron', 'build', 'icons');
   for (const [name, size] of [
     ['Square44x44Logo.png', 44],
     ['Square150x150Logo.png', 150],
@@ -398,7 +398,7 @@ test('Windows Store logos are inset squircles with fuller mark fill', () => {
 
 test('Windows ICO includes the desktop icon sizes', () => {
   const sizes = readIcoSizes(
-    path.join(__dirname, '..', 'src-tauri', 'icons', 'icon.ico')
+    path.join(__dirname, '..', 'electron', 'build', 'icons', 'icon.ico')
   );
   for (const required of [
     '16x16',
@@ -426,7 +426,7 @@ test('Windows icon generator uses a fuller content scale than macOS', () => {
 
 test('macOS ICNS includes the standard 1x and 2x slots', () => {
   const types = readIcnsEntries(
-    path.join(__dirname, '..', 'src-tauri', 'icons', 'icon.icns')
+    path.join(__dirname, '..', 'electron', 'build', 'icons', 'icon.icns')
   ).map((entry) => entry.type);
   for (const required of [
     'ic07',
@@ -443,7 +443,7 @@ test('macOS ICNS includes the standard 1x and 2x slots', () => {
 });
 
 test('macOS ICNS bakes the squircle so Dock folders do not show a square', () => {
-  const icnsPath = path.join(__dirname, '..', 'src-tauri', 'icons', 'icon.icns');
+  const icnsPath = path.join(__dirname, '..', 'electron', 'build', 'icons', 'icon.icns');
   const ic10 = readIcnsEntries(icnsPath).find((entry) => entry.type === 'ic10');
   assert.ok(ic10, 'icon.icns missing 1024px ic10');
   const { width, height, rgba } = decodePngRgba(ic10.payload, 'icon.icns ic10');

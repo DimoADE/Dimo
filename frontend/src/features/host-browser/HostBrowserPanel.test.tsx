@@ -1793,4 +1793,185 @@ describe('HostBrowserPanel', () => {
 
     expect(canvasLayerCoversBrowser(host)).toBe(true);
   });
+
+  it('closes a dockview browser tab on unmount when containerApi removed it even if serializedLayout is stale', async () => {
+    const {
+      browserPanelSurfaceKey,
+      clearAllBrowserSurfaces,
+      recallBrowserSurface,
+    } = await import('./browserPanelLifetime');
+    clearAllBrowserSurfaces();
+
+    const user = userEvent.setup();
+    backendCall.mockResolvedValue({
+      tabId: 'tab-closed-stale-layout',
+      url: 'https://github.com/',
+      title: 'GitHub',
+      grant: { level: 'none' },
+    });
+    const panelId = 'plugin:dimo.browser/browser:1';
+    let panelExists = true;
+    const containerApi = {
+      getPanel: (id: string) =>
+        panelExists && id === panelId ? ({ id } as never) : undefined,
+    };
+
+    const { unmount } = render(
+      <HostBrowserPanel
+        pluginId="dimo.browser"
+        panelVisible
+        requestedUrl={null}
+        panelApi={{ id: panelId, updateParameters: () => {} }}
+        containerApi={containerApi as never}
+      />
+    );
+
+    await user.type(screen.getByRole('combobox'), 'github.com{enter}');
+    await waitFor(() => {
+      expect(backendCall).toHaveBeenCalledWith(
+        'plugin_invoke_contribution',
+        expect.objectContaining({
+          input: expect.objectContaining({ operation: 'tab.create' }),
+        })
+      );
+    });
+
+    // Simulate real Dockview: serializedLayout is still debounced for 500ms,
+    // so it still lists panelId, while containerApi has already removed it.
+    const currentKey = useLayoutStore.getState().currentProjectKey;
+    useLayoutStore.setState({
+      serializedLayout: {
+        panels: { [panelId]: { id: panelId } },
+      } as never,
+    });
+    panelExists = false;
+    backendCall.mockClear();
+
+    unmount();
+
+    expect(backendCall).toHaveBeenCalledWith('plugin_invoke_contribution', {
+      pluginId: 'dimo.browser',
+      handler: 'browser.dispatch',
+      input: {
+        operation: 'tab.close',
+        input: { tabId: 'tab-closed-stale-layout' },
+      },
+    });
+
+    expect(
+      recallBrowserSurface(
+        browserPanelSurfaceKey(currentKey, panelId, 'dockview')
+      )
+    ).toBeUndefined();
+  });
+
+  it('serializes surface.set on unmount and cancels post-unmount visible updates', async () => {
+    const user = userEvent.setup();
+    let resolveSlowSurface: (() => void) | undefined = undefined;
+    let resolveNavigate: ((value: unknown) => void) | undefined = undefined;
+    const dispatchedSurfaceBounds: Array<{ visible: boolean }> = [];
+
+    backendCall.mockImplementation(
+      (
+        _command: string,
+        args: { input?: { operation?: string; input?: { bounds?: { visible: boolean } } } }
+      ) => {
+        const op = args?.input?.operation;
+        if (op === 'tab.create') {
+          return Promise.resolve({
+            tabId: 'tab-race',
+            url: 'https://github.com/',
+            title: 'GitHub',
+            grant: { level: 'none' },
+          });
+        }
+        if (op === 'surface.set') {
+          const bounds = args?.input?.input?.bounds;
+          if (bounds) dispatchedSurfaceBounds.push({ visible: bounds.visible });
+          if (bounds?.visible && !resolveSlowSurface) {
+            return new Promise<void>((resolve) => {
+              resolveSlowSurface = resolve;
+            }).then(() => ({ ok: true }));
+          }
+          return Promise.resolve({ ok: true });
+        }
+        if (op === 'tab.navigate') {
+          return new Promise((resolve) => {
+            resolveNavigate = resolve;
+          });
+        }
+        return Promise.resolve({ ok: true });
+      }
+    );
+
+    const panelId = 'plugin:dimo.browser/browser:1';
+    useLayoutStore.setState({
+      currentProjectKey: 'default',
+      serializedLayout: {
+        panels: { [panelId]: { id: panelId } },
+      } as never,
+    });
+
+    const { unmount } = render(
+      <HostBrowserPanel
+        pluginId="dimo.browser"
+        panelVisible
+        requestedUrl={null}
+        panelApi={{ id: panelId, updateParameters: () => {} }}
+      />
+    );
+
+    const surface = screen.getByTestId('host-browser-surface');
+    surface.getBoundingClientRect = () =>
+      ({
+        x: 400,
+        y: 80,
+        width: 800,
+        height: 500,
+        top: 80,
+        left: 400,
+        right: 1200,
+        bottom: 580,
+        toJSON() {
+          return this;
+        },
+      }) as DOMRect;
+
+    await user.type(screen.getByRole('combobox'), 'github.com{enter}');
+    await waitFor(() => {
+      expect(resolveSlowSurface).toBeDefined();
+    });
+
+    // Trigger an in-flight navigation while the visible surface.set is still in flight.
+    const combobox = screen.getByRole('combobox');
+    await user.clear(combobox);
+    await user.type(combobox, 'https://example.com/{enter}');
+    await waitFor(() => {
+      expect(resolveNavigate).toBeDefined();
+    });
+
+    // Unmount (tab switch keep=true) while slow visible surface.set & navigate are in flight.
+    unmount();
+
+    // Unmount hide must wait until the slow visible surface.set finishes, never racing it concurrently.
+    expect(dispatchedSurfaceBounds.filter((b) => !b.visible)).toHaveLength(0);
+
+    (resolveSlowSurface as (() => void) | undefined)?.();
+    await waitFor(() => {
+      expect(dispatchedSurfaceBounds.at(-1)).toEqual({ visible: false });
+    });
+
+    // Now resolve the stale navigation AFTER unmount: it must NOT push visible: true bounds.
+    (resolveNavigate as ((value: unknown) => void) | undefined)?.({
+      tabId: 'tab-race',
+      url: 'https://example.com/',
+      title: 'Example',
+      grant: { level: 'none' },
+    });
+    await new Promise((resolve) => {
+      window.setTimeout(resolve, 30);
+    });
+
+    expect(dispatchedSurfaceBounds.at(-1)).toEqual({ visible: false });
+  });
 });

@@ -13,6 +13,7 @@ import NiceModal, { useModal } from '@ebay/nice-modal-react';
 import { useTranslation } from 'react-i18next';
 import { defineModal } from '@/lib/modals';
 import { crashReportsApi } from '@/lib/api/crashReports';
+import { openExternalUrl } from '@/lib/desktopShell';
 
 export type CrashReportDialogProps = {
   reportId: string;
@@ -21,15 +22,6 @@ export type CrashReportDialogProps = {
 
 /** GitHub new-issue URLs must stay well under browser/URL limits. */
 const MAX_ISSUE_BODY_CHARS = 4000;
-
-async function openExternalUrl(url: string): Promise<void> {
-  try {
-    const { open } = await import('@tauri-apps/plugin-shell');
-    await open(url);
-  } catch {
-    window.open(url, '_blank', 'noopener,noreferrer');
-  }
-}
 
 function issueTitle(reportId: string, content: string): string {
   const messageIndex = content.indexOf('panic message:');

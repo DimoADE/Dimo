@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import { getDesktopShell } from '@/lib/desktopShell';
 import {
   allowPreviewAssetScope,
   isPreviewAssetScopeGranted,
@@ -8,7 +8,7 @@ import { FilePreviewLoading } from '@/components/panels/FilePreviewLoading';
 
 /**
  * The page runs with scripts enabled but without `allow-same-origin`, so it
- * keeps an opaque origin: it cannot reach the Dimo DOM or its Tauri bridge,
+ * keeps an opaque origin: it cannot reach the Dimo DOM or its desktop bridge,
  * while its own scripts, forms and popups behave normally.
  */
 const PREVIEW_SANDBOX = 'allow-scripts allow-forms allow-modals allow-popups';
@@ -55,7 +55,10 @@ export function HostHtmlPreview({
     };
   }, [assetRoot]);
 
-  const source = useMemo(() => convertFileSrc(filePath), [filePath]);
+  const source = useMemo(
+    () => getDesktopShell().assets.convertFileSrc(filePath),
+    [filePath]
+  );
 
   if (!scopeReady) {
     return (

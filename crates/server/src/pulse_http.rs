@@ -151,7 +151,7 @@ where
     }
 
     if let Some(token) = extract_bearer_header(&headers) {
-        let credential = match state.auth.authenticate(&token).await {
+        let credential = match state.authenticate_bearer_token(&token, &headers).await {
             Ok(Some(cred)) => cred,
             _ => return unauthorized_response("invalid or missing bearer token"),
         };

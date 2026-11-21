@@ -20,7 +20,7 @@ import { useProjects } from '@/hooks/useProjects';
 import { useProjectSwitcher } from '@/hooks/useProjectSwitcher';
 import { fileSystemApi, projectsApi } from '@/lib/api';
 import { APP_NAME } from '@/lib/branding';
-import { useLocalDesktopHost } from '@/lib/desktopShell';
+import { getDesktopShell, useLocalDesktopHost } from '@/lib/desktopShell';
 import { paths } from '@/lib/paths';
 import { cn } from '@/lib/utils';
 import { useWindowProjectsStore } from '@/stores/useWindowProjectsStore';
@@ -173,9 +173,8 @@ export function WorkspaceZeroProjectStage() {
     let disposed = false;
     let unlisten: (() => void) | undefined;
 
-    void import('@tauri-apps/api/webview')
-      .then(({ getCurrentWebview }) =>
-        getCurrentWebview().onDragDropEvent((event) => {
+    void getDesktopShell()
+      .window.onDragDropEvent((event) => {
           const payload = event.payload;
           if (payload.type === 'enter' || payload.type === 'over') {
             setDropActive(true);
@@ -207,7 +206,6 @@ export function WorkspaceZeroProjectStage() {
             }
           })();
         })
-      )
       .then((stopListening) => {
         if (disposed) stopListening();
         else unlisten = stopListening;

@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { getDesktopShell } from '@/lib/desktopShell';
 import { pickHostFile } from '@/lib/hostFs';
 import {
   AlertTriangle,
@@ -568,8 +569,7 @@ export function PluginCatalogPage() {
   const openExternalMarketplace = useCallback(async () => {
     if (supports('desktop.tauri')) {
       try {
-        const { open } = await import('@tauri-apps/plugin-shell');
-        await open(OFFICIAL_MARKETPLACE_WEB_URL);
+        await getDesktopShell().shell.openExternal(OFFICIAL_MARKETPLACE_WEB_URL);
         return;
       } catch {
         // Fallback to window.open below
@@ -593,32 +593,30 @@ export function PluginCatalogPage() {
     let disposed = false;
     let unlisten: (() => void) | undefined;
 
-    void import('@tauri-apps/api/webview')
-      .then(({ getCurrentWebview }) =>
-        getCurrentWebview().onDragDropEvent((event) => {
-          const payload = event.payload;
-          if (payload.type === 'enter') {
-            setDropActive(
-              payload.paths.length === 1 &&
-                isVxpPackagePath(payload.paths[0] ?? '')
-            );
-            return;
-          }
-          if (payload.type === 'leave') {
-            setDropActive(false);
-            return;
-          }
-          if (payload.type !== 'drop') return;
-
+    void getDesktopShell()
+      .window.onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === 'enter') {
+          setDropActive(
+            payload.paths.length === 1 &&
+              isVxpPackagePath(payload.paths[0] ?? '')
+          );
+          return;
+        }
+        if (payload.type === 'leave') {
           setDropActive(false);
-          const path = payload.paths[0];
-          if (payload.paths.length !== 1 || !path || !isVxpPackagePath(path)) {
-            toast.error(t('plugins.productDropInvalid'));
-            return;
-          }
-          void installPlugin(path);
-        })
-      )
+          return;
+        }
+        if (payload.type !== 'drop') return;
+
+        setDropActive(false);
+        const path = payload.paths[0];
+        if (payload.paths.length !== 1 || !path || !isVxpPackagePath(path)) {
+          toast.error(t('plugins.productDropInvalid'));
+          return;
+        }
+        void installPlugin(path);
+      })
       .then((stopListening) => {
         if (disposed) stopListening();
         else unlisten = stopListening;

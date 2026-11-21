@@ -66,6 +66,7 @@ impl AgentConnectionRunner {
             PermissionLookup::Accepted(pending) => {
                 let is_plan_gate = Self::is_plan_approval_tool(&pending.title)
                     || self.is_session_in_plan_mode(pending.session_id).await;
+                let persist_agent = !is_plan_gate && response.should_persist_agent_auto_approve();
                 let persist =
                     !is_plan_gate && response.should_persist_auto_approve(&pending.options);
                 let _ = pending.tx.send(response.clone());
@@ -78,7 +79,12 @@ impl AgentConnectionRunner {
                         auto: false,
                     },
                 );
-                if persist {
+                if persist_agent {
+                    self.set_connection_auto_approve_mode_if_lower(
+                        AgentAutoApproveMode::AllowAlways,
+                    )
+                    .await;
+                } else if persist {
                     self.persist_connection_auto_approve().await;
                 }
             }
@@ -131,13 +137,52 @@ impl AgentConnectionRunner {
         }
     }
 
+    pub(in crate::manager) async fn set_connection_auto_approve_mode(
+        &self,
+        mode: AgentAutoApproveMode,
+    ) {
+        if mode == AgentAutoApproveMode::AllowAlways {
+            self.set_connection_auto_approve_mode_if_lower(mode).await;
+            return;
+        }
+        *self.auto_approve_mode.lock().await = mode;
+        if mode != AgentAutoApproveMode::Off {
+            self.drain_and_auto_approve_pending_permissions(mode).await;
+        }
+    }
+
+    pub(in crate::manager) async fn set_connection_auto_approve_mode_if_lower(
+        &self,
+        target: AgentAutoApproveMode,
+    ) {
+        let rank = |mode: AgentAutoApproveMode| match mode {
+            AgentAutoApproveMode::Off => 0_u8,
+            AgentAutoApproveMode::AllowAlways => 1_u8,
+            AgentAutoApproveMode::Yolo => 2_u8,
+        };
+        let effective = {
+            let mut guard = self.auto_approve_mode.lock().await;
+            if rank(target) > rank(*guard) {
+                *guard = target;
+            }
+            *guard
+        };
+        if effective != AgentAutoApproveMode::Off {
+            self.drain_and_auto_approve_pending_permissions(effective)
+                .await;
+        }
+    }
+
     pub(in crate::manager) async fn persist_connection_auto_approve(&self) {
-        *self.auto_approve_mode.lock().await = AgentAutoApproveMode::Yolo;
+        self.set_connection_auto_approve_mode(AgentAutoApproveMode::Yolo)
+            .await;
+    }
+
+    async fn drain_and_auto_approve_pending_permissions(&self, mode: AgentAutoApproveMode) {
         let candidates = {
             let mut pending = self.pending_permissions.lock().await;
             pending.drain().collect::<Vec<_>>()
         };
-        let mode = *self.auto_approve_mode.lock().await;
         let mut to_auto_approve = Vec::new();
         let mut keep_manual = Vec::new();
         for (key, entry) in candidates {

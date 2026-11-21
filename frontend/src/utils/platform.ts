@@ -1,3 +1,5 @@
+import { hasElectronDesktopRuntime } from '@/lib/desktopShell/electronShellBridge';
+
 export type HostPlatform = 'windows' | 'macos' | 'linux' | 'unknown';
 
 export function hostPlatformFromOsType(
@@ -87,20 +89,23 @@ export function usesSolidHostChrome(): boolean {
   return document.documentElement.classList.contains('host-windows');
 }
 
-export function isTauriDesktopShell(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+export function isElectronDesktopShell(): boolean {
+  return hasElectronDesktopRuntime();
+}
+
+export function isDesktopShell(): boolean {
+  return hasElectronDesktopRuntime();
 }
 
 export function applyHostPlatformToDocument(): void {
   if (typeof document === 'undefined') {
     return;
   }
+  const electron = isElectronDesktopShell();
   document.documentElement.dataset.hostPlatform = getHostPlatform();
   document.documentElement.classList.toggle('host-windows', isWindows());
-  document.documentElement.classList.toggle(
-    'tauri-desktop',
-    isTauriDesktopShell()
-  );
+  document.documentElement.classList.toggle('electron-desktop', electron);
+  document.documentElement.classList.toggle('desktop-shell', electron);
 }
 
 export function getModifierKey(): string {

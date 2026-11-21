@@ -27,7 +27,7 @@ import {
   providerSaveRequest,
   type RouterProvision,
 } from '@/features/model-router';
-import { tauriInvoke, tauriListen } from '@/lib/tauriApi';
+import { getDesktopShell } from '@/lib/desktopShell';
 
 import { rememberAgentAuthKindTab } from './agentAuthKindTab';
 import {
@@ -239,13 +239,15 @@ export function useAgentModelRouterImport({
     let active = true;
     let unlisten: (() => void) | undefined;
 
-    void tauriListen<PendingModelRouterImport>(
-      MODEL_ROUTER_IMPORT_EVENT,
-      (payload) => {
-        if (!active) return;
-        void handleModelRouterImport(payload);
-      }
-    )
+    const shell = getDesktopShell();
+    void shell.events
+      .listen<PendingModelRouterImport>(
+        MODEL_ROUTER_IMPORT_EVENT,
+        (payload) => {
+          if (!active) return;
+          void handleModelRouterImport(payload);
+        }
+      )
       .then((fn) => {
         if (!active) {
           fn();
@@ -255,9 +257,10 @@ export function useAgentModelRouterImport({
       })
       .catch(() => undefined);
 
-    void tauriInvoke<PendingModelRouterImport | null>(
-      'take_pending_model_router_import'
-    )
+    void shell
+      .invoke<PendingModelRouterImport | null>(
+        'take_pending_model_router_import'
+      )
       .then((pending) => {
         if (!active || !pending) return;
         void handleModelRouterImport(pending);

@@ -148,9 +148,9 @@ where
         if std::env::var_os("NODE_USE_ENV_PROXY").is_none() {
             command.env("NODE_USE_ENV_PROXY", "1");
         }
+        command.env("npm_config_prefix", &user_env.npm_prefix);
         if let Some(runtime) = node {
             prepend_command_path(&mut command, &runtime.bin_dir);
-            command.env("npm_config_prefix", &user_env.npm_prefix);
         }
         command.args(npm_global_install_args_with_registry(
             &user_env.npm_prefix,
@@ -160,7 +160,11 @@ where
         match run_command_with_progress("npm install -g", command, 68, on_progress).await {
             Ok(()) => return Ok(()),
             Err(error) => {
-                if npm_install_permission_denied(&error.to_string()) {
+                let message = error.to_string();
+                if npm_install_permission_denied(&message)
+                    || npm_install_resource_busy(&message)
+                    || npm_install_unsupported_node_engine(&message)
+                {
                     return Err(error);
                 }
                 errors.push(format!("{registry}: {error}"));
@@ -184,21 +188,45 @@ where
         .or(utils::shell::resolve_executable_path("npm").await)
         .ok_or_else(|| anyhow::anyhow!("npm was not found; install Node.js and npm first"))?;
     if let Err(error) = run_npm_global_install(&npm, component, user_env, node, on_progress).await {
+        let message = error.to_string();
+        let is_perm = npm_install_permission_denied(&message);
+        let is_busy = npm_install_resource_busy(&message);
         let fallback = user_env.user_npm_prefix();
-        if !npm_install_permission_denied(&error.to_string()) || fallback == user_env.npm_prefix {
+        if (is_perm || is_busy) && fallback != user_env.npm_prefix {
+            let reason = if is_busy {
+                "target directory is busy/locked (EBUSY)"
+            } else {
+                "permission denied"
+            };
+            println!("{reason}, retrying with user prefix...");
+            on_progress(
+                62,
+                &format!(
+                    "[npm] {reason} on global prefix, retrying with {}",
+                    fallback.display()
+                ),
+            );
+            *user_env = user_env.clone().with_npm_prefix(fallback);
+            prepare_user_environment(user_env).await?;
+            if let Err(fallback_error) =
+                run_npm_global_install(&npm, component, user_env, node, on_progress).await
+            {
+                if npm_install_resource_busy(&fallback_error.to_string()) {
+                    anyhow::bail!(
+                        "{fallback_error}\n\n目录 `{}` 正被其他进程占用（EBUSY），请先关闭正在运行的相关 Agent、终端或杀毒软件扫描后重试。",
+                        user_env.npm_prefix.display()
+                    );
+                }
+                return Err(fallback_error);
+            }
+        } else if is_busy {
+            anyhow::bail!(
+                "{error}\n\n目录 `{}` 正被其他进程占用（EBUSY），请先关闭正在运行的相关 Agent、终端或杀毒软件扫描后重试。",
+                user_env.npm_prefix.display()
+            );
+        } else {
             return Err(error);
         }
-        println!("Permission denied, retrying with user prefix...");
-        on_progress(
-            62,
-            &format!(
-                "[npm] permission denied on global prefix, retrying with {}",
-                fallback.display()
-            ),
-        );
-        *user_env = user_env.clone().with_npm_prefix(fallback);
-        prepare_user_environment(user_env).await?;
-        run_npm_global_install(&npm, component, user_env, node, on_progress).await?;
     }
     let package = npm_spec_name(&component.resolved_source);
     let resolved_bin = command_is_placeholder(&component.command)
@@ -283,11 +311,13 @@ pub(super) async fn live_npm_global_prefix(node: Option<&NodeRuntime>) -> Option
     if let Some(runtime) = node {
         prepend_command_path(&mut command, &runtime.bin_dir);
     }
-    command.arg("prefix").arg("-g").kill_on_drop(true);
-    let output = tokio::time::timeout(std::time::Duration::from_secs(3), command.output())
-        .await
-        .ok()?
-        .ok()?;
+    command.arg("prefix").arg("-g");
+    let output = utils::process::run_command_output_with_timeout(
+        &mut command,
+        std::time::Duration::from_secs(3),
+    )
+    .await
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -1120,16 +1150,31 @@ pub(super) async fn persist_lock(
 }
 
 pub(super) async fn probe_version(executable: &Path, version_args: &[&str]) -> Option<String> {
+    probe_version_with_path(executable, version_args, None).await
+}
+
+pub(super) async fn probe_version_with_path(
+    executable: &Path,
+    version_args: &[&str],
+    extra_bin_dir: Option<&Path>,
+) -> Option<String> {
     if version_args.is_empty() {
         return None;
     }
     let mut command =
         utils::process::new_hidden_tokio_command(executable, version_args.iter().copied());
-    command.kill_on_drop(true);
-    let output = tokio::time::timeout(std::time::Duration::from_secs(5), command.output())
-        .await
-        .ok()?
-        .ok()?;
+    if std::env::var_os("HERMES_NPM_AUTO_SETUP").is_none() {
+        command.env("HERMES_NPM_AUTO_SETUP", "0");
+    }
+    if let Some(dir) = extra_bin_dir {
+        prepend_command_path(&mut command, dir);
+    }
+    let output = utils::process::run_command_output_with_timeout(
+        &mut command,
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .ok()?;
     if !output.status.success() {
         return None;
     }

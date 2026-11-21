@@ -6,6 +6,7 @@ import type {
 } from '@/hooks/conversationEntries';
 import { isCollapsedAssistantMessagesGroup } from '@/hooks/conversationEntries';
 import { parseDiffStats } from '@/utils/diffStatsParser';
+import { precomputedTruncatedDiffStats } from '../turnToolDiffChips';
 
 export type ConversationMessageNavEntry = {
   key: string;
@@ -60,6 +61,15 @@ function statsForPatchEntry(entry: PatchTypeWithKey): {
     entry.content.entry_type.action_type.action !== 'file_edit'
   ) {
     return { additions: 0, deletions: 0 };
+  }
+
+  const precomputed = precomputedTruncatedDiffStats(
+    'toolArguments' in entry.content
+      ? (entry.content as { toolArguments?: unknown }).toolArguments
+      : undefined
+  );
+  if (precomputed) {
+    return precomputed;
   }
 
   return entry.content.entry_type.action_type.changes.reduce(

@@ -235,7 +235,13 @@
     "before": "Before",
     "content": "Content",
     "after": "After",
-    "viewDetails": "View details"
+    "viewDetails": "View details",
+    "details": "Details",
+    "collapseDetails": "Hide details",
+    "copy": "Copy",
+    "copied": "Copied",
+    "prevRequest": "Previous permission request",
+    "nextRequest": "Next permission request"
   },
   "messageTurnView": {
     "streamingOutput": "AI is responding...",
@@ -313,7 +319,11 @@
     "noticeTab": "Notices",
     "collapsePanel": "Collapse",
     "dismissTab": "Dismiss {{label}}",
-    "regionLabel": "Composer status cockpit"
+    "regionLabel": "Composer status cockpit",
+    "openMemberSession": "Open {{name}}'s session",
+    "showMoreNotices": "{{count}} more notices · Expand all",
+    "showFewerNotices": "Show fewer notices",
+    "loadingBotSession": "Loading Bot session…"
   },
   "liveFeedback": {
     "placeholder": "Steer this turn",

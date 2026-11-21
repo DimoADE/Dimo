@@ -16,73 +16,40 @@ function readJson(relativePath) {
   return JSON.parse(read(relativePath));
 }
 
-test('desktop release version has one value across frontend, Tauri, and Cargo', () => {
+test('desktop release version stays aligned across root, frontend, and electron', () => {
+  const rootVersion = readJson('package.json').version;
   const frontendVersion = readJson('frontend/package.json').version;
-  const tauriVersionSource = readJson('src-tauri/tauri.conf.json').version;
-  const tauriVersion = tauriVersionSource.endsWith('.json')
-    ? readJson(path.join('src-tauri', tauriVersionSource)).version
-    : tauriVersionSource;
-  const cargoVersion = read('src-tauri/Cargo.toml').match(
-    /^version\s*=\s*"([^"]+)"/m
-  )?.[1];
+  const electronVersion = readJson('electron/package.json').version;
 
-  assert.equal(tauriVersion, frontendVersion);
-  assert.equal(tauriVersionSource, '../package.json');
-  assert.equal(cargoVersion, frontendVersion);
+  assert.equal(frontendVersion, rootVersion);
+  assert.equal(electronVersion, rootVersion);
 });
 
-test('main window stays hidden until the desktop shell is ready to paint', () => {
-  const config = readJson('src-tauri/tauri.conf.json');
-  const main = config.app.windows.find((window) => window.label === 'main');
-  assert.equal(main?.visible, false);
+test('main Electron window stays hidden until ready to show', () => {
+  const windowsTs = read('electron/src/main/windows.ts');
+  assert.match(windowsTs, /show:\s*false/);
 });
 
-test('installed desktop identity stays distinct from the development instance', () => {
-  const config = readJson('src-tauri/tauri.conf.json');
-  const desktopDev = read('scripts/run-tauri-dev-desktop.js');
+test('Electron packaging config declares Dimo identity, protocol, and 5-platform targets', () => {
+  const builderYml = read('electron/electron-builder.yml');
 
-  assert.equal(config.identifier, 'com.dimo.app');
-  assert.equal(config.productName, 'Dimo');
-  assert.deepEqual(config.plugins['deep-link'].desktop.schemes, ['dimo']);
-  assert.match(desktopDev, /com\.dimo\.app\.dev/);
-  assert.match(desktopDev, /Dimo Dev/);
+  assert.match(builderYml, /^appId:\s*com\.dimo\.app$/m);
+  assert.match(builderYml, /^productName:\s*Dimo$/m);
+  assert.match(builderYml, /-\s*dimo\b/);
+  assert.match(builderYml, /entitlements:\s*build\/entitlements\.mac\.plist/);
   assert.equal(
-    fs.existsSync(path.join(repoRoot, 'scripts', 'run-tauri-dev-macos.js')),
-    false
+    fs.existsSync(path.join(repoRoot, 'electron/build/entitlements.mac.plist')),
+    true
   );
-});
-
-test('Windows installer does not embed the offline WebView2 runtime', () => {
-  const config = readJson('src-tauri/tauri.windows.conf.json');
-  const mode = config.bundle?.windows?.webviewInstallMode?.type;
-
-  assert.ok(
-    mode === undefined || mode === 'downloadBootstrapper',
-    `expected Tauri default / downloadBootstrapper, got ${mode}`
-  );
-});
-
-test('macOS bundle declares its minimum supported system version', () => {
-  const config = readJson('src-tauri/tauri.macos.conf.json');
-
-  assert.match(config.bundle?.macOS?.minimumSystemVersion ?? '', /^\d+\.\d+$/);
-  assert.equal(config.bundle?.macOS?.entitlements, 'entitlements.macos.plist');
   assert.equal(
-    fs.existsSync(path.join(repoRoot, 'src-tauri', 'entitlements.macos.plist')),
+    fs.existsSync(path.join(repoRoot, 'electron/build/installer.nsh')),
     true
   );
 });
 
-test('Linux Debian package does not require XWayland for a CEF child window', () => {
-  const config = readJson('src-tauri/tauri.linux.conf.json');
-  const depends = config.bundle?.linux?.deb?.depends ?? [];
-
-  assert.equal(depends.includes('xwayland'), false);
-});
-
-test('desktop release builds every supported OS and CPU architecture', () => {
+test('desktop release builds every supported OS and CPU architecture with D1 Tauri bridge', () => {
   const workflow = read('.github/workflows/desktop-release.yml');
-  const updater = read('scripts/generate-updater-manifest.js');
+  const bridge = read('scripts/generate-tauri-bridge-manifest.js');
   const targets = [
     'x86_64-pc-windows-msvc',
     'aarch64-pc-windows-msvc',
@@ -101,33 +68,13 @@ test('desktop release builds every supported OS and CPU architecture', () => {
     'linux-aarch64',
     'darwin-aarch64',
   ]) {
-    assert.match(updater, new RegExp(`platform: ['"]${platform}['"]`));
+    assert.match(bridge, new RegExp(`['"]${platform}['"]`));
   }
-  assert.doesNotMatch(updater, /darwin-x86_64/);
-});
-
-test('local Apple signing is loaded from gitignored env without committing secrets', () => {
-  const gitignore = read('.gitignore');
-  const example = read('.env.example');
-  const desktopDev = read('scripts/run-tauri-dev-desktop.js');
-  const desktopBuild = read('scripts/run-tauri-build.js');
-
-  assert.match(gitignore, /^\.env\.local$/m);
-  assert.match(example, /APPLE_SIGNING_IDENTITY=/);
-  assert.match(example, /APPLE_API_KEY=/);
-  assert.match(example, /APPLE_API_ISSUER=/);
-  assert.match(example, /APPLE_API_KEY_PATH=/);
-  assert.match(desktopDev, /applyLocalEnvFile/);
-  assert.match(desktopBuild, /applyLocalEnvFile/);
-  assert.equal(
-    fs.existsSync(path.join(repoRoot, 'scripts', 'load-local-env.js')),
-    true
-  );
+  assert.doesNotMatch(workflow, /x86_64-apple-darwin/);
 });
 
 test('desktop release signs and verifies macOS and Windows artifacts', () => {
   const workflow = read('.github/workflows/desktop-release.yml');
-  const macosRelease = read('scripts/macos-notarize-and-dmg.js');
 
   for (const requiredText of [
     'APPLE_CERTIFICATE',
@@ -138,23 +85,15 @@ test('desktop release signs and verifies macOS and Windows artifacts', () => {
     'WINDOWS_CERTIFICATE',
     'WINDOWS_CERTIFICATE_PASSWORD',
     'EVSIGN_LICENSE_KEY',
-    'Import-PfxCertificate',
     'scripts/sign-windows-evsign.ps1',
-    'scripts/macos-notarize-and-dmg.js',
-    'timeout-minutes: 140',
     'codesign --verify --deep --strict',
     'Get-AuthenticodeSignature',
   ]) {
     assert.match(workflow, new RegExp(requiredText));
   }
-
-  assert.match(macosRelease, /notarytool/);
-  assert.match(macosRelease, /notarytool",\s*"info"/);
-  assert.match(macosRelease, /isTransientNotaryFailure/);
-  assert.match(macosRelease, /hdiutil/);
 });
 
-test('Windows EVSign signing refreshes updater signatures after Authenticode', () => {
+test('Windows EVSign signing refreshes D1 bridge signatures via dlx after Authenticode', () => {
   const script = read('scripts/sign-windows-evsign.ps1');
 
   assert.match(
@@ -163,7 +102,7 @@ test('Windows EVSign signing refreshes updater signatures after Authenticode', (
   );
   assert.match(script, /Get-FileHash -Algorithm SHA256/);
   assert.match(script, /-cdn/);
-  assert.match(script, /tauri signer sign/);
+  assert.match(script, /@tauri-apps\/cli@2\.10\.0/);
   assert.match(script, /TAURI_SIGNING_PRIVATE_KEY/);
 });
 
@@ -184,42 +123,4 @@ test('desktop release runs platform-native startup smoke tests', () => {
       `${script} must run in desktop release CI`
     );
   }
-});
-
-test('desktop release compiles frontend once and reuses Rust caches without CEF', () => {
-  const workflow = read('.github/workflows/desktop-release.yml');
-  const tauriConfig = read('src-tauri/tauri.conf.json');
-  const desktopBuild = read('scripts/run-tauri-build.js');
-  const beforeBundle = read('scripts/tauri-before-bundle.js');
-
-  assert.match(workflow, /name: Build frontend/);
-  assert.match(workflow, /probe-runners:/);
-  assert.match(workflow, /fail-fast:\s*true/);
-  assert.match(
-    workflow,
-    /needs: \[prepare-release, build-frontend, probe-runners\]/
-  );
-  assert.match(workflow, /cancel-in-progress:\s*true/);
-  assert.match(workflow, /DIMO_SKIP_FRONTEND_BUILD:\s*"1"/);
-  assert.match(workflow, /SCCACHE_GHA_ENABLED:\s*"true"/);
-  assert.match(workflow, /BloopAI\/sccache-action@main/);
-  assert.match(workflow, /Disable sccache on Windows/);
-  assert.match(workflow, /if: runner\.os != 'Windows'/);
-  assert.match(workflow, /cache-targets:\s*false/);
-  assert.doesNotMatch(workflow, /CEF_PATH/);
-  assert.doesNotMatch(workflow, /Cache CEF downloads/);
-  assert.doesNotMatch(workflow, /macos-15-intel/);
-  assert.doesNotMatch(workflow, /x86_64-apple-darwin/);
-  assert.match(
-    workflow,
-    /artifact_name: macos-arm64[\s\S]*runner: macos-15$/m
-  );
-  assert.doesNotMatch(workflow, /cache-all-crates:\s*true/);
-  assert.match(beforeBundle, /sidecarBinsExist/);
-  assert.doesNotMatch(beforeBundle, /stage-cef-runtime/);
-
-  assert.match(tauriConfig, /scripts\/tauri-before-build\.js/);
-  assert.match(tauriConfig, /scripts\/tauri-before-bundle\.js/);
-  assert.doesNotMatch(desktopBuild, /dimo_cef_helper/);
-  assert.doesNotMatch(desktopBuild, /CEF_PATH/);
 });

@@ -1772,7 +1772,6 @@ export function mergeDirectSpaceMessages<
             isStreamingSpaceMessage(cand) &&
             isTurnScopedDirectMessage(cand) &&
             (directMessageTurnId(cand) === turnId ||
-              !directMessageTurnId(cand) ||
               directMessageText(cand) === directMessageText(item))
         );
         if (streamingIdx >= 0) {

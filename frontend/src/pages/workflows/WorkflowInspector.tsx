@@ -472,16 +472,18 @@ export function WorkflowInspector() {
   useEffect(() => {
     if (!runId || !transport.subscribe || isRunTerminal) return;
     let active = true;
-    const subscribe = transport.subscribe.bind(transport);
+    const iterable = transport.subscribe({
+      subscription_id: crypto.randomUUID(),
+      resource: 'workflow_run',
+      run_id: runId,
+      after_sequence: eventCursor.current,
+    });
+    const iterator = iterable[Symbol.asyncIterator]();
     const consume = async () => {
       try {
-        for await (const _event of subscribe({
-          subscription_id: crypto.randomUUID(),
-          resource: 'workflow_run',
-          run_id: runId,
-          after_sequence: eventCursor.current,
-        })) {
-          if (!active) return;
+        while (active) {
+          const next = await iterator.next();
+          if (!active || next.done) break;
           await load(false);
         }
       } catch (subscriptionError) {
@@ -497,6 +499,7 @@ export function WorkflowInspector() {
     void consume();
     return () => {
       active = false;
+      void iterator.return?.();
     };
   }, [isRunTerminal, load, runId, transport]);
 

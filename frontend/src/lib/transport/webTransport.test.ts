@@ -6,10 +6,6 @@ import {
   WebTransportError,
 } from './webTransport';
 
-vi.mock('@tauri-apps/api/core', () => {
-  throw new Error('WebTransport must not import Tauri');
-});
-
 class MockWebSocket {
   static readonly OPEN = 1;
   static instances: MockWebSocket[] = [];
@@ -310,6 +306,51 @@ describe('WebTransport', () => {
     expect(available).toHaveBeenLastCalledWith('after');
     stopChanged();
     stopAvailable();
+    transport.destroy();
+  });
+
+  it('resets patch_stream cursor on reconnect so post-restart patches are not dropped', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    const transport = new WebTransport({
+      baseUrl: 'http://127.0.0.1:17891',
+      token: 'remote-secret',
+    });
+    const stream = transport
+      .subscribe({
+        subscription_id: '0195d6f4-8c37-7b28-a982-6a9e60142f59',
+        resource: 'patch_stream',
+        stream: 'projects',
+        args: {},
+      })
+      [Symbol.asyncIterator]();
+
+    const firstEvent = stream.next();
+    const socket = MockWebSocket.instances[0]!;
+    socket.open();
+    const attach = JSON.parse(socket.sent[0]!);
+    socket.message({
+      type: 'event',
+      subscription_id: attach.request.subscription_id,
+      event: { sequence: 42, kind: 'patch', payload: [{ op: 'add', path: '/projects/1', value: {} }] },
+    });
+    await expect(firstEvent).resolves.toEqual({
+      done: false,
+      value: {
+        sequence: 42n,
+        kind: 'patch',
+        payload: [{ op: 'add', path: '/projects/1', value: {} }],
+      },
+    });
+
+    socket.drop();
+    await vi.advanceTimersByTimeAsync(250);
+    const reconnected = MockWebSocket.instances[1]!;
+    reconnected.open();
+    const reattach = JSON.parse(reconnected.sent[0]!);
+    expect(reattach.request.after_sequence).toBe(0);
+
+    await stream.return?.();
     transport.destroy();
   });
 

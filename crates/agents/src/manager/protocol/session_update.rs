@@ -260,10 +260,16 @@ impl AcpClientBridge {
                     )
                     .await;
                 }
+                let enriched_input_preview = if peeled.peeled_input {
+                    None
+                } else {
+                    self.capture_edit_tool_start(session_id, &call_id, &tool_call)
+                        .await
+                };
                 let input_preview = if peeled.peeled_input {
                     json_preview(peeled.raw_input.as_ref())
                 } else {
-                    original_input_preview
+                    enriched_input_preview.or(original_input_preview)
                 };
                 let content = hosted
                     .map(truncate_preview)
@@ -296,14 +302,17 @@ impl AcpClientBridge {
                 })
             }
             SessionUpdate::ToolCallUpdate(update) => {
+                let call_id = update.tool_call_id.0.to_string();
+                let status = update.fields.status.as_ref().map(acp_enum_label);
+                let enriched_input_preview = self
+                    .finish_edit_tool_update(session_id, &call_id, &update)
+                    .await;
                 let content_blocks = update.fields.content.as_deref().unwrap_or_default();
                 let original_input_preview = acp_tool_input_preview(
                     update.fields.raw_input.as_ref(),
                     content_blocks,
                     update.fields.locations.as_deref().unwrap_or_default(),
                 );
-                let status = update.fields.status.as_ref().map(acp_enum_label);
-                let call_id = update.tool_call_id.0.to_string();
                 let folded = self
                     .apply
                     .fold_air_tool_meta(&call_id, update.meta.clone(), false)
@@ -350,7 +359,7 @@ impl AcpClientBridge {
                 let input_preview = if peeled.peeled_input {
                     json_preview(peeled.raw_input.as_ref())
                 } else {
-                    original_input_preview
+                    enriched_input_preview.or(original_input_preview)
                 };
                 let content = hosted
                     .map(truncate_preview)
@@ -852,3 +861,346 @@ mod retry_tests {
         assert!(event_rx.try_recv().is_err());
     }
 }
+
+#[cfg(test)]
+mod edit_diff_tests {
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    async fn test_bridge(
+        working_dir: &Path,
+    ) -> (
+        AcpClientBridge,
+        AgentSessionId,
+        ManagerEventReceiver,
+    ) {
+        let (event_tx, event_rx) = manager_event_channel();
+        let agent_id = AgentId::parse("claude").unwrap();
+        let connection_id = AgentConnectionId::new();
+        let runner = AgentConnectionRunner::new(
+            ManagedAgentConnectionSnapshot {
+                connection_id,
+                agent_id: agent_id.clone(),
+                launch_lock: SessionLaunchLock {
+                    agent_id: agent_id.clone(),
+                    absolute_acp_program: PathBuf::from("/fixture/acp"),
+                    args: Vec::new(),
+                    env: BTreeMap::new(),
+                    runtime_version: "fixture".into(),
+                    acp_version: "2.2.2".into(),
+                },
+                workspace_id: uuid::Uuid::nil(),
+                working_dir: working_dir.to_path_buf(),
+                additional_directories: Vec::new(),
+                auto_approve_mode: AgentAutoApproveMode::default(),
+                env: HashMap::new(),
+            },
+            event_tx.clone(),
+            None,
+        );
+        let session = AgentSessionId::new();
+        let prompt = AgentPromptId::new();
+        runner
+            .session_map
+            .write()
+            .await
+            .insert(session, "acp-edit-test".into());
+        *runner.active_prompt.lock().await = Some((session, prompt));
+        let bridge = AcpClientBridge::new(
+            connection_id,
+            agent_id,
+            event_tx,
+            runner.session_map.clone(),
+            runner.session_controls.clone(),
+            runner.pending_permissions.clone(),
+            runner.pending_elicitations.clone(),
+            runner.auto_approve_mode.clone(),
+            runner.stream_dedup.clone(),
+            runner.last_activity.clone(),
+            runner.grok_subagent.clone(),
+            runner.grok_mcp.clone(),
+            runner.pending_session_id.clone(),
+            working_dir.to_path_buf(),
+            HashMap::new(),
+            runner,
+        );
+        (bridge, session, event_rx)
+    }
+
+    fn tool_call_start(call_id: &str, kind: &str, raw_input: serde_json::Value) -> SessionNotification {
+        serde_json::from_value(json!({
+            "sessionId": "acp-edit-test",
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": call_id,
+                "title": "Running edit_file",
+                "kind": kind,
+                "status": "in_progress",
+                "rawInput": raw_input,
+            }
+        }))
+        .unwrap()
+    }
+
+    fn tool_call_finish(call_id: &str, status: &str) -> SessionNotification {
+        serde_json::from_value(json!({
+            "sessionId": "acp-edit-test",
+            "update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": call_id,
+                "title": "edit_file done",
+                "status": status,
+                "rawOutput": "edited",
+            }
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn synthesizes_diffs_for_modify_create_delete_and_overlapping_edits() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("app.ts");
+        std::fs::write(&target, "const x = 1;\nconst y = 2;\n").unwrap();
+        let new_file = dir.path().join("created.ts");
+
+        let (bridge, _, mut rx) = test_bridge(dir.path()).await;
+
+        // 1. Overlapping parallel edits to same file do not double count.
+        bridge
+            .session_notification(tool_call_start(
+                "edit-1",
+                "edit",
+                json!({ "file_path": target.to_string_lossy() }),
+            ))
+            .await
+            .unwrap();
+        let _ = rx.try_recv().unwrap();
+
+        bridge
+            .session_notification(tool_call_start(
+                "edit-2",
+                "edit",
+                json!({ "file_path": target.to_string_lossy() }),
+            ))
+            .await
+            .unwrap();
+        let _ = rx.try_recv().unwrap();
+
+        std::fs::write(&target, "const x = 10;\nconst y = 2;\n").unwrap();
+        bridge
+            .session_notification(tool_call_finish("edit-1", "completed"))
+            .await
+            .unwrap();
+        let ev1 = rx.try_recv().unwrap().event;
+        let AgentEvent::ToolCallUpdate { update: up1 } = ev1 else {
+            panic!("expected ToolCallUpdate");
+        };
+        let parsed1: serde_json::Value =
+            serde_json::from_str(up1.input_preview.as_deref().unwrap()).unwrap();
+        let diff1 = parsed1["unified_diff"].as_str().unwrap();
+        assert!(diff1.contains("-const x = 1;"));
+        assert!(diff1.contains("+const x = 10;"));
+
+        std::fs::write(&target, "const x = 10;\nconst y = 20;\nconst z = 30;\n").unwrap();
+        bridge
+            .session_notification(tool_call_finish("edit-2", "completed"))
+            .await
+            .unwrap();
+        let ev2 = rx.try_recv().unwrap().event;
+        let AgentEvent::ToolCallUpdate { update: up2 } = ev2 else {
+            panic!("expected ToolCallUpdate");
+        };
+        let parsed2: serde_json::Value =
+            serde_json::from_str(up2.input_preview.as_deref().unwrap()).unwrap();
+        let diff2 = parsed2["unified_diff"].as_str().unwrap();
+        assert!(!diff2.contains("const x = 1;"));
+        assert!(diff2.contains("-const y = 2;"));
+        assert!(diff2.contains("+const y = 20;"));
+        assert!(diff2.contains("+const z = 30;"));
+
+        // 2. New file creation.
+        bridge
+            .session_notification(tool_call_start(
+                "create-1",
+                "edit",
+                json!({ "file_path": "created.ts" }),
+            ))
+            .await
+            .unwrap();
+        let _ = rx.try_recv().unwrap();
+        std::fs::write(&new_file, "export const hello = true;\n").unwrap();
+        bridge
+            .session_notification(tool_call_finish("create-1", "completed"))
+            .await
+            .unwrap();
+        let AgentEvent::ToolCallUpdate { update: up_create } = rx.try_recv().unwrap().event else {
+            panic!("expected ToolCallUpdate");
+        };
+        let parsed_create: serde_json::Value =
+            serde_json::from_str(up_create.input_preview.as_deref().unwrap()).unwrap();
+        let diff_create = parsed_create["unified_diff"].as_str().unwrap();
+        assert!(diff_create.starts_with("--- /dev/null\n+++ b/created.ts\n"));
+        assert!(diff_create.contains("+export const hello = true;"));
+
+        // 3. File deletion.
+        bridge
+            .session_notification(tool_call_start(
+                "delete-1",
+                "delete",
+                json!({ "file_path": "created.ts" }),
+            ))
+            .await
+            .unwrap();
+        let _ = rx.try_recv().unwrap();
+        std::fs::remove_file(&new_file).unwrap();
+        bridge
+            .session_notification(tool_call_finish("delete-1", "completed"))
+            .await
+            .unwrap();
+        let AgentEvent::ToolCallUpdate { update: up_del } = rx.try_recv().unwrap().event else {
+            panic!("expected ToolCallUpdate");
+        };
+        let parsed_del: serde_json::Value =
+            serde_json::from_str(up_del.input_preview.as_deref().unwrap()).unwrap();
+        let diff_del = parsed_del["unified_diff"].as_str().unwrap();
+        assert!(diff_del.starts_with("--- a/created.ts\n+++ /dev/null\n"));
+        assert!(diff_del.contains("-export const hello = true;"));
+    }
+
+    #[tokio::test]
+    async fn skips_failed_binary_and_already_populated_edits() {
+        let dir = TempDir::new().unwrap();
+        let text_file = dir.path().join("fail.ts");
+        let bin_file = dir.path().join("blob.bin");
+        std::fs::write(&text_file, "before\n").unwrap();
+        std::fs::write(&bin_file, [0u8, 1, 2, 3]).unwrap();
+
+        let (bridge, _, mut rx) = test_bridge(dir.path()).await;
+
+        // Failed edit emits no synthesized input_preview.
+        bridge
+            .session_notification(tool_call_start(
+                "fail-1",
+                "edit",
+                json!({ "file_path": text_file.to_string_lossy() }),
+            ))
+            .await
+            .unwrap();
+        let _ = rx.try_recv().unwrap();
+        std::fs::write(&text_file, "after\n").unwrap();
+        bridge
+            .session_notification(tool_call_finish("fail-1", "failed"))
+            .await
+            .unwrap();
+        let AgentEvent::ToolCallUpdate { update: up_fail } = rx.try_recv().unwrap().event else {
+            panic!("expected ToolCallUpdate");
+        };
+        assert!(up_fail.input_preview.is_none());
+
+        // Binary edit emits no synthesized input_preview.
+        bridge
+            .session_notification(tool_call_start(
+                "bin-1",
+                "edit",
+                json!({ "file_path": bin_file.to_string_lossy() }),
+            ))
+            .await
+            .unwrap();
+        let _ = rx.try_recv().unwrap();
+        std::fs::write(&bin_file, [0u8, 4, 5, 6]).unwrap();
+        bridge
+            .session_notification(tool_call_finish("bin-1", "completed"))
+            .await
+            .unwrap();
+        let AgentEvent::ToolCallUpdate { update: up_bin } = rx.try_recv().unwrap().event else {
+            panic!("expected ToolCallUpdate");
+        };
+        assert!(up_bin.input_preview.is_none());
+
+        // Already-populated edit preserves original payload without re-diffing.
+        let structured: SessionNotification = serde_json::from_value(json!({
+            "sessionId": "acp-edit-test",
+            "update": {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "grok-1",
+                "title": "Edit",
+                "kind": "edit",
+                "status": "in_progress",
+                "rawInput": {
+                    "file_path": text_file.to_string_lossy(),
+                    "old_string": "after",
+                    "new_string": "final",
+                }
+            }
+        }))
+        .unwrap();
+        bridge.session_notification(structured).await.unwrap();
+        let _ = rx.try_recv().unwrap();
+        std::fs::write(&text_file, "unrelated disk change\n").unwrap();
+        bridge
+            .session_notification(tool_call_finish("grok-1", "completed"))
+            .await
+            .unwrap();
+        let AgentEvent::ToolCallUpdate { update: up_grok } = rx.try_recv().unwrap().event else {
+            panic!("expected ToolCallUpdate");
+        };
+        assert!(up_grok.input_preview.is_none());
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_git_checkpoint_when_start_snapshot_misses_write() {
+        let dir = TempDir::new().unwrap();
+        let run_git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run_git(&["init"]);
+        run_git(&["config", "user.email", "test@dimo.local"]);
+        run_git(&["config", "user.name", "Dimo Test"]);
+
+        let file = dir.path().join("tracked.ts");
+        std::fs::write(&file, "const preTurn = true;\n").unwrap();
+        run_git(&["add", "tracked.ts"]);
+        run_git(&["commit", "-m", "initial"]);
+
+        let (bridge, session, mut rx) = test_bridge(dir.path()).await;
+        crate::checkpoint_ref::CheckpointRef::new()
+            .capture(dir.path(), session.0, 1)
+            .await
+            .unwrap();
+
+        // Simulate disk write occurring BEFORE the in_progress notification arrives.
+        std::fs::write(&file, "const preTurn = false;\nconst added = 1;\n").unwrap();
+        bridge
+            .session_notification(tool_call_start(
+                "race-1",
+                "edit",
+                json!({ "file_path": file.to_string_lossy() }),
+            ))
+            .await
+            .unwrap();
+        let _ = rx.try_recv().unwrap();
+
+        bridge
+            .session_notification(tool_call_finish("race-1", "completed"))
+            .await
+            .unwrap();
+        let AgentEvent::ToolCallUpdate { update } = rx.try_recv().unwrap().event else {
+            panic!("expected ToolCallUpdate");
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(update.input_preview.as_deref().unwrap()).unwrap();
+        let diff = parsed["unified_diff"].as_str().unwrap();
+        assert!(diff.contains("-const preTurn = true;"));
+        assert!(diff.contains("+const preTurn = false;"));
+        assert!(diff.contains("+const added = 1;"));
+    }
+}
+

@@ -3,18 +3,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DesktopCapabilityError,
   desktopShellCall,
+  getDesktopShell,
   isLocalDesktopHost,
   isTauriClient,
 } from './desktopShell';
 import { configureBackendTransport } from './backendTransport';
-import { tauriBackendTransport } from './transport/tauriTransport';
+import { fallbackDesktopTransport } from './transport/transportRegistry';
 import type { BackendTransport } from './transport';
-
-const tauriInvoke = vi.fn();
-
-vi.mock('@/lib/tauriApi', () => ({
-  tauriInvoke: (...args: unknown[]) => tauriInvoke(...args),
-}));
 
 function transport(
   environment: BackendTransport['environment']
@@ -27,8 +22,8 @@ function transport(
 
 describe('desktop shell calls', () => {
   afterEach(() => {
-    configureBackendTransport(tauriBackendTransport);
-    tauriInvoke.mockReset();
+    configureBackendTransport(fallbackDesktopTransport);
+    vi.restoreAllMocks();
   });
 
   it('treats only the local desktop host as Host-path OS integration', () => {
@@ -40,25 +35,32 @@ describe('desktop shell calls', () => {
     expect(isTauriClient('web')).toBe(false);
   });
 
-  it('invokes local Tauri for desktop-shell commands', async () => {
+  it('invokes local desktop shell for desktop-shell commands', async () => {
+    const shellInvoke = vi
+      .spyOn(getDesktopShell(), 'invoke')
+      .mockResolvedValue(undefined);
     configureBackendTransport(transport('desktop'));
-    tauriInvoke.mockResolvedValue(undefined);
     await expect(
       desktopShellCall('reveal_in_file_manager', { path: '/tmp/demo' })
     ).resolves.toBeUndefined();
-    expect(tauriInvoke).toHaveBeenCalledWith('reveal_in_file_manager', {
+    expect(shellInvoke).toHaveBeenCalledWith('reveal_in_file_manager', {
       path: '/tmp/demo',
     });
   });
 
   it('keeps client chrome available on remote-desktop', async () => {
+    const shellInvoke = vi
+      .spyOn(getDesktopShell(), 'invoke')
+      .mockResolvedValue(undefined);
     configureBackendTransport(transport('remote-desktop'));
-    tauriInvoke.mockResolvedValue(undefined);
     await desktopShellCall('update_tray_badge', { count: 2 });
-    expect(tauriInvoke).toHaveBeenCalledWith('update_tray_badge', { count: 2 });
+    expect(shellInvoke).toHaveBeenCalledWith('update_tray_badge', { count: 2 });
   });
 
   it('refuses desktop-shell commands in the web environment', async () => {
+    const shellInvoke = vi
+      .spyOn(getDesktopShell(), 'invoke')
+      .mockResolvedValue(undefined);
     configureBackendTransport(transport('web'));
     await expect(
       desktopShellCall('open_project_in_editor', { id: 'project-1' })
@@ -66,7 +68,7 @@ describe('desktop shell calls', () => {
       name: 'DesktopCapabilityError',
       code: 'capability_unavailable',
     });
-    expect(tauriInvoke).not.toHaveBeenCalled();
+    expect(shellInvoke).not.toHaveBeenCalled();
     await expect(
       desktopShellCall('open_project_in_editor', { id: 'project-1' })
     ).rejects.toBeInstanceOf(DesktopCapabilityError);

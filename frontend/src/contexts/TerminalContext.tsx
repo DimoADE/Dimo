@@ -361,15 +361,11 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
       const cols = termInstance?.terminal.cols ?? 80;
       const rows = termInstance?.terminal.rows ?? 24;
 
-      // Create a PTY session via Tauri command
-      const sessionId = await backendCall<string>('create_terminal', {
-        workspaceId,
-        cols,
-        rows,
-      });
-
-      const unlisten = await backendListen<unknown>(
-        `terminal-output:${sessionId}`,
+      // Pre-allocate the session ID and attach listeners before spawning the PTY
+      // so initial shell prompt output and early exits are never missed over WebSocket.
+      const requestedSessionId = crypto.randomUUID();
+      const unlistenOutput = await backendListen<unknown>(
+        `terminal-output:${requestedSessionId}`,
         (payload) => {
           const event = parseTerminalOutputPayload(payload);
           if (!event) {
@@ -382,16 +378,44 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
         }
       );
 
+      let unlistenExit: () => void;
+      try {
+        unlistenExit = await backendListen<unknown>(
+          `terminal-exit:${requestedSessionId}`,
+          () => {
+            const callbacks = connectionCallbacksRef.current.get(tabId);
+            callbacks?.onExit?.();
+          }
+        );
+      } catch (err) {
+        unlistenOutput();
+        throw err;
+      }
+
+      let sessionId: string;
+      try {
+        sessionId = await backendCall<string>('create_terminal', {
+          workspaceId,
+          cols,
+          rows,
+          sessionId: requestedSessionId,
+        });
+      } catch (err) {
+        unlistenExit();
+        unlistenOutput();
+        throw err;
+      }
+
       const writeQueue = createWriteQueue(async (data) => {
         await backendCall('write_terminal', {
           sessionId,
           data: encodeBase64(data),
         });
       });
-      const previousUnlisten = unlisten;
       const unlistenWithQueue = () => {
         writeQueue.dispose();
-        previousUnlisten();
+        unlistenExit();
+        unlistenOutput();
       };
 
       const send = (data: string) => {

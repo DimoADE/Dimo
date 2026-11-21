@@ -173,11 +173,20 @@ export function AgentSettingsDetailSections({
   const { t } = useTranslation(['settings', 'common']);
   const effectiveAuthentication =
     authenticationOverride ?? selectedAgent.authentication;
-  const activeAgentOperation =
+  const activeAgentOperation: AgentOperationState | null =
     operations[selectedAgent.agent_id] ??
     (enablingOperation?.agentId === selectedAgent.agent_id
       ? enablingOperation
-      : null);
+      : selectedAgent.active_operation
+        ? {
+            operationId: '',
+            kind: selectedAgent.active_operation,
+            status: selectedAgent.lifecycle === 'queued' ? 'queued' : 'running',
+            progressPercent: null,
+            message: null,
+            sequence: 0,
+          }
+        : null);
   const operationBusy = Boolean(
     selectedAgent.active_operation || operations[selectedAgent.agent_id]
   );

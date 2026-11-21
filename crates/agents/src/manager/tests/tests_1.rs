@@ -1499,3 +1499,105 @@ async fn native_tool_results_preserve_structured_metadata_and_permission_correla
     assert_eq!(status_dec.as_deref(), Some("denied"));
     assert_eq!(perm_tool_call_id.as_deref(), Some("cmd-item-99"));
 }
+
+#[tokio::test]
+async fn native_auto_approve_emits_permission_responded_without_permission_requested() {
+    use crate::{
+        engine::{CodexNativeDriver, EngineEvent, EngineHandle, NativeEngineDriver},
+        manager::runner::native_events::NativeTurnState,
+    };
+
+    let driver: Arc<dyn NativeEngineDriver> = Arc::new(CodexNativeDriver::new());
+    let handle = EngineHandle::for_engine(
+        uuid::Uuid::new_v4(),
+        "codex-native",
+        uuid::Uuid::nil(),
+        PathBuf::from("C:/workspace"),
+        true,
+        None,
+    );
+    let session_id = AgentSessionId::new();
+    let prompt_id = AgentPromptId::new();
+    let (tx, mut rx) = manager_event_channel();
+    let runner = dummy_runner(tx);
+    runner
+        .set_connection_auto_approve_mode(AgentAutoApproveMode::AllowAlways)
+        .await;
+    let mut char_acc = 0usize;
+    let mut state = NativeTurnState::default();
+
+    runner
+        .handle_native_stream_event(
+            &driver,
+            &handle,
+            false,
+            None,
+            session_id,
+            prompt_id,
+            EngineEvent::PermissionRequested {
+                permission_id: "perm-auto-native".into(),
+                prompt_id: Some(prompt_id.0.to_string()),
+                session_id: None,
+                tool_name: "commandExecution".into(),
+                input: serde_json::json!({ "command": ["echo", "hi"] }),
+                decision_reason: None,
+                options: Vec::new(),
+            },
+            &mut char_acc,
+            &mut state,
+        )
+        .await;
+
+    let mut requested_count = 0usize;
+    let mut auto_responded_count = 0usize;
+    while let Ok(ev) = rx.try_recv() {
+        match ev.event {
+            AgentEvent::PermissionRequested { .. } => requested_count += 1,
+            AgentEvent::PermissionResponded { auto: true, .. } => auto_responded_count += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(
+        requested_count, 0,
+        "auto-approved native permission must not emit PermissionRequested (suppresses desktop toast)"
+    );
+    assert_eq!(
+        auto_responded_count, 1,
+        "auto-approved native permission must emit PermissionResponded with auto=true"
+    );
+
+    runner
+        .handle_native_stream_event(
+            &driver,
+            &handle,
+            false,
+            None,
+            session_id,
+            prompt_id,
+            EngineEvent::PermissionRequested {
+                permission_id: "perm-exit-plan".into(),
+                prompt_id: Some(prompt_id.0.to_string()),
+                session_id: None,
+                tool_name: "ExitPlanMode".into(),
+                input: serde_json::json!({}),
+                decision_reason: None,
+                options: Vec::new(),
+            },
+            &mut char_acc,
+            &mut state,
+        )
+        .await;
+
+    let mut plan_requested = false;
+    while let Ok(ev) = rx.try_recv() {
+        if let AgentEvent::PermissionRequested { request } = ev.event
+            && request.title == "ExitPlanMode"
+        {
+            plan_requested = true;
+        }
+    }
+    assert!(
+        plan_requested,
+        "ExitPlanMode must remain manual even when AllowAlways is active"
+    );
+}

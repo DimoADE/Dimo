@@ -235,7 +235,13 @@
     "before": "变更前",
     "content": "内容",
     "after": "变更后",
-    "viewDetails": "查看详情"
+    "viewDetails": "查看详情",
+    "details": "详情",
+    "collapseDetails": "收起详情",
+    "copy": "复制",
+    "copied": "已复制",
+    "prevRequest": "上一条权限请求",
+    "nextRequest": "下一条权限请求"
   },
   "messageTurnView": {
     "streamingOutput": "AI 正在输出...",
@@ -313,7 +319,11 @@
     "noticeTab": "提示通知",
     "collapsePanel": "收起",
     "dismissTab": "关闭 {{label}}",
-    "regionLabel": "会话状态控制台"
+    "regionLabel": "会话状态控制台",
+    "openMemberSession": "查看 {{name}} 的会话",
+    "showMoreNotices": "还有 {{count}} 条通知，展开全部",
+    "showFewerNotices": "收起其余通知",
+    "loadingBotSession": "正在加载Bot会话..."
   },
   "liveFeedback": {
     "placeholder": "给这一回合纠偏",

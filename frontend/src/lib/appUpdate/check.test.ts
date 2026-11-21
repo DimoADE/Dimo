@@ -7,21 +7,26 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn((_command: string) => Promise.resolve()),
 }));
 
-vi.mock('@tauri-apps/plugin-updater', () => ({
-  check: mocks.check,
-}));
-
-vi.mock('@tauri-apps/plugin-process', () => ({
-  relaunch: mocks.relaunch,
-}));
-
-vi.mock('@tauri-apps/api/core', () => ({
-  invoke: mocks.invoke,
-}));
-
-vi.mock('@tauri-apps/api/app', () => ({
-  getVersion: mocks.getVersion,
-}));
+vi.mock('@/lib/desktopShell', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/lib/desktopShell')>();
+  return {
+    ...actual,
+    getDesktopShell: () => {
+      const shell = actual.getDesktopShell();
+      return {
+        ...shell,
+        getAppVersion: mocks.getVersion,
+        invoke: mocks.invoke,
+        updater: {
+          ...shell.updater,
+          check: mocks.check,
+          relaunch: mocks.relaunch,
+        },
+      };
+    },
+  };
+});
 
 import {
   dismissAppUpdateVersion,
@@ -60,7 +65,7 @@ describe('appUpdate lifecycle state', () => {
     });
   });
 
-  it('tracks downloading bytes, installing, and ready_to_restart on non-Windows', async () => {
+  it('stages download on macOS and defers install until relaunchApp is called', async () => {
     Object.defineProperty(window.navigator, 'userAgent', {
       value: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
       configurable: true,
@@ -77,7 +82,6 @@ describe('appUpdate lifecycle state', () => {
     });
     const install = vi.fn(async () => {
       order.push('install');
-      expect(getAppUpdateState().status).toBe('installing');
     });
     const close = vi.fn(async () => undefined);
 
@@ -98,15 +102,14 @@ describe('appUpdate lifecycle state', () => {
     unsubscribe();
 
     expect(progresses).toEqual([0, 25, 100, 100]);
-    expect(order).toEqual(['evacuate_user_data_before_update', 'install']);
-    expect(install).toHaveBeenCalledOnce();
-    expect(close).toHaveBeenCalledOnce();
+    expect(install).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+    expect(mocks.invoke).not.toHaveBeenCalled();
     expect(states.map((s) => s.status)).toEqual([
       'downloading',
       'downloading',
       'downloading',
       'downloading',
-      'installing',
       'ready_to_restart',
     ]);
     expect(getAppUpdateState()).toEqual({
@@ -116,6 +119,14 @@ describe('appUpdate lifecycle state', () => {
       total: 4000,
       error: null,
     });
+
+    await relaunchApp();
+
+    expect(order).toEqual(['evacuate_user_data_before_update', 'install']);
+    expect(install).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+    expect(mocks.relaunch).toHaveBeenCalledOnce();
+    expect(getAppUpdateState().status).toBe('restarting');
   });
 
   it('stages download on Windows and defers install until relaunchApp is called', async () => {
@@ -191,31 +202,28 @@ describe('appUpdate lifecycle state', () => {
     });
   });
 
-  it('does not install when evacuating session data fails', async () => {
+  it('does not install when evacuating session data fails in fallback downloadAndInstall mode', async () => {
     Object.defineProperty(window.navigator, 'userAgent', {
       value: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
       configurable: true,
     });
-    const install = vi.fn(async () => undefined);
+    const downloadAndInstall = vi.fn(async () => undefined);
     mocks.invoke.mockRejectedValue(new Error('still inside bundle'));
     mocks.check.mockResolvedValue({
       version: '0.39.0',
-      download: vi.fn(async (onEvent) => {
-        onEvent({ event: 'Finished' });
-      }),
-      install,
+      downloadAndInstall,
       close: vi.fn(async () => undefined),
     });
 
     await expect(installSignedUpdate()).rejects.toThrow('still inside bundle');
-    expect(install).not.toHaveBeenCalled();
+    expect(downloadAndInstall).not.toHaveBeenCalled();
     expect(getAppUpdateState().status).toBe('error');
     expect(getAppUpdateState().error).toBe('still inside bundle');
   });
 
-  it('does not relaunch on Windows when evacuating session data fails', async () => {
+  it('does not relaunch when evacuating session data fails', async () => {
     Object.defineProperty(window.navigator, 'userAgent', {
-      value: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+      value: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
       configurable: true,
     });
     const install = vi.fn(async () => undefined);

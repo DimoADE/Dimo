@@ -1019,7 +1019,8 @@ function prefixHashOf(
 function replayPreDetailBatches(
   conversationId: string,
   controller: Controller,
-  detailCursor: bigint
+  detailCursor: bigint,
+  detailLiveCursor: bigint
 ): boolean {
   const buffered = controller.preDetailBatches.splice(0);
   if (buffered.length === 0) return false;
@@ -1028,19 +1029,24 @@ function replayPreDetailBatches(
       item,
       index,
       seq: toBigIntSeq(item.last_sequence, 0n),
+      liveSeq: toBigIntSeq(item.live_sequence, 0n),
     }))
-    .sort((left, right) =>
-      left.seq !== right.seq
-        ? left.seq < right.seq
-          ? -1
-          : 1
-        : left.index - right.index
-    )
+    .sort((left, right) => {
+      if (left.seq !== right.seq) return left.seq < right.seq ? -1 : 1;
+      if (left.liveSeq !== right.liveSeq) {
+        return left.liveSeq < right.liveSeq ? -1 : 1;
+      }
+      return left.index - right.index;
+    })
     .map((wrapped) => wrapped.item);
   let shouldResetResync = false;
   let replayedAny = false;
   for (const pending of ordered) {
     const batchSeq = toBigIntSeq(pending.last_sequence, 0n);
+    const batchLiveSeq =
+      pending.live_sequence != null
+        ? toBigIntSeq(pending.live_sequence, 0n)
+        : null;
     const maxOpRev = pending.ops.reduce((max, op) => {
       const rev =
         op.op === 'upsert'
@@ -1048,8 +1054,18 @@ function replayPreDetailBatches(
           : toBigIntSeq(op.revision, 0n);
       return rev > max ? rev : max;
     }, batchSeq);
+    const isFreshUnpersisted =
+      !isResetBatch(pending) &&
+      pending.ops.length > 0 &&
+      ((batchLiveSeq !== null && batchLiveSeq > detailLiveCursor) ||
+        (batchLiveSeq === null &&
+          detailLiveCursor === 0n &&
+          pending.previous_sequence != null &&
+          toBigIntSeq(pending.previous_sequence, -1n) === batchSeq &&
+          batchSeq >= detailCursor));
     if (
       !isResetBatch(pending) &&
+      !isFreshUnpersisted &&
       batchSeq <= detailCursor &&
       maxOpRev <= detailCursor
     ) {
@@ -1140,10 +1156,15 @@ function loadDetail(
           resolved.timeline.last_sequence,
         0n
       );
+      const detailLiveCursor = toBigIntSeq(
+        resolved.timeline.live_sequence ?? 0n,
+        0n
+      );
       const shouldResetResync = replayPreDetailBatches(
         conversationId,
         controller,
-        detailCursor
+        detailCursor,
+        detailLiveCursor
       );
       scheduleBind(conversationId, controller);
       if (shouldResetResync && !controller.stopped) {

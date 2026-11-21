@@ -49,6 +49,7 @@ import {
   type WorkspaceTabContextMenuKind,
 } from '@/components/layout/panels/workspaceTabContextMenu';
 import { requestPreviewTabRefresh } from '@/utils/previewTabRefresh';
+import { markReviewSessionViewed } from '@/lib/sessionQueryCache';
 
 const PLUGIN_PANEL_COMPONENT = 'plugin-panel';
 
@@ -252,6 +253,7 @@ export function WorkspaceDockviewTab({
   tabLocation: _tabLocation,
   hideClose,
   closeActionOverride,
+  onClick,
   onPointerDown,
   onPointerUp,
   onPointerLeave,
@@ -267,6 +269,7 @@ export function WorkspaceDockviewTab({
     params ?? {}
   );
   const isMiddleMouseButton = React.useRef(false);
+  const pointerDownPosRef = React.useRef<{ x: number; y: number } | null>(null);
   const isPreviewDirty = useIsWorkspacePanelDirty(api.id, api.component);
 
   React.useEffect(() => {
@@ -337,6 +340,7 @@ export function WorkspaceDockviewTab({
   const onClose = React.useCallback(
     (event: React.PointerEvent | React.MouseEvent) => {
       event.preventDefault();
+      event.stopPropagation();
       closeTab();
     },
     [closeTab]
@@ -362,6 +366,37 @@ export function WorkspaceDockviewTab({
         'dv-default-tab workspace-tab-surface',
         isSessionTab && 'workspace-session-tab'
       )}
+      onClick={(event) => {
+        onClick?.(event);
+        const pointerDownPos = pointerDownPosRef.current;
+        pointerDownPosRef.current = null;
+        if (
+          event.defaultPrevented ||
+          event.button !== 0 ||
+          !isSessionTab ||
+          !sessionId ||
+          !queryClient
+        ) {
+          return;
+        }
+        if (
+          event.target instanceof Element &&
+          event.target.closest('.dv-default-tab-action')
+        ) {
+          return;
+        }
+        if (pointerDownPos) {
+          const deltaX = event.clientX - pointerDownPos.x;
+          const deltaY = event.clientY - pointerDownPos.y;
+          if (Math.hypot(deltaX, deltaY) >= 4) {
+            return;
+          }
+        }
+        void markReviewSessionViewed(queryClient, sessionId, {
+          workspaceId: tabParams.workspaceId ?? null,
+          onlyIfCached: true,
+        });
+      }}
       onContextMenu={(event) => {
         if (editorTabMenu) {
           editorTabMenu.open(event.nativeEvent);
@@ -411,6 +446,8 @@ export function WorkspaceDockviewTab({
       }}
       onPointerDown={(event) => {
         isMiddleMouseButton.current = event.button === 1;
+        pointerDownPosRef.current =
+          event.button === 0 ? { x: event.clientX, y: event.clientY } : null;
         onPointerDown?.(event);
       }}
       onPointerUp={(event) => {
@@ -426,6 +463,7 @@ export function WorkspaceDockviewTab({
       }}
       onPointerLeave={(event) => {
         isMiddleMouseButton.current = false;
+        pointerDownPosRef.current = null;
         onPointerLeave?.(event);
       }}
     >

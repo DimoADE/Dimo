@@ -1,6 +1,7 @@
 param(
   [Parameter(Mandatory = $true)]
-  [string]$Executable
+  [string]$Executable,
+  [switch]$ElectronSmoke
 )
 
 $ErrorActionPreference = 'Stop'
@@ -50,7 +51,8 @@ public static class DimoWindowInspector {
             var name = new StringBuilder(256);
             GetClassName(window, name, name.Capacity);
             if (name.ToString() == "ConsoleWindowClass") {
-                GetWindowThreadProcessId(window, out var processId);
+                uint processId;
+                GetWindowThreadProcessId(window, out processId);
                 owners.Add(processId);
             }
             return true;
@@ -77,23 +79,72 @@ function Test-DescendsFrom([uint32]$ProcessId, [uint32]$AncestorId) {
   return $false
 }
 
+$prevSmoke = $env:DIMO_ELECTRON_SMOKE
+$prevMulti = $env:DIMO_ALLOW_MULTI_INSTANCE
+$prevDataDir = $env:DIMO_DATA_DIR
+$prevRunAsNode = $env:ELECTRON_RUN_AS_NODE
+$tempDataDir = $null
+
+if ($ElectronSmoke) {
+  $tempDataDir = Join-Path ([IO.Path]::GetTempPath()) ("dimo-win-smoke-" + [Guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $tempDataDir -Force | Out-Null
+  $env:DIMO_ELECTRON_SMOKE = '1'
+  $env:DIMO_ALLOW_MULTI_INSTANCE = '1'
+  $env:DIMO_DATA_DIR = $tempDataDir
+  Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+}
+
 $process = Start-Process -FilePath $Executable -PassThru
 try {
-  Start-Sleep -Seconds 8
-  if ($process.HasExited) {
-    throw "Dimo exited during the Windows startup smoke test with code $($process.ExitCode)."
-  }
+  if ($ElectronSmoke) {
+    $deadline = (Get-Date).AddSeconds(45)
+    while (-not $process.HasExited -and (Get-Date) -lt $deadline) {
+      $consoleOwners = [DimoWindowInspector]::ConsoleWindowOwners()
+      foreach ($owner in $consoleOwners) {
+        if (Test-DescendsFrom $owner ([uint32]$process.Id)) {
+          throw "Dimo spawned a visible console window owned by process $owner."
+        }
+      }
+      Start-Sleep -Milliseconds 300
+    }
+    if (-not $process.HasExited) {
+      throw 'Dimo Electron smoke test did not complete within 45 seconds.'
+    }
+    if ($process.ExitCode -ne 0) {
+      throw "Dimo Electron smoke test failed with exit code $($process.ExitCode)."
+    }
+    Start-Sleep -Milliseconds 500
+    $orphans = Get-CimInstance Win32_Process -Filter "Name = 'dimo-server.exe'" -ErrorAction SilentlyContinue |
+      Where-Object { $_.ParentProcessId -eq $process.Id }
+    if ($orphans) {
+      throw "Orphan dimo-server.exe process remained after Electron smoke exit."
+    }
+  } else {
+    Start-Sleep -Seconds 8
+    if ($process.HasExited) {
+      throw "Dimo exited during the Windows startup smoke test with code $($process.ExitCode)."
+    }
 
-  $consoleOwners = [DimoWindowInspector]::ConsoleWindowOwners()
-  foreach ($owner in $consoleOwners) {
-    if (Test-DescendsFrom $owner ([uint32]$process.Id)) {
-      throw "Dimo spawned a visible console window owned by process $owner."
+    $consoleOwners = [DimoWindowInspector]::ConsoleWindowOwners()
+    foreach ($owner in $consoleOwners) {
+      if (Test-DescendsFrom $owner ([uint32]$process.Id)) {
+        throw "Dimo spawned a visible console window owned by process $owner."
+      }
     }
   }
 }
 finally {
   if (-not $process.HasExited) {
-    Stop-Process -Id $process.Id -Force
+    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
     $process.WaitForExit()
+  }
+  if ($ElectronSmoke) {
+    if ($null -eq $prevSmoke) { Remove-Item Env:DIMO_ELECTRON_SMOKE -ErrorAction SilentlyContinue } else { $env:DIMO_ELECTRON_SMOKE = $prevSmoke }
+    if ($null -eq $prevMulti) { Remove-Item Env:DIMO_ALLOW_MULTI_INSTANCE -ErrorAction SilentlyContinue } else { $env:DIMO_ALLOW_MULTI_INSTANCE = $prevMulti }
+    if ($null -eq $prevDataDir) { Remove-Item Env:DIMO_DATA_DIR -ErrorAction SilentlyContinue } else { $env:DIMO_DATA_DIR = $prevDataDir }
+    if ($null -ne $prevRunAsNode) { $env:ELECTRON_RUN_AS_NODE = $prevRunAsNode }
+    if ($tempDataDir -and (Test-Path $tempDataDir)) {
+      Remove-Item -LiteralPath $tempDataDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
   }
 }

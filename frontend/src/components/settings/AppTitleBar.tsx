@@ -3,6 +3,7 @@ import type {
   PointerEvent as ReactPointerEvent,
   ReactNode,
 } from 'react';
+import { getDesktopShell } from '@/lib/desktopShell';
 import { cn } from '@/lib/utils';
 import { isWindows } from '@/utils/platform';
 
@@ -23,14 +24,14 @@ function isNoWindowDragTarget(target: EventTarget | null): boolean {
 }
 
 function startDesktopWindowDrag(): void {
-  void import('@tauri-apps/api/window')
-    .then(({ getCurrentWindow }) => getCurrentWindow().startDragging())
+  void getDesktopShell()
+    .window.startDragging()
     .catch(() => undefined);
 }
 
 function toggleDesktopWindowMaximize(): void {
-  void import('@tauri-apps/api/window')
-    .then(({ getCurrentWindow }) => getCurrentWindow().toggleMaximize())
+  void getDesktopShell()
+    .window.toggleMaximize()
     .catch(() => undefined);
 }
 
@@ -55,7 +56,7 @@ export function AppTitleBar({
 
   return (
     <div
-      data-tauri-drag-region
+      data-window-drag-region
       className={cn(
         'settings-titlebar window-chrome relative h-9 shrink-0 select-none text-foreground',
         className
@@ -63,10 +64,10 @@ export function AppTitleBar({
       onPointerDown={onPointerDown}
       onDoubleClick={onDoubleClick}
     >
-      <div data-tauri-drag-region className="absolute inset-0" />
+      <div data-window-drag-region className="absolute inset-0" />
 
       <div
-        data-tauri-drag-region
+        data-window-drag-region
         className="relative z-10 flex h-full items-center px-3"
       >
         <div className="min-w-0 flex-1">{left}</div>
@@ -75,7 +76,7 @@ export function AppTitleBar({
 
       {center ? (
         <div
-          data-tauri-drag-region
+          data-window-drag-region
           className="pointer-events-none absolute left-1/2 top-1/2 z-20 -translate-x-1/2 -translate-y-1/2"
         >
           <div>{center}</div>

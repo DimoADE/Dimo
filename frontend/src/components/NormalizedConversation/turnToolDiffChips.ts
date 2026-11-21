@@ -49,10 +49,49 @@ export function countFileChangeDiff(change: FileChange): {
   return { additions, deletions };
 }
 
-export function countFileChangesStats(changes: readonly FileChange[]): {
+export function precomputedTruncatedDiffStats(
+  toolArguments: unknown
+): { additions: number; deletions: number } | null {
+  if (
+    !toolArguments ||
+    typeof toolArguments !== 'object' ||
+    Array.isArray(toolArguments)
+  ) {
+    return null;
+  }
+  const record = toolArguments as Record<string, unknown>;
+  if (record.diff_truncated !== true) return null;
+  const { additions, deletions } = record;
+  if (
+    typeof additions !== 'number' ||
+    !Number.isFinite(additions) ||
+    additions < 0 ||
+    typeof deletions !== 'number' ||
+    !Number.isFinite(deletions) ||
+    deletions < 0
+  ) {
+    return null;
+  }
+  return {
+    additions: Math.trunc(additions),
+    deletions: Math.trunc(deletions),
+  };
+}
+
+export function countFileChangesStats(
+  changes: readonly FileChange[],
+  toolArguments?: unknown
+): {
   additions?: number;
   deletions?: number;
 } {
+  const precomputed = precomputedTruncatedDiffStats(toolArguments);
+  if (precomputed) {
+    return {
+      additions: precomputed.additions > 0 ? precomputed.additions : undefined,
+      deletions: precomputed.deletions > 0 ? precomputed.deletions : undefined,
+    };
+  }
   let additions = 0;
   let deletions = 0;
   for (const change of changes) {
@@ -155,6 +194,10 @@ export function extractBatchDiffChips(
       entry.fileEdits && entry.fileEdits.length > 0
         ? entry.fileEdits
         : [{ path: action.path, changes: action.changes }];
+    const precomputed =
+      fileEdits.length === 1
+        ? precomputedTruncatedDiffStats(entry.toolArguments)
+        : null;
 
     for (const edit of fileEdits) {
       const rawPath = edit.path.trim();
@@ -177,16 +220,27 @@ export function extractBatchDiffChips(
         };
         byKey.set(key, acc);
       }
-      for (const change of edit.changes) {
-        const delta = countFileChangeDiff(change);
-        acc.additions += delta.additions;
-        acc.deletions += delta.deletions;
+      if (precomputed && edit.changes.length === 1) {
+        acc.additions += precomputed.additions;
+        acc.deletions += precomputed.deletions;
         appendPreviewLines(
           acc.previewLines,
-          change,
+          edit.changes[0],
           displayPath,
           workspacePath
         );
+      } else {
+        for (const change of edit.changes) {
+          const delta = countFileChangeDiff(change);
+          acc.additions += delta.additions;
+          acc.deletions += delta.deletions;
+          appendPreviewLines(
+            acc.previewLines,
+            change,
+            displayPath,
+            workspacePath
+          );
+        }
       }
     }
   }

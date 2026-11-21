@@ -4548,54 +4548,65 @@ describe('CollaborationSpacePage', () => {
     expect(screen.queryByRole('option', { name: /全体成员/ })).toBeNull();
   });
 
-  it('mirrors a pending bot permission request into the collaboration message log', async () => {
-    useConversationTimeline.mockImplementation((id: string | null) => ({
-      timeline: [],
-      items: [],
-      sideRows:
+  it('mirrors a pending bot permission request into the collaboration composer overlay', async () => {
+    const { conversationApi } = await import(
+      '@/features/conversation/conversationApi'
+    );
+    const detailSpy = vi
+      .spyOn(conversationApi, 'detail')
+      .mockImplementation(async (id: string) =>
         id === 'conv-1'
-          ? [
-              {
-                row: {
-                  kind: 'permission_request',
-                  request: {
-                    permission_id: 'perm-collab-1',
-                    title: 'Edit README.md',
-                    status: 'pending',
-                    details: {
-                      fields: {
-                        kind: 'edit',
-                        content: [
-                          {
-                            type: 'diff',
-                            path: 'README.md',
-                            oldText: 'old',
-                            newText: 'new',
+          ? ({
+              timeline: {
+                rows: [
+                  {
+                    row_id: 'permission:perm-collab-1',
+                    revision: 1n,
+                    row: {
+                      kind: 'permission_request',
+                      request: {
+                        permission_id: 'perm-collab-1',
+                        title: 'Edit README.md',
+                        status: 'pending',
+                        details: {
+                          fields: {
+                            kind: 'edit',
+                            content: [
+                              {
+                                type: 'diff',
+                                path: 'README.md',
+                                oldText: 'old',
+                                newText: 'new',
+                              },
+                            ],
                           },
+                        },
+                        options: [
+                          { id: 'allow', label: 'Allow', kind: 'allow_once' },
+                          { id: 'deny', label: 'Deny', kind: 'reject_once' },
                         ],
                       },
                     },
-                    options: [
-                      { id: 'allow', label: 'Allow', kind: 'allow_once' },
-                      { id: 'deny', label: 'Deny', kind: 'reject_once' },
-                    ],
                   },
-                },
+                ],
               },
-            ]
-          : [],
-      sessionConfigOptions: [],
-      currentTurnId: null,
-      respondPermission: vi.fn(),
-    }));
-    renderPage();
+            } as unknown as Awaited<ReturnType<typeof conversationApi.detail>>)
+          : null
+      );
+    try {
+      renderPage();
 
-    expect(await screen.findByText('你好')).toBeTruthy();
-    expect(
-      await screen.findByTestId('collaboration-thread-permission-dock-conv-1')
-    ).toBeTruthy();
-    expect(screen.getByRole('heading', { name: '权限申请' })).toBeTruthy();
-    expect(screen.getByText('Edit README.md')).toBeTruthy();
+      expect(await screen.findByText('你好')).toBeTruthy();
+      const overlay = await screen.findByTestId('space-composer-overlay');
+      expect(
+        within(overlay).getByTestId('status-notice-actor-conv-1')
+      ).toBeTruthy();
+      expect(
+        within(overlay).getByRole('heading', { name: 'Edit README.md' })
+      ).toBeTruthy();
+    } finally {
+      detailSpy.mockRestore();
+    }
   });
 
   it('opens a message bubble menu to react, reply, copy and copy request id', async () => {
@@ -5531,9 +5542,8 @@ describe('CollaborationSpacePage', () => {
     );
     expect(dock).toBeTruthy();
     expect(
-      within(dock).getByRole('heading', { name: '权限申请' })
+      within(dock).getByRole('heading', { name: '删除旧 Bot' })
     ).toBeTruthy();
-    expect(within(dock).getByText('删除旧 Bot')).toBeTruthy();
 
     fireEvent.click(within(dock).getByRole('button', { name: '允许' }));
     await waitFor(() =>
@@ -5551,6 +5561,7 @@ describe('CollaborationSpacePage', () => {
         screen.queryByTestId('collaboration-thread-approval-dock')
       ).toBeNull()
     );
+    expect(await screen.findByTestId('collaboration-message-2')).toBeTruthy();
   });
 
   it('shows 正在加载Bot会话... Notice in BotSpace Composer when an inactive Bot session is re-spinning up, keeps input editable, and disables only the send button until ready', async () => {

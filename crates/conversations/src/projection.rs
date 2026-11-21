@@ -149,7 +149,8 @@ pub(super) fn merge_reported_turn_usage(
 // so a subsequent AgentBindingReady / AgentBindingRecovered clears it instead of
 // leaving a permanent error banner in cached snapshots.
 // v23 adds replayable connection/request facts, with independent binding readiness.
-pub const CONVERSATION_PROJECTION_VERSION: u32 = 23;
+// v24 drops auto-approved permission notice rows so auto-approvals stay silent.
+pub const CONVERSATION_PROJECTION_VERSION: u32 = 24;
 pub const OPEN_TIMELINE_ROW_LIMIT: usize = 16;
 
 pub struct OpenConversationProjection {
@@ -169,7 +170,6 @@ const AGENT_BINDING_REBIND_NOTICE_ROW_ID: &str = "notice:agent-session-rebound";
 const AGENT_CONNECTION_RECOVERING_NOTICE_ROW_ID: &str = "notice:agent-connection-recovering";
 const AGENT_SESSION_CONNECT_ERROR_NOTICE_ROW_ID: &str = "notice:agent-session-connect-error";
 const AUTO_PERMISSION_NOTICE_ROW_ID: &str = "notice:auto-permission-approved";
-const AUTO_PERMISSION_NOTICE_TITLE: &str = "已自动批准权限";
 const ANNOUNCEMENT_ROW_PREFIX: &str = "notice:announcement:";
 
 type InternalMessageListenerFn = dyn Fn(&agents::CapturedInternalMessage) + Send + Sync + 'static;
@@ -579,7 +579,6 @@ pub(super) struct ProjectionFold {
     pub(crate) side_rows: Vec<TimelineRow>,
     pub(super) side_row_turns: BTreeMap<String, Uuid>,
     pub(crate) last_sequence: i64,
-    auto_permission_approvals: u32,
     complete_antigravity_reads: bool,
     pub(super) denied_tool_calls: std::collections::BTreeSet<String>,
 }
@@ -673,8 +672,6 @@ struct ProjectionSnapshotState {
     side_row_turns: BTreeMap<String, Uuid>,
     #[serde(default)]
     last_sequence: i64,
-    #[serde(default)]
-    auto_permission_approvals: u32,
     #[serde(default = "default_full_fold")]
     full_fold: bool,
     #[serde(default)]
@@ -691,7 +688,6 @@ impl Default for ProjectionSnapshotState {
             side_rows: Vec::new(),
             side_row_turns: BTreeMap::new(),
             last_sequence: 0,
-            auto_permission_approvals: 0,
             full_fold: true,
             turn_metrics: BTreeMap::new(),
             denied_tool_calls: std::collections::BTreeSet::new(),
@@ -723,7 +719,6 @@ impl ProjectionFold {
             last_sequence: state.last_sequence,
             side_rows: state.side_rows,
             side_row_turns: state.side_row_turns,
-            auto_permission_approvals: state.auto_permission_approvals,
             denied_tool_calls: state.denied_tool_calls,
             ..ProjectionFold::default()
         };
@@ -758,7 +753,6 @@ impl ProjectionFold {
             side_rows: self.side_rows.clone(),
             side_row_turns: self.side_row_turns.clone(),
             last_sequence: self.last_sequence,
-            auto_permission_approvals: self.auto_permission_approvals,
             full_fold: true,
             turn_metrics: self.collect_turn_metrics(),
             denied_tool_calls: self.denied_tool_calls.clone(),
@@ -775,7 +769,6 @@ impl ProjectionFold {
             side_rows: self.side_rows.clone(),
             side_row_turns: self.side_row_turns.clone(),
             last_sequence: self.last_sequence,
-            auto_permission_approvals: self.auto_permission_approvals,
             full_fold: false,
             turn_metrics: turn_metrics.clone(),
             denied_tool_calls: self.denied_tool_calls.clone(),
@@ -800,6 +793,7 @@ impl ProjectionFold {
             conversation_id,
             projection_version: CONVERSATION_PROJECTION_VERSION,
             last_sequence,
+            live_sequence: None,
             rows,
             truncated_from_start: false,
             older_cursor: None,

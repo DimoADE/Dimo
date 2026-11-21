@@ -43,7 +43,7 @@ describe('release workflow contract', () => {
       {
         directory: 'crates/server',
         packageName: 'server',
-        binaryNames: ['dimo-server'],
+        binaryNames: ['dimo-server', 'generate_types'],
       },
       {
         directory: 'crates/dimo-mcp',
@@ -57,11 +57,13 @@ describe('release workflow contract', () => {
       },
     ]);
 
+    const devOnlyBinaries = new Set(['generate_types']);
     for (const workflowPath of ['.github/workflows/pre-release.yml']) {
       const workflow = read(workflowPath);
       for (const { packageName, binaryNames } of packages) {
         expect(workflow, workflowPath).toContain(`-p ${packageName}`);
         for (const binaryName of binaryNames) {
+          if (devOnlyBinaries.has(binaryName)) continue;
           expect(workflow, workflowPath).toContain(`--bin ${binaryName}`);
           expect(workflow, workflowPath).toContain(`release/${binaryName}`);
         }
@@ -84,11 +86,14 @@ describe('release workflow contract', () => {
 
     const workflow = read('.github/workflows/desktop-release.yml');
     expect(workflow).toMatch(/push:\s+tags:\s+- ['"]v\*['"]/);
-    expect(workflow).toContain('bundles: nsis');
-    expect(workflow).toContain('bundles: appimage');
-    expect(workflow).toContain('bundles: app');
-    expect(workflow).not.toContain('bundles: msi,nsis');
-    expect(workflow).not.toContain('bundles: appimage,deb');
+    expect(workflow).toContain('electron_flag: --win --x64');
+    expect(workflow).toContain('electron_flag: --win --arm64');
+    expect(workflow).toContain('electron_flag: --linux --x64');
+    expect(workflow).toContain('electron_flag: --linux --arm64');
+    expect(workflow).toContain('electron_flag: --mac --arm64');
+    expect(workflow).not.toContain('libwebkit2gtk-4.1-dev');
+    expect(workflow).toContain('scripts/stage-host-sidecars.js --electron');
+    expect(workflow).toContain('electron-builder');
     expect(workflow).toContain('xdg-utils');
     expect(workflow).toContain('NODE_OPTIONS: --max-old-space-size=6144');
     expect(workflow).toContain("printf 'APPLE_SIGNING_IDENTITY=%s\\n'");
@@ -119,10 +124,8 @@ describe('release workflow contract', () => {
     expect(read('scripts/smoke-macos-desktop.sh')).toContain(
       'kill -KILL "$app_pid"'
     );
-    expect(workflow).toContain('dimo.exe');
-    expect(workflow).toContain('bundles: appimage');
-    expect(workflow).toContain('bundles: app');
-    expect(workflow).toContain('scripts/macos-notarize-and-dmg.js');
+    expect(workflow).toContain('Dimo.exe');
+    expect(workflow).toContain('scripts/generate-tauri-bridge-manifest.js');
     expect(workflow).toContain(
       "RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}"
     );

@@ -3,6 +3,7 @@ use super::*;
 pub(in crate::manager) mod codec;
 pub(in crate::manager) mod config;
 pub(in crate::manager) mod content;
+pub(in crate::manager) mod edit_diff;
 pub(in crate::manager) mod errors;
 pub(in crate::manager) mod ext;
 pub(in crate::manager) mod mapping;
@@ -12,6 +13,7 @@ pub(in crate::manager) mod vendor;
 pub(in crate::manager) use codec::*;
 pub(in crate::manager) use config::*;
 pub(in crate::manager) use content::*;
+pub(in crate::manager) use edit_diff::EditDiffTracker;
 pub(in crate::manager) use errors::*;
 pub(in crate::manager) use mapping::*;
 pub(in crate::manager) use vendor::*;
@@ -189,6 +191,7 @@ pub(in crate::manager) struct AcpClientBridge {
     pub(in crate::manager) last_activity: Arc<Mutex<Instant>>,
     pub(in crate::manager) grok_subagent: Arc<Mutex<GrokSubagentTracker>>,
     pub(in crate::manager) grok_mcp: Arc<Mutex<GrokMcpTracker>>,
+    pub(in crate::manager) edit_diff: Arc<Mutex<EditDiffTracker>>,
     pub(in crate::manager) pending_session_id: Arc<Mutex<Option<AgentSessionId>>>,
     pub(in crate::manager) working_dir: PathBuf,
     pub(in crate::manager) env: HashMap<String, String>,
@@ -231,6 +234,7 @@ impl AcpClientBridge {
             last_activity,
             grok_subagent,
             grok_mcp,
+            edit_diff: Arc::new(Mutex::new(EditDiffTracker::default())),
             pending_session_id,
             working_dir,
             env,

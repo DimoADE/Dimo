@@ -21,22 +21,30 @@ vi.mock('@/lib/api', () => ({
   settingsWindowApi: settingsWindowApiMock,
 }));
 
-vi.mock('@/lib/desktopShell', () => ({
-  useTauriClient: () => true,
-}));
-
-vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow,
-}));
+vi.mock('@/lib/desktopShell', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/lib/desktopShell')>();
+  return {
+    ...actual,
+    useTauriClient: () => true,
+    getDesktopWindowLabel: () => getCurrentWindow().label,
+    getDesktopShell: () => {
+      const shell = actual.getDesktopShell();
+      return {
+        ...shell,
+        events: {
+          ...shell.events,
+          listen: vi.fn().mockResolvedValue(() => undefined),
+        },
+      };
+    },
+  };
+});
 
 vi.mock('@/components/ui/toast', () => ({
   toast: {
     warning: vi.fn(),
   },
-}));
-
-vi.mock('@/lib/tauriApi', () => ({
-  tauriListen: vi.fn().mockResolvedValue(() => undefined),
 }));
 
 vi.mock('react-i18next', () => ({

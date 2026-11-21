@@ -13,15 +13,11 @@ import {
   usePluginHostContributions,
 } from '@/hooks/usePluginHostContributions';
 import i18n from '@/i18n';
+import { openExternalUrl } from '@/lib/desktopShell';
 
-/** Opens a URL with the system default browser (Tauri shell, window fallback). */
+/** Opens a URL with the system default browser (desktop shell, window fallback). */
 export async function openInSystemBrowser(url: string): Promise<void> {
-  try {
-    const { open } = await import('@tauri-apps/plugin-shell');
-    await open(url);
-  } catch {
-    window.open(url, '_blank', 'noopener,noreferrer');
-  }
+  await openExternalUrl(url);
 }
 
 export interface OpenLinkOptions {

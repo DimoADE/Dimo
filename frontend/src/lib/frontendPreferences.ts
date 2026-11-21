@@ -269,11 +269,11 @@ export async function applyImportedFrontendPreferences(
 export async function readDesktopSharedPreferenceSection<T>(
   sectionKey: string
 ): Promise<T | null> {
-  const { isTauriDesktopShell } = await import('@/utils/platform');
-  if (!isTauriDesktopShell()) return null;
+  const { isDesktopShell } = await import('@/utils/platform');
+  if (!isDesktopShell()) return null;
   try {
-    const { tauriBackendTransport } = await import('@/lib/transport');
-    const all = (await tauriBackendTransport.call(
+    const { getLocalDesktopTransport } = await import('@/lib/transport');
+    const all = (await getLocalDesktopTransport().call(
       'get_frontend_preferences'
     )) as Record<string, unknown> | null;
     if (!all || typeof all !== 'object' || !(sectionKey in all)) {
@@ -290,13 +290,13 @@ export async function writeDesktopSharedPreferenceSection(
   value: JsonValue
 ): Promise<boolean> {
   if (isWithinLocalResetWindow()) return false;
-  const { isTauriDesktopShell } = await import('@/utils/platform');
-  if (!isTauriDesktopShell()) return false;
+  const { isDesktopShell } = await import('@/utils/platform');
+  if (!isDesktopShell()) return false;
   inFlightPreferenceWrites += 1;
   lastLocalPreferenceWriteAt = Date.now();
   try {
-    const { tauriBackendTransport } = await import('@/lib/transport');
-    await tauriBackendTransport.call('update_frontend_preferences', {
+    const { getLocalDesktopTransport } = await import('@/lib/transport');
+    await getLocalDesktopTransport().call('update_frontend_preferences', {
       preferences: { [sectionKey]: value },
     });
     return true;

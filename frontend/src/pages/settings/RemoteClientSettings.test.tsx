@@ -61,10 +61,6 @@ vi.mock('@/components/ui/toast', () => ({
   },
 }));
 
-vi.mock('@tauri-apps/api/event', () => ({
-  listen: vi.fn().mockResolvedValue(() => undefined),
-}));
-
 const connectedHost = {
   id: 'current',
   origin: 'http://192.168.1.9:17891',

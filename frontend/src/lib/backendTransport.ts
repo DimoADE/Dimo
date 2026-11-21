@@ -10,8 +10,8 @@ export type {
 } from './transport';
 export {
   configuredBackendTransport,
-  TauriTransport,
-  tauriBackendTransport,
+  fallbackDesktopTransport,
+  getLocalDesktopTransport,
 } from './transport';
 export { callApplicationCommand } from './transport';
 

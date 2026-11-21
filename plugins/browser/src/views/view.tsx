@@ -430,12 +430,30 @@ function ruleActionLabel(action: HostRuleAction): string {
 }
 
 // ============================================================================
-// Direct Tauri RPC Helper & Live HostBrowserPanel DOM Synchronizer
+// Direct Host RPC Helper & Live HostBrowserPanel DOM Synchronizer
 // ============================================================================
 
 type TauriInternals = {
   invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
 };
+
+type ElectronBackendBridge = {
+  baseUrl?: string;
+  token?: string;
+};
+
+type PluginWorkerInvoke = (
+  handler: string,
+  input?: Record<string, unknown>
+) => Promise<unknown>;
+
+let activeBrowserWorkerInvoke: PluginWorkerInvoke | null = null;
+
+function setActiveBrowserWorkerInvoke(invoke?: PluginWorkerInvoke | null): void {
+  if (typeof invoke === 'function') {
+    activeBrowserWorkerInvoke = invoke;
+  }
+}
 
 function getTauriInvoke():
   | ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>)
@@ -448,14 +466,66 @@ function getTauriInvoke():
     : null;
 }
 
+function getElectronBackend(): { baseUrl: string; token: string } | null {
+  const desktop = (
+    globalThis as unknown as {
+      dimoDesktop?: { backend?: ElectronBackendBridge };
+    }
+  ).dimoDesktop;
+  const baseUrl = desktop?.backend?.baseUrl?.trim();
+  const token = desktop?.backend?.token?.trim();
+  if (!baseUrl || !token) return null;
+  return { baseUrl: baseUrl.replace(/\/+$/, ''), token };
+}
+
 async function invokeBrowserContributionDirect<T = unknown>(
   pluginId: string,
   operation: string,
   input: Record<string, unknown> = {}
 ): Promise<T> {
+  if (activeBrowserWorkerInvoke) {
+    return (await activeBrowserWorkerInvoke('browser.dispatch', {
+      operation,
+      input,
+    })) as T;
+  }
+
+  const electronBackend = getElectronBackend();
+  if (electronBackend) {
+    const res = await fetch(
+      `${electronBackend.baseUrl}/api/v1/call/plugin_invoke_contribution`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${electronBackend.token}`,
+        },
+        body: JSON.stringify({
+          operation_id: globalThis.crypto.randomUUID(),
+          args: {
+            pluginId,
+            handler: 'browser.dispatch',
+            input: {
+              operation,
+              input,
+            },
+          },
+        }),
+      }
+    );
+    if (!res.ok) {
+      throw new Error(`Host browser invoke failed (${res.status})`);
+    }
+    const envelope = (await res.json()) as { data?: T } | T;
+    if (envelope && typeof envelope === 'object' && 'data' in envelope) {
+      return (envelope as { data: T }).data;
+    }
+    return envelope as T;
+  }
+
   const tauriInvoke = getTauriInvoke();
   if (!tauriInvoke) {
-    throw new Error('Tauri invoke is unavailable');
+    throw new Error('Host invoke bridge is unavailable');
   }
   const response = (await tauriInvoke('application_call', {
     command: 'plugin_invoke_contribution',
@@ -1814,6 +1884,10 @@ export default function BrowserSettingsRemoteView({
 
   const queueRef = useRef<Promise<unknown>>(Promise.resolve());
   const pluginId = environment?.pluginId || 'dimo.browser';
+
+  useEffect(() => {
+    setActiveBrowserWorkerInvoke(environment?.invoke);
+  }, [environment?.invoke]);
 
   const dispatch = useCallback(
     <T = unknown,>(

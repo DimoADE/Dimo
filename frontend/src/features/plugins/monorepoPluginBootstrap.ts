@@ -97,6 +97,12 @@ const MONOREPO_PLUGIN_DESCRIPTORS: readonly MonorepoPluginDescriptor[] = [
     version: '2.0.0',
     loader: () => import('../../../../plugins/code-completion/app/main.js'),
   },
+  {
+    dirName: 'voice-input',
+    name: '语音输入',
+    version: '2.0.0',
+    loader: () => import('../../../../plugins/voice-input/app/main.js'),
+  },
 ];
 
 function unwrapPluginModule(raw: RawPluginModuleExport): DimoPluginModule {

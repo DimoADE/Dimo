@@ -458,11 +458,13 @@ pub(crate) async fn probe_first_output_line(path: &Path, args: &[&str]) -> Optio
         return None;
     }
     let mut command = utils::process::new_hidden_tokio_command(path, args.iter().copied());
-    command.kill_on_drop(true);
-    let output = tokio::time::timeout(DIAGNOSTIC_COMMAND_TIMEOUT, command.output())
-        .await
-        .ok()?
-        .ok()?;
+    if std::env::var_os("HERMES_NPM_AUTO_SETUP").is_none() {
+        command.env("HERMES_NPM_AUTO_SETUP", "0");
+    }
+    let output =
+        utils::process::run_command_output_with_timeout(&mut command, DIAGNOSTIC_COMMAND_TIMEOUT)
+            .await
+            .ok()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     stdout

@@ -80,12 +80,33 @@ struct NpmVersion {
     peer_dependencies: std::collections::BTreeMap<String, String>,
     #[serde(default, rename = "optionalDependencies")]
     optional_dependencies: std::collections::BTreeMap<String, String>,
+    #[serde(default, deserialize_with = "deserialize_string_map")]
+    engines: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     os: Vec<String>,
     #[serde(default)]
     cpu: Vec<String>,
     #[serde(default)]
     libc: Vec<String>,
+}
+
+fn deserialize_string_map<'de, D>(
+    deserializer: D,
+) -> Result<std::collections::BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(serde_json::Value::Object(map)) = value else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    Ok(map
+        .into_iter()
+        .filter_map(|(k, v)| match v {
+            serde_json::Value::String(s) => Some((k, s)),
+            _ => None,
+        })
+        .collect())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -209,6 +230,19 @@ pub async fn fetch_npm_package_requirements(
     Ok(requirements)
 }
 
+pub async fn fetch_npm_node_engine(
+    fetcher: &dyn RegistryFetcher,
+    package_name: &str,
+    version: &str,
+) -> Option<String> {
+    let version_info = fetch_npm_version(fetcher, package_name, version).await.ok()?;
+    version_info
+        .engines
+        .get("node")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// Warn when a Runtime package version does not satisfy the ACP adapter's
 /// declared dependency range. Missing declarations are not a warning.
 pub fn runtime_acp_compatibility_warning(
@@ -297,6 +331,9 @@ pub async fn plan_runtime_acp_compatibility_warning(
 
 pub fn npm_range_allows(range: &str, version: &str) -> bool {
     let version = version.trim().trim_start_matches('v');
+    if semver_parts(version).is_empty() {
+        return false;
+    }
     range
         .split("||")
         .map(str::trim)
@@ -304,36 +341,119 @@ pub fn npm_range_allows(range: &str, version: &str) -> bool {
         .any(|candidate| npm_single_range_allows(candidate, version))
 }
 
+fn tokenize_npm_comparators(range: &str) -> Vec<String> {
+    let mut comparators = Vec::new();
+    let mut tokens = range.split_whitespace().peekable();
+    while let Some(token) = tokens.next() {
+        if matches!(token, ">=" | "<=" | ">" | "<" | "=" | "^" | "~")
+            && let Some(next) = tokens.next()
+        {
+            comparators.push(format!("{token}{next}"));
+        } else {
+            comparators.push(token.to_string());
+        }
+    }
+    comparators
+}
+
 fn npm_single_range_allows(range: &str, version: &str) -> bool {
-    let range = range.trim();
-    if range == "*" || range == "x" || range == "latest" {
+    let comparators = tokenize_npm_comparators(range.trim());
+    if comparators.is_empty() {
+        return false;
+    }
+    comparators
+        .into_iter()
+        .all(|comparator| npm_comparator_allows(&comparator, version))
+}
+
+fn npm_comparator_allows(comparator: &str, version: &str) -> bool {
+    let comparator = comparator.trim();
+    if comparator == "*" || comparator.eq_ignore_ascii_case("x") || comparator == "latest" {
         return true;
     }
-    if let Some(minimum) = range.strip_prefix(">=") {
-        return crate::local_detection::version_at_least(version, minimum.trim());
+    if let Some(minimum) = comparator.strip_prefix(">=") {
+        return compare_dotted_versions(version, minimum.trim())
+            .is_some_and(|ord| ord != std::cmp::Ordering::Less);
     }
-    if let Some(minimum) = range.strip_prefix('^') {
+    if let Some(maximum) = comparator.strip_prefix("<=") {
+        return compare_dotted_versions(version, maximum.trim())
+            .is_some_and(|ord| ord != std::cmp::Ordering::Greater);
+    }
+    if let Some(minimum) = comparator.strip_prefix('>') {
+        return compare_dotted_versions(version, minimum.trim())
+            == Some(std::cmp::Ordering::Greater);
+    }
+    if let Some(maximum) = comparator.strip_prefix('<') {
+        return compare_dotted_versions(version, maximum.trim()) == Some(std::cmp::Ordering::Less);
+    }
+    if let Some(minimum) = comparator.strip_prefix('^') {
         let minimum = minimum.trim();
         return same_semver_major(version, minimum)
-            && crate::local_detection::version_at_least(version, minimum);
+            && compare_dotted_versions(version, minimum)
+                .is_some_and(|ord| ord != std::cmp::Ordering::Less);
     }
-    if let Some(minimum) = range.strip_prefix('~') {
+    if let Some(minimum) = comparator.strip_prefix('~') {
         let minimum = minimum.trim();
         return same_semver_minor(version, minimum)
-            && crate::local_detection::version_at_least(version, minimum);
+            && compare_dotted_versions(version, minimum)
+                .is_some_and(|ord| ord != std::cmp::Ordering::Less);
     }
-    let exact = range.strip_prefix('=').unwrap_or(range).trim();
-    version == exact || crate::local_detection::version_at_least(version, exact)
+    if let Some(exact) = comparator.strip_prefix('=') {
+        return compare_dotted_versions(version, exact.trim()) == Some(std::cmp::Ordering::Equal);
+    }
+
+    let version_parts = semver_parts(version);
+    let raw_segments: Vec<&str> = comparator.trim().trim_start_matches('v').split('.').collect();
+    let wildcard_prefix = raw_segments
+        .iter()
+        .any(|segment| segment.eq_ignore_ascii_case("x") || *segment == "*");
+    if wildcard_prefix {
+        let fixed: Vec<u64> = raw_segments
+            .iter()
+            .take_while(|segment| !segment.eq_ignore_ascii_case("x") && **segment != "*")
+            .map_while(|segment| segment.parse::<u64>().ok())
+            .collect();
+        return !fixed.is_empty()
+            && version_parts.len() >= fixed.len()
+            && version_parts[..fixed.len()] == fixed[..];
+    }
+
+    let expected_parts = semver_parts(comparator);
+    if expected_parts.is_empty() || version_parts.is_empty() {
+        return false;
+    }
+    if expected_parts.len() < 3 {
+        return version_parts.len() >= expected_parts.len()
+            && version_parts[..expected_parts.len()] == expected_parts[..];
+    }
+    compare_dotted_versions(version, comparator) == Some(std::cmp::Ordering::Equal)
 }
 
 fn semver_parts(version: &str) -> Vec<u64> {
-    version
+    let trimmed = version.trim().trim_start_matches('v');
+    trimmed
         .split(|character: char| !character.is_ascii_digit() && character != '.')
         .next()
-        .unwrap_or(version)
+        .unwrap_or(trimmed)
         .split('.')
         .map_while(|part| part.parse().ok())
         .collect()
+}
+
+fn compare_dotted_versions(left: &str, right: &str) -> Option<std::cmp::Ordering> {
+    let left_parts = semver_parts(left);
+    let right_parts = semver_parts(right);
+    if left_parts.is_empty() || right_parts.is_empty() {
+        return None;
+    }
+    for index in 0..left_parts.len().max(right_parts.len()) {
+        let l = left_parts.get(index).copied().unwrap_or(0);
+        let r = right_parts.get(index).copied().unwrap_or(0);
+        if l != r {
+            return Some(l.cmp(&r));
+        }
+    }
+    Some(std::cmp::Ordering::Equal)
 }
 
 fn same_semver_major(left: &str, right: &str) -> bool {
@@ -985,6 +1105,7 @@ mod tests {
             dependencies: std::collections::BTreeMap::new(),
             peer_dependencies: std::collections::BTreeMap::new(),
             optional_dependencies: std::collections::BTreeMap::new(),
+            engines: std::collections::BTreeMap::new(),
             os: os.iter().map(|value| (*value).to_string()).collect(),
             cpu: cpu.iter().map(|value| (*value).to_string()).collect(),
             libc: libc.iter().map(|value| (*value).to_string()).collect(),
@@ -1007,6 +1128,53 @@ mod tests {
             &version(&["!darwin"], &["arm64"], &[]),
             mac_arm64
         ));
+    }
+
+    #[test]
+    fn npm_range_allows_handles_openclaw_node_comparator_sets() {
+        let openclaw_engine = ">=24.16.0 <25 || >=26.1.0";
+        assert!(!npm_range_allows(openclaw_engine, "v22.22.3"));
+        assert!(!npm_range_allows(openclaw_engine, "v24.15.9"));
+        assert!(npm_range_allows(openclaw_engine, "v24.16.0"));
+        assert!(npm_range_allows(openclaw_engine, "v24.22.3"));
+        assert!(!npm_range_allows(openclaw_engine, "v25.0.0"));
+        assert!(!npm_range_allows(openclaw_engine, "v26.0.0"));
+        assert!(npm_range_allows(openclaw_engine, "v26.1.0"));
+
+        assert!(npm_range_allows(">= 20.0.0 < 25", "v22.22.3"));
+        assert!(npm_range_allows("24.x", "v24.22.3"));
+        assert!(!npm_range_allows("24.x", "v22.22.3"));
+        assert!(!npm_range_allows("=24.16.0", "v25.0.0"));
+        assert!(npm_range_allows("=24.16.0", "24.16.0"));
+        assert!(!npm_range_allows(">=20", "garbage"));
+    }
+
+    #[tokio::test]
+    async fn fetches_npm_node_engine_and_tolerates_non_string_engine_entries() {
+        let fetcher = ScriptedFetcher(Mutex::new(HashMap::from([(
+            "https://registry.npmjs.org/openclaw".to_string(),
+            serde_json::to_vec(&serde_json::json!({
+                "versions": {
+                    "2026.11.5": {
+                        "engines": {
+                            "node": ">=24.16.0 <25 || >=26.1.0",
+                            "extra": 123
+                        },
+                        "dist": {
+                            "integrity": "sha512-x",
+                            "tarball": "https://example/openclaw.tgz"
+                        }
+                    }
+                }
+            }))
+            .unwrap(),
+        )])));
+        assert_eq!(
+            fetch_npm_node_engine(&fetcher, "openclaw", "2026.11.5")
+                .await
+                .as_deref(),
+            Some(">=24.16.0 <25 || >=26.1.0")
+        );
     }
 
     #[tokio::test]

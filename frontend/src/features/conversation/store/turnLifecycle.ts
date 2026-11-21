@@ -117,6 +117,8 @@ export type LiveTextOverlay = {
   reasoning: string;
   /** Highest applied append revision, for idempotent dedup. */
   revision: bigint;
+  /** Highest applied monotonic live_sequence for unpersisted streaming deltas. */
+  liveSequence?: bigint;
   /** Highest unconsuming patch revision (e.g. usage-only patch) covering this overlay. */
   patchedRevision?: bigint;
 };
@@ -137,6 +139,8 @@ export type ConversationStoreEntry = {
   lastSequence: bigint;
   /** Highest authoritative SQLite snapshot/backfill sequence applied (`load_success` / `apply_gap_rows`). */
   loadedLastSequence: bigint;
+  /** Highest unpersisted live-delta cursor already overlaid into `load_success`. */
+  loadedLiveSequence: bigint;
   projectionVersion: number | null;
   currentTurnId: string | null;
   loading: boolean;
@@ -227,6 +231,9 @@ export function conversationStoreReducer(
       return updateEntry(state, action.conversationId, (entry) => {
         const detailLastSequence = toBigInt(
           action.detail.timeline.last_sequence
+        );
+        const detailLiveSequence = toBigInt(
+          action.detail.timeline.live_sequence ?? 0n
         );
         const forceReplace = Boolean(action.forceReplaceWindow);
         const keepRealtimeRows =
@@ -365,6 +372,11 @@ export function conversationStoreReducer(
             : detailLastSequence > entry.loadedLastSequence
               ? detailLastSequence
               : entry.loadedLastSequence,
+          loadedLiveSequence: forceReplace
+            ? detailLiveSequence
+            : detailLiveSequence > entry.loadedLiveSequence
+              ? detailLiveSequence
+              : entry.loadedLiveSequence,
           projectionVersion: action.detail.projection_version,
           currentTurnId: action.detail.current_turn?.id ?? entry.currentTurnId,
           loading: false,
@@ -749,7 +761,12 @@ function applyOpsSequence(
     fallbackTurnStartedAt?: string | null;
   },
   ops: ConversationRowOp[],
-  loadedWatermark: bigint
+  loadedWatermark: bigint,
+  options?: {
+    unpersistedLiveBatch?: boolean;
+    batchLastSequence?: bigint;
+    batchLiveSequence?: bigint | null;
+  }
 ): {
   windowRows: TimelineRow[];
   liveRows: TimelineRow[];
@@ -772,8 +789,15 @@ function applyOpsSequence(
     liveRows.map((row, index) => [row.row_id, index] as const)
   );
   for (const op of ops) {
-    if (loadedWatermark > 0n && opRevision(op) <= loadedWatermark) {
-      continue;
+    const rev = opRevision(op);
+    if (loadedWatermark > 0n) {
+      const stale = options?.unpersistedLiveBatch
+        ? rev < (options.batchLastSequence ?? loadedWatermark) &&
+          rev <= loadedWatermark
+        : rev <= loadedWatermark;
+      if (stale) {
+        continue;
+      }
     }
     if (op.op === 'upsert') {
       const reconciled = reconcileOptimisticTurnAgainstUserRow(
@@ -866,7 +890,10 @@ function applyOpsSequence(
         );
       }
     } else {
-      liveText = appendLiveText(liveText, settledAssistantRowIds, op);
+      liveText = appendLiveText(liveText, settledAssistantRowIds, op, {
+        allowSameRevision: Boolean(options?.unpersistedLiveBatch),
+        liveSequence: options?.batchLiveSequence ?? null,
+      });
     }
   }
   return {
@@ -1031,6 +1058,16 @@ function applyRowOpBatch(
       ...applyBatchMetadata(entry, batch, false),
     };
   }
+  const batchLastSeq = toBigInt(batch.last_sequence);
+  const batchLiveSeq =
+    batch.live_sequence != null ? toBigInt(batch.live_sequence) : null;
+  const isUnpersistedLiveBatch =
+    !isReset &&
+    ((batchLiveSeq !== null && batchLiveSeq > entry.loadedLiveSequence) ||
+      (batchLiveSeq === null &&
+        batch.previous_sequence != null &&
+        toBigInt(batch.previous_sequence) === batchLastSeq &&
+        batchLastSeq >= entry.loadedLastSequence));
   const applied = applyOpsSequence(
     {
       conversationId: entry.conversationId,
@@ -1044,7 +1081,14 @@ function applyRowOpBatch(
       fallbackTurnStartedAt: extractCurrentTurnStartedAt(entry.detail),
     },
     batch.ops,
-    isReset ? 0n : entry.loadedLastSequence
+    isReset ? 0n : entry.loadedLastSequence,
+    isReset
+      ? undefined
+      : {
+          unpersistedLiveBatch: isUnpersistedLiveBatch,
+          batchLastSequence: batchLastSeq,
+          batchLiveSequence: batchLiveSeq,
+        }
   );
   let { windowRows, liveRows } = applied;
   const {
@@ -1102,6 +1146,7 @@ function applyRowOpBatch(
         ? lastSequence
         : entry.lastSequence,
     loadedLastSequence: isReset ? 0n : entry.loadedLastSequence,
+    loadedLiveSequence: isReset ? 0n : entry.loadedLiveSequence,
     olderCursor: isReset ? null : entry.olderCursor,
     prefixHash: isReset ? null : entry.prefixHash,
     userTurnsBeforeOffset: isReset ? 0 : entry.userTurnsBeforeOffset,
@@ -1472,6 +1517,7 @@ function createEntry(conversationId: string): ConversationStoreEntry {
     settledAssistantRowIds: {},
     lastSequence: 0n,
     loadedLastSequence: 0n,
+    loadedLiveSequence: 0n,
     projectionVersion: null,
     currentTurnId: null,
     loading: false,

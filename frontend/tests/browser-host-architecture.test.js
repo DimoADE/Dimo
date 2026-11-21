@@ -63,7 +63,7 @@ test('workspace and Tauri shell no longer link CEF or desktop browser_* commands
   const workspace = readRepoFile('Cargo.toml');
   const tauriCargo = readRepoFile('src-tauri/Cargo.toml');
   const tauri = readRepoFile('src-tauri/src/lib.rs');
-  const generateTypes = readRepoFile('src-tauri/src/bin/generate_types.rs');
+  const generateTypes = readRepoFile('crates/server/src/bin/generate_types.rs');
   const hostCommands = readRepoFile('shared/hostCommands.ts');
   const desktopDev = readRepoFile('scripts/run-tauri-dev-desktop.js');
   const desktopBuild = readRepoFile('scripts/run-tauri-build.js');

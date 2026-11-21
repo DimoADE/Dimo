@@ -13,7 +13,7 @@ export function isDirectBrowserDisplayUrl(
   url: string | null | undefined
 ): boolean {
   if (!url) return false;
-  return /^(blob:|asset:|https?:|tauri:)/i.test(url);
+  return /^(blob:|asset:|dimo-asset:|dimo-app:|https?:|tauri:)/i.test(url);
 }
 
 export function isBrowserDisplayUrl(url: string | null | undefined): boolean {

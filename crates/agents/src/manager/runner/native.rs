@@ -342,6 +342,9 @@ impl AgentConnectionRunner {
                     self.forward_native_permission(&driver, &handle, &permission_id, response)
                         .await;
                 }
+                AgentConnectionCommand::SetAutoApproveMode { mode } => {
+                    self.set_connection_auto_approve_mode(mode).await;
+                }
                 AgentConnectionCommand::RespondElicitation {
                     elicitation_id,
                     response,
@@ -727,6 +730,9 @@ impl AgentConnectionRunner {
                         } => {
                             self.forward_native_permission(&driver, handle, &permission_id, response)
                                 .await;
+                        }
+                        AgentConnectionCommand::SetAutoApproveMode { mode } => {
+                            self.set_connection_auto_approve_mode(mode).await;
                         }
                         AgentConnectionCommand::RespondElicitation {
                             elicitation_id,

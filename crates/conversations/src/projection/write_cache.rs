@@ -210,7 +210,6 @@ pub(crate) async fn get_or_load_write_projector_on_conn(
             side_rows: snap_state.side_rows,
             side_row_turns: snap_state.side_row_turns,
             last_sequence: snap_state.last_sequence,
-            auto_permission_approvals: snap_state.auto_permission_approvals,
             complete_antigravity_reads,
             ..ProjectionFold::default()
         };

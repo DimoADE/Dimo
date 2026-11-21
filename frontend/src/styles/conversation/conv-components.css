@@ -213,7 +213,9 @@
    Product cards such as host delegation own their inset and must keep it. */
 .conv-assistant-body
   > .conv-entry-item
-  > div:not(.host-delegation-card):not(.ask-question-tool-card) {
+  > div:not(.host-delegation-card):not(.ask-question-tool-card):not(
+    .permission-capsule-bar
+  ):not(.permission-capsule-drawer) {
   padding-left: 0 !important;
   padding-right: 0 !important;
 }

@@ -33,6 +33,7 @@ import { AstryxSelect } from '@/components/ui/astryx-select';
 import { useOptionMenuPlacement } from '@/components/ui/option-menu-position';
 import { ConfirmDialog } from '@/components/dialogs/shared/ConfirmDialog';
 import { Button } from '@/components/ui/button';
+import { openExternalUrl as openDesktopExternalUrl } from '@/lib/desktopShell';
 import { toast } from '@/components/ui/toast';
 import { usePortalContainer } from '@/contexts/PortalContainerContext';
 import { NativeSurfaceOcclusionHold } from '@/contexts/WorkspaceOverlayContext';
@@ -1462,10 +1463,5 @@ async function openExternalUrl(url: string): Promise<void> {
     return;
   }
   if (!['http:', 'https:'].includes(parsed.protocol)) return;
-  try {
-    const { open } = await import('@tauri-apps/plugin-shell');
-    await open(parsed.toString());
-  } catch {
-    window.open(parsed.toString(), '_blank', 'noopener,noreferrer');
-  }
+  await openDesktopExternalUrl(parsed.toString());
 }

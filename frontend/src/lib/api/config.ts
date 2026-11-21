@@ -98,7 +98,10 @@ export const configApi = {
     const capabilities = transport.capabilities
       ? await transport.capabilities()
       : { capabilities: [] as string[] };
-    if (!capabilities.capabilities.includes('desktop.tauri')) {
+    const hasLocalDesktop =
+      capabilities.capabilities.includes('desktop.electron') ||
+      capabilities.capabilities.includes('desktop.tauri');
+    if (!hasLocalDesktop) {
       return { available: false };
     }
     return backendCall<CheckEditorAvailabilityResponse>(
@@ -111,7 +114,10 @@ export const configApi = {
     const capabilities = transport.capabilities
       ? await transport.capabilities()
       : { capabilities: [] as string[] };
-    if (!capabilities.capabilities.includes('desktop.tauri')) {
+    const hasLocalDesktop =
+      capabilities.capabilities.includes('desktop.electron') ||
+      capabilities.capabilities.includes('desktop.tauri');
+    if (!hasLocalDesktop) {
       return;
     }
     return backendCall<void>('play_notification_sound', {

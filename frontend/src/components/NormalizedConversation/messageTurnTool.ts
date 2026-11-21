@@ -39,7 +39,7 @@ export type ToolDisplayEntry = NormalizedEntry & {
 
 /** Opaque tool identifiers that carry no display meaning on their own. */
 const OPAQUE_TOOL_ID =
-  /^(call_[A-Za-z0-9]{6,}|fc_[A-Za-z0-9]{6,}|tool[-_][A-Za-z0-9]{6,}|toolu_[A-Za-z0-9]{6,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+  /^(?:call_[A-Za-z0-9]{6,}|fc_[A-Za-z0-9]{6,}|tool[-_][A-Za-z0-9]{6,}|toolu_[A-Za-z0-9]{6,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?::\d+)?$/i;
 
 /**
  * Agents sometimes record the real tool only as `arguments.variant` and leave
@@ -753,8 +753,10 @@ function toolActionType(
   const obj = asRecord(parsed);
   const reportedName = toolName.trim();
   const reportedCanonical = canonicalName(reportedName);
+  const reportedIsOpaque = OPAQUE_TOOL_ID.test(reportedName);
   const variant =
     reportedCanonical.length === 0 ||
+    reportedIsOpaque ||
     PLACEHOLDER_TOOL_NAMES.has(reportedCanonical)
       ? firstString(obj, 'variant')
       : null;
@@ -802,7 +804,8 @@ function toolActionType(
   ) {
     return {
       ...commandResult(status, output, structuredResult),
-      command: command ?? labelName,
+      command:
+        command ?? (OPAQUE_TOOL_ID.test(labelName) ? '' : labelName),
     };
   }
 
@@ -896,7 +899,7 @@ function toolActionType(
       action: 'task_create',
       description:
         firstString(obj, 'description', 'title', 'name', 'prompt', 'tool') ??
-        labelName,
+        displayToolName(labelName, obj),
       subagent_type: subagentType ?? firstString(obj, 'tool'),
       result: structuredResult,
     };
@@ -1019,6 +1022,7 @@ function resolveMcpToolName(toolName: string, mcpMeta: McpToolMeta): string {
   if (mcpMeta.tool) {
     if (
       !trimmed ||
+      OPAQUE_TOOL_ID.test(trimmed) ||
       canonicalName(trimmed) === 'mcptoolcall' ||
       (mcpMeta.server &&
         (trimmed === `${mcpMeta.server}_${mcpMeta.tool}` ||

@@ -1,4 +1,5 @@
 import { configApi, type AppReleaseStatus } from '@/lib/api';
+import { getDesktopShell } from '@/lib/desktopShell';
 
 import { resolveAppUpdate } from './resolve';
 import {
@@ -39,16 +40,10 @@ let stagedUpdate: {
   close?: () => Promise<void>;
 } | null = null;
 
-function isWindowsPlatform(): boolean {
-  if (typeof navigator === 'undefined') return false;
-  return /windows|win32|win64/i.test(navigator.userAgent);
-}
-
 /// Move session data out of the install tree before the updater replaces it.
 /// A failure aborts the install: continuing on macOS deletes the only database.
 async function evacuateUserDataBeforeReplacingInstall(): Promise<void> {
-  const { invoke } = await import('@tauri-apps/api/core');
-  await invoke('evacuate_user_data_before_update');
+  await getDesktopShell().invoke('evacuate_user_data_before_update');
 }
 
 function setLifecycleState(next: AppUpdateLifecycleState): void {
@@ -142,8 +137,7 @@ function toGitHubCheck(status: AppReleaseStatus): GitHubReleaseCheck {
 
 async function getCurrentVersion(): Promise<string> {
   try {
-    const { getVersion } = await import('@tauri-apps/api/app');
-    return await getVersion();
+    return await getDesktopShell().getAppVersion();
   } catch {
     return '';
   }
@@ -152,8 +146,9 @@ async function getCurrentVersion(): Promise<string> {
 async function checkSignedFeed(): Promise<SignedFeedUpdate | null> {
   if (import.meta.env.DEV) return null;
 
-  const { check } = await import('@tauri-apps/plugin-updater');
-  const update = await check({ timeout: MANIFEST_TIMEOUT_MS });
+  const update = await getDesktopShell().updater.check({
+    timeout: MANIFEST_TIMEOUT_MS,
+  });
   if (!update) return null;
 
   try {
@@ -164,7 +159,7 @@ async function checkSignedFeed(): Promise<SignedFeedUpdate | null> {
     };
   } finally {
     try {
-      await update.close();
+      await update.close?.();
     } catch {
       // One leaked resource slot is better than losing the check result.
     }
@@ -285,8 +280,9 @@ export async function installSignedUpdate(
     }
 
     const cachedVersion = readLastCheck()?.update?.version ?? null;
-    const { check } = await import('@tauri-apps/plugin-updater');
-    const update = await check({ timeout: MANIFEST_TIMEOUT_MS });
+    const update = await getDesktopShell().updater.check({
+      timeout: MANIFEST_TIMEOUT_MS,
+    });
     if (!update) {
       const message = 'No signed update is available to install';
       setLifecycleState({
@@ -350,40 +346,19 @@ export async function installSignedUpdate(
     };
 
     try {
-      const canSplitDownloadAndInstall =
-        typeof update.download === 'function' &&
-        typeof update.install === 'function';
+      const download = update.download;
+      const install = update.install;
 
-      if (canSplitDownloadAndInstall) {
-        await update.download(handleDownloadEvent);
-        if (isWindowsPlatform()) {
-          stagedUpdate = update;
-          closeOnExit = false;
-        } else {
-          setLifecycleState({
-            status: 'installing',
-            version: targetVersion,
-            downloaded,
-            total,
-            error: null,
-          });
-          await evacuateUserDataBeforeReplacingInstall();
-          await update.install();
-        }
-      } else if (isWindowsPlatform()) {
-        await evacuateUserDataBeforeReplacingInstall();
-        await update.downloadAndInstall((event) => {
-          handleDownloadEvent(event);
-          if (event.event === 'Finished') {
-            setLifecycleState({
-              status: 'installing',
-              version: targetVersion,
-              downloaded,
-              total,
-              error: null,
-            });
-          }
-        });
+      if (typeof download === 'function' && typeof install === 'function') {
+        await download.call(update, handleDownloadEvent);
+        stagedUpdate = {
+          install: () => install.call(update),
+          close:
+            typeof update.close === 'function'
+              ? () => update.close!()
+              : undefined,
+        };
+        closeOnExit = false;
       } else {
         await evacuateUserDataBeforeReplacingInstall();
         await update.downloadAndInstall((event) => {
@@ -465,8 +440,7 @@ export async function relaunchApp(): Promise<void> {
       }
     }
 
-    const { relaunch } = await import('@tauri-apps/plugin-process');
-    await relaunch();
+    await getDesktopShell().updater.relaunch();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     setLifecycleState({

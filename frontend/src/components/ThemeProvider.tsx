@@ -102,13 +102,25 @@ export function ThemeProvider({
 
   // Listen for cross-window theme changes (e.g. settings window → main window)
   useEffect(() => {
+    let disposed = false;
     let unlisten: (() => void) | undefined;
-    backendListen<{ theme: ThemeMode }>('theme-changed', (payload) => {
-      setThemeState(payload.theme);
-    }).then((fn) => {
-      unlisten = fn;
-    });
-    return () => unlisten?.();
+    void backendListen<{ theme: ThemeMode }>('theme-changed', (payload) => {
+      if (!disposed) {
+        setThemeState(payload.theme);
+      }
+    })
+      .then((fn) => {
+        if (disposed) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, []);
 
   const setTheme = (newTheme: ThemeMode) => {

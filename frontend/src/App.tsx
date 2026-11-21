@@ -8,10 +8,10 @@ import {
   useCallback,
   useEffect,
   useRef,
+  useState,
   type ReactNode,
 } from 'react';
 import { BrowserRouter, useLocation, useNavigate } from 'react-router-dom';
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import { usePreviousPath } from '@/hooks/usePreviousPath';
 import { useUiPreferencesScratch } from '@/hooks/useUiPreferencesScratch';
 
@@ -46,7 +46,7 @@ import { isSettingsSurfacePath } from '@/lib/settingsPreload';
 import { AgentWorkbenchProvider } from '@/features/agents/useAgentWorkbench';
 import { scheduleIdleWork } from '@/lib/scheduleIdleWork';
 import { revealDesktopWindowAfterPaint } from '@/lib/revealDesktopWindow';
-import { useTauriClient } from '@/lib/desktopShell';
+import { getDesktopWindowLabel, useTauriClient } from '@/lib/desktopShell';
 import { useRemoteHostReleaseUpdateToast } from '@/hooks/useRemoteHostReleaseUpdateToast';
 import { usePluginContributionCatalogSync } from '@/hooks/usePluginHostContributions';
 import { useProviderBindConfirmations } from '@/hooks/useProviderBindConfirmations';
@@ -121,7 +121,7 @@ function MainAppContent({ children }: { children: ReactNode }) {
   const crashPromptShownRef = useRef(false);
   const postUpdateRestoreHandledRef = useRef(false);
   const isTauri = useTauriClient();
-  const isMainDesktopWindow = isTauri && getCurrentWindow().label === 'main';
+  const isMainDesktopWindow = isTauri && getDesktopWindowLabel() === 'main';
   const shouldManageProjectWindows = !isTauri || isMainDesktopWindow;
   const configRef = useRef(config);
   configRef.current = config;
@@ -260,7 +260,7 @@ function MainAppContent({ children }: { children: ReactNode }) {
   // newest locally captured crash report (full content, user decides whether to
   // file it). Runs at most once per app session.
   useEffect(() => {
-    if (!isTauri) return;
+    if (!isMainDesktopWindow) return;
     if (!config?.crash_reports_enabled || crashPromptShownRef.current) return;
     const startupPromptStep = getStartupPromptStep({
       config,
@@ -302,10 +302,10 @@ function MainAppContent({ children }: { children: ReactNode }) {
         crashPromptShownRef.current = false;
       }
     };
-  }, [config, isTauri, location.pathname]);
+  }, [config, isMainDesktopWindow, location.pathname]);
 
   useEffect(() => {
-    if (!isTauri || !config?.disclaimer_acknowledged) return;
+    if (!isMainDesktopWindow || !config?.disclaimer_acknowledged) return;
     if (config.auto_update_enabled === false || maintenanceStartedRef.current)
       return;
 
@@ -334,14 +334,14 @@ function MainAppContent({ children }: { children: ReactNode }) {
         maintenanceStartedRef.current = false;
       }
     };
-  }, [config, isTauri]);
+  }, [config, isMainDesktopWindow]);
 
   return (
     <ThemeProvider initialTheme={config?.theme || ThemeMode.SYSTEM}>
       <SearchProvider>
         <AgentWorkbenchProvider>
           {shouldManageProjectWindows ? <ProjectWindowManager /> : null}
-          {isTauri ? <TrayBadgeSync /> : null}
+          {isMainDesktopWindow ? <TrayBadgeSync /> : null}
           {isTauri ? <DesktopWindowControls /> : null}
           <ThemedToaster />
           <StartupOverlayContext.Provider
@@ -367,6 +367,51 @@ function MainAppContent({ children }: { children: ReactNode }) {
   );
 }
 
+function SettingsPluginSyncRunner() {
+  usePluginContributionCatalogSync();
+  return null;
+}
+
+function SettingsPluginContributionBridge({ defer }: { defer: boolean }) {
+  const [ready, setReady] = useState(!defer);
+
+  useEffect(() => {
+    if (!defer) {
+      setReady(true);
+      return;
+    }
+    return scheduleIdleWork(() => {
+      setReady(true);
+    });
+  }, [defer]);
+
+  return ready ? <SettingsPluginSyncRunner /> : null;
+}
+
+function SettingsSurfaceContent() {
+  const { config } = useUserSystem();
+  const location = useLocation();
+  const isTauri = useTauriClient();
+
+  useLegacyDesignBodyClass();
+  useOptionMenuViewportFit();
+
+  return (
+    <ThemeProvider initialTheme={config?.theme || ThemeMode.SYSTEM}>
+      <SettingsPluginContributionBridge
+        defer={!location.pathname.startsWith('/settings/plugin/')}
+      />
+      <AppContextMenuHost>
+        {isTauri ? <DesktopWindowControls /> : null}
+        <ThemedToaster />
+        <Suspense fallback={null}>
+          <SettingsAppRoutes />
+        </Suspense>
+      </AppContextMenuHost>
+    </ThemeProvider>
+  );
+}
+
 function AppContent() {
   const location = useLocation();
   const routeMode = getAppRouteMode(location.pathname);
@@ -379,15 +424,9 @@ function AppContent() {
     );
   }
 
-  const routes = isSettingsSurfacePath(location.pathname) ? (
-    <Suspense fallback={null}>
-      <SettingsAppRoutes />
-    </Suspense>
-  ) : (
-    <Suspense fallback={null}>
-      <MainAppRoutes />
-    </Suspense>
-  );
+  if (isSettingsSurfacePath(location.pathname)) {
+    return <SettingsSurfaceContent />;
+  }
 
   return (
     <ClickedElementsProvider>
@@ -401,7 +440,11 @@ function AppContent() {
             <FocusConversationListener />
             <AppContextMenuHost>
               <BasicGuideProvider>
-                <MainAppContent>{routes}</MainAppContent>
+                <MainAppContent>
+                  <Suspense fallback={null}>
+                    <MainAppRoutes />
+                  </Suspense>
+                </MainAppContent>
                 <Suspense fallback={null}>
                   <BasicGuideOverlay />
                 </Suspense>

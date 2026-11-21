@@ -461,7 +461,6 @@ impl IncrementalRowProjector {
                 fold.side_rows = snap_state.side_rows;
                 fold.side_row_turns = snap_state.side_row_turns;
                 fold.last_sequence = snap_state.last_sequence;
-                fold.auto_permission_approvals = snap_state.auto_permission_approvals;
                 partial_turns = true;
                 if let Some(&latest_turn_id) = fold.turn_order.last() {
                     if let Some(hydrated) = hydrate_turn_state_before(
@@ -676,11 +675,16 @@ pub(super) fn target_turn_id_for_fold(
 const MAX_CACHED_ROW_PROJECTORS: usize = 96;
 const HARD_MAX_CACHED_ROW_PROJECTORS: usize = MAX_CACHED_ROW_PROJECTORS * 2;
 
+static NEXT_LIVE_OP_SEQUENCE: std::sync::atomic::AtomicI64 =
+    std::sync::atomic::AtomicI64::new(1);
+
 pub struct CachedRowProjector {
     pub projector: IncrementalRowProjector,
     pub last_emitted_sequence: i64,
     pub db_cursor: i64,
+    pub live_sequence: i64,
     has_unpersisted: bool,
+    unpersisted_row_ids: HashSet<String>,
     last_used: Instant,
     generation: u64,
     active_pins: Vec<std::sync::Weak<()>>,
@@ -694,7 +698,9 @@ impl CachedRowProjector {
             projector,
             last_emitted_sequence,
             db_cursor: last_emitted_sequence,
+            live_sequence: 0,
             has_unpersisted: false,
+            unpersisted_row_ids: HashSet::new(),
             last_used: Instant::now(),
             generation,
             active_pins: Vec::new(),
@@ -721,6 +727,18 @@ impl CachedRowProjector {
         self.has_unpersisted
     }
 
+    pub fn unpersisted_overlay_rows(&self) -> Vec<TimelineRow> {
+        if !self.has_unpersisted || self.unpersisted_row_ids.is_empty() {
+            return Vec::new();
+        }
+        self.projector
+            .fold
+            .timeline_rows()
+            .into_iter()
+            .filter(|row| self.unpersisted_row_ids.contains(&row.row_id))
+            .collect()
+    }
+
     /// Synchronize with the latest rebuilt/truncated state if `truncate_to_turn_ordinal`
     /// or `rebuild_projection` ran since this projector was initialized.
     pub fn sync_if_rebuilt(&mut self, conversation_id: Uuid) -> bool {
@@ -741,6 +759,7 @@ impl CachedRowProjector {
         self.db_cursor = self.projector.last_sequence();
         self.last_emitted_sequence = self.db_cursor;
         self.has_unpersisted = false;
+        self.unpersisted_row_ids.clear();
         self.generation = entry.generation;
         true
     }
@@ -767,6 +786,7 @@ impl CachedRowProjector {
         self.db_cursor = record.sequence;
         if is_turn_terminal_event_record(record) {
             self.has_unpersisted = false;
+            self.unpersisted_row_ids.clear();
         }
         self.projector.fold.last_sequence = record.sequence;
         let mut folded = record.clone();
@@ -783,8 +803,19 @@ impl CachedRowProjector {
         self.sync_if_rebuilt(record.conversation_id);
         let mut folded = record.clone();
         folded.sequence = self.projector.last_sequence().max(self.db_cursor).max(1);
-        self.has_unpersisted = true;
-        self.projector.apply(&folded)
+        let ops = self.projector.apply(&folded)?;
+        if !ops.is_empty() {
+            self.has_unpersisted = true;
+            self.live_sequence =
+                NEXT_LIVE_OP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            for op in &ops {
+                self.unpersisted_row_ids
+                    .insert(row_op_target_id(op).to_owned());
+            }
+        } else {
+            self.has_unpersisted = true;
+        }
+        Ok(ops)
     }
 }
 

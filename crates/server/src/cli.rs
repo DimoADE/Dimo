@@ -1,4 +1,7 @@
-use std::net::{IpAddr, SocketAddr};
+use std::{
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+};
 
 use remote_protocol::{
     DevicePermissionPreset, PAIRING_TTL_DEFAULT_SECONDS, parse_pairing_ttl_seconds,
@@ -32,6 +35,10 @@ pub struct ServerLaunch {
     pub port: u16,
     pub rotate_token: bool,
     pub reveal_console: bool,
+    pub desktop: bool,
+    pub parent_pid: Option<u32>,
+    pub app_version: Option<String>,
+    pub resources_dir: Option<PathBuf>,
 }
 
 impl ServerLaunch {
@@ -77,9 +84,14 @@ where
 
     let mut allow_lan = std::env::var("DIMO_SERVER_ALLOW_LAN").as_deref() == Ok("1");
     let mut port = env_listen_port().unwrap_or(DEFAULT_PORT);
+    let mut seen_port = false;
     let mut rotate_token = false;
     let mut reveal_console = false;
     let mut seen_local = false;
+    let mut desktop = false;
+    let mut parent_pid: Option<u32> = None;
+    let mut app_version: Option<String> = None;
+    let mut resources_dir: Option<PathBuf> = None;
 
     if tokens
         .peek()
@@ -102,6 +114,7 @@ where
         match token.as_str() {
             "--help" | "-h" | "help" => return Ok(ParsedArgs::Command(LaunchCommand::Help)),
             "--version" | "-V" => return Ok(ParsedArgs::Command(LaunchCommand::Version)),
+            "--desktop" => desktop = true,
             "--lan" => allow_lan = true,
             "--local" => {
                 allow_lan = false;
@@ -115,17 +128,62 @@ where
                 port = value
                     .parse()
                     .map_err(|_| ParseError(format!("invalid --port {value}")))?;
+                seen_port = true;
             }
             other if other.starts_with("--port=") => {
                 let value = &other[7..];
                 port = value
                     .parse()
                     .map_err(|_| ParseError(format!("invalid --port {value}")))?;
+                seen_port = true;
+            }
+            "--parent-pid" => {
+                let value = tokens
+                    .next()
+                    .ok_or_else(|| ParseError("missing value for --parent-pid".to_string()))?;
+                parent_pid = Some(
+                    value
+                        .parse()
+                        .map_err(|_| ParseError(format!("invalid --parent-pid {value}")))?,
+                );
+            }
+            other if other.starts_with("--parent-pid=") => {
+                let value = &other[13..];
+                parent_pid = Some(
+                    value
+                        .parse()
+                        .map_err(|_| ParseError(format!("invalid --parent-pid {value}")))?,
+                );
+            }
+            "--app-version" => {
+                let value = tokens
+                    .next()
+                    .ok_or_else(|| ParseError("missing value for --app-version".to_string()))?;
+                app_version = Some(value);
+            }
+            other if other.starts_with("--app-version=") => {
+                app_version = Some(other[14..].to_string());
+            }
+            "--resources-dir" => {
+                let value = tokens
+                    .next()
+                    .ok_or_else(|| ParseError("missing value for --resources-dir".to_string()))?;
+                resources_dir = Some(PathBuf::from(value));
+            }
+            other if other.starts_with("--resources-dir=") => {
+                resources_dir = Some(PathBuf::from(&other[16..]));
             }
             other => return Err(ParseError(format!("unknown argument: {other}"))),
         }
     }
 
+    if desktop {
+        allow_lan = false;
+        reveal_console = false;
+        if !seen_port {
+            port = 0;
+        }
+    }
     if seen_local {
         allow_lan = false;
     }
@@ -135,6 +193,10 @@ where
         port,
         rotate_token,
         reveal_console,
+        desktop,
+        parent_pid,
+        app_version,
+        resources_dir,
     }))
 }
 
@@ -161,6 +223,7 @@ pub fn format_host_console(status: &str, token: &str, origins: &[String]) -> Str
 pub fn usage() -> &'static str {
     "Usage:\n  \
      dimo-server                      Start on loopback\n  \
+     dimo-server --desktop [--port N] [--parent-pid PID] [--app-version V] [--resources-dir DIR]\n  \
      dimo-server serve                Start the Host on every interface and print status, token, and addresses\n  \
      dimo-server serve --local        Start the Web UI on loopback only\n  \
      dimo-server serve --port N\n  \
@@ -444,5 +507,43 @@ mod tests {
         assert!(text.contains("  http://127.0.0.1:17891\n"));
         assert!(text.contains("  http://203.0.113.8:17891\n"));
         assert!(!text.contains("INFO"));
+    }
+
+    #[test]
+    fn desktop_mode_defaults_to_loopback_ephemeral_port_and_parses_options() {
+        let ParsedArgs::Start(launch) = parse_args([
+            "--desktop",
+            "--parent-pid",
+            "4242",
+            "--app-version=0.6.0",
+            "--resources-dir",
+            "/opt/dimo/resources",
+        ])
+        .expect("parse") else {
+            panic!("expected start");
+        };
+        assert!(launch.desktop);
+        assert!(!launch.allow_lan);
+        assert!(!launch.reveal_console);
+        assert_eq!(launch.port, 0);
+        assert_eq!(launch.listen_addr().ip(), Ipv4Addr::LOCALHOST);
+        assert_eq!(launch.parent_pid, Some(4242));
+        assert_eq!(launch.app_version.as_deref(), Some("0.6.0"));
+        assert_eq!(
+            launch.resources_dir.as_deref(),
+            Some(std::path::Path::new("/opt/dimo/resources"))
+        );
+    }
+
+    #[test]
+    fn desktop_mode_respects_explicit_port_and_blocks_lan() {
+        let ParsedArgs::Start(launch) =
+            parse_args(["--desktop", "--lan", "--port=18999"]).expect("parse")
+        else {
+            panic!("expected start");
+        };
+        assert!(launch.desktop);
+        assert!(!launch.allow_lan);
+        assert_eq!(launch.port, 18999);
     }
 }

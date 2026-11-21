@@ -125,7 +125,7 @@ describe('SpaceMessageBody cards', () => {
   it('resolves an approval card', async () => {
     render(<SpaceMessageBody fromYou={false} text={approval} />);
     expect(screen.queryByText(/<card/)).toBeNull();
-    expect(screen.getByRole('heading', { name: '权限申请' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: '合并 PR #42' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: '允许' }));
     await waitFor(() =>
       expect(collaborationCall).toHaveBeenCalledWith(

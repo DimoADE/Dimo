@@ -175,7 +175,13 @@ export function scrollTopToRevealVirtualWindow(input: {
   const maxScroll = Math.max(0, input.scrollHeight - input.viewportHeight);
   let next: number | null = null;
   if (!intersects) {
-    next = input.followTail ? maxScroll : Math.min(visualTop, maxScroll);
+    if (input.followTail) {
+      next = maxScroll;
+    } else if (visualTop >= viewBottom - 1) {
+      next = Math.min(visualTop, maxScroll);
+    } else if (input.scrollTop > maxScroll) {
+      next = maxScroll;
+    }
   } else if (input.followTail && visualBottom > viewBottom + 1) {
     next = Math.min(
       Math.max(0, visualBottom - input.viewportHeight),

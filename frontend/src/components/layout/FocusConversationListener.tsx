@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { backendListen } from '@/lib/backendTransport';
+import { getDesktopShell } from '@/lib/desktopShell';
 import {
   focusEventMatchesWindow,
   focusWorkspaceConversation,
@@ -20,8 +21,7 @@ export function FocusConversationListener() {
     void (async () => {
       let windowLabel = '';
       try {
-        const { getCurrentWindow } = await import('@tauri-apps/api/window');
-        windowLabel = getCurrentWindow().label.trim();
+        windowLabel = (await getDesktopShell().window.getLabel()).trim();
       } catch {
         windowLabel = '';
       }

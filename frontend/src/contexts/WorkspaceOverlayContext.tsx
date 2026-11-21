@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from 'react';
 import { usePortalContainer } from '@/contexts/PortalContainerContext';
+import { hasElectronDesktopRuntime } from '@/lib/desktopShell';
 import {
   collectFloatingLayers,
   FLOATING_LAYER_SELECTOR,
@@ -282,6 +283,9 @@ export function WorkspaceOverlayProvider({
   );
 
   const registerNativeSurfaceHost = useCallback(() => {
+    if (hasElectronDesktopRuntime()) {
+      return () => {};
+    }
     surfaceHostCountRef.current += 1;
     return () => {
       surfaceHostCountRef.current = Math.max(
@@ -303,6 +307,7 @@ export function WorkspaceOverlayProvider({
 
   const isOverlayReady = useCallback(
     () =>
+      hasElectronDesktopRuntime() ||
       surfaceHostCountRef.current === 0 ||
       ackedEpochRef.current === overlayEpochRef.current,
     []
@@ -354,9 +359,13 @@ export function WorkspaceOverlayProvider({
     ]
   );
 
+  const skipFloatingObserver = hasElectronDesktopRuntime();
+
   return (
     <WorkspaceOverlayContext.Provider value={value}>
-      <FloatingLayerObserver onChange={setObservedOcclusion} />
+      {skipFloatingObserver ? null : (
+        <FloatingLayerObserver onChange={setObservedOcclusion} />
+      )}
       {children}
     </WorkspaceOverlayContext.Provider>
   );
@@ -438,11 +447,13 @@ export function useWorkspaceOverlay(): WorkspaceOverlayContextValue {
 
 /** Publish this overlay's rectangle so a native page can step aside where they overlap. */
 export function NativeSurfaceOcclusionHold() {
+  const isElectron = hasElectronDesktopRuntime();
   const { setHtmlOverlayRect } = useWorkspaceOverlay();
   const id = useId();
   const anchorRef = useRef<HTMLSpanElement>(null);
 
   useLayoutEffect(() => {
+    if (isElectron) return;
     const overlay = anchorRef.current?.parentElement;
     if (!overlay) return;
 

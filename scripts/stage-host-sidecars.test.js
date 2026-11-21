@@ -143,3 +143,37 @@ test('copySidecar replaces existing staged binary and sweeps retired leftovers',
   assert.equal(fs.readFileSync(path.join(outDir, baseName), 'utf8'), 'v2-fresh');
   assert.equal(fs.existsSync(path.join(outDir, `${baseName}.old-100-1`)), false);
 });
+
+test('stageElectronSidecars stages dimo-server, dimo-mcp, and dimo-workflow-mcp into electron/resources/bin', () => {
+  const { stageElectronSidecars } = require('./stage-host-sidecars');
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'dimo-electron-sidecars-'));
+  const targetDir = path.join(repo, 'target');
+  const triple = 'x86_64-pc-windows-msvc';
+  const binDir = path.join(targetDir, triple, 'release');
+  fs.mkdirSync(binDir, { recursive: true });
+  fs.writeFileSync(path.join(binDir, 'dimo-server.exe'), 'server-bin');
+  fs.writeFileSync(path.join(binDir, 'dimo-mcp.exe'), 'mcp-bin');
+  fs.writeFileSync(path.join(binDir, 'dimo-workflow-mcp.exe'), 'workflow-bin');
+
+  const staged = stageElectronSidecars({
+    repo,
+    env: {
+      CARGO_TARGET_DIR: targetDir,
+      DIMO_BUILD_TARGET: triple,
+      CARGO_PROFILE: 'release',
+    },
+    hostTriple: triple,
+    platform: 'win32',
+  });
+
+  const expectedDir = path.join(repo, 'electron', 'resources', 'bin');
+  assert.deepEqual(staged, [
+    path.join(expectedDir, 'dimo-server.exe'),
+    path.join(expectedDir, 'dimo-mcp.exe'),
+    path.join(expectedDir, 'dimo-workflow-mcp.exe'),
+  ]);
+  assert.equal(
+    fs.readFileSync(path.join(expectedDir, 'dimo-server.exe'), 'utf8'),
+    'server-bin'
+  );
+});

@@ -12,9 +12,12 @@ import {
 } from '@/features/conversation/runtimeStatus';
 import { parseReconnectProgressTitle } from '@/features/conversation/inlineRuntimeStatus';
 import { ConversationStatusDetails } from '@/components/NormalizedConversation/conversation/ConversationStatusDetails';
+import type { StatusNoticeActor } from '@/contexts/ConversationStatusContext';
+import { StatusNoticeActorChip } from './StatusNoticeActorChip';
 
 type Props = {
   notice: ConversationSessionNotice;
+  actor?: StatusNoticeActor;
   placement?: 'composer' | 'stream';
   titleOverride?: string | null;
   onReconnect?: () => void | Promise<unknown>;
@@ -24,6 +27,7 @@ type Props = {
 
 export function AgentRuntimeStatus({
   notice,
+  actor,
   placement = 'composer',
   titleOverride,
   onReconnect,
@@ -155,6 +159,7 @@ export function AgentRuntimeStatus({
       data-placement={placement}
     >
       <div className="flex flex-wrap items-center gap-2">
+        <StatusNoticeActorChip actor={actor} />
         {isActive ? (
           <PixelGridLoader size="sm" />
         ) : isError ? (

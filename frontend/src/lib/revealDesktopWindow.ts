@@ -1,6 +1,7 @@
 import { getAppRouteMode } from '@/appRouteMode';
+import { getDesktopShell } from '@/lib/desktopShell';
 import { isSettingsSurfacePath } from '@/lib/settingsPreload';
-import { isTauriDesktopShell } from '@/utils/platform';
+import { isDesktopShell } from '@/utils/platform';
 
 export function shouldRevealDesktopWindowOnBoot(pathname: string): boolean {
   if (getAppRouteMode(pathname) === 'desktop-toast') return false;
@@ -10,24 +11,18 @@ export function shouldRevealDesktopWindowOnBoot(pathname: string): boolean {
 export const REVEAL_RETRY_DELAYS_MS = [0, 80, 250] as const;
 
 async function fallbackRevealMainWindow(): Promise<void> {
-  const { invoke } = await import('@tauri-apps/api/core');
-  await invoke('reveal_main_window');
+  await getDesktopShell().invoke('reveal_main_window');
 }
 
 export async function revealDesktopWindow(): Promise<void> {
-  if (!isTauriDesktopShell()) return;
+  if (!isDesktopShell()) return;
   if (getAppRouteMode(window.location.pathname) === 'desktop-toast') return;
 
-  let current: {
-    show: () => Promise<void>;
-    setFocus: () => Promise<void>;
-  } | null = null;
+  const shell = getDesktopShell();
   let showError: unknown = null;
 
   try {
-    const { getCurrentWindow } = await import('@tauri-apps/api/window');
-    current = getCurrentWindow();
-    await current.show();
+    await shell.window.show();
   } catch (err) {
     showError = err;
   }
@@ -40,15 +35,13 @@ export async function revealDesktopWindow(): Promise<void> {
     }
   }
 
-  if (current) {
-    try {
-      await current.setFocus();
-    } catch (focusErr) {
-      console.warn(
-        '[revealDesktopWindow] Window shown, but setFocus failed:',
-        focusErr
-      );
-    }
+  try {
+    await shell.window.setFocus();
+  } catch (focusErr) {
+    console.warn(
+      '[revealDesktopWindow] Window shown, but setFocus failed:',
+      focusErr
+    );
   }
 }
 
@@ -56,7 +49,7 @@ export async function revealDesktopWindowWithRetry(
   delays: readonly number[] = REVEAL_RETRY_DELAYS_MS,
   shouldCancel?: () => boolean
 ): Promise<boolean> {
-  if (!isTauriDesktopShell()) return false;
+  if (!isDesktopShell()) return false;
   if (getAppRouteMode(window.location.pathname) === 'desktop-toast') {
     return false;
   }
@@ -92,7 +85,7 @@ export async function revealDesktopWindowWithRetry(
 export function revealDesktopWindowAfterPaint(
   delays: readonly number[] = REVEAL_RETRY_DELAYS_MS
 ): () => void {
-  if (!isTauriDesktopShell()) return () => undefined;
+  if (!isDesktopShell()) return () => undefined;
   if (getAppRouteMode(window.location.pathname) === 'desktop-toast') {
     return () => undefined;
   }

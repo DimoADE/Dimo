@@ -31,4 +31,19 @@ describe('preloadSettingsPath', () => {
       'scheduleRemainingSettingsPreload'
     );
   });
+
+  it('exports SettingsAppRoutes and PluginSettingsPage loaders for parallel surface warming', async () => {
+    const settingsPreload = await import('./settingsPreload');
+    expect(typeof settingsPreload.loadSettingsAppRoutes).toBe('function');
+    expect(typeof settingsPreload.loadPluginSettingsPage).toBe('function');
+    expect(() =>
+      settingsPreload.warmDefaultSettingsSurface('/settings/agents')
+    ).not.toThrow();
+    expect(() =>
+      settingsPreload.warmDefaultSettingsSurface('/settings/plugin/demo/page')
+    ).not.toThrow();
+    expect(() =>
+      settingsPreload.warmDefaultSettingsSurface('/plugins/demo')
+    ).not.toThrow();
+  });
 });

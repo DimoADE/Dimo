@@ -14,8 +14,7 @@ use uuid::Uuid;
 use super::{
     AGENT_BINDING_LOAD_FAILURE_NOTICE_ROW_ID, AGENT_BINDING_REBIND_NOTICE_ROW_ID,
     AGENT_CONNECTION_RECOVERING_NOTICE_ROW_ID, AGENT_SESSION_CONNECT_ERROR_NOTICE_ROW_ID,
-    ANNOUNCEMENT_ROW_PREFIX, AUTO_PERMISSION_NOTICE_ROW_ID, AUTO_PERMISSION_NOTICE_TITLE,
-    CURRENT_EVENT_VERSION, ProjectionFold,
+    ANNOUNCEMENT_ROW_PREFIX, AUTO_PERMISSION_NOTICE_ROW_ID, CURRENT_EVENT_VERSION, ProjectionFold,
     cache::{remove_side_row, upsert_stable_notice},
     fold::ProjectedTurn,
 };
@@ -69,7 +68,6 @@ impl ProjectionFold {
         let latest_turn_id = record.turn_id.or_else(|| self.turn_order.last().copied());
         let side_rows = &mut self.side_rows;
         let side_row_turns = &mut self.side_row_turns;
-        let auto_permission_approvals = &mut self.auto_permission_approvals;
         match event {
             ConversationEvent::PermissionRequested { request } => {
                 let row = side_row(
@@ -102,12 +100,12 @@ impl ProjectionFold {
                     let row_id = format!("perm:{permission_id}");
                     side_row_turns.remove(&row_id);
                     remove_side_row(side_rows, deleted_rows, &row_id, record.sequence);
-                    *auto_permission_approvals = auto_permission_approvals.saturating_add(1);
-                    upsert_stable_notice(
+                    side_row_turns.remove(AUTO_PERMISSION_NOTICE_ROW_ID);
+                    remove_side_row(
                         side_rows,
+                        deleted_rows,
                         AUTO_PERMISSION_NOTICE_ROW_ID,
                         record.sequence,
-                        auto_permission_notice(*auto_permission_approvals),
                     );
                 } else {
                     for entry in side_rows.iter_mut() {
@@ -777,15 +775,6 @@ pub(super) fn side_row(sequence: i64, row: ConversationTimelineRow) -> TimelineR
         row_id: row_id_for(&row, sequence),
         revision: sequence,
         row,
-    }
-}
-
-fn auto_permission_notice(count: u32) -> ConversationSessionNotice {
-    ConversationSessionNotice {
-        title: AUTO_PERMISSION_NOTICE_TITLE.into(),
-        message: Some(format!("已自动批准 {count} 项权限请求")),
-        severity: "info".into(),
-        ..Default::default()
     }
 }
 

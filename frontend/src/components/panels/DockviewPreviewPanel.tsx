@@ -53,7 +53,7 @@ import {
   isBinaryContentError,
   MAX_VIDEO_PREVIEW_BYTES,
 } from '@/utils/filePreviewKind';
-import { isMac, isTauriDesktopShell } from '@/utils/platform';
+import { isMac } from '@/utils/platform';
 import { useLocalDesktopHost } from '@/lib/desktopShell';
 import { ZoomableImagePreview } from '@/components/previews/ZoomableImagePreview';
 import { toast } from '@/components/ui/toast';
@@ -394,8 +394,8 @@ function DockviewPreviewPanel(props: IDockviewPanelProps) {
     const form = filePath ? getFilePreviewForm(filePath) : null;
     // The HTML form renders through the desktop webview's asset protocol; a web
     // or remote-desktop client has no local filesystem to serve it from.
-    return form === 'html' && !isTauriDesktopShell() ? null : form;
-  }, [filePath]);
+    return form === 'html' && !localDesktopHost ? null : form;
+  }, [filePath, localDesktopHost]);
   const isMd = previewForm === 'markdown';
   const isHtml = previewForm === 'html';
   // Assets resolve against the file's own directory, but granting the whole

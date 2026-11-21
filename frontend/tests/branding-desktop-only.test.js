@@ -75,11 +75,11 @@ test('桌面宿主页使用可随主题更新的新应用图标入口', () => {
   assert.match(indexSource, /<title>Dimo<\/title>/);
 });
 
-test('Tauri 桌面应用名称更新为 Dimo', () => {
-  const tauriConfigSource = readRepoFile('src-tauri/tauri.conf.json');
+test('Electron 桌面应用名称更新为 Dimo', () => {
+  const builderConfigSource = readRepoFile('electron/electron-builder.yml');
 
-  assert.match(tauriConfigSource, /"productName":\s*"Dimo"/);
-  assert.match(tauriConfigSource, /"title":\s*"Dimo"/);
+  assert.match(builderConfigSource, /^productName:\s*Dimo$/m);
+  assert.match(builderConfigSource, /^appId:\s*com\.dimo\.app$/m);
 });
 
 test('创建 PR 对话框使用新的品牌后缀', () => {

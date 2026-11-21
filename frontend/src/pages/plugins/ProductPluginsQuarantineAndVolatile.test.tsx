@@ -26,11 +26,6 @@ const toastMock = vi.hoisted(() => ({
 }));
 
 vi.mock('@/components/ui/toast', () => ({ toast: toastMock }));
-vi.mock('@tauri-apps/api/webview', () => ({
-  getCurrentWebview: () => ({
-    onDragDropEvent: vi.fn().mockResolvedValue(() => undefined),
-  }),
-}));
 
 const basePlugin = {
   id: 'office',

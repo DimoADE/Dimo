@@ -32,12 +32,9 @@ const mocks = vi.hoisted(() => ({
   deleteSavedHost: vi.fn(),
 }));
 
-vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow: () => ({ label: mocks.windowLabel }),
-}));
-
 vi.mock('@/lib/desktopShell', () => ({
   isTauriClient: () => mocks.isTauri,
+  getDesktopWindowLabel: () => mocks.windowLabel,
 }));
 
 vi.mock('@/lib/backendTransport', async (importOriginal) => {

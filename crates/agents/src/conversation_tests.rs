@@ -40,6 +40,7 @@ fn cap_timeline_preview_fields_keeps_small_tool_output() {
         conversation_id: Uuid::nil(),
         projection_version: 1,
         last_sequence: 1,
+        live_sequence: None,
         rows: vec![TimelineRow {
             row_id: "row-1".into(),
             revision: 1,

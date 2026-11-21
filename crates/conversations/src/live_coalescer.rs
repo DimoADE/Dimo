@@ -343,6 +343,10 @@ pub fn merge_into_batch(target: &mut ConversationRowOpBatch, incoming: Conversat
     if target.previous_sequence.is_none() {
         target.previous_sequence = incoming.previous_sequence;
     }
+    target.live_sequence = match (target.live_sequence, incoming.live_sequence) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    };
     target.reset |= incoming.reset;
     if incoming.session_modes.is_some() {
         target.session_modes = incoming.session_modes;
@@ -617,6 +621,7 @@ mod tests {
             conversation_id: cid,
             last_sequence: last,
             previous_sequence: Some(prev),
+            live_sequence: None,
             reset: false,
             ops,
             session_modes: None,

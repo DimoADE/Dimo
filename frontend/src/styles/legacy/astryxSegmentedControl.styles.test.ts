@@ -124,7 +124,7 @@ describe('Astryx SegmentedControl chrome', () => {
     expect(selectedDecls['box-shadow']).toBe('none');
   });
 
-  it('does not declare CSS app-region rules that interfere with SegmentedControl or WebView2', () => {
+  it('scopes CSS app-region rules strictly to Electron drag regions and excludes interactive controls', () => {
     const appRegionSelectors: string[] = [];
     parse(stylesheet).walkRules((rule) => {
       rule.walkDecls(/^(?:-webkit-)?app-region$/, () => {
@@ -132,7 +132,20 @@ describe('Astryx SegmentedControl chrome', () => {
       });
     });
 
-    expect(appRegionSelectors).toEqual([]);
+    expect(appRegionSelectors.length).toBeGreaterThan(0);
+    for (const selector of appRegionSelectors) {
+      expect(selector).toContain('html.electron-desktop');
+      expect(selector).toContain('[data-window-drag-region]');
+    }
+    expect(
+      appRegionSelectors.some(
+        (selector) =>
+          selector.includes('button') &&
+          selector.includes('[data-no-drag]') &&
+          selector.includes('.desktop-window-controls') &&
+          selector.includes("[role='tab']")
+      )
+    ).toBe(true);
   });
 
   it('styles Agent auth mode tabs and submodes as capsule segmented controls', () => {

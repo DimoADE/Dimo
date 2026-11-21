@@ -1,10 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const platform = vi.hoisted(() => ({ isTauriDesktopShell: vi.fn(() => true) }));
+const platform = vi.hoisted(() => ({
+  isDesktopShell: vi.fn(() => true),
+}));
 const invoke = vi.hoisted(() => vi.fn());
 
 vi.mock('@/utils/platform', () => platform);
-vi.mock('@/lib/tauriApi', () => ({ tauriInvoke: invoke }));
+vi.mock('@/lib/desktopShell', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/lib/desktopShell')>();
+  return {
+    ...actual,
+    getDesktopShell: () => ({
+      ...actual.getDesktopShell(),
+      invoke,
+    }),
+  };
+});
 
 /** The granted-directory set is module state, so each test needs a fresh copy. */
 async function loadScope() {
@@ -14,7 +26,7 @@ async function loadScope() {
 
 describe('previewAssetScope', () => {
   beforeEach(() => {
-    platform.isTauriDesktopShell.mockReturnValue(true);
+    platform.isDesktopShell.mockReturnValue(true);
     invoke.mockReset().mockResolvedValue(undefined);
   });
 
@@ -50,7 +62,7 @@ describe('previewAssetScope', () => {
   });
 
   it('never touches the native scope outside the desktop shell', async () => {
-    platform.isTauriDesktopShell.mockReturnValue(false);
+    platform.isDesktopShell.mockReturnValue(false);
     const { allowPreviewAssetScope, isPreviewAssetScopeGranted } =
       await loadScope();
 

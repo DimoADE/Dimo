@@ -10,6 +10,7 @@ import {
   agentManagementApi,
   agentManagementErrorMessage as errorMessage,
 } from '@/features/agent-management';
+import { openExternalUrl } from '@/lib/desktopShell';
 
 type PackageId = 'opencode' | 'opencode-go';
 
@@ -169,14 +170,7 @@ export function OpenCodeSubscriptionPanel({ onChanged, onDirtyChange }: Props) {
                 size="sm"
                 variant="ghost"
                 onClick={() => {
-                  void (async () => {
-                    try {
-                      const { open } = await import('@tauri-apps/plugin-shell');
-                      await open(pack.url);
-                    } catch {
-                      window.open(pack.url, '_blank', 'noopener,noreferrer');
-                    }
-                  })();
+                  void openExternalUrl(pack.url);
                 }}
               >
                 <ExternalLink aria-hidden="true" className="h-3.5 w-3.5" />

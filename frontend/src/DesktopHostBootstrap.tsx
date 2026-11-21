@@ -1,41 +1,37 @@
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState, type ReactNode } from 'react';
 
 import { hostClientApi } from '@/lib/api';
+import { getDesktopShell, getDesktopWindowLabel } from '@/lib/desktopShell';
 import { isHostBoundWindowLabel } from '@/lib/hostBoundWindow';
 import {
   BackendTransportProvider,
   RemoteDesktopTransport,
-  tauriBackendTransport,
+  getLocalDesktopTransport,
   type BackendTransport,
 } from '@/lib/transport';
 import { BoundHostTransport } from '@/lib/transport/boundHostTransport';
-import { isTauriDesktopShell } from '@/utils/platform';
+import { isDesktopShell } from '@/utils/platform';
 import { getAppRouteMode } from './appRouteMode';
 
 const HOST_CLIENT_CHANGED = 'host-client-changed';
 
 function shouldBindAppShell(): boolean {
   return (
-    isTauriDesktopShell() &&
+    isDesktopShell() &&
     getAppRouteMode(window.location.pathname) !== 'desktop-toast'
   );
 }
 
 function currentWindowLabel(): string {
-  try {
-    return getCurrentWindow().label;
-  } catch {
-    return 'main';
-  }
+  return getDesktopWindowLabel();
 }
 
 export function DesktopHostBootstrap({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const bindShell = shouldBindAppShell();
-  const [transport, setTransport] = useState<BackendTransport>(
-    tauriBackendTransport
+  const [transport, setTransport] = useState<BackendTransport>(() =>
+    getLocalDesktopTransport()
   );
   const [shellKey, setShellKey] = useState('desktop');
   const [ready, setReady] = useState(
@@ -69,12 +65,12 @@ export function DesktopHostBootstrap({ children }: { children: ReactNode }) {
           setTransport(new BoundHostTransport(remote));
           setShellKey(`remote:${nextOrigin}`);
         } else {
-          setTransport(tauriBackendTransport);
+          setTransport(getLocalDesktopTransport());
           setShellKey('desktop');
         }
       } catch {
         if (!cancelled && boundOrigin == null) {
-          setTransport(tauriBackendTransport);
+          setTransport(getLocalDesktopTransport());
         }
       } finally {
         if (!cancelled) {
@@ -84,14 +80,17 @@ export function DesktopHostBootstrap({ children }: { children: ReactNode }) {
     };
 
     void apply();
-    void import('@/lib/tauriApi').then(({ tauriListen }) =>
-      tauriListen(HOST_CLIENT_CHANGED, () => {
+    const listenPromise =
+      getLocalDesktopTransport().listen?.(HOST_CLIENT_CHANGED, () => {
         void apply();
-      }).then((fn) => {
-        if (cancelled) fn();
-        else unlisten = fn;
-      })
-    );
+      }) ??
+      getDesktopShell().events.listen(HOST_CLIENT_CHANGED, () => {
+        void apply();
+      });
+    void listenPromise.then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
 
     return () => {
       cancelled = true;

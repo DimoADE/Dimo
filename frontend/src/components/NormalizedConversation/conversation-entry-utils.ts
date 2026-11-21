@@ -768,11 +768,13 @@ export const getToolSummary = (
                   typeof value === 'string' && value.trim().length > 0
               ) ?? '')
             : '';
+        const rawName = at.tool_name || entryType.tool_name || '';
+        const readableName =
+          rawName && !/^(?:call_|fc_|tool[-_]|toolu_|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?::\d+)?$)/i.test(rawName.trim())
+            ? rawName
+            : '';
         return {
-          label:
-            at.tool_name ||
-            entryType.tool_name ||
-            i18n.t('app:entryUtils.tool'),
+          label: readableName || i18n.t('app:entryUtils.tool'),
           detail,
         };
       }
@@ -783,11 +785,20 @@ export const getToolSummary = (
       };
     case 'plan_presentation':
       return { label: i18n.t('app:entryUtils.plan'), detail: '' };
-    default:
+    default: {
+      const rawName = entryType.tool_name?.trim() ?? '';
+      const isOpaqueId =
+        /^(?:call_[A-Za-z0-9]{6,}|fc_[A-Za-z0-9]{6,}|tool[-_][A-Za-z0-9]{6,}|toolu_[A-Za-z0-9]{6,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?::\d+)?$/i.test(
+          rawName
+        );
       return {
-        label: entryType.tool_name || i18n.t('app:entryUtils.tool'),
+        label:
+          rawName && !isOpaqueId
+            ? entryType.tool_name
+            : i18n.t('app:entryUtils.tool'),
         detail: content.trim(),
       };
+    }
   }
 };
 

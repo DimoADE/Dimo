@@ -196,27 +196,58 @@ impl ServerApplicationDomains {
         let row_limit = args
             .tail_turns
             .map(|turns| (turns as usize).saturating_mul(2).clamp(1, 500))
-            .unwrap_or(OPEN_TIMELINE_ROW_LIMIT);
+            .unwrap_or_else(|| {
+                if args.from_index == Some(0) {
+                    i64::MAX as usize
+                } else {
+                    OPEN_TIMELINE_ROW_LIMIT
+                }
+            });
         let mut detail = load_conversation_detail(&self.pool, id, row_limit).await?;
-        if let Some(detail) = detail.as_mut()
-            && let Some(retained) = self
+        if let Some(detail) = detail.as_mut() {
+            {
+                let projectors = self.conversations.row_projectors.lock().await;
+                if let Some(entry) = projectors.get(&id)
+                    && entry.db_cursor >= detail.timeline.last_sequence
+                {
+                    if entry.live_sequence > 0 {
+                        detail.timeline.live_sequence = Some(entry.live_sequence);
+                    }
+                    if entry.has_unpersisted() {
+                        for overlay in entry.unpersisted_overlay_rows() {
+                            if let Some(existing) = detail
+                                .timeline
+                                .rows
+                                .iter_mut()
+                                .find(|row| row.row_id == overlay.row_id)
+                            {
+                                *existing = overlay;
+                            } else {
+                                detail.timeline.rows.push(overlay);
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(retained) = self
                 .conversations
                 .agent_runtime
                 .retained_session_controls(AgentSessionId(id))
                 .await
-        {
-            if retained.goal.is_some() || retained.goal_actions.is_some() {
-                let fallback_goal = detail
-                    .session_goal
-                    .as_ref()
-                    .and_then(|goal| goal.goal.clone());
-                detail.session_goal = Some(ConversationSessionGoal {
-                    goal: retained.goal.or(fallback_goal),
-                    actions: retained.goal_actions,
-                });
+            {
+                if retained.goal.is_some() || retained.goal_actions.is_some() {
+                    let fallback_goal = detail
+                        .session_goal
+                        .as_ref()
+                        .and_then(|goal| goal.goal.clone());
+                    detail.session_goal = Some(ConversationSessionGoal {
+                        goal: retained.goal.or(fallback_goal),
+                        actions: retained.goal_actions,
+                    });
+                }
+                detail.async_tasks = retained.async_tasks;
+                detail.prompt_suggestion = retained.prompt_suggestion;
             }
-            detail.async_tasks = retained.async_tasks;
-            detail.prompt_suggestion = retained.prompt_suggestion;
         }
         serialize(detail)
     }
@@ -1309,6 +1340,7 @@ mod tests {
                 conversation_id: Uuid::nil(),
                 projection_version: CONVERSATION_PROJECTION_VERSION,
                 last_sequence: 0,
+                live_sequence: None,
                 rows: Vec::new(),
                 truncated_from_start: false,
                 older_cursor: None,

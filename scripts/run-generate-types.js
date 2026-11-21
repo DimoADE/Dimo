@@ -8,7 +8,15 @@ const { withCargoBinOnPath } = require("./cargo-path");
 const workspaceRoot = path.join(__dirname, "..");
 const sqlxOfflineDir = path.join(workspaceRoot, "crates", "db", ".sqlx");
 const cargo = "cargo";
-const args = ["run", "--bin", "generate_types", "--", ...process.argv.slice(2)];
+const args = [
+  "run",
+  "-p",
+  "server",
+  "--bin",
+  "generate_types",
+  "--",
+  ...process.argv.slice(2),
+];
 
 const result = spawnSync(cargo, args, {
   cwd: workspaceRoot,

@@ -87,6 +87,7 @@ export default function PluginDockviewPanel(props: IDockviewPanelProps) {
           typeof params.nativeTabId === 'string' ? params.nativeTabId : null
         }
         panelApi={props.api}
+        containerApi={props.containerApi}
       />
     );
   }

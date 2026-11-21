@@ -215,6 +215,19 @@ fn launch_env_matches(
     }
 }
 
+fn connection_agent_matches(left: &AgentId, right: &AgentId) -> bool {
+    if left == right {
+        return true;
+    }
+    match (
+        crate::AgentKind::from_lenient(left.as_str()),
+        crate::AgentKind::from_lenient(right.as_str()),
+    ) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
 pub fn runtime_event_channel() -> (
     Arc<dyn RuntimeEventSink>,
     mpsc::Receiver<AgentEventEnvelope>,
@@ -2622,6 +2635,64 @@ impl AgentRuntime {
         self.connection_manager
             .respond_permission(input.connection_id, input.permission_id, input.response)
             .await
+    }
+
+    pub async fn connection_agent_id(&self, connection_id: AgentConnectionId) -> Option<AgentId> {
+        self.state
+            .read()
+            .await
+            .connections
+            .get(&connection_id)
+            .map(|connection| connection.snapshot.agent_id.clone())
+    }
+
+    pub async fn permission_allows_auto_approve_persistence(
+        &self,
+        connection_id: AgentConnectionId,
+        permission_id: AgentPermissionId,
+    ) -> bool {
+        self.connection_manager
+            .permission_allows_auto_approve_persistence(connection_id, permission_id)
+            .await
+    }
+
+    pub async fn set_agent_auto_approve_mode(
+        &self,
+        agent_id: &AgentId,
+        mode: AgentAutoApproveMode,
+    ) {
+        let targets = {
+            let mut state = self.state.write().await;
+            let mut targets = Vec::new();
+            for (connection_id, connection) in state.connections.iter_mut() {
+                if !connection_agent_matches(&connection.snapshot.agent_id, agent_id)
+                    || !matches!(
+                        connection.snapshot.status,
+                        AgentConnectionStatus::Ready
+                            | AgentConnectionStatus::Connecting
+                            | AgentConnectionStatus::Recovering
+                    )
+                {
+                    continue;
+                }
+                let next_mode = if mode == AgentAutoApproveMode::AllowAlways
+                    && connection.launch.auto_approve_mode == AgentAutoApproveMode::Yolo
+                {
+                    AgentAutoApproveMode::Yolo
+                } else {
+                    connection.launch.auto_approve_mode = mode;
+                    mode
+                };
+                targets.push((*connection_id, next_mode));
+            }
+            targets
+        };
+        for (connection_id, next_mode) in targets {
+            let _ = self
+                .connection_manager
+                .set_auto_approve_mode(connection_id, next_mode)
+                .await;
+        }
     }
 
     pub async fn respond_elicitation(
@@ -6213,6 +6284,115 @@ mod tests {
                 .await
                 .background_compactions
                 .contains(&compact_prompt_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn set_agent_auto_approve_mode_propagates_to_all_live_connections_of_agent() {
+        assert!(super::connection_agent_matches(
+            &AgentId::parse("claude_code").unwrap(),
+            &AgentId::parse("claude-code").unwrap(),
+        ));
+        assert!(super::connection_agent_matches(
+            &AgentId::parse("antigravity").unwrap(),
+            &AgentId::parse("gemini").unwrap(),
+        ));
+        assert!(!super::connection_agent_matches(
+            &AgentId::parse("codex").unwrap(),
+            &AgentId::parse("gemini").unwrap(),
+        ));
+
+        let runtime = AgentRuntime::new_with_driver(Arc::new(NoopEventSink), false);
+        let workspace_id = Uuid::new_v4();
+        let codex_a = test_session(&runtime, workspace_id, "C:/w-a", "acp-a").await;
+        let codex_b = test_session(&runtime, workspace_id, "C:/w-b", "acp-b").await;
+        let claude_yolo = runtime
+            .ensure_session(EnsureAgentSessionInput {
+                agent_id: AgentId::parse("claude_code").unwrap(),
+                launch_lock: SessionLaunchLock {
+                    agent_id: AgentId::parse("claude_code").unwrap(),
+                    ..test_launch_lock()
+                },
+                workspace_id,
+                working_dir: PathBuf::from("C:/w-c"),
+                additional_directories: Vec::new(),
+                session_id: AgentSessionId::new(),
+                acp_session_id: "acp-c".to_string(),
+                auto_approve_mode: AgentAutoApproveMode::Yolo,
+                env: HashMap::new(),
+                preferences: Default::default(),
+            })
+            .await
+            .unwrap();
+        let gemini_off = runtime
+            .ensure_session(EnsureAgentSessionInput {
+                agent_id: AgentId::parse("gemini").unwrap(),
+                launch_lock: SessionLaunchLock {
+                    agent_id: AgentId::parse("gemini").unwrap(),
+                    ..test_launch_lock()
+                },
+                workspace_id,
+                working_dir: PathBuf::from("C:/w-d"),
+                additional_directories: Vec::new(),
+                session_id: AgentSessionId::new(),
+                acp_session_id: "acp-d".to_string(),
+                auto_approve_mode: AgentAutoApproveMode::Off,
+                env: HashMap::new(),
+                preferences: Default::default(),
+            })
+            .await
+            .unwrap();
+
+        runtime
+            .set_agent_auto_approve_mode(
+                &AgentId::parse("codex").unwrap(),
+                AgentAutoApproveMode::AllowAlways,
+            )
+            .await;
+        runtime
+            .set_agent_auto_approve_mode(
+                &AgentId::parse("claude-code").unwrap(),
+                AgentAutoApproveMode::AllowAlways,
+            )
+            .await;
+
+        let state = runtime.state.read().await;
+        assert_eq!(
+            state
+                .connections
+                .get(&codex_a.connection_id)
+                .unwrap()
+                .launch
+                .auto_approve_mode,
+            AgentAutoApproveMode::AllowAlways
+        );
+        assert_eq!(
+            state
+                .connections
+                .get(&codex_b.connection_id)
+                .unwrap()
+                .launch
+                .auto_approve_mode,
+            AgentAutoApproveMode::AllowAlways
+        );
+        assert_eq!(
+            state
+                .connections
+                .get(&claude_yolo.connection_id)
+                .unwrap()
+                .launch
+                .auto_approve_mode,
+            AgentAutoApproveMode::Yolo,
+            "AllowAlways must not downgrade an existing Yolo connection"
+        );
+        assert_eq!(
+            state
+                .connections
+                .get(&gemini_off.connection_id)
+                .unwrap()
+                .launch
+                .auto_approve_mode,
+            AgentAutoApproveMode::Off
         );
     }
 }

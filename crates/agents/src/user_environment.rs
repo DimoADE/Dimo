@@ -178,6 +178,19 @@ pub fn npm_install_permission_denied(stderr: &str) -> bool {
     stderr.contains("EACCES") || stderr.contains("EPERM") || stderr.contains("permission denied")
 }
 
+pub fn npm_install_resource_busy(stderr: &str) -> bool {
+    stderr.contains("EBUSY") || stderr.contains("resource busy or locked")
+}
+
+pub fn npm_install_unsupported_node_engine(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    stderr.contains("EBADENGINE")
+        || lower.contains("unsupported engine")
+        || lower.contains("requires node")
+        || lower.contains("node.js >=")
+        || (lower.contains("node") && lower.contains("not compatible with your version of node"))
+}
+
 fn first_existing_directory(path: &Path) -> Option<&Path> {
     let mut current = path;
     loop {
@@ -593,6 +606,21 @@ mod tests {
         let stderr = "npm error code EACCES npm error syscall mkdir npm error path /usr/local/lib/node_modules/@agentclientprotocol npm error Error: EACCES: permission denied, mkdir '/usr/local/lib/node_modules/@agentclientprotocol'";
         assert!(npm_install_permission_denied(stderr));
         assert!(!npm_install_permission_denied("npm error code EEXIST"));
+    }
+
+    #[test]
+    fn npm_ebusy_and_unsupported_node_engine_logs_are_classified() {
+        let ebusy = "npm error code EBUSY npm error syscall rename npm error EBUSY: resource busy or locked, rename 'F:\\Ucode\\runtimes\\node\\node_modules\\hermes-agent'";
+        assert!(npm_install_resource_busy(ebusy));
+        assert!(!npm_install_resource_busy("npm error code ENOENT"));
+
+        let openclaw_err =
+            "[openclaw] error: openclaw requires Node.js >=24.16.0 (detected v22.22.3)";
+        assert!(npm_install_unsupported_node_engine(openclaw_err));
+        assert!(npm_install_unsupported_node_engine(
+            "npm error code EBADENGINE"
+        ));
+        assert!(!npm_install_unsupported_node_engine("npm error code EEXIST"));
     }
 
     #[test]

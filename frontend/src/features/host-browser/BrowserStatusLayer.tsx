@@ -16,7 +16,7 @@ import {
   setBrowserNotice,
   subscribeBrowserChrome,
 } from './browserChromeStore';
-import { open } from '@tauri-apps/plugin-shell';
+import { getDesktopShell } from '@/lib/desktopShell';
 import { requestBrowserTabOpen } from './openBrowserTab';
 
 export function BrowserNoticeBar({ tabId }: { tabId: string | null }) {
@@ -90,7 +90,7 @@ export function BrowserDownloadBar({ tabId }: { tabId: string | null }) {
               type="button"
               className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 font-medium text-primary hover:bg-primary/8"
               onClick={() => {
-                void open(item.path as string);
+                void getDesktopShell().shell.openExternal(item.path as string);
               }}
             >
               <FolderOpen className="h-3.5 w-3.5" />

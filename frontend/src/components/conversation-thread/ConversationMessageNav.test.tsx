@@ -156,4 +156,44 @@ describe('ConversationMessageNav', () => {
     rafSpy.mockRestore();
     cancelRafSpy.mockRestore();
   });
+
+  it('does not capture pointer on plain press-and-click without drag', () => {
+    const onSelect = vi.fn();
+    render(
+      <ConversationMessageNav
+        activeIndex={0}
+        onSelect={onSelect}
+        entries={[
+          {
+            key: 'first',
+            index: 0,
+            ordinal: 1,
+            preview: 'First request',
+            additions: 0,
+            deletions: 0,
+          },
+          {
+            key: 'second',
+            index: 4,
+            ordinal: 2,
+            preview: 'Second request',
+            additions: 0,
+            deletions: 0,
+          },
+        ]}
+      />
+    );
+
+    const list = screen.getByTestId('conv-message-nav-list');
+    const captureSpy = vi.fn();
+    list.setPointerCapture = captureSpy;
+    const tick = screen.getByRole('button', { name: '跳转到第 2 条消息' });
+
+    fireEvent.pointerDown(tick, { button: 0, pointerId: 2, clientY: 200 });
+    expect(captureSpy).not.toHaveBeenCalled();
+    fireEvent.pointerUp(tick, { pointerId: 2, clientY: 200 });
+    fireEvent.click(tick);
+
+    expect(onSelect).toHaveBeenCalledWith(4);
+  });
 });

@@ -102,17 +102,27 @@ vi.mock('./PluginsSettings', () => ({
   ),
 }));
 
-vi.mock('@/lib/tauriApi', async (importOriginal) => {
-  const original = await importOriginal<typeof import('@/lib/tauriApi')>();
+vi.mock('@/lib/desktopShell', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('@/lib/desktopShell')>();
   return {
     ...original,
-    tauriInvoke: tauriInvokeMock,
-    tauriListen: vi.fn(
-      async (event: string, listener: (event: unknown) => void) => {
-        tauriListeners.set(event, listener);
-        return vi.fn();
-      }
-    ),
+    getDesktopShell: () => {
+      const shell = original.getDesktopShell();
+      return {
+        ...shell,
+        invoke: tauriInvokeMock,
+        events: {
+          ...shell.events,
+          listen: vi.fn(
+            async (event: string, listener: (event: unknown) => void) => {
+              tauriListeners.set(event, listener);
+              return vi.fn();
+            }
+          ),
+        },
+      };
+    },
   };
 });
 
@@ -826,5 +836,76 @@ describe('AgentSettings (provisioning, preflight & updates)', () => {
         status: 'queued',
       });
     });
+  });
+
+  it('shows operation progress and allows canceling when reopening Settings during a persisted active_operation', async () => {
+    const user = userEvent.setup();
+    api.bar
+      .mockResolvedValueOnce([
+        {
+          agent_id: 'codex',
+          display_name: 'Codex',
+          description: 'OpenAI Codex CLI',
+          icon_light: null,
+          icon_dark: null,
+          icon_svg: null,
+          source: 'built_in',
+          built_in: true,
+          retired: false,
+          enabled: true,
+          position: 0,
+          lifecycle: 'queued',
+          authentication: 'logged_in',
+          runtime_version: '0.168.0',
+          acp_version: null,
+          active_operation: 'update',
+          rollback_available: false,
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          agent_id: 'codex',
+          display_name: 'Codex',
+          description: 'OpenAI Codex CLI',
+          icon_light: null,
+          icon_dark: null,
+          icon_svg: null,
+          source: 'built_in',
+          built_in: true,
+          retired: false,
+          enabled: true,
+          position: 0,
+          lifecycle: 'ready',
+          authentication: 'logged_in',
+          runtime_version: '0.168.0',
+          acp_version: null,
+          active_operation: null,
+          rollback_available: false,
+        },
+      ]);
+    api.cancelOperation.mockResolvedValue({
+      operation_id: 'op-persisted-1',
+      agent_id: 'codex',
+      kind: 'update',
+      status: 'canceled',
+    });
+
+    render(<AgentSettings />);
+
+    const cancelButton = await screen.findByRole('button', {
+      name: '取消操作',
+    });
+    expect(cancelButton).toBeVisible();
+
+    await user.click(cancelButton);
+
+    await waitFor(() =>
+      expect(api.cancelOperation).toHaveBeenCalledWith('codex', '')
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', { name: '取消操作' })
+      ).not.toBeInTheDocument()
+    );
   });
 });

@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ConversationPermissionView } from 'shared/types';
-import { PermissionRequestCard } from './PermissionRequestCard';
+import {
+  PermissionRequestCard,
+  PermissionRequestStack,
+} from './PermissionRequestCard';
 
 function fileEditRequest(
   overrides: Partial<ConversationPermissionView> = {}
@@ -33,7 +36,8 @@ function fileEditRequest(
 }
 
 describe('PermissionRequestCard', () => {
-  it('presents a terminal permission with the request title and exact command', () => {
+  it('presents a terminal permission primarily with its title and reveals the exact command in details', async () => {
+    const user = userEvent.setup();
     render(
       <PermissionRequestCard
         request={fileEditRequest({
@@ -51,25 +55,29 @@ describe('PermissionRequestCard', () => {
 
     expect(screen.getByText('终端')).toBeInTheDocument();
     expect(
-      screen.getByRole('heading', { name: '权限申请' })
+      screen.getByRole('heading', { name: 'Run the project test command' })
     ).toBeInTheDocument();
-    expect(
-      screen.getByText('Run the project test command')
-    ).toBeInTheDocument();
+    expect(screen.queryByTestId('permission-capsule-drawer')).toBeNull();
+    expect(screen.queryByText('pnpm test --runInBand')).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: '详情' }));
+
+    expect(screen.getByTestId('permission-capsule-drawer')).toBeInTheDocument();
     expect(screen.getByText('pnpm test --runInBand')).toBeInTheDocument();
-    expect(
-      document.querySelector('.permission-request-preview')
-    ).not.toBeNull();
   });
 
-  it('renders the real file path from the ACP diff detail', () => {
+  it('renders the real file path from the ACP diff detail when expanded', async () => {
+    const user = userEvent.setup();
     render(
       <PermissionRequestCard request={fileEditRequest()} onRespond={vi.fn()} />
     );
 
-    expect(screen.getByText('Edit README.md')).toBeInTheDocument();
-    // The diff block surfaces the real path the agent wants to touch.
+    expect(
+      screen.getByRole('heading', { name: 'Edit README.md' })
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '详情' }));
     expect(screen.getByText('README.md')).toBeInTheDocument();
+    expect(screen.getByText('new line')).toBeInTheDocument();
   });
 
   it('answers with the selected option id', () => {
@@ -151,7 +159,7 @@ describe('PermissionRequestCard', () => {
     });
   });
 
-  it('persists auto-approve even when the agent only offers allow-once', async () => {
+  it('persists agent-wide auto-approve when selecting always allow even when the agent only offers allow-once', async () => {
     const user = userEvent.setup();
     const onRespond = vi.fn();
     render(
@@ -168,6 +176,7 @@ describe('PermissionRequestCard', () => {
       kind: 'selected',
       option_id: 'allow',
       persist: true,
+      persist_for_agent: true,
     });
   });
 
@@ -216,7 +225,8 @@ describe('PermissionRequestCard', () => {
     expect(screen.queryByRole('button', { name: '允许' })).toBeNull();
   });
 
-  it('renders a command preview from rawInput when there is no content block', () => {
+  it('renders a command preview from rawInput when details are opened', async () => {
+    const user = userEvent.setup();
     render(
       <PermissionRequestCard
         request={fileEditRequest({
@@ -229,6 +239,10 @@ describe('PermissionRequestCard', () => {
       />
     );
 
+    expect(
+      screen.getByRole('heading', { name: 'Run command' })
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '详情' }));
     expect(screen.getByText('rm -rf build')).toBeInTheDocument();
   });
 
@@ -244,7 +258,8 @@ describe('PermissionRequestCard', () => {
     expect(screen.getByRole('button', { name: '允许' })).toBeDisabled();
   });
 
-  it('uses _meta.claudeCode.title as the visible heading without duplicating the title', () => {
+  it('uses _meta.claudeCode.title as the visible heading without duplicating the title', async () => {
+    const user = userEvent.setup();
     render(
       <PermissionRequestCard
         request={fileEditRequest({
@@ -270,6 +285,8 @@ describe('PermissionRequestCard', () => {
       screen.queryByRole('heading', { name: '权限申请' })
     ).not.toBeInTheDocument();
     expect(screen.getAllByText('Build')).toHaveLength(1);
+
+    await user.click(screen.getByRole('button', { name: '详情' }));
     expect(screen.getByText('cargo build')).toBeInTheDocument();
   });
 
@@ -299,7 +316,8 @@ describe('PermissionRequestCard', () => {
     expect(screen.getAllByText('pnpm test --runInBand')).toHaveLength(1);
   });
 
-  it('uses _meta.permission.title when _meta.claudeCode.title is absent and falls back to toolCall.title without meta', () => {
+  it('uses _meta.permission.title when _meta.claudeCode.title is absent and falls back to toolCall.title without meta', async () => {
+    const user = userEvent.setup();
     const { rerender } = render(
       <PermissionRequestCard
         request={fileEditRequest({
@@ -322,6 +340,7 @@ describe('PermissionRequestCard', () => {
     expect(
       screen.getByRole('heading', { name: 'Run command?' })
     ).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '详情' }));
     expect(screen.getByText('git status')).toBeInTheDocument();
 
     rerender(
@@ -341,12 +360,13 @@ describe('PermissionRequestCard', () => {
     );
 
     expect(
-      screen.getByRole('heading', { name: '权限申请' })
+      screen.getByRole('heading', { name: 'Update Cargo.toml' })
     ).toBeInTheDocument();
-    expect(screen.getByText('Update Cargo.toml')).toBeInTheDocument();
+    expect(screen.getByText('Cargo.toml')).toBeInTheDocument();
   });
 
-  it('renders command and unified diff previews from native details.input and bare input objects', () => {
+  it('renders command and unified diff previews from native details.input and bare input objects', async () => {
+    const user = userEvent.setup();
     const { rerender } = render(
       <PermissionRequestCard
         request={fileEditRequest({
@@ -361,6 +381,7 @@ describe('PermissionRequestCard', () => {
     );
 
     expect(screen.getByText('终端')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '详情' }));
     expect(
       screen.getByText('cargo test -p conversations --lib')
     ).toBeInTheDocument();
@@ -384,7 +405,9 @@ describe('PermissionRequestCard', () => {
     );
 
     expect(screen.getByText('文件')).toBeInTheDocument();
-    expect(screen.getByText('src/native.ts')).toBeInTheDocument();
+    expect(screen.getAllByText('src/native.ts').length).toBeGreaterThanOrEqual(
+      1
+    );
     expect(screen.getByText(/const legacy = false;/)).toBeInTheDocument();
 
     rerender(
@@ -404,7 +427,47 @@ describe('PermissionRequestCard', () => {
       />
     );
 
-    expect(screen.getByText('src/claude.ts')).toBeInTheDocument();
+    expect(screen.getAllByText('src/claude.ts').length).toBeGreaterThanOrEqual(
+      1
+    );
     expect(screen.getByText(/after\(\)/)).toBeInTheDocument();
+  });
+
+  it('stacks multiple pending requests into a single capsule deck with a stepper', async () => {
+    const user = userEvent.setup();
+    const onRespond = vi.fn();
+    render(
+      <PermissionRequestStack
+        items={[
+          {
+            request: fileEditRequest({
+              permission_id: 'perm-1',
+              title: '运行单元测试',
+            }),
+            onRespond,
+          },
+          {
+            request: fileEditRequest({
+              permission_id: 'perm-2',
+              title: '修改配置文件',
+            }),
+            onRespond,
+          },
+        ]}
+      />
+    );
+
+    expect(screen.getByTestId('permission-capsule-stack')).toBeInTheDocument();
+    expect(screen.getByText('1 / 2')).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: '运行单元测试' })
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '下一条权限请求' }));
+
+    expect(screen.getByText('2 / 2')).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { name: '修改配置文件' })
+    ).toBeInTheDocument();
   });
 });

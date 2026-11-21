@@ -294,6 +294,57 @@ fn canonical_launch_agent_id(agent_id: &AgentId) -> AgentId {
     agent_id.clone()
 }
 
+pub async fn persist_agent_auto_approve_mode(
+    pool: &SqlitePool,
+    agent_id: &AgentId,
+    mode: agents::AgentAutoApproveMode,
+) -> Result<(), ConversationServiceError> {
+    let canonical = canonical_launch_agent_id(agent_id);
+    let existing_membership: Option<String> =
+        sqlx::query_scalar("SELECT agent_id FROM agent_membership WHERE agent_id = ? LIMIT 1")
+            .bind(agent_id.as_str())
+            .fetch_optional(pool)
+            .await?;
+    let target_agent_id = if let Some(found) = existing_membership {
+        found
+    } else if canonical != *agent_id
+        && let Some(found) = sqlx::query_scalar::<_, String>(
+            "SELECT agent_id FROM agent_membership WHERE agent_id = ? LIMIT 1",
+        )
+        .bind(canonical.as_str())
+        .fetch_optional(pool)
+        .await?
+    {
+        found
+    } else {
+        agent_id.as_str().to_string()
+    };
+    let mode_str = match mode {
+        agents::AgentAutoApproveMode::Off => "off",
+        agents::AgentAutoApproveMode::AllowAlways => "allow_always",
+        agents::AgentAutoApproveMode::Yolo => "yolo",
+    };
+    db::models::agent_setting::AgentSetting::ensure_row(pool, &target_agent_id).await?;
+    if mode == agents::AgentAutoApproveMode::AllowAlways
+        && let Some(existing) =
+            db::models::agent_setting::AgentSetting::find_by_type(pool, &target_agent_id).await?
+        && existing.auto_approve_mode == "yolo"
+    {
+        return Ok(());
+    }
+    db::models::agent_setting::AgentSetting::update_preferences(
+        pool,
+        &target_agent_id,
+        None,
+        None,
+        None,
+        Some(mode_str),
+    )
+    .await
+    .map_err(|error| ConversationServiceError::Internal(error.to_string()))?;
+    Ok(())
+}
+
 pub(crate) async fn resolve_agent_runtime_launch_settings_with_resolver(
     pool: &SqlitePool,
     agent_id: &AgentId,
@@ -305,7 +356,8 @@ pub(crate) async fn resolve_agent_runtime_launch_settings_with_resolver(
                   COALESCE(probe.authentication, 'not_logged_in') AS authentication,
                   lock.resolved_json,
                   lock.id,
-                  setting.env_json
+                  setting.env_json,
+                  setting.auto_approve_mode
            FROM agent_membership membership
            LEFT JOIN agent_installation installation
              ON installation.agent_id = membership.agent_id
@@ -459,8 +511,24 @@ pub(crate) async fn resolve_agent_runtime_launch_settings_with_resolver(
     if agent_id.as_str() == "pi" {
         bind_pi_acp_pi_command(&mut env, requested_pi_command.as_deref());
     }
+    let persisted_auto_approve = row
+        .try_get::<Option<String>, _>("auto_approve_mode")?
+        .as_deref()
+        .map(agents::AgentAutoApproveMode::from_setting)
+        .unwrap_or(agents::AgentAutoApproveMode::Off);
+    let env_auto_approve = agents::auto_approve_mode_for_launch(agent_id, &env);
+    let auto_approve_mode = match (env_auto_approve, persisted_auto_approve) {
+        (agents::AgentAutoApproveMode::Yolo, _) | (_, agents::AgentAutoApproveMode::Yolo) => {
+            agents::AgentAutoApproveMode::Yolo
+        }
+        (agents::AgentAutoApproveMode::AllowAlways, _)
+        | (_, agents::AgentAutoApproveMode::AllowAlways) => {
+            agents::AgentAutoApproveMode::AllowAlways
+        }
+        _ => agents::AgentAutoApproveMode::Off,
+    };
     Ok(AgentRuntimeLaunchSettings {
-        auto_approve_mode: agents::auto_approve_mode_for_launch(agent_id, &env),
+        auto_approve_mode,
         env,
         launch_lock: SessionLaunchLock {
             agent_id: authorization.agent_id,
@@ -1160,6 +1228,126 @@ mod working_dir_tests {
         assert_eq!(
             directories,
             vec![std::path::PathBuf::from("/Users/mac/Projects/Dimo")]
+        );
+    }
+}
+
+#[cfg(test)]
+mod auto_approve_tests {
+    use std::str::FromStr;
+
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    use super::*;
+
+    async fn setup_pool() -> SqlitePool {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .expect("sqlite options")
+            .foreign_keys(false);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("connect memory db");
+        sqlx::migrate!("../db/migrations")
+            .run(&pool)
+            .await
+            .expect("run migrations");
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .expect("disable foreign keys");
+        pool
+    }
+
+    async fn seed_agent_launch_rows(pool: &SqlitePool, agent_id: &str) {
+        let exe = std::env::current_exe().expect("current exe");
+        let lock_id = format!("lock-{agent_id}");
+        let resolved_json = serde_json::json!({
+            "absolute_acp_program": exe,
+            "args": [],
+            "env": {},
+            "runtime_version": "1.0.0",
+            "acp_version": "1.0.0"
+        })
+        .to_string();
+
+        sqlx::query(
+            "INSERT INTO agent_membership (agent_id, source, built_in, retired, enabled, position)
+             VALUES (?, 'built_in_profile', 1, 0, 1, 0)",
+        )
+        .bind(agent_id)
+        .execute(pool)
+        .await
+        .expect("insert membership");
+
+        sqlx::query(
+            "INSERT INTO agent_install_lock (id, agent_id, registry_version, platform, distribution_kind, resolved_json, created_at)
+             VALUES (?, ?, '1.0.0', 'test', 'binary', ?, '2026-01-01T00:00:00Z')",
+        )
+        .bind(&lock_id)
+        .bind(agent_id)
+        .bind(resolved_json)
+        .execute(pool)
+        .await
+        .expect("insert lock");
+
+        sqlx::query(
+            "INSERT INTO agent_installation (agent_id, ownership, lifecycle, current_lock_id, updated_at)
+             VALUES (?, 'external', 'ready', ?, '2026-01-01T00:00:00Z')",
+        )
+        .bind(agent_id)
+        .bind(&lock_id)
+        .execute(pool)
+        .await
+        .expect("insert installation");
+    }
+
+    #[tokio::test]
+    async fn persist_agent_auto_approve_mode_applies_to_subsequent_launch_settings() {
+        let pool = setup_pool().await;
+        seed_agent_launch_rows(&pool, "codex").await;
+        let agent_id = AgentId::parse("codex").unwrap();
+
+        let initial = resolve_agent_runtime_launch_settings(&pool, &agent_id)
+            .await
+            .expect("initial launch settings");
+        assert_eq!(initial.auto_approve_mode, agents::AgentAutoApproveMode::Off);
+
+        persist_agent_auto_approve_mode(
+            &pool,
+            &agent_id,
+            agents::AgentAutoApproveMode::AllowAlways,
+        )
+        .await
+        .expect("persist allow_always");
+
+        let next_session = resolve_agent_runtime_launch_settings(&pool, &agent_id)
+            .await
+            .expect("next session launch settings");
+        assert_eq!(
+            next_session.auto_approve_mode,
+            agents::AgentAutoApproveMode::AllowAlways
+        );
+
+        persist_agent_auto_approve_mode(&pool, &agent_id, agents::AgentAutoApproveMode::Yolo)
+            .await
+            .expect("upgrade to yolo");
+        // Choosing allow_always later must not downgrade an explicit yolo setting.
+        persist_agent_auto_approve_mode(
+            &pool,
+            &agent_id,
+            agents::AgentAutoApproveMode::AllowAlways,
+        )
+        .await
+        .expect("preserve yolo");
+
+        let yolo_session = resolve_agent_runtime_launch_settings(&pool, &agent_id)
+            .await
+            .expect("yolo launch settings");
+        assert_eq!(
+            yolo_session.auto_approve_mode,
+            agents::AgentAutoApproveMode::Yolo
         );
     }
 }

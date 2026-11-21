@@ -114,7 +114,7 @@ const BUILTIN_TOOLBAR_TAB_KEYS: readonly string[] = [
 function ToolbarDivider() {
   return (
     <div
-      data-tauri-drag-region
+      data-window-drag-region
       className="workspace-toolbar-divider mx-1 h-6 w-px"
       role="separator"
       aria-orientation="vertical"
@@ -125,7 +125,7 @@ function ToolbarDivider() {
 function WindowChromeLeadingRule() {
   return (
     <div
-      data-tauri-drag-region
+      data-window-drag-region
       className="window-chrome-leading-rule workspace-toolbar-divider mx-1 h-6 w-px"
       role="separator"
       aria-orientation="vertical"
@@ -560,7 +560,7 @@ export function WorkspaceBranchControls({
 
   return (
     <div
-      data-tauri-drag-region
+      data-window-drag-region
       className="flex min-w-0 shrink-0 items-center gap-1"
       role="group"
       aria-label={i18n.t('panels:shellA11y.workspaceBranches', {
@@ -569,7 +569,7 @@ export function WorkspaceBranchControls({
     >
       <HostSelector />
       <span
-        data-tauri-drag-region
+        data-window-drag-region
         aria-hidden="true"
         className="select-none px-0.5 text-xs text-muted-foreground/45"
       >
@@ -1028,16 +1028,16 @@ export function Toolbar() {
   return (
     <TooltipProvider delayDuration={300}>
       <div className="workspace-topbar window-chrome relative w-full px-1.5">
-        <div data-tauri-drag-region className="absolute inset-0" />
+        <div data-window-drag-region className="absolute inset-0" />
         {hasProject || isCollaborationTab ? (
           <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center">
-            <div className="pointer-events-auto">
+            <div className="pointer-events-auto" data-no-drag>
               <WorkspaceTabSwitcher />
             </div>
           </div>
         ) : null}
         <div
-          data-tauri-drag-region
+          data-window-drag-region
           className="relative z-10 flex h-9 items-center gap-0.5"
         >
           {logoLeads ? <HomeLogoMenu align="start" /> : null}
@@ -1050,7 +1050,7 @@ export function Toolbar() {
           />
 
           <div
-            data-tauri-drag-region
+            data-window-drag-region
             className="ml-auto flex items-center shrink-0 gap-0.5"
           >
             {isCollaborationTab ? (

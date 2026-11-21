@@ -31,6 +31,7 @@ import {
   type AppUpdateInfo,
   type AppUpdateLifecycleState,
 } from '@/lib/appUpdate';
+import { openExternalUrl } from '@/lib/desktopShell';
 import { cn } from '@/lib/utils';
 
 const POLL_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -116,15 +117,6 @@ function StepRail({
       })}
     </div>
   );
-}
-
-async function openExternalUrl(url: string): Promise<void> {
-  try {
-    const { open } = await import('@tauri-apps/plugin-shell');
-    await open(url);
-  } catch {
-    window.open(url, '_blank', 'noopener,noreferrer');
-  }
 }
 
 export function UpdateAvailableBadge() {

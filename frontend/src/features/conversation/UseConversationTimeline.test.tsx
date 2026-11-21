@@ -1958,4 +1958,83 @@ describe('useConversationTimeline', () => {
       })
     );
   });
+
+  it('replays fresh unpersisted preDetailBatches beyond detail live_sequence without duplicating overlaid text', async () => {
+    let resolveDetail!: (value: DbConversationDetail) => void;
+    detailMock.mockImplementationOnce(
+      () =>
+        new Promise<DbConversationDetail>((resolve) => {
+          resolveDetail = resolve;
+        })
+    );
+
+    const { result } = renderHook(() =>
+      useConversationTimeline(CONVERSATION_ID)
+    );
+
+    await waitFor(() => expect(listeners).toHaveLength(1));
+
+    act(() => {
+      // Buffered batch already included in detail overlay (live_sequence = 3n)
+      listeners[0]?.({
+        ...batch(
+          [
+            {
+              op: 'append_text',
+              row_id: 't1:assistant',
+              revision: 10n,
+              stream: 'text',
+              delta: 'overlaid ',
+            },
+          ],
+          10n
+        ),
+        previous_sequence: 10n,
+        live_sequence: 3n,
+      });
+      // Buffered batch emitted after server snapshotted detail (live_sequence = 4n)
+      listeners[0]?.({
+        ...batch(
+          [
+            {
+              op: 'append_text',
+              row_id: 't1:assistant',
+              revision: 10n,
+              stream: 'text',
+              delta: 'fresh-delta',
+            },
+          ],
+          10n
+        ),
+        previous_sequence: 10n,
+        live_sequence: 4n,
+      });
+    });
+
+    const streamingAssistant = assistantRow('t1', 'overlaid ', 10n);
+    if (streamingAssistant.row.kind === 'message_turn') {
+      streamingAssistant.row.phase = 'streaming';
+    }
+
+    await act(async () => {
+      resolveDetail({
+        ...detail(),
+        timeline: {
+          ...detail().timeline,
+          last_sequence: 10n,
+          live_sequence: 3n,
+          rows: [userRow('t1', 'prompt', 9n), streamingAssistant],
+        },
+      });
+    });
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const assistant = result.current.timeline.find(
+      (row) => row.turn.role === 'assistant'
+    );
+    const text = assistant?.turn.blocks
+      .flatMap((b) => (b.type === 'text' ? [b.text] : []))
+      .join('');
+    expect(text).toBe('overlaid fresh-delta');
+  });
 });

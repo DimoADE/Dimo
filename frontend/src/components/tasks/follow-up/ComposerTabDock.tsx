@@ -39,6 +39,7 @@ import { isLimitedGoalStatus } from '@/lib/sessionGoal';
 import { cn } from '@/lib/utils';
 import { MessageQueueIndicator } from './MessageQueueIndicator';
 import { SessionNoticeActions } from './SessionNoticeActions';
+import { StatusNoticeActorChip } from './StatusNoticeActorChip';
 import type { QueuedMessage } from './sessionComposerQueue';
 import type { ComposerSteerChannel } from './sessionComposerSteering';
 
@@ -533,6 +534,7 @@ function ComposerCockpitNoticeRow({
       role="status"
     >
       <div className="flex min-w-0 items-center gap-2">
+        {notice.actor ? <StatusNoticeActorChip actor={notice.actor} /> : null}
         <Badge
           className="composer-status-badge shrink-0"
           variant={tone}

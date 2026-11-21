@@ -60,7 +60,7 @@ pub fn read_custom_data_dir_from(bootstrap_path: &Path) -> Option<PathBuf> {
         return None;
     }
     let path = PathBuf::from(trimmed);
-    if !path.is_absolute() {
+    if !path.is_absolute() || is_inside_macos_app_bundle(&path) {
         return None;
     }
     Some(crate::path::normalize_windows_extended_path_prefix(path))
@@ -141,7 +141,10 @@ pub fn probe_writable_dir(dir: &Path) -> bool {
 }
 
 pub fn install_data_dir_for_exe_dir(install_dir: &Path) -> Option<PathBuf> {
-    if !install_dir.exists() || is_cargo_build_or_test_dir(install_dir) {
+    if !install_dir.exists()
+        || is_cargo_build_or_test_dir(install_dir)
+        || is_inside_macos_app_bundle(install_dir)
+    {
         return None;
     }
     let candidate = install_dir.join("data");
@@ -195,6 +198,31 @@ pub fn macos_app_bundle_containing(exe: &Path) -> Option<PathBuf> {
         }
         cursor = cursor.parent()?;
     }
+}
+
+fn is_app_bundle_component(component: std::path::Component<'_>) -> bool {
+    matches!(component, std::path::Component::Normal(name)
+        if Path::new(name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("app")))
+}
+
+/// Whether `path` points to or inside a macOS `.app` bundle. Writing runtime
+/// data there breaks the sealed Apple code signature (`a sealed resource is
+/// missing or invalid`) and causes Gatekeeper to reject the app as damaged.
+pub fn is_inside_macos_app_bundle(path: &Path) -> bool {
+    is_inside_macos_app_bundle_for_os(cfg!(target_os = "macos"), path)
+}
+
+fn is_inside_macos_app_bundle_for_os(is_macos: bool, path: &Path) -> bool {
+    let components: Vec<_> = path.components().collect();
+    if is_macos && components.iter().copied().any(is_app_bundle_component) {
+        return true;
+    }
+    components.windows(2).any(|pair| {
+        is_app_bundle_component(pair[0])
+            && matches!(pair[1], std::path::Component::Normal(next) if next.eq_ignore_ascii_case("Contents"))
+    })
 }
 
 /// Whether replacing the running app would delete `dir`.
@@ -666,6 +694,9 @@ static DATA_DIR_FOR_THIS_RUN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock
 /// the user's existing data is opened in place and the move is retried on the
 /// next launch. Must run before anything resolves the data directory.
 pub fn use_data_dir_for_this_run(dir: PathBuf) {
+    if is_inside_macos_app_bundle(&dir) {
+        return;
+    }
     let _ = DATA_DIR_FOR_THIS_RUN.set(dir);
 }
 
@@ -715,8 +746,10 @@ pub fn renamed_env_var(name: &str) -> Option<std::ffi::OsString> {
 pub fn host_data_dir() -> PathBuf {
     if let Some(explicit) = renamed_env_var("DIMO_DATA_DIR") {
         let path = PathBuf::from(explicit);
-        let _ = std::fs::create_dir_all(&path);
-        return path;
+        if !is_inside_macos_app_bundle(&path) {
+            let _ = std::fs::create_dir_all(&path);
+            return path;
+        }
     }
     asset_dir()
 }
@@ -734,6 +767,12 @@ pub fn get_data_dir_settings() -> DataDirSettings {
 }
 
 pub fn set_custom_data_dir(new_dir: Option<&Path>) -> std::io::Result<DataDirSettings> {
+    if new_dir.is_some_and(is_inside_macos_app_bundle) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "data directory cannot be inside a macOS .app bundle",
+        ));
+    }
     let normalized = new_dir.map(|dir| {
         crate::path::normalize_windows_extended_path_prefix(dir)
             .to_string_lossy()
@@ -1412,5 +1451,34 @@ mod tests {
             windows,
             windows_data
         ));
+    }
+
+    #[test]
+    fn rejects_macos_app_bundle_paths_for_writable_data_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let bundle_exec_dir = root.path().join("Dimo.app").join("Contents").join("MacOS");
+        std::fs::create_dir_all(&bundle_exec_dir).unwrap();
+        assert!(super::is_inside_macos_app_bundle(&bundle_exec_dir));
+        assert!(super::is_inside_macos_app_bundle(&bundle_exec_dir.join("data")));
+        assert!(super::is_inside_macos_app_bundle_for_os(
+            true,
+            Path::new("/Applications/Dimo.app/data")
+        ));
+        assert!(!super::is_inside_macos_app_bundle(
+            Path::new("/Users/me/Library/Application Support/app.dimo.dimo")
+        ));
+        assert_eq!(super::install_data_dir_for_exe_dir(&bundle_exec_dir), None);
+
+        let bootstrap = root.path().join("config").join("bootstrap.json");
+        let bundle_data = bundle_exec_dir.join("data");
+        super::save_bootstrap_config_to(
+            &bootstrap,
+            &super::BootstrapConfig {
+                custom_data_dir: Some(bundle_data.to_string_lossy().into_owned()),
+            },
+        )
+        .unwrap();
+        assert_eq!(super::read_custom_data_dir_from(&bootstrap), None);
+        assert!(super::set_custom_data_dir(Some(&bundle_data)).is_err());
     }
 }

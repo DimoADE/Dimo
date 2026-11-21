@@ -20,7 +20,7 @@ from PIL import Image, ImageChops
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "assets" / "app-icon.png"
-ICONS = ROOT / "src-tauri" / "icons"
+ICONS = ROOT / "electron" / "build" / "icons"
 MASTER_SIZE = 1024
 # Apple's continuous-corner squircle is a superellipse; n≈5 matches macOS.
 # 0.80 leaves a 10% margin so custom-shaped icons do not outsize system icons.
@@ -260,27 +260,6 @@ def write_icns(master: Image.Image) -> None:
         )
 
 
-def write_ios_android(master_path: Path) -> None:
-    bin_name = "tauri.cmd" if sys.platform == "win32" else "tauri"
-    tauri = ROOT / "node_modules" / ".bin" / bin_name
-    if not tauri.exists():
-        print("skipping tauri ios/android icons: @tauri-apps/cli is not installed")
-        return
-    subprocess.run(
-        [
-            str(tauri),
-            "icon",
-            str(master_path),
-            "-o",
-            str(ICONS),
-            "--ios-color",
-            "#000000",
-        ],
-        check=True,
-        cwd=ROOT,
-    )
-
-
 def assert_ico_sizes() -> None:
     data = (ICONS / "icon.ico").read_bytes()
     count = struct.unpack_from("<H", data, 4)[0]
@@ -306,12 +285,7 @@ def main() -> int:
     source = Image.open(SOURCE).convert("RGBA")
     if source.size[0] != source.size[1]:
         raise SystemExit(f"{SOURCE} must be square, got {source.size}")
-    square = place_content(source, MASTER_SIZE, CONTENT_SCALE)
     desktop = render_desktop_icon(source, MASTER_SIZE, CONTENT_SCALE)
-    with tempfile.TemporaryDirectory() as temp:
-        master_path = Path(temp) / "app-icon.png"
-        square.save(master_path, format="PNG")
-        write_ios_android(master_path)
     write_pngs(source)
     write_ico(source)
     write_icns(desktop)

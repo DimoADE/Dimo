@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useTranslation } from 'react-i18next';
+import { getDesktopShell } from '@/lib/desktopShell';
 
 export function WindowControls() {
   const { t } = useTranslation('settings');
@@ -10,7 +10,7 @@ export function WindowControls() {
     let disposed = false;
     let unlistenResize: (() => void) | null = null;
     let resizeFrame: number | null = null;
-    const appWindow = getCurrentWindow();
+    const appWindow = getDesktopShell().window;
 
     const syncMaximized = async () => {
       try {
@@ -40,6 +40,10 @@ export function WindowControls() {
         scheduleSync();
       })
       .then((unlisten) => {
+        if (disposed) {
+          unlisten();
+          return;
+        }
         unlistenResize = unlisten;
       })
       .catch(() => {
@@ -57,10 +61,10 @@ export function WindowControls() {
     };
   }, []);
 
-  const appWindow = getCurrentWindow();
+  const appWindow = getDesktopShell().window;
 
   return (
-    <div className="flex h-9 items-center gap-1 px-1.5">
+    <div className="flex h-9 items-center gap-1 px-1.5" data-no-drag>
       <button
         type="button"
         className={buttonClass}

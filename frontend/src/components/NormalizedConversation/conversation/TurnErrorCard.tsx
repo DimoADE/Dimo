@@ -15,6 +15,8 @@ import type {
   ConversationError,
   ConversationTurnErrorKind,
 } from 'shared/types';
+import type { StatusNoticeActor } from '@/contexts/ConversationStatusContext';
+import { StatusNoticeActorChip } from '@/components/tasks/follow-up/StatusNoticeActorChip';
 import { describeReset } from '@/components/kanban/planUsageFormat';
 import { Button } from '@/components/ui/button';
 import {
@@ -33,6 +35,7 @@ import { cn } from '@/lib/utils';
  */
 export function TurnErrorCard({
   error,
+  actor,
   onReload,
   onRebind,
   onRetry,
@@ -41,6 +44,7 @@ export function TurnErrorCard({
   placement = 'timeline',
 }: {
   error: ConversationError;
+  actor?: StatusNoticeActor;
   onReload?: () => void | Promise<unknown>;
   onRebind?: () => void | Promise<unknown>;
   onRetry?: () => void | Promise<unknown>;
@@ -92,6 +96,7 @@ export function TurnErrorCard({
       >
         <div className="composer-status-header">
           <div className="composer-status-heading">
+            <StatusNoticeActorChip actor={actor} />
             <div className="composer-status-title">{view.title}</div>
             <Badge
               className="composer-status-badge"

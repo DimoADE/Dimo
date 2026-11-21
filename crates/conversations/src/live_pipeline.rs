@@ -104,6 +104,7 @@ impl ConversationLivePipeline {
             conversation_id,
             last_sequence,
             previous_sequence: None,
+            live_sequence: None,
             reset: true,
             ops: Vec::new(),
             session_modes: None,
@@ -347,6 +348,7 @@ impl ConversationLivePipeline {
                 conversation_id,
                 last_sequence,
                 previous_sequence: Some(previous_sequence),
+                live_sequence: None,
                 reset: false,
                 ops,
                 session_modes: control.session_modes,
@@ -588,6 +590,7 @@ impl ConversationLivePipeline {
                 conversation_id,
                 last_sequence,
                 previous_sequence: Some(previous_sequence),
+                live_sequence: None,
                 reset: false,
                 ops,
                 session_modes: control.session_modes,
@@ -666,7 +669,7 @@ impl ConversationLivePipeline {
             }
         }
 
-        let (cursor, ops) = {
+        let (cursor, live_sequence, ops) = {
             let mut map = self.projectors.lock().await;
             let entry = match map.entry(conversation_id) {
                 std::collections::hash_map::Entry::Occupied(occupied) => occupied.into_mut(),
@@ -686,12 +689,13 @@ impl ConversationLivePipeline {
                     return;
                 }
             };
+            let live_sequence = entry.live_sequence;
             let mut ops = Vec::new();
             extend_coalesced_row_ops(&mut ops, record_ops);
             drop(pin_guard);
             evict_least_recently_used_projectors(&mut map, conversation_id);
             self.prune_conversation_locks(&map);
-            (cursor, ops)
+            (cursor, live_sequence, ops)
         };
 
         let mut prompt_suggestion = None;
@@ -715,6 +719,7 @@ impl ConversationLivePipeline {
             conversation_id,
             last_sequence: cursor,
             previous_sequence: Some(cursor),
+            live_sequence: (live_sequence > 0).then_some(live_sequence),
             reset: false,
             ops,
             session_modes: None,
@@ -1305,5 +1310,81 @@ mod tests {
             })
             .expect("coalesced AppendText op present");
         assert_eq!(append_text, ("hello world", 3));
+    }
+
+    #[tokio::test]
+    async fn publish_unpersisted_assigns_monotonic_live_sequence_without_advancing_db_cursor() {
+        let pool = test_pool().await;
+        let projectors = ConversationRowProjectors::default();
+        let (sink, batches, _workbench) = CapturingSink::new();
+        let pipeline =
+            ConversationLivePipeline::new(pool.clone(), projectors.clone(), Arc::new(sink));
+
+        let conversation_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+        ConversationTurnRecord::create_pending(
+            &pool,
+            turn_id,
+            CreateConversationTurn {
+                conversation_id,
+                prompt_id: None,
+                text_preview: Some("hello"),
+                input_blocks_json: "[]",
+            },
+        )
+        .await
+        .expect("create pending turn");
+        let rec1 = append_event(
+            &pool,
+            conversation_id,
+            turn_id,
+            "user_turn_created",
+            &ConversationEvent::UserTurnCreated {
+                blocks: vec![ConversationInputBlock::Text {
+                    text: "hello".to_string(),
+                }],
+                workflow_refs: Vec::new(),
+            },
+        )
+        .await;
+        pipeline.publish_batch(std::slice::from_ref(&rec1)).await;
+        batches.lock().unwrap().clear();
+
+        let make_delta = |text: &str| ConversationEventRecord {
+            id: Uuid::new_v4(),
+            conversation_id,
+            turn_id: Some(turn_id),
+            binding_id: None,
+            connection_id: None,
+            prompt_id: None,
+            sequence: 0,
+            source: "acp".to_string(),
+            event_kind: "assistant_text_delta".to_string(),
+            event_version: 1,
+            normalized_json: serde_json::to_string(&ConversationEvent::AssistantTextDelta {
+                text: text.to_string(),
+                message_id: None,
+            })
+            .expect("serialize delta"),
+            raw_json: None,
+            idempotency_key: None,
+            created_at: chrono::Utc::now(),
+        };
+
+        pipeline.publish_unpersisted(&make_delta("chunk1 ")).await;
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        pipeline.publish_unpersisted(&make_delta("chunk2")).await;
+
+        let channel = format!("conversation-events:{conversation_id}");
+        let captured = batches.lock().unwrap().clone();
+        let conv_batches: Vec<_> = captured.iter().filter(|(ch, _)| ch == &channel).collect();
+        assert_eq!(conv_batches.len(), 2);
+        assert_eq!(conv_batches[0].1.last_sequence, 1);
+        assert_eq!(conv_batches[0].1.previous_sequence, Some(1));
+        assert_eq!(conv_batches[1].1.last_sequence, 1);
+        assert_eq!(conv_batches[1].1.previous_sequence, Some(1));
+        let seq0 = conv_batches[0].1.live_sequence.expect("first live_sequence");
+        let seq1 = conv_batches[1].1.live_sequence.expect("second live_sequence");
+        assert!(seq1 > seq0, "expected {seq1} > {seq0}");
     }
 }

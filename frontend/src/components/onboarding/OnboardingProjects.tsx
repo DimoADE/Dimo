@@ -21,7 +21,7 @@ import { ProjectFormDialog } from '@/components/dialogs/projects/ProjectFormDial
 import { CloneRepoDialog } from '@/components/dialogs/projects/CloneRepoDialog';
 import { fileSystemApi, projectsApi } from '@/lib/api';
 import { APP_NAME } from '@/lib/branding';
-import { useLocalDesktopHost } from '@/lib/desktopShell';
+import { getDesktopShell, useLocalDesktopHost } from '@/lib/desktopShell';
 import { pickHostDirectories } from '@/lib/hostFs';
 import { orderImportedProjects } from '@/lib/importedProject';
 import { useOptionalBasicGuide } from '@/features/basic-guide';
@@ -366,9 +366,8 @@ export function OnboardingProjects({
     let disposed = false;
     let unlisten: (() => void) | undefined;
 
-    void import('@tauri-apps/api/webview')
-      .then(({ getCurrentWebview }) =>
-        getCurrentWebview().onDragDropEvent((event) => {
+    void getDesktopShell()
+      .window.onDragDropEvent((event) => {
           const payload = event.payload;
           if (payload.type === 'enter' || payload.type === 'over') {
             setDropActive(true);
@@ -409,7 +408,6 @@ export function OnboardingProjects({
             await importDirectoryPaths(validPaths);
           })();
         })
-      )
       .then((stopListening) => {
         if (disposed) stopListening();
         else unlisten = stopListening;

@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use agents::{
@@ -274,6 +274,102 @@ fn emit_host_agent_operation(
             message,
         },
     );
+}
+
+static HOST_INSTANCE_ID: OnceLock<String> = OnceLock::new();
+static ACTIVE_AGENT_OPERATIONS: OnceLock<Mutex<HashMap<Uuid, tokio::task::AbortHandle>>> =
+    OnceLock::new();
+
+pub(crate) fn host_instance_id() -> &'static str {
+    HOST_INSTANCE_ID
+        .get_or_init(|| Uuid::new_v4().to_string())
+        .as_str()
+}
+
+fn active_agent_operations() -> &'static Mutex<HashMap<Uuid, tokio::task::AbortHandle>> {
+    ACTIVE_AGENT_OPERATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn register_active_operation_handle(operation_id: Uuid, handle: tokio::task::AbortHandle) {
+    if let Ok(mut map) = active_agent_operations().lock() {
+        map.insert(operation_id, handle);
+    }
+}
+
+fn remove_active_operation_handle(operation_id: Uuid) {
+    if let Ok(mut map) = active_agent_operations().lock() {
+        map.remove(&operation_id);
+    }
+}
+
+fn abort_active_operation_handle(operation_id: Uuid) {
+    let handle = active_agent_operations()
+        .lock()
+        .ok()
+        .and_then(|mut map| map.remove(&operation_id));
+    if let Some(handle) = handle {
+        handle.abort();
+    }
+}
+
+struct ActiveOperationGuard(Uuid);
+
+impl Drop for ActiveOperationGuard {
+    fn drop(&mut self) {
+        remove_active_operation_handle(self.0);
+    }
+}
+
+pub(crate) async fn recover_interrupted_agent_operations(pool: &sqlx::SqlitePool) {
+    let repository = InstallationOperationRepository::new(pool.clone());
+    let recovered = match repository.recover_interrupted(host_instance_id()).await {
+        Ok(recovered) => recovered,
+        Err(error) => {
+            tracing::error!(%error, "failed to recover interrupted Agent operations");
+            return;
+        }
+    };
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let managed_artifacts_dir =
+        utils::path::managed_artifacts_directory(&home, &utils::assets::host_data_dir());
+    for operation_id in recovered {
+        let Ok(Some(operation)) = repository.find(operation_id).await else {
+            continue;
+        };
+        let Some(staging_path) = operation.staging_path.map(PathBuf::from) else {
+            continue;
+        };
+        let agents_root = managed_artifacts_dir.join("agents");
+        let root = agents_root.join(operation.agent_id.as_str());
+        if root.parent() != Some(agents_root.as_path()) {
+            continue;
+        }
+        let is_staging = staging_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".staging-"));
+        if !(staging_path.is_absolute() && staging_path.starts_with(&root) && is_staging) {
+            continue;
+        }
+        let lock_references = sqlx::query_scalar::<_, String>(
+            r#"SELECT absolute_path FROM agent_install_component
+               WHERE lock_id IN (
+                 SELECT id FROM agent_install_lock WHERE agent_id = ?
+               )"#,
+        )
+        .bind(operation.agent_id.as_str())
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .any(|path| PathBuf::from(path).starts_with(&staging_path));
+        if lock_references {
+            continue;
+        }
+        let _ = tokio::fs::remove_dir_all(&staging_path).await;
+    }
 }
 
 fn parse_uuid(field: &str, value: &str) -> Result<Uuid, ApplicationError> {
@@ -908,15 +1004,40 @@ impl ServerApplicationDomains {
 
     async fn agent_respond_permission(&self, args: Value) -> Result<Value, ApplicationError> {
         let args: AgentRespondPermissionArgs = parse(args)?;
+        let connection_id = parse_connection_id(&args.connection_id)?;
+        let permission_id = parse_permission_id(&args.permission_id)?;
+        let persist_for_agent = args.response.should_persist_agent_auto_approve()
+            && self
+                .conversations
+                .agent_runtime
+                .permission_allows_auto_approve_persistence(connection_id, permission_id)
+                .await;
+        let agent_id = if persist_for_agent {
+            self.conversations
+                .agent_runtime
+                .connection_agent_id(connection_id)
+                .await
+        } else {
+            None
+        };
         self.conversations
             .agent_runtime
             .respond_permission(RespondAgentPermissionInput {
-                connection_id: parse_connection_id(&args.connection_id)?,
-                permission_id: parse_permission_id(&args.permission_id)?,
+                connection_id,
+                permission_id,
                 response: args.response,
             })
             .await
             .map_err(|error| ApplicationError::bad_request(error.to_string()))?;
+        if let Some(agent_id) = agent_id {
+            self.conversations
+                .persist_and_apply_agent_auto_approve_mode(
+                    &agent_id,
+                    agents::AgentAutoApproveMode::AllowAlways,
+                )
+                .await
+                .map_err(|error| ApplicationError::internal(error.to_string()))?;
+        }
         Ok(Value::Null)
     }
 
@@ -1687,7 +1808,7 @@ impl ServerApplicationDomains {
                 agent_id: agent_id.clone(),
                 kind: operation_kind_key(kind).to_string(),
                 frozen_plan_json,
-                host_instance_id: "host".to_string(),
+                host_instance_id: host_instance_id().to_string(),
                 resource_claims: Vec::new(),
                 staging_path: None,
             })
@@ -1723,10 +1844,13 @@ impl ServerApplicationDomains {
         let data_dir = utils::assets::host_data_dir();
         let events = self.events.clone();
         let plan_for_install = plan.clone();
-        tokio::spawn(async move {
+        let operation_uuid = operation.id;
+        let task_handle = tokio::spawn(async move {
+            let _guard = ActiveOperationGuard(operation_uuid);
             crate::host::events::bind_host_events(events.clone(), async move {
-                let _ = InstallationOperationRepository::new(pool.clone())
-                    .mark_running(operation.id, "host")
+                let repository = InstallationOperationRepository::new(pool.clone());
+                let _ = repository
+                    .mark_running(operation_uuid, host_instance_id())
                     .await;
                 let progress_events = events.clone();
                 let progress_agent_id = agent_id.clone();
@@ -1748,13 +1872,35 @@ impl ServerApplicationDomains {
                     },
                 )
                 .await;
-                let repository = InstallationOperationRepository::new(pool.clone());
+                let still_active = matches!(
+                    repository.find(operation_uuid).await,
+                    Ok(Some(current)) if matches!(current.status.as_str(), "queued" | "running")
+                );
+                if !still_active {
+                    return;
+                }
                 match result {
                     Ok(()) => {
                         let _ =
                             super::management::persist_observed_authentication(&pool, &agent_id)
                                 .await;
-                        let _ = repository.finish(operation.id, "succeeded").await;
+                        let _ = repository.finish(operation_uuid, "succeeded").await;
+                        let _ = sqlx::query(
+                            r#"UPDATE agent_installation
+                               SET lifecycle = CASE
+                                     WHEN lifecycle IN ('queued', 'installing', 'updating', 'repairing')
+                                       THEN CASE WHEN current_lock_id IS NULL THEN 'uninstalled' ELSE 'ready' END
+                                     ELSE lifecycle
+                                   END,
+                                   active_operation = NULL,
+                                   active_operation_id = NULL,
+                                   updated_at = CURRENT_TIMESTAMP
+                               WHERE agent_id = ? AND active_operation_id = ?"#,
+                        )
+                        .bind(agent_id.as_str())
+                        .bind(&operation_id)
+                        .execute(&pool)
+                        .await;
                         emit_host_agent_operation(
                             &events,
                             &agent_id,
@@ -1772,7 +1918,7 @@ impl ServerApplicationDomains {
                             %error,
                             "Host ACP install failed"
                         );
-                        let _ = repository.finish(operation.id, "failed").await;
+                        let _ = repository.finish(operation_uuid, "failed").await;
                         let _ = sqlx::query(
                             r#"UPDATE agent_installation
                                SET lifecycle = 'needs_repair',
@@ -1803,6 +1949,7 @@ impl ServerApplicationDomains {
             })
             .await;
         });
+        register_active_operation_handle(operation_uuid, task_handle.abort_handle());
         serialize(receipt)
     }
 
@@ -2023,7 +2170,7 @@ impl ServerApplicationDomains {
         if changed == 0 {
             return Err(ApplicationError::conflict("回滚未能应用到安装记录"));
         }
-        crate::host::events::current_host_events().emit(
+        self.events.emit(
             "agent-management-snapshot-invalidated",
             json!({ "agentId": args.agent_id }),
         );
@@ -2035,82 +2182,7 @@ impl ServerApplicationDomains {
         &self,
         args: Value,
     ) -> Result<Value, ApplicationError> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct CancelArgs {
-            agent_id: AgentId,
-            operation_id: String,
-        }
-        let args: CancelArgs = parse(args)?;
-        let repository = InstallationOperationRepository::new(self.pool.clone());
-        let operation = if let Ok(id) = Uuid::parse_str(&args.operation_id) {
-            repository.find(id).await.map_err(internal_error)?
-        } else {
-            None
-        };
-        let operation = match operation {
-            Some(operation) if operation.agent_id == args.agent_id => operation,
-            _ => repository
-                .active_for_agent(&args.agent_id)
-                .await
-                .map_err(internal_error)?
-                .ok_or_else(|| {
-                    ApplicationError::not_found(format!(
-                        "Agent `{}` 没有可取消的管理操作",
-                        args.agent_id
-                    ))
-                })?,
-        };
-        let kind = parse_operation_kind(&operation.kind)
-            .ok_or_else(|| ApplicationError::conflict("持久化管理操作类型无效"))?;
-        let status = if matches!(operation.status.as_str(), "queued" | "running") {
-            repository
-                .finish(operation.id, "cancelled")
-                .await
-                .map_err(internal_error)?;
-            sqlx::query(
-                r#"UPDATE agent_installation
-                   SET lifecycle = 'idle',
-                       active_operation = NULL,
-                       active_operation_id = NULL,
-                       updated_at = CURRENT_TIMESTAMP
-                   WHERE agent_id = ? AND active_operation_id = ?"#,
-            )
-            .bind(args.agent_id.as_str())
-            .bind(operation.id.to_string())
-            .execute(&self.pool)
-            .await
-            .map_err(internal_error)?;
-            AgentOperationStatus::Canceled
-        } else {
-            match operation.status.as_str() {
-                "succeeded" => AgentOperationStatus::Succeeded,
-                "failed" => AgentOperationStatus::Failed,
-                "cancelled" => AgentOperationStatus::Canceled,
-                "interrupted" => AgentOperationStatus::Interrupted,
-                _ => AgentOperationStatus::Failed,
-            }
-        };
-        let receipt = AgentOperationReceipt {
-            operation_id: operation.id.to_string(),
-            agent_id: args.agent_id.clone(),
-            kind,
-            status,
-        };
-        crate::host::events::current_host_events().emit(
-            "agent-management-event",
-            json!({
-                "agentId": args.agent_id,
-                "operationId": receipt.operation_id,
-                "kind": kind,
-                "status": status,
-            }),
-        );
-        crate::host::events::current_host_events().emit(
-            "agent-management-snapshot-invalidated",
-            json!({ "agentId": args.agent_id }),
-        );
-        serialize(receipt)
+        cancel_host_agent_operation(&self.pool, &self.events, args).await
     }
 
     async fn agent_management_detail_value(&self, args: Value) -> Result<Value, ApplicationError> {
@@ -2625,9 +2697,184 @@ fn parse_operation_kind(value: &str) -> Option<AgentOperationKind> {
     }
 }
 
+async fn cancel_host_agent_operation(
+    pool: &sqlx::SqlitePool,
+    events: &crate::host::events::HostEventBus,
+    args: Value,
+) -> Result<Value, ApplicationError> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct CancelArgs {
+        #[serde(alias = "agent_id")]
+        agent_id: AgentId,
+        #[serde(default, alias = "operation_id")]
+        operation_id: String,
+    }
+    let args: CancelArgs = parse(args)?;
+    let repository = InstallationOperationRepository::new(pool.clone());
+    let operation = if let Ok(id) = Uuid::parse_str(&args.operation_id) {
+        repository.find(id).await.map_err(internal_error)?
+    } else {
+        None
+    };
+    let operation = match operation {
+        Some(operation) if operation.agent_id == args.agent_id => Some(operation),
+        _ => repository
+            .active_for_agent(&args.agent_id)
+            .await
+            .map_err(internal_error)?,
+    };
+    let (operation_id, kind, status) = if let Some(operation) = operation {
+        let kind = parse_operation_kind(&operation.kind)
+            .ok_or_else(|| ApplicationError::conflict("持久化管理操作类型无效"))?;
+        let status = if matches!(operation.status.as_str(), "queued" | "running") {
+            abort_active_operation_handle(operation.id);
+            repository
+                .finish(operation.id, "cancelled")
+                .await
+                .map_err(internal_error)?;
+            AgentOperationStatus::Canceled
+        } else {
+            match operation.status.as_str() {
+                "succeeded" => AgentOperationStatus::Succeeded,
+                "failed" => AgentOperationStatus::Failed,
+                "cancelled" => AgentOperationStatus::Canceled,
+                "interrupted" => AgentOperationStatus::Interrupted,
+                _ => AgentOperationStatus::Failed,
+            }
+        };
+        sqlx::query(
+            r#"UPDATE agent_installation
+               SET lifecycle = CASE
+                     WHEN current_lock_id IS NULL THEN 'uninstalled'
+                     ELSE 'ready'
+                   END,
+                   active_operation = NULL,
+                   active_operation_id = NULL,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE agent_id = ? AND active_operation_id = ?"#,
+        )
+        .bind(args.agent_id.as_str())
+        .bind(operation.id.to_string())
+        .execute(pool)
+        .await
+        .map_err(internal_error)?;
+        (operation.id.to_string(), kind, status)
+    } else {
+        let stale = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            r#"SELECT active_operation, active_operation_id
+               FROM agent_installation
+               WHERE agent_id = ?"#,
+        )
+        .bind(args.agent_id.as_str())
+        .fetch_optional(pool)
+        .await
+        .map_err(internal_error)?;
+        let Some((Some(active_kind), active_operation_id)) = stale else {
+            return Err(ApplicationError::not_found(format!(
+                "Agent `{}` 没有可取消的管理操作",
+                args.agent_id
+            )));
+        };
+        if let Some(id) = active_operation_id
+            .as_deref()
+            .and_then(|raw| Uuid::parse_str(raw).ok())
+        {
+            abort_active_operation_handle(id);
+            let _ = repository.finish(id, "cancelled").await;
+        }
+        sqlx::query(
+            r#"UPDATE agent_installation
+               SET lifecycle = CASE
+                     WHEN current_lock_id IS NULL THEN 'uninstalled'
+                     ELSE 'ready'
+                   END,
+                   active_operation = NULL,
+                   active_operation_id = NULL,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE agent_id = ?"#,
+        )
+        .bind(args.agent_id.as_str())
+        .execute(pool)
+        .await
+        .map_err(internal_error)?;
+        let kind = parse_operation_kind(&active_kind).unwrap_or(AgentOperationKind::Update);
+        (
+            active_operation_id.unwrap_or_else(|| Uuid::new_v4().to_string()),
+            kind,
+            AgentOperationStatus::Canceled,
+        )
+    };
+    let receipt = AgentOperationReceipt {
+        operation_id: operation_id.clone(),
+        agent_id: args.agent_id.clone(),
+        kind,
+        status,
+    };
+    emit_host_agent_operation(
+        events,
+        &args.agent_id,
+        &operation_id,
+        kind,
+        status,
+        None,
+        (status == AgentOperationStatus::Canceled).then(|| "操作已取消".to_string()),
+    );
+    events.emit(
+        "agent-management-snapshot-invalidated",
+        json!({ "agentId": args.agent_id }),
+    );
+    serialize(receipt)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn migrated_agent_pool() -> sqlx::SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite");
+        sqlx::migrate!("../db/migrations")
+            .run(&pool)
+            .await
+            .expect("migrations");
+        pool
+    }
+
+    async fn seed_installed_codex(pool: &sqlx::SqlitePool, lock_id: &str) {
+        sqlx::query(
+            r#"INSERT OR IGNORE INTO agent_membership
+               (agent_id, source, built_in, retired, enabled, position)
+               VALUES ('codex', 'built_in_profile', 1, 0, 1, 0)"#,
+        )
+        .execute(pool)
+        .await
+        .expect("insert membership");
+        sqlx::query(
+            r#"INSERT INTO agent_install_lock
+               (id, agent_id, registry_version, platform, distribution_kind, resolved_json, created_at)
+               VALUES (?, 'codex', '1.0.0', 'windows-x86_64', 'npx', '{}', CURRENT_TIMESTAMP)"#,
+        )
+        .bind(lock_id)
+        .execute(pool)
+        .await
+        .expect("insert lock");
+        sqlx::query(
+            r#"INSERT INTO agent_installation
+               (agent_id, ownership, lifecycle, current_lock_id, rollback_lock_id, updated_at)
+               VALUES ('codex', 'external', 'ready', ?, NULL, CURRENT_TIMESTAMP)
+               ON CONFLICT(agent_id) DO UPDATE SET
+                 lifecycle = 'ready',
+                 current_lock_id = excluded.current_lock_id"#,
+        )
+        .bind(lock_id)
+        .execute(pool)
+        .await
+        .expect("insert installation");
+    }
 
     #[test]
     fn session_defaults_view_uses_values_not_a_raw_map() {
@@ -2666,5 +2913,103 @@ mod tests {
             Ok(_) => panic!("legacy path args must not accept the enable payload"),
         };
         assert!(error.to_string().contains("path"));
+    }
+
+    #[tokio::test]
+    async fn recover_interrupted_agent_operations_clears_legacy_host_update_row() {
+        let pool = migrated_agent_pool().await;
+        let lock_id = Uuid::new_v4().to_string();
+        seed_installed_codex(&pool, &lock_id).await;
+        let repository = InstallationOperationRepository::new(pool.clone());
+        let op = repository
+            .enqueue(NewInstallationOperation {
+                agent_id: AgentId::parse("codex").unwrap(),
+                kind: "update".to_string(),
+                frozen_plan_json: "{}".to_string(),
+                host_instance_id: "host".to_string(),
+                resource_claims: Vec::new(),
+                staging_path: None,
+            })
+            .await
+            .expect("enqueue");
+        repository.mark_running(op.id, "host").await.expect("running");
+
+        assert_ne!(host_instance_id(), "host");
+        recover_interrupted_agent_operations(&pool).await;
+
+        let persisted_op = repository.find(op.id).await.expect("find").expect("exists");
+        assert_eq!(persisted_op.status, "interrupted");
+        let (lifecycle, active_op, active_op_id): (String, Option<String>, Option<String>) =
+            sqlx::query_as(
+                "SELECT lifecycle, active_operation, active_operation_id FROM agent_installation WHERE agent_id = 'codex'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("installation row");
+        assert_eq!(lifecycle, "ready");
+        assert_eq!(active_op, None);
+        assert_eq!(active_op_id, None);
+    }
+
+    #[tokio::test]
+    async fn cancel_host_agent_operation_restores_ready_lifecycle_and_emits_typed_event() {
+        let pool = migrated_agent_pool().await;
+        let lock_id = Uuid::new_v4().to_string();
+        seed_installed_codex(&pool, &lock_id).await;
+        let repository = InstallationOperationRepository::new(pool.clone());
+        let op = repository
+            .enqueue(NewInstallationOperation {
+                agent_id: AgentId::parse("codex").unwrap(),
+                kind: "update".to_string(),
+                frozen_plan_json: "{}".to_string(),
+                host_instance_id: host_instance_id().to_string(),
+                resource_claims: Vec::new(),
+                staging_path: None,
+            })
+            .await
+            .expect("enqueue");
+        repository
+            .mark_running(op.id, host_instance_id())
+            .await
+            .expect("running");
+
+        let events = crate::host::events::HostEventBus::new();
+        let mut rx = events.subscribe();
+
+        let receipt_value = cancel_host_agent_operation(
+            &pool,
+            &events,
+            json!({
+                "agentId": "codex",
+                "operationId": ""
+            }),
+        )
+        .await
+        .expect("cancel succeeds without explicit operationId");
+
+        let receipt: AgentOperationReceipt =
+            serde_json::from_value(receipt_value).expect("valid receipt");
+        assert_eq!(receipt.operation_id, op.id.to_string());
+        assert_eq!(receipt.status, AgentOperationStatus::Canceled);
+
+        let (lifecycle, active_op, active_op_id): (String, Option<String>, Option<String>) =
+            sqlx::query_as(
+                "SELECT lifecycle, active_operation, active_operation_id FROM agent_installation WHERE agent_id = 'codex'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("installation row");
+        assert_eq!(lifecycle, "ready");
+        assert_eq!(active_op, None);
+        assert_eq!(active_op_id, None);
+
+        let first = rx.try_recv().expect("agent-management-event");
+        assert_eq!(first.channel, "agent-management-event");
+        let parsed: AgentOperationEvent =
+            serde_json::from_value(first.payload).expect("snake_case AgentOperationEvent");
+        assert_eq!(parsed.agent_id.as_str(), "codex");
+        assert_eq!(parsed.operation_id, op.id.to_string());
+        assert_eq!(parsed.status, AgentOperationStatus::Canceled);
+        assert!(parsed.sequence > 0);
     }
 }

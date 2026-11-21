@@ -254,6 +254,27 @@ impl InstallationOperationRepository {
             .execute(&mut *transaction)
             .await?;
         }
+        sqlx::query(
+            r#"UPDATE agent_installation
+               SET lifecycle = CASE
+                     WHEN current_lock_id IS NULL THEN 'interrupted'
+                     ELSE 'ready'
+                   END,
+                   active_operation = NULL,
+                   active_operation_id = NULL,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE (active_operation IS NOT NULL OR active_operation_id IS NOT NULL)
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM agent_install_operation op
+                   WHERE op.id = agent_installation.active_operation_id
+                     AND op.status IN ('queued', 'running')
+                     AND op.host_instance_id = ?
+                 )"#,
+        )
+        .bind(current_host_instance_id)
+        .execute(&mut *transaction)
+        .await?;
         transaction.commit().await?;
         ids.into_iter()
             .map(|id| {
@@ -908,13 +929,16 @@ impl InstallationRepository {
         .await?;
         sqlx::query(
             r#"INSERT INTO agent_installation
-               (agent_id, ownership, lifecycle, current_lock_id, rollback_lock_id, updated_at)
-               VALUES (?, ?, ?, ?, NULL, ?)
+               (agent_id, ownership, lifecycle, current_lock_id, rollback_lock_id,
+                active_operation, active_operation_id, updated_at)
+               VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?)
                ON CONFLICT(agent_id) DO UPDATE SET
                    ownership = excluded.ownership,
                    lifecycle = excluded.lifecycle,
                    rollback_lock_id = agent_installation.current_lock_id,
                    current_lock_id = excluded.current_lock_id,
+                   active_operation = NULL,
+                   active_operation_id = NULL,
                    updated_at = excluded.updated_at"#,
         )
         .bind(lock.agent_id.as_str())
@@ -1100,6 +1124,19 @@ impl SessionDefaultRepository {
         .bind(value_json)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    pub async fn delete_option(
+        &self,
+        agent_id: &AgentId,
+        option_id: &str,
+    ) -> Result<(), AgentManagementRepositoryError> {
+        sqlx::query("DELETE FROM agent_session_default WHERE agent_id = ? AND option_id = ?")
+            .bind(agent_id.as_str())
+            .bind(option_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 

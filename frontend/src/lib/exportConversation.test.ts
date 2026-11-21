@@ -16,8 +16,21 @@ const {
   getBackendTransport: vi.fn(),
 }));
 
-vi.mock('@tauri-apps/plugin-dialog', () => ({ save }));
-vi.mock('@tauri-apps/plugin-fs', () => ({ writeTextFile }));
+vi.mock('@/lib/desktopShell', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/lib/desktopShell')>();
+  return {
+    ...actual,
+    getDesktopShell: () => {
+      const shell = actual.getDesktopShell();
+      return {
+        ...shell,
+        dialog: { ...shell.dialog, save },
+        fs: { ...shell.fs, writeTextFile },
+      };
+    },
+  };
+});
 vi.mock('@/features/conversation/conversationApi', () => ({
   conversationApi: {
     exportMarkdown,

@@ -24,9 +24,11 @@ import type {
   ConversationQuestionRequest,
 } from 'shared/types';
 import { Button } from '@/components/ui/button';
+import type { StatusNoticeActor } from '@/contexts/ConversationStatusContext';
 import { getErrorMessage } from '@/lib/modals';
 import { cn } from '@/lib/utils';
 import { GlideMenu } from './GlideMenu';
+import { StatusNoticeActorChip } from './StatusNoticeActorChip';
 import {
   emptyQuestionAnswerState,
   hasAnswer,
@@ -159,6 +161,7 @@ export function AgentQuestionCard({
   mode = 'interactive',
   answers = null,
   onQuestionIndexChange,
+  actor,
 }: {
   request: ConversationQuestionRequest;
   onRespond?: (
@@ -170,6 +173,7 @@ export function AgentQuestionCard({
   mode?: 'interactive' | 'readonly';
   answers?: Record<string, QuestionAnswerState> | null;
   onQuestionIndexChange?: (index: number) => void;
+  actor?: StatusNoticeActor;
 }) {
   const { t } = useTranslation(['conversation', 'common']);
   const questions = useMemo(() => questionTabsFromRequest(request), [request]);
@@ -439,6 +443,11 @@ export function AgentQuestionCard({
           className="inline-flex items-center gap-2 rounded-full border border-[var(--border-strong)] bg-[var(--surface-dialog)] px-3 py-1.5 text-[12.5px] font-medium text-[var(--text-primary)] shadow-[var(--shadow-control)] transition-colors duration-150 hover:bg-[var(--surface-control-hover)]"
           aria-label={t('questionRequestCard.expand')}
         >
+          {actor ? (
+            <StatusNoticeActorChip
+              actor={{ ...actor, onOpenSession: undefined }}
+            />
+          ) : null}
           <MessageCircleQuestion className="h-3.5 w-3.5 text-[var(--text-muted)]" />
           <span className="max-w-[16rem] truncate">
             {activeQuestion.header || t('questionRequestCard.title')}
@@ -499,6 +508,11 @@ export function AgentQuestionCard({
         </button>
 
         <div className="agent-question-card-content">
+          {actor ? (
+            <div className="mb-2 flex items-center pr-7">
+              <StatusNoticeActorChip actor={actor} />
+            </div>
+          ) : null}
           <div
             className="overflow-hidden"
             style={{

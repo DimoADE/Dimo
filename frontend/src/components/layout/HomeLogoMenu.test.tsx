@@ -26,7 +26,8 @@ vi.mock('@/hooks/useProjectSwitcher', () => ({
   useProjectSwitcher: () => switchProject,
 }));
 
-vi.mock('@/lib/desktopShell', () => ({
+vi.mock('@/lib/desktopShell', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/desktopShell')>()),
   useTauriClient,
 }));
 

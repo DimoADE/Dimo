@@ -492,22 +492,10 @@ fn write_cached_probe_version(path: &std::path::Path, revision: &str, version: &
     }
 }
 
-struct KillGroupOnDrop(Option<command_group::AsyncGroupChild>);
-
-impl Drop for KillGroupOnDrop {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
-            let _ = child.start_kill();
-        }
-    }
-}
-
 async fn probe_version(
     executable: &std::path::Path,
     version_args: &[&str],
 ) -> anyhow::Result<Option<String>> {
-    use tokio::io::AsyncReadExt;
-
     let revision = version_probe_cache_revision(executable);
     if let Some(revision) = revision.as_deref()
         && let Some(cached) = read_cached_probe_version(executable, revision)
@@ -515,48 +503,25 @@ async fn probe_version(
         return Ok(Some(cached));
     }
     let mut command = utils::process::new_hidden_tokio_command(executable, version_args);
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = utils::process::group_spawn_no_window(&mut command)?;
-    let mut stdout_pipe = child
-        .inner()
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("version probe missing stdout"))?;
-    let mut stderr_pipe = child
-        .inner()
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("version probe missing stderr"))?;
-    let mut guard = KillGroupOnDrop(Some(child));
+    if std::env::var_os("HERMES_NPM_AUTO_SETUP").is_none() {
+        command.env("HERMES_NPM_AUTO_SETUP", "0");
+    }
+    let output =
+        utils::process::run_command_output_with_timeout(&mut command, LOCAL_RUNTIME_VERSION_TIMEOUT)
+            .await
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::TimedOut {
+                    anyhow::anyhow!("external Runtime version probe timed out")
+                } else {
+                    error.into()
+                }
+            })?;
 
-    let (status, stdout_bytes, stderr_bytes) =
-        tokio::time::timeout(LOCAL_RUNTIME_VERSION_TIMEOUT, async {
-            let child_ref = guard.0.as_mut().expect("active probe child");
-            let read_out = async {
-                let mut buf = Vec::new();
-                stdout_pipe.read_to_end(&mut buf).await?;
-                Ok::<Vec<u8>, std::io::Error>(buf)
-            };
-            let read_err = async {
-                let mut buf = Vec::new();
-                stderr_pipe.read_to_end(&mut buf).await?;
-                Ok::<Vec<u8>, std::io::Error>(buf)
-            };
-            tokio::try_join!(child_ref.wait(), read_out, read_err)
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("external Runtime version probe timed out"))??;
-    let _ = guard.0.take();
-
-    if !status.success() {
+    if !output.status.success() {
         anyhow::bail!("external Runtime version probe failed");
     }
-    let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
-    let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let version = [stdout, stderr].into_iter().find(|value| !value.is_empty());
     if let (Some(revision), Some(version)) = (revision.as_deref(), version.as_deref()) {
         write_cached_probe_version(executable, revision, version);

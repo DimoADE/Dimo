@@ -1,4 +1,10 @@
-import { type Dispatch, type SetStateAction, useCallback } from 'react';
+import {
+  type Dispatch,
+  type SetStateAction,
+  useCallback,
+  useContext,
+} from 'react';
+import { QueryClientContext } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import type {
   AgentId,
@@ -12,6 +18,7 @@ import {
   agentManagementApi,
   agentManagementErrorMessage as errorMessage,
 } from '@/features/agent-management';
+import { invalidateAgentSessionControlsCaches } from '@/features/agents/sessionControlsQuery';
 
 import { isConfigConflict } from './agentSettingsPreflightHelpers';
 
@@ -57,6 +64,7 @@ export function useAgentNativeConfigActions({
   refreshManagement: () => Promise<unknown>;
 }) {
   const { t } = useTranslation(['settings', 'common']);
+  const queryClient = useContext(QueryClientContext);
 
   const saveConfig = useCallback(
     async (
@@ -74,6 +82,9 @@ export function useAgentNativeConfigActions({
             : await agentManagementApi.writeConfig(request)
         );
         setConfigConflict(null);
+        if (queryClient) {
+          invalidateAgentSessionControlsCaches(queryClient, request.agent_id);
+        }
         if (options?.refreshAuth) await refreshAuthentication();
         else await refreshManagement();
       } catch (error) {
@@ -105,6 +116,7 @@ export function useAgentNativeConfigActions({
     },
     [
       activeProviderInstanceId,
+      queryClient,
       refreshAuthentication,
       refreshManagement,
       setConfig,
@@ -127,6 +139,9 @@ export function useAgentNativeConfigActions({
             : await agentManagementApi.writeConfigFile(request)
         );
         setConfigConflict(null);
+        if (queryClient) {
+          invalidateAgentSessionControlsCaches(queryClient, request.agent_id);
+        }
         toast.success(t('settings:agents.configFileSaved'));
         await refreshManagement();
       } catch (error) {
@@ -159,6 +174,7 @@ export function useAgentNativeConfigActions({
     },
     [
       activeProviderInstanceId,
+      queryClient,
       refreshManagement,
       setConfig,
       setConfigConflict,

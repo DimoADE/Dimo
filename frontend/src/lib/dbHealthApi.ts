@@ -2,6 +2,7 @@ import {
   configuredBackendTransport,
   type BackendTransport,
 } from '@/lib/backendTransport';
+import { hasAnyDesktopRuntime } from '@/lib/desktopShell';
 
 export interface DbHealthReport {
   pageCount: number;
@@ -178,8 +179,7 @@ function isUnavailableDbHealthTransport(transport: BackendTransport): boolean {
     transport === configuredBackendTransport &&
     transport.environment === 'desktop' &&
     typeof window !== 'undefined' &&
-    !('__TAURI_INTERNALS__' in window) &&
-    !('__TAURI__' in window)
+    !hasAnyDesktopRuntime()
   );
 }
 

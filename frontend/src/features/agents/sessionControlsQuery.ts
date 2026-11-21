@@ -181,9 +181,11 @@ export function mergeCreateSessionControls(
 }
 
 /**
- * Keep `preferred`'s current mode and option values wherever `controls` still
- * offers them, so a workspace's live picks survive without reviving choices
- * the authoritative controls no longer advertise.
+ * Keep `preferred`'s option values wherever `controls` still offers them, so a
+ * workspace's live picks survive without reviving choices the authoritative
+ * controls no longer advertise. `controls.current_mode` stays authoritative
+ * whenever the catalog defines one so editing an Agent's native default
+ * permission mode is not shadowed by an older session in the same workspace.
  */
 export function preferSessionControlValues(
   controls: AgentSessionControlsSnapshot | null,
@@ -193,13 +195,14 @@ export function preferSessionControlValues(
   const preferredValues = new Map(
     preferred.config_options.map((option) => [option.key, option.value])
   );
+  const currentMode =
+    controls.current_mode ??
+    (controls.modes.some((mode) => mode.id === preferred.current_mode)
+      ? preferred.current_mode
+      : null);
   return {
     ...controls,
-    current_mode: controls.modes.some(
-      (mode) => mode.id === preferred.current_mode
-    )
-      ? preferred.current_mode
-      : controls.current_mode,
+    current_mode: currentMode,
     config_options: controls.config_options.map((option) => {
       const value = preferredValues.get(option.key);
       const offered =
@@ -209,6 +212,36 @@ export function preferSessionControlValues(
       return offered ? { ...option, value } : option;
     }),
   };
+}
+
+/**
+ * Drop stale cached session controls (catalog, workspace live snapshots,
+ * agent-wide schema, freshness, and saved defaults) after an Agent's native
+ * configuration file changes so the next create-session surface reflects the
+ * updated defaults immediately.
+ */
+export function invalidateAgentSessionControlsCaches(
+  queryClient: QueryClient,
+  agentType: string | null | undefined
+): void {
+  const normalized = normalizeAgentType(agentType);
+  if (!normalized) return;
+  queryClient.removeQueries({
+    queryKey: ['agent-session-controls-catalog', normalized],
+    predicate: (query) => query.queryKey[2] !== null,
+  });
+  void queryClient.invalidateQueries({
+    queryKey: ['agent-session-controls-catalog', normalized],
+  });
+  queryClient.removeQueries({
+    queryKey: ['agent-session-controls-schema', normalized],
+  });
+  void queryClient.invalidateQueries({
+    queryKey: ['agentCapabilityCatalogFreshness', normalized],
+  });
+  void queryClient.invalidateQueries({
+    queryKey: ['agentSessionDefaults', normalized],
+  });
 }
 
 /**

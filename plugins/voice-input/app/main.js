@@ -1282,23 +1282,36 @@ export default {
         }, [recordingShortcut]);
 
         const openPluginSettings = () => {
+          const targetPath = `/plugins/${PLUGIN_ID}`;
           try {
-            if (
-              typeof window !== 'undefined' &&
-              window.__TAURI_INTERNALS__ &&
-              typeof window.__TAURI_INTERNALS__.invoke === 'function'
-            ) {
-              void window.__TAURI_INTERNALS__.invoke('open_settings_window', {
-                title: '设置',
-                path: `/plugins/${PLUGIN_ID}`,
-              });
-              return;
+            if (typeof window !== 'undefined') {
+              if (
+                window.dimoDesktop &&
+                typeof window.dimoDesktop.invoke === 'function'
+              ) {
+                void window.dimoDesktop.invoke('open_settings_window', {
+                  title: '设置',
+                  path: targetPath,
+                });
+                return;
+              }
+              if (
+                window.__TAURI_INTERNALS__ &&
+                typeof window.__TAURI_INTERNALS__.invoke === 'function'
+              ) {
+                void window.__TAURI_INTERNALS__.invoke('open_settings_window', {
+                  title: '设置',
+                  path: targetPath,
+                });
+                return;
+              }
             }
           } catch {
             // fallback
           }
           if (typeof window !== 'undefined') {
-            window.location.hash = `#/plugins/${PLUGIN_ID}`;
+            window.history.pushState({}, '', targetPath);
+            window.dispatchEvent(new PopStateEvent('popstate'));
           }
         };
 

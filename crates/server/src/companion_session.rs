@@ -310,11 +310,15 @@ impl CompanionSessionPort for CompanionSessionAdapter {
         permission_id: &str,
         response: AgentPermissionResponse,
     ) -> Result<bool, ApplicationError> {
+        let should_persist_agent = response.should_persist_agent_auto_approve();
         let decision = match &response {
             AgentPermissionResponse::Selected {
-                option_id, persist, ..
+                option_id,
+                persist,
+                persist_for_agent,
+                ..
             } => {
-                if *persist || option_id == "allow_always" {
+                if *persist || *persist_for_agent || option_id == "allow_always" {
                     "allow_always"
                 } else if option_id == "allow_once" || option_id.starts_with("allow") {
                     "allow_once"
@@ -378,6 +382,44 @@ impl CompanionSessionPort for CompanionSessionAdapter {
                 .live_connection_id(AgentSessionId::from(conversation_id))
                 .await
         };
+        if should_persist_agent {
+            let agent_id = match connection_id {
+                Some(conn_id) => {
+                    self.context
+                        .agent_runtime
+                        .connection_agent_id(conn_id)
+                        .await
+                }
+                None => None,
+            };
+            let agent_id = match agent_id {
+                Some(agent_id) => Some(agent_id),
+                None => db::models::conversation::ConversationAgentBindingRecord::latest_for_conversation(
+                    &self.context.deployment.db().pool,
+                    conversation_id,
+                )
+                .await
+                .ok()
+                .flatten()
+                .map(|binding| binding.agent_id),
+            };
+            if let Some(agent_id) = agent_id
+                && let Err(error) = self
+                    .context
+                    .persist_and_apply_agent_auto_approve_mode(
+                        &agent_id,
+                        agents::AgentAutoApproveMode::AllowAlways,
+                    )
+                    .await
+            {
+                tracing::warn!(
+                    %conversation_id,
+                    agent_id = %agent_id,
+                    error = %error,
+                    "failed to persist agent auto-approve mode from companion permission"
+                );
+            }
+        }
         if let (Some(connection_id), Ok(permission_uuid)) =
             (connection_id, Uuid::parse_str(permission_id))
         {

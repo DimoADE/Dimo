@@ -1143,8 +1143,14 @@ export function useCollaborationSpaceRuntime(
     [queryClient]
   );
   const setThreadCardsFor = useCallback(
-    (targetThreadId: string, cards: SpaceCardRecord[] | undefined) => {
-      if (!targetThreadId || !Array.isArray(cards)) return;
+    (
+      targetThreadId: string,
+      updater:
+        | SpaceCardRecord[]
+        | ((current: SpaceCardRecord[]) => SpaceCardRecord[])
+        | undefined
+    ) => {
+      if (!targetThreadId || !updater) return;
       queryClient.setQueryData<ThreadMessagesPage>(
         collabQueryKeys.thread(targetThreadId),
         (current) => {
@@ -1152,7 +1158,11 @@ export function useCollaborationSpaceRuntime(
             messages: EMPTY_MESSAGES,
             scheduled: EMPTY_SCHEDULED,
           };
-          return { ...prev, cards };
+          const cards =
+            typeof updater === 'function'
+              ? updater(prev.cards ?? [])
+              : updater;
+          return Array.isArray(cards) ? { ...prev, cards } : prev;
         }
       );
     },
@@ -1996,6 +2006,18 @@ export function useCollaborationSpaceRuntime(
         }),
         api.onDidRemovePanel((removedPanel) => {
           if (syncingDockviewRef.current) return;
+          void import('@/features/host-browser/browserPanelLifetime').then(
+            ({ closeRemovedDockviewBrowserPanel }) => {
+              void import('@/stores/useLayoutStore').then(
+                ({ useLayoutStore }) => {
+                  closeRemovedDockviewBrowserPanel(
+                    useLayoutStore.getState().currentProjectKey,
+                    removedPanel.id
+                  );
+                }
+              );
+            }
+          );
           setPreviewTabs((current) => {
             const next = current.filter((tab) => tab.id !== removedPanel.id);
             if (next.length === 0) {
@@ -2959,9 +2981,42 @@ export function useCollaborationSpaceRuntime(
         );
         if (cancelled) return;
         if (direct) {
+          let collected = direct.messages;
+          if (incrementalDirect && direct.hasMoreBefore && collected.length > 0) {
+            const latestExistingSeq = latestMessageSeq(directExisting);
+            let oldestLoadedSeq = Number(collected[0]?.seq ?? 0);
+            let oldestLoadedId = collected[0]?.id;
+            let hasMore = Boolean(direct.hasMoreBefore);
+            for (
+              let pageIdx = 0;
+              pageIdx < 5 &&
+              hasMore &&
+              latestExistingSeq > 0 &&
+              oldestLoadedSeq > latestExistingSeq + 1;
+              pageIdx += 1
+            ) {
+              const older = await loadDirectMessages<SpaceMessage>(
+                collaborationCall,
+                directThreadId,
+                undefined,
+                {
+                  beforeSeq: oldestLoadedSeq,
+                  beforeId: oldestLoadedId,
+                  limit: 200,
+                }
+              );
+              if (cancelled || !older || older.messages.length === 0) break;
+              collected = [...older.messages, ...collected];
+              oldestLoadedSeq = Number(
+                older.messages[0]?.seq ?? oldestLoadedSeq
+              );
+              oldestLoadedId = older.messages[0]?.id ?? oldestLoadedId;
+              hasMore = Boolean(older.hasMoreBefore);
+            }
+          }
           applyDirectMessages(
             directThreadId,
-            direct.messages,
+            collected,
             incrementalDirect
           );
           if (Array.isArray(direct.cards)) {
@@ -5932,6 +5987,17 @@ export function useCollaborationSpaceRuntime(
           cardId,
           decision,
         });
+        const resolvedThreadId =
+          directThreadRef.current || selectedIdRef.current || '';
+        if (resolvedThreadId) {
+          setThreadCardsFor(resolvedThreadId, (current) =>
+            current.map((card) =>
+              card.id === cardId
+                ? { ...card, status: 'resolved', resolution: { decision } }
+                : card
+            )
+          );
+        }
         setResolvedApprovalCardIds((current) =>
           current.includes(cardId) ? current : [...current, cardId]
         );
@@ -5953,7 +6019,7 @@ export function useCollaborationSpaceRuntime(
         );
       }
     },
-    []
+    [setThreadCardsFor]
   );
 
   const filteredMessages = useMemo(
@@ -5962,12 +6028,16 @@ export function useCollaborationSpaceRuntime(
         const text = bubbleText(message.envelope ?? {});
         if (isCollabDmBootstrapPrompt(text)) return false;
         const card = parseCard(text);
-        if (card?.kind === 'approval' && !card.before.trim()) {
+        if (
+          card?.kind === 'approval' &&
+          !card.before.trim() &&
+          pendingApprovalCardIds.has(card.id)
+        ) {
           return false;
         }
         return true;
       }),
-    [messages]
+    [messages, pendingApprovalCardIds]
   );
 
   const listAvatarPx = groupAvatarMemberSlotPx(
@@ -6126,8 +6196,10 @@ export function useCollaborationSpaceRuntime(
       setIsAtThreadBottom(true);
       setActiveNavIndex(null);
     }
+    const threadViewportHeight = threadLogRef.current?.clientHeight ?? 0;
     if (
       filteredMessages.length > 0 &&
+      threadViewportHeight > 0 &&
       hasPinnedNonEmptyThreadRef.current !== activeThreadPinKey
     ) {
       hasPinnedNonEmptyThreadRef.current = activeThreadPinKey;
@@ -6146,6 +6218,22 @@ export function useCollaborationSpaceRuntime(
     workingConversationIds.length,
     pendingApprovalCards.length,
   ]);
+
+  useLayoutEffect(() => {
+    const el = threadLogRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    let lastHeight = el.clientHeight;
+    const observer = new ResizeObserver(() => {
+      const nextHeight = el.clientHeight;
+      const revealed = lastHeight === 0 && nextHeight > 0;
+      lastHeight = nextHeight;
+      if (revealed && followThreadBottomRef.current) {
+        pinThreadLogToBottom('auto');
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [pinThreadLogToBottom]);
 
   const selectedTagConfig = useMemo(() => {
     if (!selected) return undefined;

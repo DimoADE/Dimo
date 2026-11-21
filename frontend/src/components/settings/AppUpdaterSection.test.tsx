@@ -1,10 +1,32 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { open } from '@tauri-apps/plugin-shell';
 
 import i18n from '@/i18n';
 import { AppUpdaterSection } from './AppUpdaterSection';
+
+const openExternalMock = vi.hoisted(() =>
+  vi.fn<(target: string) => Promise<void>>().mockResolvedValue(undefined)
+);
+
+vi.mock('@/lib/desktopShell', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/lib/desktopShell')>();
+  return {
+    ...actual,
+    openExternalUrl: openExternalMock,
+    getDesktopShell: () => {
+      const shell = actual.getDesktopShell();
+      return {
+        ...shell,
+        shell: {
+          ...shell.shell,
+          openExternal: openExternalMock,
+        },
+      };
+    },
+  };
+});
 
 const mocks = vi.hoisted(() => ({
   snapshot: {
@@ -45,6 +67,8 @@ vi.mock('@/components/NormalizedConversation/AstryxMarkdown', () => ({
 
 describe('AppUpdaterSection', () => {
   beforeEach(async () => {
+    openExternalMock.mockReset();
+    openExternalMock.mockResolvedValue(undefined);
     mocks.checkAppUpdate.mockReset();
     mocks.checkAppUpdate.mockResolvedValue(mocks.snapshot);
     if (i18n.language !== 'zh-CN') {
@@ -88,7 +112,7 @@ describe('AppUpdaterSection', () => {
     );
 
     await user.click(await screen.findByRole('button', { name: '发布页' }));
-    expect(open).toHaveBeenCalledWith(
+    expect(openExternalMock).toHaveBeenCalledWith(
       'https://github.com/DimoADE/Dimo/releases/tag/v0.1.3'
     );
   });
@@ -133,7 +157,7 @@ describe('AppUpdaterSection', () => {
     expect(screen.getByText('代理：system')).toBeVisible();
 
     await user.click(screen.getByRole('button', { name: '发布页' }));
-    expect(open).toHaveBeenCalledWith(
+    expect(openExternalMock).toHaveBeenCalledWith(
       'https://github.com/DimoADE/Dimo/releases/latest'
     );
 

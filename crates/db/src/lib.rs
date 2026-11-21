@@ -887,6 +887,32 @@ impl ReadPool {
     }
 }
 
+/// Post-commit visibility fence for writer-only SQLite hooks reading via [`ReadPool`].
+///
+/// SQLite invokes `update_hook` and `commit_hook` before the WAL commit frame is
+/// published to `-shm`. Acquiring and immediately releasing a connection from the
+/// single-connection [`WritePool`] in a spawned task guarantees the originating
+/// statement or transaction has finished committing and is visible to [`ReadPool`],
+/// without executing any SQL on the writer connection.
+#[derive(Clone, Default)]
+pub struct CommitVisibilityFence {
+    writer: Arc<std::sync::OnceLock<WritePool>>,
+}
+
+impl CommitVisibilityFence {
+    pub fn bind(&self, writer: WritePool) {
+        let _ = self.writer.set(writer);
+    }
+
+    pub async fn wait_for_commit(&self) {
+        if let Some(writer) = self.writer.get()
+            && let Ok(conn) = writer.as_pool().acquire().await
+        {
+            drop(conn);
+        }
+    }
+}
+
 fn sqlite_write_connect_options(database_path: &Path) -> SqliteConnectOptions {
     // WAL lets readers (git-status polls, conversation detail) run concurrently
     // with the single writer connection (`WritePool(1)`).
@@ -1015,7 +1041,11 @@ impl DBService {
     /// migrations and SQLite concurrency settings cannot drift by host.
     pub async fn new_at(data_dir: impl AsRef<std::path::Path>) -> Result<DBService, Error> {
         std::fs::create_dir_all(data_dir.as_ref()).map_err(Error::Io)?;
-        Self::create_pools(data_dir.as_ref(), None::<fn(ReadPool) -> AfterConnectHook>).await
+        Self::create_pools(
+            data_dir.as_ref(),
+            None::<fn(ReadPool, CommitVisibilityFence) -> AfterConnectHook>,
+        )
+        .await
     }
 
     pub async fn new_with_after_connect<F>(after_connect: F) -> Result<DBService, Error>
@@ -1029,7 +1059,7 @@ impl DBService {
             + 'static,
     {
         let hook: AfterConnectHook = Arc::new(after_connect);
-        Self::create_pools(&asset_dir(), Some(move |_reader| hook)).await
+        Self::create_pools(&asset_dir(), Some(move |_reader, _fence| hook)).await
     }
 
     pub async fn new_at_with_after_connect<F>(
@@ -1047,18 +1077,19 @@ impl DBService {
     {
         std::fs::create_dir_all(data_dir.as_ref()).map_err(Error::Io)?;
         let hook: AfterConnectHook = Arc::new(after_connect);
-        Self::create_pools(data_dir.as_ref(), Some(move |_reader| hook)).await
+        Self::create_pools(data_dir.as_ref(), Some(move |_reader, _fence| hook)).await
     }
 
     /// Open `WritePool(1)` + `ReadPool(4)` at `data_dir` and build the writer-only
-    /// `after_connect` hook from the freshly initialized [`ReadPool`], eliminating any
-    /// hidden third pool inside update hooks.
+    /// `after_connect` hook from the freshly initialized [`ReadPool`] and
+    /// [`CommitVisibilityFence`], eliminating any hidden third pool inside update hooks
+    /// while ensuring hook queries only run after WAL commits are visible.
     pub async fn new_at_with_reader_hook<MakeHook, F>(
         data_dir: impl AsRef<std::path::Path>,
         make_hook: MakeHook,
     ) -> Result<DBService, Error>
     where
-        MakeHook: FnOnce(ReadPool) -> F,
+        MakeHook: FnOnce(ReadPool, CommitVisibilityFence) -> F,
         F: for<'a> Fn(
                 &'a mut SqliteConnection,
             ) -> std::pin::Pin<
@@ -1070,7 +1101,9 @@ impl DBService {
         std::fs::create_dir_all(data_dir.as_ref()).map_err(Error::Io)?;
         Self::create_pools(
             data_dir.as_ref(),
-            Some(move |reader| Arc::new(make_hook(reader)) as AfterConnectHook),
+            Some(move |reader, commit_fence| {
+                Arc::new(make_hook(reader, commit_fence)) as AfterConnectHook
+            }),
         )
         .await
     }
@@ -1080,7 +1113,7 @@ impl DBService {
         make_hook: Option<MakeHook>,
     ) -> Result<DBService, Error>
     where
-        MakeHook: FnOnce(ReadPool) -> AfterConnectHook,
+        MakeHook: FnOnce(ReadPool, CommitVisibilityFence) -> AfterConnectHook,
     {
         let db_path = data_dir.join("db.sqlite");
         let write_options = sqlite_write_connect_options(&db_path);
@@ -1106,6 +1139,7 @@ impl DBService {
             .connect_with(read_options)
             .await?;
         let reader = ReadPool(reader_pool);
+        let commit_fence = CommitVisibilityFence::default();
 
         let mut writer_builder = SqlitePoolOptions::new()
             .max_connections(1)
@@ -1114,7 +1148,7 @@ impl DBService {
             .acquire_timeout(Duration::from_secs(30));
 
         if let Some(make_hook) = make_hook {
-            let hook = make_hook(reader.clone());
+            let hook = make_hook(reader.clone(), commit_fence.clone());
             writer_builder = writer_builder.after_connect(move |conn, _meta| {
                 let hook = hook.clone();
                 Box::pin(async move {
@@ -1126,6 +1160,7 @@ impl DBService {
 
         let writer_pool = writer_builder.connect_with(write_options).await?;
         let writer = WritePool(writer_pool.clone());
+        commit_fence.bind(writer.clone());
 
         Ok(DBService {
             pool: writer_pool,

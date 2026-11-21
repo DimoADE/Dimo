@@ -1,5 +1,5 @@
-import { tauriInvoke } from '@/lib/tauriApi';
-import { isTauriDesktopShell } from '@/utils/platform';
+import { getDesktopShell } from '@/lib/desktopShell';
+import { isDesktopShell } from '@/utils/platform';
 
 /** Directories already handed to the webview asset protocol this session. */
 const grantedDirectories = new Set<string>();
@@ -12,7 +12,7 @@ const grantedDirectories = new Set<string>();
 export async function allowPreviewAssetScope(
   directories: readonly string[]
 ): Promise<void> {
-  if (!isTauriDesktopShell()) {
+  if (!isDesktopShell()) {
     return;
   }
 
@@ -23,7 +23,9 @@ export async function allowPreviewAssetScope(
     return;
   }
 
-  await tauriInvoke('allow_preview_asset_scope', { directories: pending });
+  await getDesktopShell().invoke('allow_preview_asset_scope', {
+    directories: pending,
+  });
 
   for (const directory of pending) {
     grantedDirectories.add(directory);

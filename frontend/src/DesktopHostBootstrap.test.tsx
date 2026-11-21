@@ -9,13 +9,28 @@ const tauriListen = vi.hoisted(() => vi.fn(async () => () => undefined));
 const getCurrentWindow = vi.hoisted(() => vi.fn(() => ({ label: 'main' })));
 const isTauriDesktopShell = vi.hoisted(() => vi.fn(() => true));
 
-vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow,
-}));
+vi.mock('@/lib/desktopShell', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/lib/desktopShell')>();
+  return {
+    ...actual,
+    getDesktopWindowLabel: () => getCurrentWindow().label,
+    getDesktopShell: () => {
+      const shell = actual.getDesktopShell();
+      return {
+        ...shell,
+        events: {
+          ...shell.events,
+          listen: tauriListen,
+        },
+      };
+    },
+  };
+});
 
 vi.mock('@/utils/platform', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/utils/platform')>()),
-  isTauriDesktopShell,
+  isDesktopShell: isTauriDesktopShell,
 }));
 
 vi.mock('@/lib/api', () => ({
@@ -23,10 +38,6 @@ vi.mock('@/lib/api', () => ({
     status: hostClientStatus,
     connect: vi.fn(),
   },
-}));
-
-vi.mock('@/lib/tauriApi', () => ({
-  tauriListen,
 }));
 
 import { RemoteDesktopTransport } from '@/lib/transport';

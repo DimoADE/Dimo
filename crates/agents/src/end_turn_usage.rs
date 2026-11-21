@@ -424,6 +424,25 @@ where
     merged
 }
 
+/// Reads `permissions.defaultMode` from `<CLAUDE_CONFIG_DIR || ~/.claude>/settings.json`.
+pub fn read_claude_default_permission_mode<'a, I>(env: I) -> Option<String>
+where
+    I: IntoIterator<Item = (&'a String, &'a String)>,
+{
+    let env_lookup: HashMap<&str, &str> = env
+        .into_iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let config_dir = resolve_claude_config_dir(&env_lookup)?;
+    let bytes = std::fs::read(config_dir.join("settings.json")).ok()?;
+    let root = serde_json::from_slice::<Value>(&bytes).ok()?;
+    root.pointer("/permissions/defaultMode")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 /// Extracts configured Claude model alias mappings (`ANTHROPIC_MODEL`,
 /// `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL`) from launch env and
 /// `~/.claude/settings.json`.

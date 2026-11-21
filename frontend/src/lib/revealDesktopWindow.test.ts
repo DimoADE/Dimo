@@ -4,21 +4,36 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const show = vi.fn<() => Promise<void>>(async () => undefined);
 const setFocus = vi.fn<() => Promise<void>>(async () => undefined);
-const getCurrentWindow = vi.fn(() => ({ show, setFocus }));
 const invoke = vi.fn<(cmd: string) => Promise<void>>(async () => undefined);
 
-vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow,
-}));
+vi.mock('@/lib/desktopShell', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/lib/desktopShell')>();
+  return {
+    ...actual,
+    getDesktopShell: () => {
+      const shell = actual.getDesktopShell();
+      return {
+        ...shell,
+        invoke,
+        window: {
+          ...shell.window,
+          show,
+          setFocus,
+        },
+      };
+    },
+  };
+});
 
-vi.mock('@tauri-apps/api/core', () => ({
-  invoke,
-}));
-
-vi.mock('@/utils/platform', () => ({
-  isTauriDesktopShell: () =>
-    typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window,
-}));
+vi.mock('@/utils/platform', () => {
+  const isElectron = () =>
+    typeof window !== 'undefined' && Boolean(window.dimoDesktop);
+  return {
+    isElectronDesktopShell: isElectron,
+    isDesktopShell: isElectron,
+  };
+});
 
 import {
   revealDesktopWindow,
@@ -27,40 +42,40 @@ import {
   shouldRevealDesktopWindowOnBoot,
 } from './revealDesktopWindow';
 
+function enableElectronDesktop() {
+  window.dimoDesktop = {
+    platform: 'win32',
+  } as unknown as Window['dimoDesktop'];
+}
+
 afterEach(() => {
   show.mockReset();
   show.mockImplementation(async () => undefined);
   setFocus.mockReset();
   setFocus.mockImplementation(async () => undefined);
-  getCurrentWindow.mockClear();
   invoke.mockReset();
   invoke.mockImplementation(async () => undefined);
-  delete (window as Window & { __TAURI_INTERNALS__?: unknown })
-    .__TAURI_INTERNALS__;
+  delete (window as Window & { dimoDesktop?: unknown }).dimoDesktop;
   window.history.replaceState({}, '', '/');
 });
 
 describe('revealDesktopWindow', () => {
   it('does nothing outside the desktop shell', async () => {
     await revealDesktopWindow();
-    expect(getCurrentWindow).not.toHaveBeenCalled();
+    expect(show).not.toHaveBeenCalled();
     expect(invoke).not.toHaveBeenCalled();
   });
 
   it('does not reveal the desktop-toast window', async () => {
-    (
-      window as Window & { __TAURI_INTERNALS__?: Record<string, never> }
-    ).__TAURI_INTERNALS__ = {};
+    enableElectronDesktop();
     window.history.replaceState({}, '', '/desktop-toast');
     await revealDesktopWindow();
-    expect(getCurrentWindow).not.toHaveBeenCalled();
+    expect(show).not.toHaveBeenCalled();
     expect(invoke).not.toHaveBeenCalled();
   });
 
   it('shows and focuses the current window after paint', async () => {
-    (
-      window as Window & { __TAURI_INTERNALS__?: Record<string, never> }
-    ).__TAURI_INTERNALS__ = {};
+    enableElectronDesktop();
 
     const raf = vi
       .spyOn(window, 'requestAnimationFrame')
@@ -79,9 +94,7 @@ describe('revealDesktopWindow', () => {
   });
 
   it('isolates setFocus failure so show still succeeds without throwing', async () => {
-    (
-      window as Window & { __TAURI_INTERNALS__?: Record<string, never> }
-    ).__TAURI_INTERNALS__ = {};
+    enableElectronDesktop();
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     setFocus.mockRejectedValueOnce(new Error('focus denied by WM'));
 
@@ -97,9 +110,7 @@ describe('revealDesktopWindow', () => {
   });
 
   it('falls back to reveal_main_window command when current.show() fails', async () => {
-    (
-      window as Window & { __TAURI_INTERNALS__?: Record<string, never> }
-    ).__TAURI_INTERNALS__ = {};
+    enableElectronDesktop();
     show.mockRejectedValueOnce(new Error('window plugin unavailable'));
 
     await expect(revealDesktopWindow()).resolves.toBeUndefined();
@@ -110,9 +121,7 @@ describe('revealDesktopWindow', () => {
   });
 
   it('retries with backoff when both show() and fallback fail initially', async () => {
-    (
-      window as Window & { __TAURI_INTERNALS__?: Record<string, never> }
-    ).__TAURI_INTERNALS__ = {};
+    enableElectronDesktop();
     show
       .mockRejectedValueOnce(new Error('attempt 1 show failed'))
       .mockRejectedValueOnce(new Error('attempt 2 show failed'))
@@ -129,9 +138,7 @@ describe('revealDesktopWindow', () => {
   });
 
   it('logs a diagnostic warning when all retry attempts fail', async () => {
-    (
-      window as Window & { __TAURI_INTERNALS__?: Record<string, never> }
-    ).__TAURI_INTERNALS__ = {};
+    enableElectronDesktop();
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     show.mockRejectedValue(new Error('show failed'));
     invoke.mockRejectedValue(new Error('fallback failed'));
@@ -201,10 +208,10 @@ describe('revealDesktopWindow', () => {
   });
 
   it('is allowed to show the desktop window', () => {
-    const capability = fs.readFileSync(
-      path.resolve(__dirname, '../../../src-tauri/capabilities/default.json'),
+    const preload = fs.readFileSync(
+      path.resolve(__dirname, '../../../electron/src/preload/index.ts'),
       'utf8'
     );
-    expect(capability).toContain('core:window:allow-show');
+    expect(preload).toContain('IPC_CHANNELS.WINDOW_SHOW');
   });
 });

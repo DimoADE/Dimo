@@ -50,6 +50,7 @@ enum ActiveSubscription {
     HostEvent {
         channel: String,
         after_sequence: i64,
+        exact: bool,
     },
 }
 
@@ -223,7 +224,7 @@ async fn handle_socket<R>(
                 }
             }
             _ = revocation_ticker.tick() => {
-                match state.auth.is_active(&credential).await {
+                match state.is_credential_active(&credential).await {
                     Ok(true) => {}
                     Ok(false) => {
                         let _ = send_message(
@@ -273,10 +274,12 @@ async fn handle_socket<R>(
                         ActiveSubscription::HostEvent {
                             channel,
                             after_sequence,
+                            exact,
                         } => {
                             event.sequence > *after_sequence
                                 && (*channel == event.channel
-                                    || event.channel.starts_with(&format!("{channel}:")))
+                                    || (!*exact
+                                        && event.channel.starts_with(&format!("{channel}:"))))
                         }
                         _ => false,
                     })
@@ -600,6 +603,7 @@ where
                 ActiveSubscription::HostEvent {
                     channel,
                     after_sequence,
+                    exact: false,
                 },
             ))
         }
@@ -628,6 +632,7 @@ where
                 ActiveSubscription::HostEvent {
                     channel: channel.clone(),
                     after_sequence,
+                    exact: true,
                 },
             );
             let task_key =
@@ -646,6 +651,7 @@ where
                 ActiveSubscription::HostEvent {
                     channel,
                     after_sequence,
+                    exact: true,
                 },
             ))
         }
@@ -792,5 +798,205 @@ mod tests {
         assert!(decode_ws_text(&wrapped, Some(&session), &mut active_key).is_ok());
         assert!(active_key.is_some());
         assert!(decode_ws_text(plaintext, Some(&session), &mut active_key).is_err());
+    }
+
+    #[tokio::test]
+    async fn desktop_token_websocket_stays_active_and_streams_project_creation() {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        use tokio_tungstenite::{
+            connect_async,
+            tungstenite::{
+                Message as ClientMessage, client::IntoClientRequest, http::HeaderValue,
+            },
+        };
+
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let project_dir = tempfile::tempdir().expect("temp project dir");
+        let desktop_token = "desktop-owner-token-with-at-least-32-bytes";
+
+        let headless = crate::HeadlessServer::bootstrap(
+            crate::ServerBootstrapConfig::new(data_dir.path())
+                .with_desktop_mode(true)
+                .with_desktop_token(crate::ServerToken::new(desktop_token))
+                .with_autostart_web_service(false),
+        )
+        .await
+        .expect("bootstrap desktop headless server");
+
+        let app = headless.runtime().router();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let mut request = format!("ws://{address}/api/v1/ws")
+            .into_client_request()
+            .expect("request");
+        let encoded = URL_SAFE_NO_PAD.encode(desktop_token);
+        request.headers_mut().insert(
+            "sec-websocket-protocol",
+            HeaderValue::from_str(&format!("dimo.v1, dimo.token.{encoded}")).expect("protocol"),
+        );
+        let (mut socket, _) = connect_async(request).await.expect("websocket connect");
+
+        async fn next_msg(
+            socket: &mut tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            stage: &str,
+        ) -> SubscriptionServerMessage {
+            let frame = tokio::time::timeout(Duration::from_secs(3), socket.next())
+                .await
+                .unwrap_or_else(|_| panic!("websocket message timeout while {stage}"))
+                .expect("websocket open")
+                .expect("valid websocket frame");
+            serde_json::from_slice(&frame.into_data()).expect("server message")
+        }
+
+        let subscription_id = SubscriptionId::new();
+        socket
+            .send(ClientMessage::Text(
+                serde_json::to_string(&SubscriptionClientMessage::Attach {
+                    request: remote_protocol::SubscriptionRequest {
+                        subscription_id,
+                        resource: SubscriptionResource::PatchStream {
+                            stream: "projects".to_string(),
+                            args: serde_json::json!({}),
+                        },
+                    },
+                })
+                .expect("attach projects stream")
+                .into(),
+            ))
+            .await
+            .expect("send attach");
+
+        let mut saw_initial_ready_patch = false;
+        for _ in 0..8 {
+            match next_msg(&mut socket, "waiting for initial Ready patch").await {
+                SubscriptionServerMessage::Error { error, .. } => {
+                    panic!("desktop websocket unexpectedly errored: {error:?}");
+                }
+                SubscriptionServerMessage::Event {
+                    subscription_id: event_sub_id,
+                    event,
+                } if event_sub_id == subscription_id => {
+                    if event.payload == serde_json::json!("Ready") {
+                        saw_initial_ready_patch = true;
+                        break;
+                    }
+                }
+                SubscriptionServerMessage::Ready { .. }
+                | SubscriptionServerMessage::Live { .. }
+                | SubscriptionServerMessage::Snapshot { .. }
+                | SubscriptionServerMessage::Pong => {}
+                other => panic!("unexpected server message before Ready patch: {other:?}"),
+            }
+        }
+        assert!(
+            saw_initial_ready_patch,
+            "expected initial projects patch stream Ready event"
+        );
+
+        // Wait past REVOCATION_POLL_INTERVAL (250ms) to ensure the desktop owner
+        // credential is never treated as revoked.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        socket
+            .send(ClientMessage::Text(
+                serde_json::to_string(&SubscriptionClientMessage::Ping)
+                    .expect("ping")
+                    .into(),
+            ))
+            .await
+            .expect("send ping");
+
+        let mut saw_pong = false;
+        for _ in 0..4 {
+            match next_msg(&mut socket, "waiting for Pong after revocation tick").await {
+                SubscriptionServerMessage::Pong => {
+                    saw_pong = true;
+                    break;
+                }
+                SubscriptionServerMessage::Error { error, .. } => {
+                    panic!("desktop websocket revoked after poll interval: {error:?}");
+                }
+                SubscriptionServerMessage::Event { .. } => {}
+                other => panic!("unexpected message waiting for Pong: {other:?}"),
+            }
+        }
+        assert!(saw_pong, "expected Pong on live desktop websocket");
+
+        let client = reqwest::Client::new();
+        let create_response = client
+            .post(format!("http://{address}/api/v1/call/create_project"))
+            .bearer_auth(desktop_token)
+            .json(&remote_protocol::CommandRequest {
+                operation_id: OperationId::new(),
+                args: serde_json::json!({
+                    "payload": {
+                        "name": "Desktop Folder Test",
+                        "rootPath": project_dir.path().to_string_lossy(),
+                        "repositories": []
+                    }
+                }),
+            })
+            .send()
+            .await
+            .expect("call create_project");
+        let status = create_response.status();
+        let create_text = create_response
+            .text()
+            .await
+            .expect("read create_project response body");
+        assert!(
+            status.is_success(),
+            "create_project failed with status {status}: {create_text}"
+        );
+        let create_body: serde_json::Value =
+            serde_json::from_str(&create_text).expect("parse create_project response JSON");
+        let created_project_id = create_body
+            .pointer("/result/id")
+            .or_else(|| create_body.pointer("/data/id"))
+            .or_else(|| create_body.get("id"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_else(|| panic!("missing created project id in response: {create_body}"))
+            .to_string();
+
+        let mut saw_created_project_patch = false;
+        let mut seen_after_create = Vec::new();
+        for _ in 0..8 {
+            let msg = next_msg(
+                &mut socket,
+                &format!(
+                    "waiting for project {created_project_id} patch (seen so far: {seen_after_create:?})"
+                ),
+            )
+            .await;
+            match msg {
+                SubscriptionServerMessage::Error { error, .. } => {
+                    panic!("desktop websocket errored during project creation: {error:?}");
+                }
+                SubscriptionServerMessage::Event {
+                    subscription_id: event_sub_id,
+                    event,
+                } if event_sub_id == subscription_id => {
+                    seen_after_create.push(event.payload.clone());
+                    if event.payload.to_string().contains(&created_project_id) {
+                        saw_created_project_patch = true;
+                        break;
+                    }
+                }
+                other => seen_after_create.push(serde_json::json!(format!("{other:?}"))),
+            }
+        }
+        assert!(
+            saw_created_project_patch,
+            "expected live projects patch containing created project id {created_project_id}; seen: {seen_after_create:?}"
+        );
+
+        server.abort();
+        drop(headless);
     }
 }

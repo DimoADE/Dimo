@@ -419,6 +419,19 @@ describe('conversation bottom distance', () => {
         followTail: true,
       })
     ).toBeNull();
+    // Scrolling down past the painted window into phantom virtual height must
+    // never snap scrollTop back to 0 (visualTop).
+    expect(
+      scrollTopToRevealVirtualWindow({
+        scrollTop: 2600,
+        viewportHeight: 600,
+        scrollHeight: 5000,
+        windowStart: 0,
+        scrollMargin: 0,
+        windowHeight: 1800,
+        followTail: false,
+      })
+    ).toBeNull();
   });
 
   it('pulls a followed tail down when the live turn hangs below the fold', () => {

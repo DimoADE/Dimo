@@ -292,4 +292,38 @@ describe('MainAppRoutes', () => {
     expect(await screen.findByTestId('ide-layout')).toBeInTheDocument();
     expect(screen.queryByTestId('normal-layout')).not.toBeInTheDocument();
   });
+
+  it('handles dimo:settings-navigate custom events in-memory without reloading', async () => {
+    const { act } = await import('@testing-library/react');
+    renderAt('/settings/general');
+
+    expect(await screen.findByTestId('settings-general')).toBeInTheDocument();
+
+    const validEvent = new CustomEvent('dimo:settings-navigate', {
+      cancelable: true,
+      detail: { path: '/settings/agents?highlight=foo' },
+    });
+    act(() => {
+      window.dispatchEvent(validEvent);
+    });
+
+    expect(validEvent.defaultPrevented).toBe(true);
+    expect(await screen.findByTestId('settings-agents')).toBeInTheDocument();
+    expect(screen.getByTestId('route-location').textContent).toBe(
+      '/settings/agents?highlight=foo'
+    );
+
+    const ignoredEvent = new CustomEvent('dimo:settings-navigate', {
+      cancelable: true,
+      detail: { path: '/local-projects' },
+    });
+    act(() => {
+      window.dispatchEvent(ignoredEvent);
+    });
+
+    expect(ignoredEvent.defaultPrevented).toBe(false);
+    expect(screen.getByTestId('route-location').textContent).toBe(
+      '/settings/agents?highlight=foo'
+    );
+  });
 });

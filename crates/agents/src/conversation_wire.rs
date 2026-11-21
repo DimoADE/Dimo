@@ -132,6 +132,11 @@ pub struct ConversationRowOpBatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub previous_sequence: Option<i64>,
+    /// Monotonic counter incremented for unpersisted in-memory live deltas that do not
+    /// advance the persisted SQLite sequence cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub live_sequence: Option<i64>,
     /// Barrier flag emitted after turn truncation/rollback so connected clients drop
     /// stale rows and reload the authoritative snapshot window.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -215,6 +220,11 @@ pub struct ConversationTimeline {
     pub conversation_id: Uuid,
     pub projection_version: u32,
     pub last_sequence: i64,
+    /// Monotonic unpersisted live-delta watermark already folded into `rows` when
+    /// opened mid-turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub live_sequence: Option<i64>,
     pub rows: Vec<TimelineRow>,
     /// True when `rows` is a tail window, not the full projection.
     #[serde(default)]

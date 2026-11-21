@@ -86,7 +86,7 @@ See [`docs/architecture.md`](docs/architecture.md) for the full diagram and 26-c
 
 ## Cross-cutting rules & gotchas
 
-- **`shared/types.ts` is generated, never hand-edited.** Produced by [`generate_types.rs`](src-tauri/src/bin/generate_types.rs), which merges `replacement_declarations()` and drops `removed_declarations()`. Add `insert_declaration::<T>()` there, then run `pnpm run generate-types`.
+- **`shared/types.ts` is generated, never hand-edited.** Produced by [`generate_types.rs`](crates/server/src/bin/generate_types.rs), which merges `replacement_declarations()` and drops `removed_declarations()`. Add `insert_declaration::<T>()` there, then run `pnpm run generate-types`.
 - **SQLx is offline.** Any change to `sqlx::query!` / `query_as!` or migrations requires `pnpm run prepare-db` to refresh `crates/db/.sqlx`.
 - **`qa-mode` feature** enables `QaMock` and is required for clippy (`pnpm run lint` passes `--features qa-mode`).
 - **TLS:** `install_rustls_crypto_provider` runs once at process startup (`reqwest` is built in no-provider mode) — never construct TLS clients before startup initialization.

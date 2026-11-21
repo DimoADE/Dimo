@@ -58,7 +58,7 @@ import { backendListen } from '@/lib/backendTransport';
 import { DesktopCapabilityError, isTauriClient } from '@/lib/desktopShell';
 import { getSiteUrl } from '@/lib/branding';
 import { getErrorMessage } from '@/lib/modals';
-import { tauriBackendTransport, useBackendTransport } from '@/lib/transport';
+import { getLocalDesktopTransport, useBackendTransport } from '@/lib/transport';
 import { cn } from '@/lib/utils';
 import {
   localProvisionerSurfaces,
@@ -409,7 +409,7 @@ function NewSshHostDialog({
   const { t } = useTranslation(['panels', 'common']);
   const contextTransport = useBackendTransport();
   const activeTransport = isTauriClient()
-    ? tauriBackendTransport
+    ? getLocalDesktopTransport()
     : contextTransport;
   const pluginApi = useMemo(
     () => createPluginControlApi(activeTransport),
@@ -604,7 +604,7 @@ export function HostSelector() {
 
   const resolveProvisionerForProfile = useCallback(
     async (profile: HostClientProfile) => {
-      const pluginApi = createPluginControlApi(tauriBackendTransport);
+      const pluginApi = createPluginControlApi(getLocalDesktopTransport());
       const [catalog, contributions] = await Promise.all([
         pluginApi.catalog(),
         pluginApi.contributionCatalog(),

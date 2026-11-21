@@ -160,28 +160,29 @@ jobs:
           - artifact_name: windows-x64
             runner: windows-latest
             target: x86_64-pc-windows-msvc
-            bundles: nsis
+            electron_flag: --win --x64
           - artifact_name: windows-arm64
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
-            bundles: nsis
+            electron_flag: --win --arm64
           - artifact_name: linux-x64
             runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            bundles: appimage
+            electron_flag: --linux --x64
           - artifact_name: linux-arm64
             runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-            bundles: appimage
+            electron_flag: --linux --arm64
           - artifact_name: macos-arm64
             runner: macos-15
             target: aarch64-apple-darwin
-            bundles: app
+            electron_flag: --mac --arm64
     steps:
       - name: Confirm runner
         run: |
           echo "runner=${{ matrix.runner }}"
           echo "target=${{ matrix.target }}"
+          echo "electron_flag=${{ matrix.electron_flag }}"
           echo "os=${{ runner.os }}"
           echo "arch=${{ runner.arch }}"
 
@@ -244,11 +245,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf \
+            libgtk-3-0 \
+            libnss3 \
+            libasound2 \
             xdg-utils \
             xauth \
             xvfb
@@ -286,10 +285,10 @@ jobs:
           workspaces: "."
           cache-provider: github
           cache-on-failure: true
-          shared-key: desktop-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}
+          shared-key: desktop-electron-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}
           cache-targets: false
 
-      - name: Install frontend dependencies
+      - name: Install workspace dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Download frontend artifact
@@ -297,6 +296,21 @@ jobs:
         with:
           name: frontend-dist
           path: frontend/dist
+
+      - name: Build Rust desktop sidecars
+        run: |
+          cargo build --release --target ${{ matrix.target }} \
+            -p server --bin dimo-server \
+            -p dimo-mcp --bin dimo-mcp \
+            -p dimo-workflow-mcp --bin dimo-workflow-mcp
+
+      - name: Stage Electron sidecar binaries
+        run: node scripts/stage-host-sidecars.js --electron --target ${{ matrix.target }} --profile release
+
+      - name: Build Electron main and preload bundles
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: pnpm run electron:build
 
       - name: Import macOS signing certificate and notarization key
         if: ${{ runner.os == 'macOS' && needs.prepare-release.outputs.apple_signing_enabled == 'true' }}
@@ -335,68 +349,19 @@ jobs:
           echo "APPLE_API_KEY_PATH=$api_key_path" >> "$GITHUB_ENV"
           echo "DIMO_MACOS_KEYCHAIN=$keychain_path" >> "$GITHUB_ENV"
 
-      - name: Import Windows signing certificate
-        if: ${{ runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'pfx' }}
-        shell: pwsh
-        env:
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: |
-          $certificatePath = Join-Path $env:RUNNER_TEMP 'dimo-release-certificate.pfx'
-          [IO.File]::WriteAllBytes(
-            $certificatePath,
-            [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
-          )
-          $password = ConvertTo-SecureString `
-            -String $env:WINDOWS_CERTIFICATE_PASSWORD `
-            -AsPlainText `
-            -Force
-          $sourceCertificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new(
-            $certificatePath,
-            $env:WINDOWS_CERTIFICATE_PASSWORD,
-            [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
-          )
-          "DIMO_WINDOWS_CERTIFICATE_THUMBPRINT=$($sourceCertificate.Thumbprint)" >> $env:GITHUB_ENV
-          $certificate = Import-PfxCertificate `
-            -FilePath $certificatePath `
-            -CertStoreLocation Cert:\CurrentUser\My `
-            -Password $password
-          if (-not $certificate.HasPrivateKey) {
-            throw 'Imported Windows signing certificate has no private key.'
-          }
-
-          $configPath = Join-Path $env:RUNNER_TEMP 'tauri-windows-signing.json'
-          @{
-            bundle = @{
-              windows = @{
-                certificateThumbprint = $certificate.Thumbprint
-                digestAlgorithm = 'sha256'
-                timestampUrl = 'http://timestamp.digicert.com'
-              }
-            }
-          } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 $configPath
-
-          "DIMO_TAURI_RELEASE_CONFIG=$configPath" >> $env:GITHUB_ENV
-
-      - name: Build desktop installers
-        env:
-          NODE_OPTIONS: --max-old-space-size=6144
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_API_KEY: ""
-          APPLE_API_ISSUER: ""
-          APPLE_API_KEY_PATH: ""
-        run: node scripts/run-tauri-build.js --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
-
-      - name: Notarize macOS app and create DMG
-        if: runner.os == 'macOS'
+      - name: Package Electron desktop installers
         timeout-minutes: 140
         env:
+          NODE_OPTIONS: --max-old-space-size=6144
+          CSC_NAME: ${{ runner.os == 'macOS' && needs.prepare-release.outputs.apple_signing_enabled == 'true' && env.APPLE_SIGNING_IDENTITY || '' }}
+          CSC_LINK: ${{ runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'pfx' && secrets.WINDOWS_CERTIFICATE || '' }}
+          CSC_KEY_PASSWORD: ${{ runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'pfx' && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ (runner.os == 'macOS' && needs.prepare-release.outputs.apple_signing_enabled == 'true') || (runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'pfx') }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
-        run: node scripts/macos-notarize-and-dmg.js --target ${{ matrix.target }}
+        run: pnpm --filter @dimo/electron exec electron-builder ${{ matrix.electron_flag }} --config electron-builder.yml --publish never
 
       - name: Sign Windows installers with EVSign
         if: ${{ runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'evsign' }}
@@ -404,27 +369,125 @@ jobs:
         env:
           EVSIGN_LICENSE_KEY: ${{ secrets.EVSIGN_LICENSE_KEY }}
           EVSIGN_SIGN_PASSWORD: ${{ secrets.EVSIGN_SIGN_PASSWORD }}
+        run: |
+          scripts/sign-windows-evsign.ps1 -BundleRoot "electron/release" -TopLevelOnly
+
+      - name: Sign Windows bridge payload with Tauri updater key
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          scripts/sign-windows-evsign.ps1 -BundleRoot "target/${{ matrix.target }}/release/bundle"
+          $installers = Get-ChildItem "electron/release" -File -Filter "*-setup.exe"
+          if ($installers.Count -ne 1) {
+            throw "Expected one NSIS installer under electron/release, found $($installers.Count)"
+          }
+          & pnpm dlx @tauri-apps/cli@2.10.0 signer sign $installers[0].FullName
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to generate Tauri bridge .sig for $($installers[0].Name)"
+          }
+
+      - name: Sign Linux bridge payload with Tauri updater key
+        if: runner.os == 'Linux'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          appimage="$(find "electron/release" -maxdepth 1 -name '*.AppImage' -print -quit)"
+          test -n "$appimage"
+          pnpm dlx @tauri-apps/cli@2.10.0 signer sign "$appimage"
+
+      - name: Notarize macOS DMG and create signed Tauri bridge tarball
+        if: runner.os == 'macOS'
+        timeout-minutes: 60
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          app_path="$(find "electron/release/mac-arm64" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$app_path"
+          app_name="$(basename "$app_path")"
+          tar_path="electron/release/Dimo-${version}-darwin-arm64.app.tar.gz"
+
+          if [ "${{ needs.prepare-release.outputs.apple_signing_enabled }}" = "true" ]; then
+            dmg_path="$(find "electron/release" -maxdepth 1 -name '*.dmg' -print -quit)"
+            test -n "$dmg_path"
+            codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$dmg_path"
+            xcrun notarytool submit "$dmg_path" \
+              --key "$APPLE_API_KEY_PATH" \
+              --key-id "$APPLE_API_KEY" \
+              --issuer "$APPLE_API_ISSUER" \
+              --wait
+            xcrun stapler staple "$dmg_path"
+          fi
+
+          tar -czf "$tar_path" -C "electron/release/mac-arm64" "$app_name"
+          pnpm dlx @tauri-apps/cli@2.10.0 signer sign "$tar_path"
 
       - name: Verify signed and notarized macOS bundle
         if: ${{ runner.os == 'macOS' && needs.prepare-release.outputs.apple_signing_enabled == 'true' }}
         run: |
-          app_path="$(find "target/${{ matrix.target }}/release/bundle/macos" -maxdepth 1 -name '*.app' -print -quit)"
+          set -euo pipefail
+          mount_dir=""
+          extract_dir=""
+          cleanup_verify() {
+            if [ -n "$mount_dir" ]; then
+              hdiutil detach "$mount_dir" -force >/dev/null 2>&1 || true
+              rm -rf "$mount_dir"
+            fi
+            if [ -n "$extract_dir" ]; then
+              rm -rf "$extract_dir"
+            fi
+          }
+          trap cleanup_verify EXIT
+
+          app_path="$(find "electron/release/mac-arm64" -maxdepth 1 -name '*.app' -print -quit)"
           test -n "$app_path"
           codesign --verify --deep --strict --verbose=2 "$app_path"
+          xcrun stapler validate -v "$app_path"
           spctl --assess --type execute --verbose=2 "$app_path"
+
+          dmg_path="$(find "electron/release" -maxdepth 1 -name '*.dmg' -print -quit)"
+          test -n "$dmg_path"
+          codesign --verify --verbose=2 "$dmg_path"
+          xcrun stapler validate -v "$dmg_path"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg_path"
+
+          mount_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/dimo-dmg-verify.XXXXXX")"
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount_dir" "$dmg_path"
+          dmg_app_path="$(find "$mount_dir" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$dmg_app_path"
+          codesign --verify --deep --strict --verbose=2 "$dmg_app_path"
+          xcrun stapler validate -v "$dmg_app_path"
+          spctl --assess --type execute --verbose=2 "$dmg_app_path"
+          hdiutil detach "$mount_dir"
+          rm -rf "$mount_dir"
+          mount_dir=""
+
+          tar_path="$(find "electron/release" -maxdepth 1 -name '*.app.tar.gz' -print -quit)"
+          test -n "$tar_path"
+          test -s "${tar_path}.sig"
+          extract_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/dimo-updater-verify.XXXXXX")"
+          tar -xzf "$tar_path" -C "$extract_dir"
+          tar_app_path="$(find "$extract_dir" -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$tar_app_path"
+          codesign --verify --deep --strict --verbose=2 "$tar_app_path"
+          xcrun stapler validate -v "$tar_app_path"
+          spctl --assess --type execute --verbose=2 "$tar_app_path"
 
       - name: Verify signed Windows artifacts
         if: ${{ runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_enabled == 'true' }}
         shell: pwsh
         run: |
-          $artifacts = Get-ChildItem `
-            "target/${{ matrix.target }}/release/bundle" `
-            -Recurse `
-            -File | Where-Object { $_.Extension -in '.exe', '.msi' }
+          $artifacts = Get-ChildItem "electron/release" -File |
+            Where-Object { $_.Extension -in '.exe', '.msi' }
           if ($artifacts.Count -eq 0) {
             throw 'No Windows installers were produced.'
           }
@@ -435,22 +498,34 @@ jobs:
             }
           }
 
-      - name: Smoke-test Linux desktop startup through XWayland
+      - name: Smoke-test Linux desktop startup through Xvfb
         if: runner.os == 'Linux'
-        run: scripts/smoke-linux-desktop.sh "target/${{ matrix.target }}/release/dimo"
+        run: |
+          unpacked_dir="$(find "electron/release" -maxdepth 1 -type d -name 'linux*-unpacked' -print -quit)"
+          test -n "$unpacked_dir"
+          DIMO_ELECTRON_SMOKE=1 scripts/smoke-linux-desktop.sh "$unpacked_dir/dimo"
 
       - name: Smoke-test macOS desktop startup
         if: runner.os == 'macOS'
         timeout-minutes: 2
         run: |
-          app_path="$(find "target/${{ matrix.target }}/release/bundle/macos" -maxdepth 1 -name '*.app' -print -quit)"
+          app_path="$(find "electron/release/mac-arm64" -maxdepth 1 -name '*.app' -print -quit)"
           test -n "$app_path"
-          scripts/smoke-macos-desktop.sh "$app_path"
+          DIMO_ELECTRON_SMOKE=1 scripts/smoke-macos-desktop.sh "$app_path"
+          if [ "${{ needs.prepare-release.outputs.apple_signing_enabled }}" = "true" ]; then
+            codesign --verify --deep --strict --verbose=2 "$app_path"
+          fi
 
       - name: Smoke-test Windows desktop startup without a console
         if: runner.os == 'Windows'
         shell: pwsh
-        run: scripts/smoke-windows-desktop.ps1 -Executable "target/${{ matrix.target }}/release/dimo.exe"
+        run: |
+          $unpacked = Get-ChildItem "electron/release" -Directory -Filter "win*-unpacked" | Select-Object -First 1
+          if (-not $unpacked) {
+            throw "Missing Electron unpacked directory under electron/release"
+          }
+          $exe = Join-Path $unpacked.FullName "Dimo.exe"
+          scripts/smoke-windows-desktop.ps1 -Executable $exe -ElectronSmoke
 
       - name: Remove temporary macOS signing material
         if: ${{ always() && runner.os == 'macOS' && needs.prepare-release.outputs.apple_signing_enabled == 'true' }}
@@ -462,36 +537,28 @@ jobs:
             "$RUNNER_TEMP/dimo-release-certificate.p12" \
             "$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
 
-      - name: Remove temporary Windows signing material
-        if: ${{ always() && runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'pfx' }}
-        shell: pwsh
-        run: |
-          if ($env:DIMO_WINDOWS_CERTIFICATE_THUMBPRINT) {
-            Remove-Item `
-              "Cert:\CurrentUser\My\$env:DIMO_WINDOWS_CERTIFICATE_THUMBPRINT" `
-              -Force `
-              -ErrorAction SilentlyContinue
-          }
-          Remove-Item `
-            (Join-Path $env:RUNNER_TEMP 'dimo-release-certificate.pfx') `
-            -Force `
-            -ErrorAction SilentlyContinue
-          Remove-Item `
-            (Join-Path $env:RUNNER_TEMP 'tauri-windows-signing.json') `
-            -Force `
-            -ErrorAction SilentlyContinue
-
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: Dimo-${{ matrix.artifact_name }}
           if-no-files-found: error
           path: |
-            target/${{ matrix.target }}/release/bundle/**/*
-            target/release/bundle/**/*
+            electron/release/*.exe
+            electron/release/*.exe.blockmap
+            electron/release/*.exe.sig
+            electron/release/*.AppImage
+            electron/release/*.AppImage.sig
+            electron/release/*.deb
+            electron/release/*.dmg
+            electron/release/*.dmg.blockmap
+            electron/release/*.zip
+            electron/release/*.zip.blockmap
+            electron/release/*.app.tar.gz
+            electron/release/*.app.tar.gz.sig
+            electron/release/latest*.yml
 
   publish-updater:
-    name: Publish updater manifest
+    name: Publish updater feeds & bridge manifest
     needs: build
     if: ${{ github.event_name == 'push' || (inputs.upload_to_release && inputs.release_tag != '') }}
     runs-on: ubuntu-22.04
@@ -507,7 +574,7 @@ jobs:
           pattern: Dimo-*
           path: updater-artifacts
 
-      - name: Generate updater manifest
+      - name: Generate Electron updater feeds and Tauri bridge manifest
         env:
           RELEASE_REPOSITORY: ${{ github.repository }}
         run: |
@@ -517,7 +584,7 @@ jobs:
           if [ -f "$NOTES_FILE" ]; then
             NOTES_ARGS=(--notes-file "$NOTES_FILE")
           fi
-          node scripts/generate-updater-manifest.js \
+          node scripts/generate-tauri-bridge-manifest.js \
             --artifacts-dir updater-artifacts \
             --output-dir updater-release \
             --repository "$RELEASE_REPOSITORY" \
@@ -525,7 +592,7 @@ jobs:
             --version "$VERSION" \
             "${NOTES_ARGS[@]}"
 
-      - name: Upload updater manifest and signed bundles
+      - name: Upload updater feeds, bridge manifest, and signed bundles
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

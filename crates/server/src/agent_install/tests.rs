@@ -483,10 +483,11 @@ async fn native_engine_try_adopt_discovers_standalone_claude_and_codex_extra_dir
                 trust: agents::ArtifactTrust::EcosystemIntegrityRequired,
             }],
         };
-        let adopted = try_adopt_with_options(&agent_id, &plan, &user_env, Some(home), false)
-            .await
-            .unwrap()
-            .unwrap_or_else(|| panic!("expected standalone {raw_id} CLI to be adopted"));
+        let adopted =
+            try_adopt_with_options(&agent_id, &plan, &user_env, Some(home), false, None)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("expected standalone {raw_id} CLI to be adopted"));
         assert_eq!(adopted.components.len(), 1);
         assert_eq!(adopted.components[0].kind, "combined_runtime");
         assert!(adopted.launch_lock.runtime_version.contains(version));
@@ -562,7 +563,316 @@ fn build_installed_plan_strips_acp_arg_for_hermes_acp() {
             version: "0.22.2".into(),
             sha256: None,
         }],
+        None,
     )
     .unwrap();
     assert!(installed.launch_lock.args.is_empty());
+}
+
+#[test]
+fn profile_node_requirements_reads_openclaw_node_24_requirement() {
+    let openclaw = AgentId::parse("openclaw").unwrap();
+    let plan = ResolvedInstallPlan {
+        agent_id: openclaw,
+        source: LockedInstallSource::BuiltInProfile,
+        version: "2026.9.8".into(),
+        platform: current_platform(),
+        components: vec![PlannedInstallComponent {
+            component_id: "combined_runtime".into(),
+            distribution_kind: PlannedDistributionKind::Npx,
+            version: "2026.9.8".into(),
+            resolved_source: "openclaw@2026.9.8".into(),
+            command: "openclaw".into(),
+            args: vec!["acp".into()],
+            env: Default::default(),
+            trust: agents::ArtifactTrust::EcosystemIntegrityRequired,
+        }],
+    };
+    let requirements = profile_node_requirements(&plan);
+    assert!(
+        requirements.iter().any(|req| req == ">=24.16.0"),
+        "expected >=24.16.0 in {requirements:?}"
+    );
+}
+
+#[test]
+fn node_runtime_satisfies_requirements_checks_all_constraints() {
+    let requirements = vec![
+        ">=24.16.0".to_string(),
+        ">=24.16.0 <25 || >=26.1.0".to_string(),
+    ];
+    assert!(!node_runtime_satisfies_requirements(None, &requirements));
+    assert!(!node_runtime_satisfies_requirements(
+        Some("v22.22.3"),
+        &requirements
+    ));
+    assert!(!node_runtime_satisfies_requirements(
+        Some("v24.15.0"),
+        &requirements
+    ));
+    assert!(!node_runtime_satisfies_requirements(
+        Some("v25.0.0"),
+        &requirements
+    ));
+    assert!(node_runtime_satisfies_requirements(
+        Some("v24.22.3"),
+        &requirements
+    ));
+    assert!(node_runtime_satisfies_requirements(
+        Some("v26.1.0"),
+        &requirements
+    ));
+    assert!(node_runtime_satisfies_requirements(Some("v22.22.3"), &[]));
+}
+
+#[test]
+fn build_installed_plan_prepends_managed_node_bin_dir_to_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let openclaw = AgentId::parse("openclaw").unwrap();
+    let user_env = UserEnvironmentLayout::for_current_user(temp.path());
+    let managed_node_bin = temp.path().join("managed-node-24");
+    let plan = ResolvedInstallPlan {
+        agent_id: openclaw.clone(),
+        source: LockedInstallSource::BuiltInProfile,
+        version: "2026.9.8".into(),
+        platform: current_platform(),
+        components: vec![PlannedInstallComponent {
+            component_id: "combined_runtime".into(),
+            distribution_kind: PlannedDistributionKind::Npx,
+            version: "2026.9.8".into(),
+            resolved_source: "openclaw@2026.9.8".into(),
+            command: "openclaw".into(),
+            args: vec!["acp".into()],
+            env: Default::default(),
+            trust: agents::ArtifactTrust::EcosystemIntegrityRequired,
+        }],
+    };
+    let installed = build_installed_plan(
+        &openclaw,
+        &plan,
+        &user_env,
+        vec![InstalledComponent {
+            kind: "combined_runtime".into(),
+            absolute_path: user_env.npm_bin.join("openclaw"),
+            version: "2026.9.8".into(),
+            sha256: None,
+        }],
+        Some(&managed_node_bin),
+    )
+    .unwrap();
+    let path_value = installed.launch_lock.env.get("PATH").unwrap();
+    let first_entry = std::env::split_paths(path_value).next().unwrap();
+    assert_eq!(first_entry, managed_node_bin);
+}
+
+#[test]
+fn live_prefix_has_bundled_node_detects_portable_node_prefix() {
+    let temp = tempfile::tempdir().unwrap();
+    let portable_prefix = temp.path().join("portable-node");
+    let clean_prefix = temp.path().join("clean-npm-prefix");
+    std::fs::create_dir_all(&clean_prefix).unwrap();
+    assert!(!live_prefix_has_bundled_node(&clean_prefix));
+
+    #[cfg(windows)]
+    {
+        std::fs::create_dir_all(&portable_prefix).unwrap();
+        std::fs::write(portable_prefix.join("node.exe"), b"").unwrap();
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::create_dir_all(portable_prefix.join("bin")).unwrap();
+        std::fs::write(portable_prefix.join("bin").join("node"), b"").unwrap();
+    }
+    assert!(live_prefix_has_bundled_node(&portable_prefix));
+}
+
+#[tokio::test]
+async fn run_npm_global_install_short_circuits_on_ebusy_and_unsupported_node_engine() {
+    for (name, stderr_msg) in [
+        (
+            "ebusy",
+            "npm error EBUSY: resource busy or locked, rename 'a' -> 'b'",
+        ),
+        (
+            "engine",
+            "[openclaw] error: openclaw requires Node.js >=24.16.0 (detected v22.22.3)",
+        ),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let log_file = temp.path().join("calls.log");
+        let npm_path = write_fake_npm_script(
+            temp.path(),
+            None,
+            &log_file,
+            stderr_msg,
+            "openclaw",
+            false,
+        );
+        let component = PlannedInstallComponent {
+            component_id: "combined_runtime".into(),
+            distribution_kind: PlannedDistributionKind::Npx,
+            version: "2026.9.8".into(),
+            resolved_source: "openclaw@2026.9.8".into(),
+            command: "openclaw".into(),
+            args: Vec::new(),
+            env: Default::default(),
+            trust: agents::ArtifactTrust::EcosystemIntegrityRequired,
+        };
+        let user_env = UserEnvironmentLayout::for_current_user(temp.path());
+        let err = run_npm_global_install(&npm_path, &component, &user_env, None, &mut |_, _| {})
+            .await
+            .expect_err(&format!("{name} must fail"));
+        let logged = std::fs::read_to_string(&log_file).unwrap();
+        assert_eq!(
+            logged.lines().count(),
+            1,
+            "{name} should fail fast after 1 attempt instead of retrying all mirrors: {err}\nlog:\n{logged}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn install_npm_falls_back_to_user_prefix_on_ebusy_and_reports_lock_if_both_locked() {
+    let temp = tempfile::tempdir().unwrap();
+    let locked_prefix = temp.path().join("locked-global-prefix");
+    std::fs::create_dir_all(&locked_prefix).unwrap();
+    let log_file = temp.path().join("calls.log");
+    let npm_path = write_fake_npm_script(
+        temp.path(),
+        Some(&locked_prefix),
+        &log_file,
+        "npm error EBUSY: resource busy or locked, rename 'a' -> 'b'",
+        "hermes",
+        true,
+    );
+    let node = NodeRuntime {
+        node: npm_path.with_file_name(if cfg!(windows) { "node.exe" } else { "node" }),
+        npm: npm_path.clone(),
+        bin_dir: npm_path.parent().unwrap().to_path_buf(),
+    };
+    let component = PlannedInstallComponent {
+        component_id: "combined_runtime".into(),
+        distribution_kind: PlannedDistributionKind::Npx,
+        version: "0.23.2".into(),
+        resolved_source: "hermes-agent@0.23.2".into(),
+        command: "hermes".into(),
+        args: Vec::new(),
+        env: Default::default(),
+        trust: agents::ArtifactTrust::EcosystemIntegrityRequired,
+    };
+    let mut user_env =
+        UserEnvironmentLayout::for_current_user(temp.path()).with_npm_prefix(locked_prefix.clone());
+    let expected_user_prefix = user_env.user_npm_prefix();
+    let installed_bin = install_npm(&component, &mut user_env, Some(&node), &mut |_, _| {})
+        .await
+        .expect("EBUSY on global prefix should fall back to user npm prefix");
+    assert_eq!(user_env.npm_prefix, expected_user_prefix);
+    assert!(installed_bin.is_file());
+
+    // Now test when the user prefix itself returns EBUSY -> surfaces lock diagnostic
+    let log_file_2 = temp.path().join("calls2.log");
+    let always_busy_npm = write_fake_npm_script(
+        &temp.path().join("busy"),
+        None,
+        &log_file_2,
+        "npm error EBUSY: resource busy or locked, rename 'a' -> 'b'",
+        "hermes",
+        false,
+    );
+    let busy_node = NodeRuntime {
+        node: always_busy_npm.with_file_name(if cfg!(windows) { "node.exe" } else { "node" }),
+        npm: always_busy_npm,
+        bin_dir: temp.path().join("busy"),
+    };
+    let mut user_env_2 = UserEnvironmentLayout::for_current_user(temp.path());
+    let err = install_npm(
+        &component,
+        &mut user_env_2,
+        Some(&busy_node),
+        &mut |_, _| {},
+    )
+    .await
+    .expect_err("EBUSY on user prefix must fail with actionable hint");
+    assert!(err.to_string().contains("EBUSY"), "{err}");
+    assert!(
+        err.to_string().contains("正被其他进程占用"),
+        "expected lock guidance in error: {err}"
+    );
+}
+
+fn write_fake_npm_script(
+    dir: &Path,
+    fail_only_for_prefix: Option<&Path>,
+    log_file: &Path,
+    stderr_msg: &str,
+    bin_stem: &str,
+    succeed_on_other_prefix: bool,
+) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    #[cfg(windows)]
+    {
+        let path = dir.join("npm.cmd");
+        let fail_prefix = fail_only_for_prefix
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let script = if succeed_on_other_prefix {
+            format!(
+                "@echo off\r\n\
+                 echo %*>> \"{}\"\r\n\
+                 if /I \"%npm_config_prefix%\"==\"{fail_prefix}\" (\r\n\
+                   echo {stderr_msg} 1>&2\r\n\
+                   exit /b 1\r\n\
+                 )\r\n\
+                 echo @echo ok> \"%npm_config_prefix%\\{bin_stem}.cmd\"\r\n\
+                 exit /b 0\r\n",
+                log_file.display(),
+            )
+        } else {
+            format!(
+                "@echo off\r\n\
+                 echo %*>> \"{}\"\r\n\
+                 echo {stderr_msg} 1>&2\r\n\
+                 exit /b 1\r\n",
+                log_file.display(),
+            )
+        };
+        std::fs::write(&path, script).unwrap();
+        path
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("npm");
+        let fail_prefix = fail_only_for_prefix
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let script = if succeed_on_other_prefix {
+            format!(
+                "#!/bin/sh\n\
+                 echo \"$*\" >> \"{}\"\n\
+                 if [ \"$npm_config_prefix\" = \"{fail_prefix}\" ]; then\n\
+                   echo \"{stderr_msg}\" >&2\n\
+                   exit 1\n\
+                 fi\n\
+                 mkdir -p \"$npm_config_prefix/bin\"\n\
+                 echo \"#!/bin/sh\" > \"$npm_config_prefix/bin/{bin_stem}\"\n\
+                 chmod +x \"$npm_config_prefix/bin/{bin_stem}\"\n\
+                 exit 0\n",
+                log_file.display(),
+            )
+        } else {
+            format!(
+                "#!/bin/sh\n\
+                 echo \"$*\" >> \"{}\"\n\
+                 echo \"{stderr_msg}\" >&2\n\
+                 exit 1\n",
+                log_file.display(),
+            )
+        };
+        std::fs::write(&path, script).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
 }

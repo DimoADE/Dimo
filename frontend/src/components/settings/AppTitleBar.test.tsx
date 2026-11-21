@@ -6,12 +6,24 @@ import { AppTitleBar } from './AppTitleBar';
 const startDragging = vi.hoisted(() => vi.fn(() => Promise.resolve()));
 const toggleMaximize = vi.hoisted(() => vi.fn(() => Promise.resolve()));
 
-vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow: () => ({
-    startDragging,
-    toggleMaximize,
-  }),
-}));
+vi.mock('@/lib/desktopShell', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/lib/desktopShell')>();
+  return {
+    ...actual,
+    getDesktopShell: () => {
+      const shell = actual.getDesktopShell();
+      return {
+        ...shell,
+        window: {
+          ...shell.window,
+          startDragging,
+          toggleMaximize,
+        },
+      };
+    },
+  };
+});
 
 describe('AppTitleBar', () => {
   it('is a drag region without embedding window controls', () => {
@@ -19,8 +31,8 @@ describe('AppTitleBar', () => {
 
     const bar = screen.getByText('Settings').closest('.settings-titlebar');
     expect(bar).toHaveClass('window-chrome', 'h-9');
-    expect(bar).toHaveAttribute('data-tauri-drag-region');
-    expect(bar?.querySelector('[data-tauri-drag-region]')).not.toBeNull();
+    expect(bar).toHaveAttribute('data-window-drag-region');
+    expect(bar?.querySelector('[data-window-drag-region]')).not.toBeNull();
     expect(
       screen.queryByRole('button', { name: 'Minimize' })
     ).not.toBeInTheDocument();
@@ -31,7 +43,7 @@ describe('AppTitleBar', () => {
 
     const title = screen.getByText('Settings');
     const overlay = title.parentElement?.parentElement;
-    expect(overlay).toHaveAttribute('data-tauri-drag-region');
+    expect(overlay).toHaveAttribute('data-window-drag-region');
     expect(overlay).toHaveClass('pointer-events-none');
     expect(overlay).not.toHaveClass('inset-0');
   });

@@ -21,7 +21,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 use workspace_utils::process::{new_hidden_std_command, new_hidden_tokio_command};
 
-pub const MANAGED_NODE_VERSION: &str = "22.22.3";
+pub const MANAGED_NODE_VERSION: &str = "24.22.3";
 pub const MANAGED_UV_VERSION: &str = "0.8.10";
 pub const MANAGED_BUN_VERSION: &str = "1.4.4";
 
@@ -93,32 +93,32 @@ pub fn managed_node_artifact(platform: &str) -> Option<ManagedNodeArtifact> {
         "darwin-aarch64" => (
             "darwin-arm64",
             "tar.gz",
-            "0da7ff74ef8611328c8212f17943368713a2ad953fb7d89a8c8a0eae87c23207",
+            "ff6e17d4874b76d272212b908cc020d6e815fba5a6c7eaaa06add725840307fd",
         ),
         "darwin-x86_64" => (
             "darwin-x64",
             "tar.gz",
-            "45830ba752fa0d892c6dcd640946669801293cac820a33591ded40ac075198ec",
+            "977614af0504c81045e7fd85596dbca0e5f951b96681516dadafedcca8c447f7",
         ),
         "linux-aarch64" => (
             "linux-arm64",
             "tar.gz",
-            "cc8bc82b2dd0b595c3b95a4c3c9c8c350907cff011afbdee3d1379e812e1e3e3",
+            "261af2af250dfd7e9f25cf151d1b2713a0adf8f10a9ad116c4947f68627affe8",
         ),
         "linux-x86_64" => (
             "linux-x64",
             "tar.gz",
-            "c7a10d6816da8eaaa7534dd73c71c6e2b2c391dbbf845e364902d156615dd1b8",
+            "061ec3e3062115705b56b51fa9cc330ab50d34b6969387d4e4b1a50c6809acc2",
         ),
         "windows-aarch64" => (
             "win-arm64",
             "zip",
-            "00be129a09e8872cd52d3bb8bba12412c5733d2224123a482a2dca4a6fbf2586",
+            "b3cc74a295b39d4f273271e96f58c06dd2b35757ca12abec64c7d0598b434f14",
         ),
         "windows-x86_64" => (
             "win-x64",
             "zip",
-            "6c8d54f635feff4df76c2ca80f45332eb2ff57d25226edce36592e51a177ee33",
+            "e612af99f626ab415ea225af6bce5c971feb448cb5cae250bb1c3fa50c5f7d9f",
         ),
         _ => return None,
     };
@@ -926,7 +926,7 @@ mod tests {
             let mut builder = tar::Builder::new(encoder);
 
             let node_entry_path = format!("node-v{MANAGED_NODE_VERSION}-linux-x64/bin/node");
-            let node_payload = b"#!/bin/sh\necho v22.22.3\n";
+            let node_payload = b"#!/bin/sh\necho v24.22.3\n";
             let mut header = tar::Header::new_gnu();
             header.set_size(node_payload.len() as u64);
             header.set_mode(0o755);
@@ -936,7 +936,7 @@ mod tests {
                 .expect("append node");
 
             let npm_entry_path = format!("node-v{MANAGED_NODE_VERSION}-linux-x64/bin/npm");
-            let npm_payload = b"#!/bin/sh\necho 10.9.0\n";
+            let npm_payload = b"#!/bin/sh\necho 11.0.0\n";
             let mut npm_header = tar::Header::new_gnu();
             npm_header.set_size(npm_payload.len() as u64);
             npm_header.set_mode(0o755);
@@ -994,7 +994,8 @@ mod tests {
 
     #[test]
     fn parses_node_major_versions_accurately() {
-        assert_eq!(parse_node_major_version("v22.22.3\n"), Some(22));
+        assert_eq!(parse_node_major_version("v24.22.3\n"), Some(24));
+        assert_eq!(parse_node_major_version("22.22.3\n"), Some(22));
         assert_eq!(parse_node_major_version("20.11.0"), Some(20));
         assert_eq!(parse_node_major_version("v18.19.1"), Some(18));
         assert_eq!(parse_node_major_version("invalid"), None);

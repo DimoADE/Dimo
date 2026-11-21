@@ -37,6 +37,7 @@ pub struct ServerConfig {
     pub static_asset_resolver: Option<StaticAssetResolver>,
     pub host_id: String,
     pub reachability: Vec<ReachabilityOrigin>,
+    pub desktop_mode: bool,
 }
 
 impl fmt::Debug for ServerConfig {
@@ -54,6 +55,7 @@ impl fmt::Debug for ServerConfig {
             )
             .field("host_id", &self.host_id)
             .field("reachability", &self.reachability)
+            .field("desktop_mode", &self.desktop_mode)
             .finish()
     }
 }
@@ -68,6 +70,7 @@ impl PartialEq for ServerConfig {
             && self.static_asset_resolver.is_some() == other.static_asset_resolver.is_some()
             && self.host_id == other.host_id
             && self.reachability == other.reachability
+            && self.desktop_mode == other.desktop_mode
     }
 }
 
@@ -91,6 +94,17 @@ impl ServerConfig {
         origins: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         self.allowed_origins = origins.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn with_desktop_mode(mut self, enabled: bool) -> Self {
+        self.desktop_mode = enabled;
+        if enabled {
+            self.allowed_origins
+                .insert(crate::desktop::DESKTOP_APP_ORIGIN.to_string());
+            self.allowed_origins
+                .insert(crate::desktop::DESKTOP_ASSET_ORIGIN.to_string());
+        }
         self
     }
 
@@ -134,6 +148,7 @@ impl Default for ServerConfig {
             static_asset_resolver: None,
             host_id: String::new(),
             reachability: Vec::new(),
+            desktop_mode: false,
         }
     }
 }

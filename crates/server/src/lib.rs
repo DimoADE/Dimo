@@ -13,7 +13,9 @@ mod composition;
 mod config;
 mod data_dir_adoption;
 mod delegation_runtime;
+pub mod desktop;
 mod domains;
+pub mod dto;
 pub mod e2ee;
 mod host;
 mod host_core;
@@ -68,6 +70,7 @@ pub use delegation_runtime::{DimoDelegationInjector, SpaceSessionLookup};
 pub use domains::ServerApplicationDomains;
 pub use host::{
     HostEvent, HostEventBus, account_flow,
+    catalog::system::init_system_proxy,
     collaboration::HostCollaborationHost,
     events::{
         COLLABORATION_SPACE_CHANGED_EVENT, HOST_EVENT_CHANNELS, TerminalBridgeRegistry,

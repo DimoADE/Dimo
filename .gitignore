@@ -18,6 +18,9 @@ yarn-error.log*
 /build
 bindings/
 frontend/dist
+electron/dist
+electron/release
+electron/resources/bin
 launch-site/dist
 npx-cli/dist
 npx-cli/dimo-*
@@ -78,10 +81,7 @@ __pycache__/
 .scratch/
 .cef/
 
-# ===== Tauri =====
-src-tauri/gen/
-src-tauri/tauri.dev.generated.conf.json
-src-tauri/binaries/
+# ===== Helper binaries & temp files =====
 plugins/computer-use/bin/
 **/.codeg-fs-*.tmp
 **/*.cstemp

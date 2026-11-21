@@ -18,7 +18,6 @@ describe('BROWSER_HOST_EVENT', () => {
 
   it('is the only name native browser emit/listen sites use', () => {
     const files = [
-      'src-tauri/src/browser_native.rs',
       'frontend/src/features/host-browser/HostBrowserPanel.tsx',
       'frontend/src/features/host-browser/openBrowserTab.ts',
       'frontend/src/contexts/PanelActionsContext.tsx',

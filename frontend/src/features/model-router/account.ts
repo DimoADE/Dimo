@@ -5,7 +5,7 @@ import {
   webServiceApi,
   type SyncableHostProfile,
 } from '@/lib/api';
-import { isTauriClient } from '@/lib/desktopShell';
+import { isLocalDesktopHost, isTauriClient } from '@/lib/desktopShell';
 import {
   readDesktopSharedPreferenceSection,
   writeDesktopSharedPreferenceSection,
@@ -482,6 +482,8 @@ export const accountApi = {
     void hostTunnelApi.setAccountLease(null).catch(() => null);
     if (isTauriClient()) {
       void hostClientApi.setSyncAccount(null).catch(() => null);
+    }
+    if (isLocalDesktopHost()) {
       // Phones were admitted because they share this account; signing out ends that trust.
       void webServiceApi.revokeAccountLinkedDevices().catch(() => null);
     }

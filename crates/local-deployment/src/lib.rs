@@ -129,8 +129,13 @@ impl LocalDeployment {
         let db = {
             let msg_store_for_hook = events_msg_store.clone();
             let entry_count_for_hook = events_entry_count.clone();
-            DBService::new_at_with_reader_hook(data_dir.as_ref(), move |reader| {
-                EventService::create_hook(msg_store_for_hook, entry_count_for_hook, reader)
+            DBService::new_at_with_reader_hook(data_dir.as_ref(), move |reader, commit_fence| {
+                EventService::create_hook(
+                    msg_store_for_hook,
+                    entry_count_for_hook,
+                    reader,
+                    commit_fence,
+                )
             })
             .await?
         };

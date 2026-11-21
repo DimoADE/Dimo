@@ -15,11 +15,19 @@ import type {
 } from 'shared/types';
 import type { RateLimitIndicatorState } from '@/components/NormalizedConversation/RateLimitRecoveryBanner';
 
+export type StatusNoticeActor = {
+  id?: string;
+  name: string;
+  avatar?: ReactNode;
+  onOpenSession?: () => void;
+};
+
 export type ConversationStatusNotice =
   | {
       id: string;
       kind: 'turn-error';
       error: ConversationError;
+      actor?: StatusNoticeActor;
       onReload?: () => void | Promise<unknown>;
       onRebind?: () => void | Promise<unknown>;
       onRetry?: () => void | Promise<unknown>;
@@ -27,12 +35,14 @@ export type ConversationStatusNotice =
   | {
       id: string;
       kind: 'interrupted-turn';
+      actor?: StatusNoticeActor;
       onResend?: () => void;
     }
   | {
       id: string;
       kind: 'session-notice';
       notice: ConversationSessionNotice;
+      actor?: StatusNoticeActor;
       titleOverride?: string | null;
       onCancel?: () => void | Promise<unknown>;
       onRetry?: () => void | Promise<unknown>;
@@ -43,12 +53,14 @@ export type ConversationStatusNotice =
 
 export type PendingConversationQuestion = {
   request: ConversationQuestionRequest;
+  actor?: StatusNoticeActor;
   responding: boolean;
   onRespond: (questionId: string, response: AgentElicitationResponse) => void;
 };
 
 export type PendingConversationPermission = {
   request: ConversationPermissionView;
+  actor?: StatusNoticeActor;
   responding: boolean;
   onRespond: (permissionId: string, response: AgentPermissionResponse) => void;
 };

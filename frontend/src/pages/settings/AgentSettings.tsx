@@ -1271,19 +1271,20 @@ export function AgentSettings() {
   const cancelOperation = useCallback(async () => {
     if (!selectedAgentId) return;
     const operation = management.state.operations[selectedAgentId];
-    if (!operation) return;
+    if (!operation && !selectedAgent?.active_operation) return;
     try {
       await agentManagementApi.cancelOperation(
         selectedAgentId,
-        operation.operationId
+        operation?.operationId ?? ''
       );
+      await management.refresh();
       toast.success(t('settings:agents.cancelingOperation'));
     } catch (error) {
       toast.error(
         errorMessage(error, t('settings:agents.cancelOperationFailed'))
       );
     }
-  }, [management.state.operations, selectedAgentId, t]);
+  }, [management, selectedAgent?.active_operation, selectedAgentId, t]);
 
   const remove = useCallback(async () => {
     if (!selectedAgentId) return;

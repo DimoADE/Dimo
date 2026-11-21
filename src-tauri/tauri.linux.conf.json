@@ -1,9 +1,0 @@
-{
-  "bundle": {
-    "linux": {
-      "deb": {
-        "depends": []
-      }
-    }
-  }
-}

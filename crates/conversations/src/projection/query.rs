@@ -262,6 +262,7 @@ impl ProjectionFold {
             conversation_id,
             projection_version: CONVERSATION_PROJECTION_VERSION,
             last_sequence,
+            live_sequence: None,
             rows,
             truncated_from_start: truncated,
             older_cursor,
@@ -285,7 +286,7 @@ impl ConversationProjector {
         if latest > snapshot.last_sequence {
             return Ok(None);
         }
-        let bounded = limit.max(1) as i64;
+        let bounded = limit.max(1).min(i64::MAX as usize) as i64;
         let records =
             ConversationTimelineRowRecord::list_tail(pool, conversation_id, bounded).await?;
         let expected = snapshot.total_rows.min(bounded);
@@ -326,6 +327,7 @@ impl ConversationProjector {
             conversation_id,
             projection_version: CONVERSATION_PROJECTION_VERSION,
             last_sequence: effective_last_seq,
+            live_sequence: None,
             rows,
             truncated_from_start: truncated,
             older_cursor,

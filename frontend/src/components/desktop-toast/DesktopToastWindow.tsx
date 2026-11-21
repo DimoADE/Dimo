@@ -16,10 +16,9 @@ import {
   Send,
   X,
 } from 'lucide-react';
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import type { AgentId, Session } from 'shared/types';
 import { backendListen } from '@/lib/backendTransport';
-import { desktopShellCall } from '@/lib/desktopShell';
+import { desktopShellCall, getDesktopShell } from '@/lib/desktopShell';
 import { sessionsApi } from '@/lib/api';
 import { Logo } from '@/components/Logo';
 import { conversationApi } from '@/features/conversation/conversationApi';
@@ -126,8 +125,8 @@ export function DesktopToastWindow() {
     try {
       await desktopShellCall('hide_desktop_toast');
     } catch {
-      await getCurrentWindow()
-        .hide()
+      await getDesktopShell()
+        .window.hide()
         .catch(() => {});
     }
   }, []);

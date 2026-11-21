@@ -101,17 +101,27 @@ pub async fn evacuate_user_data_before_app_update() -> Result<(), String> {
     Ok(())
 }
 
-fn pin_opened_in_place_when_stable_is_empty(outcomes: &[DataDirAdoptionOutcome], stable: &Path) {
+fn opened_in_place_dir_to_pin<'a>(
+    outcomes: &'a [DataDirAdoptionOutcome],
+    stable: &Path,
+) -> Option<&'a Path> {
     if stable.join("db.sqlite").is_file() {
-        return;
+        return None;
     }
     for outcome in outcomes {
         if let DataDirAdoptionOutcome::OpenedInPlace { legacy_dir, .. } = outcome
+            && !utils::assets::is_inside_macos_app_bundle(legacy_dir)
             && legacy_dir.join("db.sqlite").is_file()
         {
-            utils::assets::use_data_dir_for_this_run(legacy_dir.clone());
-            return;
+            return Some(legacy_dir.as_path());
         }
+    }
+    None
+}
+
+fn pin_opened_in_place_when_stable_is_empty(outcomes: &[DataDirAdoptionOutcome], stable: &Path) {
+    if let Some(dir) = opened_in_place_dir_to_pin(outcomes, stable) {
+        utils::assets::use_data_dir_for_this_run(dir.to_path_buf());
     }
 }
 
@@ -514,13 +524,21 @@ fn rename_dir_with_windows_retry(from: &Path, to: &Path) -> std::io::Result<()> 
     }
 }
 
+fn evacuate_or_set_aside_legacy_dir(legacy_dir: &Path, target_dir: &Path) -> std::io::Result<PathBuf> {
+    if utils::assets::is_inside_macos_app_bundle(legacy_dir) {
+        preserve_sqlite_dir_beside_stable(legacy_dir, target_dir)
+    } else {
+        set_aside(legacy_dir)
+    }
+}
+
 fn move_into_target_with_decision(
     legacy_dir: &Path,
     target_dir: &Path,
     keep_target: bool,
 ) -> std::io::Result<MoveResult> {
     if keep_target {
-        let superseded = match set_aside(legacy_dir) {
+        let superseded = match evacuate_or_set_aside_legacy_dir(legacy_dir, target_dir) {
             Ok(aside) => aside,
             Err(_) => {
                 // Only mark as permanently evaluated when no process holds live
@@ -575,7 +593,7 @@ fn move_into_target_with_decision(
                 }
                 return Err(copy_err);
             }
-            if set_aside(legacy_dir).is_err() {
+            if evacuate_or_set_aside_legacy_dir(legacy_dir, target_dir).is_err() {
                 let _ = utils::assets::record_adopted_legacy_source(target_dir, legacy_dir);
             }
             Ok(MoveResult::Moved { superseded })
@@ -1311,5 +1329,55 @@ mod tests {
         );
 
         check_pool.close().await;
+    }
+
+    #[test]
+    fn opened_in_place_never_pins_a_macos_app_bundle_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let stable = root.path().join("AppSupport").join("app.dimo.dimo");
+        let bundle_data = root
+            .path()
+            .join("Dimo.app")
+            .join("Contents")
+            .join("MacOS")
+            .join("data");
+        write_db(&bundle_data, 64);
+
+        let outcomes = [DataDirAdoptionOutcome::OpenedInPlace {
+            legacy_dir: bundle_data,
+            error: "locked".to_string(),
+        }];
+        assert_eq!(opened_in_place_dir_to_pin(&outcomes, &stable), None);
+
+        let external_data = root.path().join("Dimo").join("data");
+        write_db(&external_data, 64);
+        let external_outcomes = [DataDirAdoptionOutcome::OpenedInPlace {
+            legacy_dir: external_data.clone(),
+            error: "locked".to_string(),
+        }];
+        assert_eq!(
+            opened_in_place_dir_to_pin(&external_outcomes, &stable),
+            Some(external_data.as_path())
+        );
+    }
+
+    #[test]
+    fn weaker_bundle_data_is_evacuated_outside_app_instead_of_superseded_inside() {
+        let root = tempfile::tempdir().unwrap();
+        let macos_dir = root.path().join("Dimo.app").join("Contents").join("MacOS");
+        let bundle_data = macos_dir.join("data");
+        let stable = root.path().join("AppSupport").join("app.dimo.dimo");
+        write_db(&bundle_data, 16);
+        write_db(&stable, 4096);
+
+        let MoveResult::KeptTarget { superseded } =
+            move_into_target_with_decision(&bundle_data, &stable, true).unwrap()
+        else {
+            panic!("larger stable directory should stay active");
+        };
+        assert!(!bundle_data.exists());
+        assert!(!utils::assets::is_inside_macos_app_bundle(&superseded));
+        assert!(superseded.join("db.sqlite").is_file());
+        assert_eq!(std::fs::read_dir(&macos_dir).unwrap().count(), 0);
     }
 }

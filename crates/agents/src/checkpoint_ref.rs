@@ -8,13 +8,15 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use workspace_utils::process::new_hidden_tokio_command;
+use workspace_utils::process::{new_hidden_tokio_command, run_command_output_with_timeout};
 
 pub const CHECKPOINT_REF_PREFIX: &str = "refs/dimo/checkpoints";
+const CHECKPOINT_GIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, thiserror::Error)]
 pub enum CheckpointRefError {
@@ -501,7 +503,7 @@ async fn run_git(
         cmd.env(key, value);
     }
 
-    let output = cmd.output().await?;
+    let output = run_command_output_with_timeout(&mut cmd, CHECKPOINT_GIT_TIMEOUT).await?;
     if !output.status.success() {
         return Err(CheckpointRefError::GitCommandFailed {
             args: args.join(" "),

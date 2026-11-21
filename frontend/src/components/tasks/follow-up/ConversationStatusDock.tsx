@@ -1,8 +1,11 @@
 import { Badge } from '@astryxdesign/core/Badge';
-import { RefreshCw, RotateCcw, X } from 'lucide-react';
+import { ChevronDown, ChevronUp, RefreshCw, RotateCcw, X } from 'lucide-react';
 import { useEffect, useId, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { ConversationStatusNotice } from '@/contexts/ConversationStatusContext';
+import type {
+  ConversationStatusNotice,
+  StatusNoticeActor,
+} from '@/contexts/ConversationStatusContext';
 import { TurnErrorCard } from '@/components/NormalizedConversation/conversation/TurnErrorCard';
 import {
   ConversationStatusDetailsContent,
@@ -16,6 +19,7 @@ import {
 import { sessionNoticeNeedsRebind } from '@/features/conversation/sessionNoticeNeedsRebind';
 import { AgentRuntimeStatus } from './AgentRuntimeStatus';
 import { SessionNoticeActions } from './SessionNoticeActions';
+import { StatusNoticeActorChip } from './StatusNoticeActorChip';
 
 type ConversationStatusDockProps = {
   notices: ConversationStatusNotice[];
@@ -24,6 +28,7 @@ type ConversationStatusDockProps = {
   dismissalScope?: string | null;
   placement?: 'composer' | 'panel';
   extra?: ReactNode;
+  maxVisibleCount?: number;
 };
 
 export function ConversationStatusDock({
@@ -33,8 +38,10 @@ export function ConversationStatusDock({
   dismissalScope,
   placement = 'composer',
   extra,
+  maxVisibleCount,
 }: ConversationStatusDockProps) {
   const { t } = useTranslation(['conversation']);
+  const [overflowExpanded, setOverflowExpanded] = useState(false);
   const { dismiss: dismissNotice, isDismissed } =
     useConversationStatusDismissal(dismissalScope);
   const visibleNotices = notices.filter(
@@ -43,6 +50,29 @@ export function ConversationStatusDock({
         (notice.notice.connection_status || notice.notice.request_status)) ||
       !isDismissed(notice)
   );
+  const hasOverflow = Boolean(
+    maxVisibleCount &&
+      maxVisibleCount > 0 &&
+      visibleNotices.length > maxVisibleCount
+  );
+  const displayedNotices =
+    hasOverflow && !overflowExpanded
+      ? visibleNotices.slice(0, maxVisibleCount)
+      : visibleNotices;
+  const hiddenCount = hasOverflow
+    ? visibleNotices.length - (maxVisibleCount ?? 0)
+    : 0;
+
+  useEffect(() => {
+    setOverflowExpanded(false);
+  }, [dismissalScope]);
+
+  useEffect(() => {
+    if (!hasOverflow && overflowExpanded) {
+      setOverflowExpanded(false);
+    }
+  }, [hasOverflow, overflowExpanded]);
+
   const blockingNotice = visibleNotices.some(
     (notice) =>
       notice.kind === 'turn-error' ||
@@ -101,12 +131,13 @@ export function ConversationStatusDock({
           />
         ) : null}
 
-        {visibleNotices.map((notice) => {
+        {displayedNotices.map((notice) => {
           if (notice.kind === 'turn-error') {
             return (
               <TurnErrorCard
                 key={notice.id}
                 error={notice.error}
+                actor={notice.actor}
                 onReload={notice.onReload}
                 onRebind={notice.onRebind}
                 onRetry={notice.onRetry}
@@ -125,6 +156,7 @@ export function ConversationStatusDock({
                 key={notice.id}
                 tone="warning"
                 role="status"
+                actor={notice.actor}
                 title={title}
                 badgeLabel={t('statusDock.warningBadge')}
                 detailsLabel={t('statusDock.showDetails')}
@@ -162,6 +194,7 @@ export function ConversationStatusDock({
               <AgentRuntimeStatus
                 key={notice.id}
                 notice={notice.notice}
+                actor={notice.actor}
                 titleOverride={notice.titleOverride}
                 onReconnect={notice.onReload}
                 onCancel={notice.onCancel}
@@ -181,11 +214,12 @@ export function ConversationStatusDock({
               key={notice.id}
               tone={tone}
               role={tone === 'error' ? 'alert' : 'status'}
-              title={copy.title}
+              actor={notice.actor}
+              title={notice.titleOverride?.trim() || copy.title}
               badgeLabel={t(`statusDock.${tone}Badge`)}
               detailsLabel={t('statusDock.showDetails')}
               detailsAccessibleLabel={t('statusDock.showDetailsFor', {
-                title: copy.title,
+                title: notice.titleOverride?.trim() || copy.title,
               })}
               detailsKey={copy.message ?? ''}
               detailsMono={tone !== 'info'}
@@ -241,6 +275,30 @@ export function ConversationStatusDock({
             />
           );
         })}
+
+        {hasOverflow ? (
+          <button
+            type="button"
+            className="composer-status-overflow-toggle tabular-nums"
+            onClick={() => setOverflowExpanded((current) => !current)}
+            aria-expanded={overflowExpanded}
+            data-testid="conversation-status-overflow-toggle"
+          >
+            {overflowExpanded ? (
+              <>
+                <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>{t('statusDock.showFewerNotices')}</span>
+              </>
+            ) : (
+              <>
+                <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>
+                  {t('statusDock.showMoreNotices', { count: hiddenCount })}
+                </span>
+              </>
+            )}
+          </button>
+        ) : null}
       </div>
     </div>
   );
@@ -269,6 +327,7 @@ function DismissButton({
 function StatusSurface({
   tone,
   role,
+  actor,
   title,
   badgeLabel,
   action,
@@ -280,6 +339,7 @@ function StatusSurface({
 }: {
   tone: 'error' | 'warning' | 'info';
   role: 'alert' | 'status';
+  actor?: StatusNoticeActor;
   title: string;
   badgeLabel: string;
   action?: React.ReactNode;
@@ -301,6 +361,7 @@ function StatusSurface({
     <div className="composer-status-row text-xs" data-tone={tone} role={role}>
       <div className="composer-status-header">
         <div className="composer-status-heading">
+          <StatusNoticeActorChip actor={actor} />
           <p className="composer-status-title text-foreground">{title}</p>
           <Badge
             className="composer-status-badge"

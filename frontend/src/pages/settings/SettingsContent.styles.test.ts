@@ -44,22 +44,23 @@ function declarationsMatching(fragment: string) {
 describe('desktop window chrome insets', () => {
   it('reserves macOS traffic-light and Windows control space on overlay chrome', () => {
     const macos = declarationsFor(
-      "html.tauri-desktop[data-host-platform='macos'] .window-chrome"
+      "html.electron-desktop[data-host-platform='macos'] .window-chrome"
     );
     const windows = declarationsFor(
-      'html.tauri-desktop.host-windows .window-chrome'
+      'html.electron-desktop.host-windows .window-chrome'
     );
 
     expect(macos.get('padding-left')).toBe('4.75rem');
     expect(windows.get('padding-right')).toBe('6.5rem');
   });
 
-  it('avoids CSS app-region declarations on drag regions while disabling image drag', () => {
-    const drag = declarationsFor('[data-tauri-drag-region]');
-    expect(drag.get('-webkit-app-region')).toBeUndefined();
-    expect(drag.get('app-region')).toBeUndefined();
+  it('uses Electron CSS app-region on drag regions and disables image drag', () => {
+    const drag = declarationsFor(
+      'html.electron-desktop [data-window-drag-region], html.electron-desktop .dimo-window-drag'
+    );
+    expect(drag.get('-webkit-app-region')).toBe('drag');
 
-    const dragImg = declarationsFor('[data-tauri-drag-region] img');
+    const dragImg = declarationsMatching('[data-window-drag-region] img');
     expect(dragImg.get('-webkit-user-drag')).toBe('none');
 
     const noDrag = declarationsMatching('.window-chrome button');
@@ -70,7 +71,7 @@ describe('desktop window chrome insets', () => {
   it('hides the traffic-light divider except on the macOS desktop shell', () => {
     const rule = declarationsFor('.window-chrome-leading-rule');
     const macos = declarationsFor(
-      "html.tauri-desktop[data-host-platform='macos'] .window-chrome-leading-rule"
+      "html.electron-desktop[data-host-platform='macos'] .window-chrome-leading-rule"
     );
 
     expect(rule.get('display')).toBe('none');

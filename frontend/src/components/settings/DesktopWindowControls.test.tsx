@@ -5,19 +5,28 @@ import { DesktopWindowControls } from './DesktopWindowControls';
 
 const useTauriClient = vi.hoisted(() => vi.fn(() => true));
 
-vi.mock('@/lib/desktopShell', () => ({
-  useTauriClient,
-}));
-
-vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow: () => ({
-    isMaximized: () => Promise.resolve(false),
-    onResized: () => Promise.resolve(() => undefined),
-    minimize: () => Promise.resolve(),
-    toggleMaximize: () => Promise.resolve(),
-    close: () => Promise.resolve(),
-  }),
-}));
+vi.mock('@/lib/desktopShell', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/lib/desktopShell')>();
+  return {
+    ...actual,
+    useTauriClient,
+    getDesktopShell: () => {
+      const shell = actual.getDesktopShell();
+      return {
+        ...shell,
+        window: {
+          ...shell.window,
+          isMaximized: () => Promise.resolve(false),
+          onResized: () => Promise.resolve(() => undefined),
+          minimize: () => Promise.resolve(),
+          toggleMaximize: () => Promise.resolve(),
+          close: () => Promise.resolve(),
+        },
+      };
+    },
+  };
+});
 
 describe('DesktopWindowControls', () => {
   afterEach(() => {

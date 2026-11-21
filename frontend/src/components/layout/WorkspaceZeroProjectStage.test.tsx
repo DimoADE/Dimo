@@ -15,16 +15,28 @@ const dragDropListeners = vi.hoisted(
   () => [] as Array<(event: { payload: unknown }) => void>
 );
 
-vi.mock('@tauri-apps/api/webview', () => ({
-  getCurrentWebview: () => ({
-    onDragDropEvent: async (
-      listener: (event: { payload: unknown }) => void
-    ) => {
-      dragDropListeners.push(listener);
-      return () => undefined;
+vi.mock('@/lib/desktopShell', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/lib/desktopShell')>();
+  return {
+    ...actual,
+    getDesktopShell: () => {
+      const shell = actual.getDesktopShell();
+      return {
+        ...shell,
+        window: {
+          ...shell.window,
+          onDragDropEvent: async (
+            listener: (event: { payload: unknown }) => void
+          ) => {
+            dragDropListeners.push(listener);
+            return () => undefined;
+          },
+        },
+      };
     },
-  }),
-}));
+  };
+});
 
 vi.mock('@/components/context-menu', () => ({
   useAppContextMenu: () => ({

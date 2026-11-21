@@ -48,45 +48,6 @@ beforeEach(async () => {
   if (i18n.language !== 'zh-CN') await i18n.changeLanguage('zh-CN');
 });
 
-// Mock Tauri API - all invoke calls return undefined by default
-vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn(),
-  // Mirrors the real macOS/Linux asset URL shape closely enough for tests to
-  // assert on the file path the webview would load.
-  convertFileSrc: vi.fn((path: string) => `asset://localhost/${path}`),
-  Channel: class MockChannel<T> {
-    onmessage: (message: T) => void = () => undefined;
-  },
-}));
-
-vi.mock('@tauri-apps/api/event', () => ({
-  listen: vi.fn(() => Promise.resolve(() => {})),
-  emit: vi.fn(),
-  once: vi.fn(() => Promise.resolve(() => {})),
-}));
-
-vi.mock('@tauri-apps/plugin-shell', () => ({
-  Command: {
-    create: vi.fn(),
-  },
-  open: vi.fn().mockResolvedValue(undefined),
-}));
-
-vi.mock('@tauri-apps/plugin-dialog', () => ({
-  open: vi.fn(),
-  save: vi.fn(),
-  message: vi.fn(),
-  ask: vi.fn(),
-  confirm: vi.fn(),
-}));
-
-vi.mock('@tauri-apps/plugin-fs', () => ({
-  readTextFile: vi.fn(),
-  writeTextFile: vi.fn(),
-  readDir: vi.fn(),
-  exists: vi.fn(),
-}));
-
 // Mock window.matchMedia
 Object.defineProperty(window, 'matchMedia', {
   writable: true,

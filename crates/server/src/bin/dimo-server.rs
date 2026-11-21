@@ -1,11 +1,17 @@
-use std::{net::SocketAddr, path::PathBuf, process::ExitCode};
+use std::{
+    io::Write,
+    net::SocketAddr,
+    path::PathBuf,
+    process::ExitCode,
+    sync::Arc,
+};
 
 use server::{
     HeadlessServer, LaunchCommand, ParsedArgs, ServerBootstrapConfig, ServerConfig, ServerLaunch,
-    ServerToken, format_host_console, parse_args, read_host_token, resolve_console_token,
-    run_agents_command, run_pairing_command, usage, write_host_token,
+    ServerToken, format_host_console, issue_host_token, parse_args, read_host_token,
+    resolve_console_token, run_agents_command, run_pairing_command, usage, write_host_token,
 };
-use tracing_subscriber::EnvFilter;
+use tokio::sync::Notify;
 
 fn main() -> ExitCode {
     // Match the desktop Host: debug command futures exceed Tokio's default stack.
@@ -39,18 +45,17 @@ async fn run_command() -> ExitCode {
 }
 
 async fn run(launch: ServerLaunch) -> ExitCode {
+    if let Some(explicit) = utils::assets::renamed_env_var("DIMO_DATA_DIR") {
+        let path = PathBuf::from(explicit);
+        let _ = std::fs::create_dir_all(&path);
+        utils::assets::use_data_dir_for_this_run(path);
+    }
     let data_dir_adoptions = server::adopt_legacy_data_dir().await;
     utils::shell::bootstrap_desktop_path();
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            EnvFilter::new(if launch.reveal_console {
-                "error"
-            } else {
-                "info"
-            })
-        }))
-        .without_time()
-        .init();
+    let _log_guard = server::desktop::logging::init_logging(launch.desktop, launch.reveal_console);
+    if launch.desktop {
+        server::desktop::crash_reports::install_panic_hook();
+    }
     for outcome in &data_dir_adoptions {
         server::log_data_dir_adoption(outcome);
     }
@@ -60,9 +65,13 @@ async fn run(launch: ServerLaunch) -> ExitCode {
 
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
+    if launch.desktop {
+        server::init_system_proxy().await;
+    }
+
     let data_dir = utils::assets::host_data_dir();
     let listen_addr = match env_listen_override() {
-        Some(address) if !launch.reveal_console => address,
+        Some(address) if !launch.reveal_console && !launch.desktop => address,
         _ => launch.listen_addr(),
     };
     let mut server = match ServerConfig::default().with_listen_addr(listen_addr, launch.allow_lan) {
@@ -72,6 +81,11 @@ async fn run(launch: ServerLaunch) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if let Some(version) = launch.app_version.as_deref()
+        && !version.trim().is_empty()
+    {
+        server.server_version = version.trim().to_string();
+    }
     if let Some(static_root) = std::env::var_os("DIMO_STATIC_ROOT") {
         server = server.with_static_root(PathBuf::from(static_root));
     } else if let Some(sibling) = sibling_web_root() {
@@ -84,6 +98,65 @@ async fn run(launch: ServerLaunch) -> ExitCode {
                 .map(str::trim)
                 .filter(|origin| !origin.is_empty()),
         );
+    }
+    if launch.desktop {
+        server = server.with_desktop_mode(true);
+    }
+
+    let mut bootstrap = ServerBootstrapConfig::new(data_dir.clone());
+    bootstrap.server = server;
+
+    if launch.desktop {
+        let desktop_token = match resolve_desktop_token() {
+            Ok(token) => token,
+            Err(error) => {
+                eprintln!("invalid DIMO_DESKTOP_TOKEN: {error}");
+                return ExitCode::from(2);
+            }
+        };
+        let shutdown_notify = Arc::new(Notify::new());
+        bootstrap.desktop_mode = true;
+        bootstrap.desktop_token = Some(desktop_token);
+        bootstrap.resources_dir = launch.resources_dir.clone();
+        bootstrap.shutdown_notify = Some(Arc::clone(&shutdown_notify));
+
+        let headless = match HeadlessServer::bootstrap(bootstrap).await {
+            Ok(headless) => headless,
+            Err(error) => {
+                tracing::error!(%error, "failed to initialize dimo-server in desktop mode");
+                return ExitCode::from(1);
+            }
+        };
+        spawn_desktop_watchdogs(launch.parent_pid, Arc::clone(&shutdown_notify));
+        let signal_shutdown = async move {
+            let _ = tokio::signal::ctrl_c().await;
+        };
+        let ready_data_dir = data_dir.to_string_lossy().into_owned();
+        let result = headless
+            .serve_with_ready_and_shutdown(
+                |bound_addr| {
+                    let payload = serde_json::json!({
+                        "type": "dimo-server-ready",
+                        "listen_addr": bound_addr.to_string(),
+                        "port": bound_addr.port(),
+                        "pid": std::process::id(),
+                        "protocol_version": remote_protocol::PROTOCOL_VERSION,
+                        "data_dir": ready_data_dir,
+                    });
+                    let mut stdout = std::io::stdout().lock();
+                    let _ = writeln!(stdout, "{payload}");
+                    let _ = stdout.flush();
+                },
+                signal_shutdown,
+            )
+            .await;
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                tracing::error!(%error, "dimo-server desktop mode stopped");
+                ExitCode::from(1)
+            }
+        };
     }
 
     let supplied_token = match resolve_startup_token(&data_dir, &launch) {
@@ -100,8 +173,6 @@ async fn run(launch: ServerLaunch) -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let mut bootstrap = ServerBootstrapConfig::new(data_dir.clone());
-    bootstrap.server = server;
     bootstrap.token = supplied_token.clone();
 
     let mut headless = match HeadlessServer::bootstrap(bootstrap).await {
@@ -137,6 +208,109 @@ async fn run(launch: ServerLaunch) -> ExitCode {
         Err(error) => {
             tracing::error!(%error, "dimo-server stopped");
             ExitCode::from(1)
+        }
+    }
+}
+
+fn resolve_desktop_token() -> Result<ServerToken, server::ServerTokenError> {
+    if let Some(value) = std::env::var("DIMO_DESKTOP_TOKEN")
+        .ok()
+        .filter(|token| !token.trim().is_empty())
+    {
+        return ServerToken::try_new(value);
+    }
+    Ok(issue_host_token())
+}
+
+fn spawn_desktop_watchdogs(parent_pid: Option<u32>, shutdown: Arc<Notify>) {
+    if let Some(pid) = parent_pid {
+        let shutdown_pid = Arc::clone(&shutdown);
+        let _ = std::thread::Builder::new()
+            .name("dimo-parent-watchdog".into())
+            .spawn(move || {
+                wait_for_parent_exit(pid);
+                tracing::info!(parent_pid = pid, "parent process exited; shutting down");
+                shutdown_pid.notify_one();
+            });
+    }
+    // On Windows, a blocking ReadFile on a synchronous piped stdin holds the
+    // kernel FILE_OBJECT lock indefinitely, causing any child process that
+    // inherits stdin (e.g. git.exe via tokio::process::Command::output) to
+    // deadlock on startup. When parent_pid is provided, wait_for_parent_exit
+    // already monitors the parent via OpenProcess + WaitForSingleObject.
+    #[cfg(target_os = "windows")]
+    if parent_pid.is_some() {
+        return;
+    }
+
+    // Also monitor stdin EOF so if Electron spawns with a piped stdin and dies
+    // unexpectedly, the server shuts down promptly on every OS.
+    let shutdown_stdin = shutdown;
+    let _ = std::thread::Builder::new()
+        .name("dimo-stdin-watchdog".into())
+        .spawn(move || {
+            use std::io::Read;
+            let mut stdin = std::io::stdin().lock();
+            let mut buf = [0u8; 64];
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) => {
+                        tracing::info!("desktop stdin closed; shutting down");
+                        shutdown_stdin.notify_one();
+                        break;
+                    }
+                    Ok(_) => continue,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+                        tracing::info!("desktop stdin pipe broken; shutting down");
+                        shutdown_stdin.notify_one();
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "desktop stdin watchdog stopped");
+                        break;
+                    }
+                }
+            }
+        });
+}
+
+#[cfg(target_os = "windows")]
+fn wait_for_parent_exit(pid: u32) {
+    use windows::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
+    };
+    unsafe {
+        if let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            let _ = WaitForSingleObject(handle, INFINITE);
+            let _ = CloseHandle(handle);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn wait_for_parent_exit(pid: u32) {
+    // Poll every 500ms whether the parent process is still alive (or reparented to PID 1).
+    let proc_path = PathBuf::from(format!("/proc/{pid}"));
+    let has_proc = proc_path.exists();
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if has_proc {
+            if !proc_path.exists() {
+                return;
+            }
+            continue;
+        }
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !alive {
+            return;
         }
     }
 }

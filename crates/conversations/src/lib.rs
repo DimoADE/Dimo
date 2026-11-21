@@ -72,8 +72,8 @@ pub use handoff::{
     HandoffContext, HandoffError, latest_agent_handoff_sequence,
 };
 pub use host::{
-    DefaultConversationHost, resolve_absolute_workspace_agent_working_dir,
-    resolve_agent_runtime_launch_settings,
+    DefaultConversationHost, persist_agent_auto_approve_mode,
+    resolve_absolute_workspace_agent_working_dir, resolve_agent_runtime_launch_settings,
     resolve_agent_runtime_launch_settings_for_provider_instance,
     resolve_workspace_agent_working_dir, session_launch_rejection_from_pool,
     workspace_prompt_blocks,

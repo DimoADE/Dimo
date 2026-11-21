@@ -2,6 +2,7 @@ import {
   FolderPickerDialog,
   MultiFolderPickerDialog,
 } from '@/components/dialogs/shared/FolderPickerDialog';
+import { getDesktopShell } from '@/lib/desktopShell';
 import { getBackendTransport } from '@/lib/transport';
 
 export type PickHostDirectoryOptions = {
@@ -22,8 +23,7 @@ export async function pickHostDirectory(
 ): Promise<string | null> {
   const transport = getBackendTransport();
   if (transport.environment === 'desktop') {
-    const { open } = await import('@tauri-apps/plugin-dialog');
-    const selected = await open({
+    const selected = await getDesktopShell().dialog.open({
       directory: true,
       multiple: false,
       title: options.title,
@@ -43,8 +43,7 @@ export async function pickHostDirectories(
 ): Promise<string[]> {
   const transport = getBackendTransport();
   if (transport.environment === 'desktop') {
-    const { open } = await import('@tauri-apps/plugin-dialog');
-    const selected = await open({
+    const selected = await getDesktopShell().dialog.open({
       directory: true,
       multiple: true,
       title: options.title,
@@ -74,8 +73,7 @@ export async function pickHostFile(
 ): Promise<string | null> {
   const transport = getBackendTransport();
   if (transport.environment === 'desktop') {
-    const { open } = await import('@tauri-apps/plugin-dialog');
-    const selected = await open({
+    const selected = await getDesktopShell().dialog.open({
       directory: false,
       multiple: false,
       title: options.title,
@@ -108,8 +106,7 @@ export async function pickHostSavePath(
 ): Promise<string | null> {
   const transport = getBackendTransport();
   if (transport.environment === 'desktop') {
-    const { save } = await import('@tauri-apps/plugin-dialog');
-    const selected = await save({
+    const selected = await getDesktopShell().dialog.save({
       title: options.title,
       defaultPath: options.defaultName,
       filters: options.extensions?.length

@@ -71,6 +71,7 @@ import {
 } from '@/utils/dockviewStartupSizing';
 import { applyWorkspaceZoneConstraints } from '@/utils/dockviewWorkspaceConstraints';
 import { shouldDismissEditorColumnAfterPanelRemoval } from '@/utils/lastPreviewTabLayout';
+import { closeRemovedDockviewBrowserPanel } from '@/features/host-browser/browserPanelLifetime';
 
 export type DropTargetZone = 'editor' | 'session' | null;
 
@@ -261,6 +262,10 @@ export function attachDockviewWorkspaceListeners(
 
   const removePanelDisposable = api.onDidRemovePanel((panel) => {
     if (isResettingRef.current) return;
+    closeRemovedDockviewBrowserPanel(
+      useLayoutStore.getState().currentProjectKey,
+      panel.id
+    );
 
     const sessionGroupsHavePanels = listSessionGroups(api.groups).some(
       (group) => group.panels.length > 0

@@ -1,7 +1,11 @@
 import type { QueryClient } from '@tanstack/react-query';
 import type { Session } from 'shared/types';
 import { syncConversationSelectedAgent } from '@/features/conversation/conversationTimelineRegistry';
-import type { SessionSummary } from '@/lib/api';
+import {
+  sessionsApi,
+  type SessionStatus,
+  type SessionSummary,
+} from '@/lib/api';
 import { normalizeAgentGroupKey } from '@/lib/providerInstancesApi';
 import type { WorkspaceWithSession } from '@/types/attempt';
 
@@ -263,4 +267,149 @@ export function removeSessionsFromWorkspaceCaches(
       queryKey: ['session', sessionId],
     });
   });
+}
+
+export interface CachedSessionReviewState {
+  status: SessionStatus | string;
+  isRunning: boolean;
+  workspaceId: string | null;
+}
+
+export function isSessionReviewReady(session: {
+  status?: SessionStatus | string | null;
+  isRunning?: boolean;
+}): boolean {
+  return session.status === 'inreview' && !session.isRunning;
+}
+
+export function findCachedSessionReviewState(
+  queryClient: QueryClient | null | undefined,
+  sessionId: string | null | undefined
+): CachedSessionReviewState | null {
+  const id = sessionId?.trim();
+  if (!queryClient || !id) return null;
+
+  const workspaceQueries = queryClient.getQueriesData<
+    Array<Record<string, unknown>>
+  >({ queryKey: ['workspaceSessions'] });
+  for (const [, current] of workspaceQueries) {
+    if (!Array.isArray(current)) continue;
+    const match = current.find((item) => item?.id === id);
+    if (match && typeof match.status === 'string') {
+      return {
+        status: match.status,
+        isRunning: Boolean(match.is_running),
+        workspaceId:
+          typeof match.workspace_id === 'string' && match.workspace_id.trim()
+            ? match.workspace_id
+            : null,
+      };
+    }
+  }
+
+  const session = queryClient.getQueryData<Session>(['session', id]);
+  if (session && typeof session.status === 'string') {
+    return {
+      status: session.status,
+      isRunning: false,
+      workspaceId: session.workspace_id?.trim() || null,
+    };
+  }
+
+  return null;
+}
+
+export function syncSessionStatusInCaches(
+  queryClient: QueryClient | null | undefined,
+  sessionId: string | null | undefined,
+  status: SessionStatus | string
+): void {
+  const id = sessionId?.trim();
+  if (!queryClient || !id) return;
+
+  queryClient.setQueriesData<Array<Record<string, unknown>>>(
+    { queryKey: ['workspaceSessions'] },
+    (current) => {
+      if (!Array.isArray(current)) return current;
+      let touched = false;
+      const next = current.map((item) => {
+        if (item?.id !== id || item.status === status) return item;
+        touched = true;
+        return {
+          ...item,
+          status,
+        };
+      });
+      return touched ? next : current;
+    }
+  );
+
+  queryClient.setQueryData<Session | undefined>(['session', id], (current) =>
+    current && current.status !== status
+      ? {
+          ...current,
+          status: status as Session['status'],
+        }
+      : current
+  );
+}
+
+const inFlightMarkViewedRequests = new Map<string, Promise<boolean>>();
+
+export function markReviewSessionViewed(
+  queryClient: QueryClient | null | undefined,
+  sessionId: string | null | undefined,
+  options?: {
+    workspaceId?: string | null;
+    onlyIfCached?: boolean;
+  }
+): Promise<boolean> {
+  const id = sessionId?.trim();
+  if (!queryClient || !id) return Promise.resolve(false);
+
+  const existing = inFlightMarkViewedRequests.get(id);
+  if (existing) {
+    return existing;
+  }
+
+  const cached = findCachedSessionReviewState(queryClient, id);
+  if (cached && !isSessionReviewReady(cached)) {
+    return Promise.resolve(false);
+  }
+  if (!cached && options?.onlyIfCached) {
+    return Promise.resolve(false);
+  }
+
+  const workspaceId =
+    options?.workspaceId?.trim() || cached?.workspaceId || null;
+  const previousStatus = cached?.status ?? null;
+
+  syncSessionStatusInCaches(queryClient, id, 'done');
+
+  const request = (async () => {
+    try {
+      await sessionsApi.markViewed(id);
+      await queryClient.invalidateQueries({
+        queryKey: workspaceId
+          ? ['workspaceSessions', workspaceId]
+          : ['workspaceSessions'],
+      });
+      return true;
+    } catch {
+      if (previousStatus) {
+        syncSessionStatusInCaches(queryClient, id, previousStatus);
+      }
+      await queryClient.invalidateQueries({
+        queryKey: workspaceId
+          ? ['workspaceSessions', workspaceId]
+          : ['workspaceSessions'],
+      });
+      return false;
+    } finally {
+      inFlightMarkViewedRequests.delete(id);
+    }
+  })();
+
+  inFlightMarkViewedRequests.set(id, request);
+  return request;
 }

@@ -32,8 +32,8 @@ use super::claude_events::{
     apply_claude_env_to_models, classify_claude_tool_call, claude_accepts_model_id,
     claude_capabilities, claude_normalize_mode, default_claude_permission_options,
     encode_claude_question_answers, normalize_sidecar_event, parse_sidecar_models,
-    prepare_claude_launch_env, resolve_claude_auth, resolve_claude_default_model,
-    serialize_sidecar_blocks, str_opt, str_or,
+    prepare_claude_launch_env, resolve_claude_auth, resolve_claude_default_mode,
+    resolve_claude_default_model, serialize_sidecar_blocks, str_opt, str_or,
 };
 pub use super::claude_events::{
     default_claude_models, resolve_claude_driver_script, resolve_node_executable,
@@ -785,6 +785,10 @@ impl NativeEngineDriver for ClaudeNativeDriver {
 
     fn resolve_default_model(&self, env: &HashMap<String, String>) -> Option<String> {
         resolve_claude_default_model(env)
+    }
+
+    fn resolve_default_mode(&self, env: &HashMap<String, String>) -> Option<String> {
+        resolve_claude_default_mode(env)
     }
 
     fn model_aliases(&self, env: &HashMap<String, String>) -> HashMap<String, String> {

@@ -1,5 +1,6 @@
 import { toast } from '@/components/ui/toast';
 import i18n from '@/i18n';
+import { getDesktopShell } from '@/lib/desktopShell';
 import { conversationExportFileStem } from '@/lib/exportConversation';
 import { getBackendTransport } from '@/lib/transport';
 import { writeClipboardViaBridge } from '@/vscode/bridge';
@@ -48,14 +49,13 @@ export async function saveImageFromSrc(src: string, filename: string) {
           : 'png';
     const transport = getBackendTransport();
     if (transport.environment === 'desktop') {
-      const { save } = await import('@tauri-apps/plugin-dialog');
-      const { writeFile } = await import('@tauri-apps/plugin-fs');
-      const path = await save({
+      const shell = getDesktopShell();
+      const path = await shell.dialog.save({
         defaultPath: `${stem}.${ext}`,
         filters: [{ name: 'Image', extensions: [ext] }],
       });
       if (!path) return;
-      await writeFile(path, new Uint8Array(await blob.arrayBuffer()));
+      await shell.fs.writeFile(path, new Uint8Array(await blob.arrayBuffer()));
       toast.success(i18n.t('common:contextMenu.saved'));
       return;
     }

@@ -59,15 +59,77 @@ export function findScroller(
   return null;
 }
 
+const CLIPPING_OVERFLOW = new Set([
+  'hidden',
+  'clip',
+  'auto',
+  'scroll',
+  'overlay',
+]);
+
+type RectBounds = {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+};
+
+function clippedBounds(scroller: HTMLElement): RectBounds {
+  const rect = scroller.getBoundingClientRect();
+  let left = Math.max(rect.left, 0);
+  let top = Math.max(rect.top, 0);
+  let right = Math.min(rect.right, window.innerWidth);
+  let bottom = Math.min(rect.bottom, window.innerHeight);
+
+  let parent: Element | null = scroller.parentElement;
+  while (parent && parent !== document.documentElement) {
+    const style = getComputedStyle(parent);
+    const clipX = CLIPPING_OVERFLOW.has(style.overflowX);
+    const clipY = CLIPPING_OVERFLOW.has(style.overflowY);
+    if (clipX || clipY) {
+      const pRect = parent.getBoundingClientRect();
+      if (clipX) {
+        left = Math.max(left, pRect.left);
+        right = Math.min(right, pRect.right);
+      }
+      if (clipY) {
+        top = Math.max(top, pRect.top);
+        bottom = Math.min(bottom, pRect.bottom);
+      }
+    }
+    parent = parent.parentElement;
+  }
+
+  return { left, top, right, bottom };
+}
+
 function placeThumb(
   thumb: HTMLElement,
   scroller: HTMLElement,
   axis: 'x' | 'y'
 ): boolean {
   const rect = scroller.getBoundingClientRect();
-  const viewport = axis === 'y' ? window.innerHeight : window.innerWidth;
-  const start = Math.max(axis === 'y' ? rect.top : rect.left, 0);
-  const end = Math.min(axis === 'y' ? rect.bottom : rect.right, viewport);
+  const clip = clippedBounds(scroller);
+  if (clip.bottom - clip.top <= 1 || clip.right - clip.left <= 1) {
+    thumb.classList.remove('is-visible');
+    return false;
+  }
+  if (
+    axis === 'y' &&
+    (rect.right <= clip.left + THUMB_PX || rect.left >= clip.right)
+  ) {
+    thumb.classList.remove('is-visible');
+    return false;
+  }
+  if (
+    axis === 'x' &&
+    (rect.bottom <= clip.top + THUMB_PX || rect.top >= clip.bottom)
+  ) {
+    thumb.classList.remove('is-visible');
+    return false;
+  }
+  const start = axis === 'y' ? clip.top : clip.left;
+  const end = axis === 'y' ? clip.bottom : clip.right;
   const geo = thumbGeometry({
     clientSize: axis === 'y' ? scroller.clientHeight : scroller.clientWidth,
     scrollSize: axis === 'y' ? scroller.scrollHeight : scroller.scrollWidth,
@@ -80,13 +142,15 @@ function placeThumb(
     return false;
   }
   if (axis === 'y') {
+    const rightEdge = Math.min(rect.right, clip.right);
     thumb.style.top = `${start + geo.offset}px`;
-    thumb.style.left = `${rect.right - THUMB_PX - EDGE_INSET}px`;
+    thumb.style.left = `${rightEdge - THUMB_PX - EDGE_INSET}px`;
     thumb.style.width = `${THUMB_PX}px`;
     thumb.style.height = `${geo.size}px`;
   } else {
+    const bottomEdge = Math.min(rect.bottom, clip.bottom);
     thumb.style.left = `${start + geo.offset}px`;
-    thumb.style.top = `${rect.bottom - THUMB_PX - EDGE_INSET}px`;
+    thumb.style.top = `${bottomEdge - THUMB_PX - EDGE_INSET}px`;
     thumb.style.height = `${THUMB_PX}px`;
     thumb.style.width = `${geo.size}px`;
   }
@@ -195,11 +259,24 @@ export function attachOverlayScrollbars(
   };
   const onScroll = (event: Event) => {
     const target = event.target;
-    if (!(target instanceof HTMLElement) || target.closest(SKIP)) return;
-    if (!canScroll(target, 'y') && !canScroll(target, 'x')) return;
+    if (!(target instanceof HTMLElement) || target.closest(SKIP)) {
+      if (active && target instanceof Element && target.contains(active)) {
+        place(active);
+      }
+      return;
+    }
+    if (!canScroll(target, 'y') && !canScroll(target, 'x')) {
+      if (active && target.contains(active)) {
+        place(active);
+      }
+      return;
+    }
     if (target !== active) watch(target);
     else place(target);
     if (!pointerInside) scheduleHide();
+  };
+  const onWindowResize = () => {
+    if (active) schedulePlace(active);
   };
 
   const bindDrag = (thumb: HTMLElement, axis: 'x' | 'y') => {
@@ -215,8 +292,13 @@ export function attachOverlayScrollbars(
       startScroll = axis === 'y' ? active.scrollTop : active.scrollLeft;
       const client = axis === 'y' ? active.clientHeight : active.clientWidth;
       const scroll = axis === 'y' ? active.scrollHeight : active.scrollWidth;
+      const clip = clippedBounds(active);
+      const visibleTrack = Math.max(
+        1,
+        axis === 'y' ? clip.bottom - clip.top : clip.right - clip.left
+      );
       const thumbSize = axis === 'y' ? thumb.offsetHeight : thumb.offsetWidth;
-      travel = Math.max(1, client - thumbSize);
+      travel = Math.max(1, visibleTrack - thumbSize);
       overflow = Math.max(1, scroll - client);
       thumb.setPointerCapture(event.pointerId);
       event.preventDefault();
@@ -258,6 +340,7 @@ export function attachOverlayScrollbars(
   root.addEventListener('pointerover', onPointer, true);
   root.addEventListener('pointerdown', onPointerDown, true);
   root.addEventListener('scroll', onScroll, true);
+  window.addEventListener('resize', onWindowResize);
 
   return () => {
     window.clearTimeout(hideTimer);
@@ -267,6 +350,7 @@ export function attachOverlayScrollbars(
     root.removeEventListener('pointerover', onPointer, true);
     root.removeEventListener('pointerdown', onPointerDown, true);
     root.removeEventListener('scroll', onScroll, true);
+    window.removeEventListener('resize', onWindowResize);
     unbindVertical();
     unbindHorizontal();
   };

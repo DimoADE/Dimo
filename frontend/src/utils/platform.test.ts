@@ -31,9 +31,12 @@ function stubPlatform(platform: string): void {
 
 afterEach(() => {
   document.documentElement.removeAttribute('data-host-platform');
-  document.documentElement.classList.remove('host-windows', 'tauri-desktop');
-  delete (window as Window & { __TAURI_INTERNALS__?: unknown })
-    .__TAURI_INTERNALS__;
+  document.documentElement.classList.remove(
+    'host-windows',
+    'electron-desktop',
+    'desktop-shell'
+  );
+  delete window.dimoDesktop;
   if (originalUserAgentData === undefined) {
     delete (navigator as Navigator & { userAgentData?: unknown }).userAgentData;
   } else {
@@ -140,15 +143,19 @@ describe('applyHostPlatformToDocument', () => {
   it('marks the desktop shell so overlay and frameless chrome can inset content', () => {
     stubPlatform('MacIntel');
     applyHostPlatformToDocument();
-    expect(document.documentElement.classList.contains('tauri-desktop')).toBe(
+    expect(
+      document.documentElement.classList.contains('electron-desktop')
+    ).toBe(false);
+    expect(document.documentElement.classList.contains('desktop-shell')).toBe(
       false
     );
 
-    (
-      window as Window & { __TAURI_INTERNALS__?: Record<string, never> }
-    ).__TAURI_INTERNALS__ = {};
+    window.dimoDesktop = {} as Window['dimoDesktop'];
     applyHostPlatformToDocument();
-    expect(document.documentElement.classList.contains('tauri-desktop')).toBe(
+    expect(
+      document.documentElement.classList.contains('electron-desktop')
+    ).toBe(true);
+    expect(document.documentElement.classList.contains('desktop-shell')).toBe(
       true
     );
   });

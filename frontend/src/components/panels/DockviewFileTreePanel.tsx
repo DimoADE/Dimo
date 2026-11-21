@@ -87,6 +87,7 @@ function DockviewFileTreePanel(_props: IDockviewPanelProps) {
   const pendingProjectRootSyncRef = useRef<string | undefined>(projectId);
 
   // Directory listing state
+  const [manualRootPath, setManualRootPath] = useState<string | null>(null);
   const [files, setFiles] = useState<string[]>([]);
   const [directories, setDirectories] = useState<string[]>([]);
   const [gitignoredFiles, setGitignoredFiles] = useState<Set<string>>(
@@ -140,11 +141,15 @@ function DockviewFileTreePanel(_props: IDockviewPanelProps) {
         return;
       }
 
+      const worktreeChanged = activeWorktreeId !== prevWorktreeIdRef.current;
       if (
         resolvedWorkspaceRootPath &&
-        (activeWorktreeId !== prevWorktreeIdRef.current ||
-          resolvedWorkspaceRootPath !== rootPath)
+        (worktreeChanged ||
+          (!manualRootPath && resolvedWorkspaceRootPath !== rootPath))
       ) {
+        if (worktreeChanged) {
+          setManualRootPath(null);
+        }
         setRootPath(resolvedWorkspaceRootPath);
         setSelectedFilePath(null);
         setDiffFilePath(null);
@@ -152,12 +157,14 @@ function DockviewFileTreePanel(_props: IDockviewPanelProps) {
       }
     } else if (!activeWorktreeId && prevWorktreeIdRef.current !== null) {
       prevWorktreeIdRef.current = null;
+      setManualRootPath(null);
       if (projectFolderPath) {
         setRootPath(projectFolderPath);
       }
     }
   }, [
     activeWorktreeId,
+    manualRootPath,
     projectFolderPath,
     resolvedWorkspaceRootPath,
     rootPath,
@@ -177,6 +184,7 @@ function DockviewFileTreePanel(_props: IDockviewPanelProps) {
     pendingProjectRootSyncRef.current = projectId;
     prevWorktreeIdRef.current = null;
 
+    setManualRootPath(null);
     setRootPath(null);
     setSelectedFilePath(null);
     setDiffFilePath(null);
@@ -223,25 +231,29 @@ function DockviewFileTreePanel(_props: IDockviewPanelProps) {
   // Load root directory children
   const loadRootChildren = useCallback(async () => {
     const allowedRoots = new Set(
-      [projectFolderPath, ...workspaceRootCandidates].filter(
+      [manualRootPath, projectFolderPath, ...workspaceRootCandidates].filter(
         (candidate): candidate is string => Boolean(candidate)
       )
     );
     const loadRoot =
       (rootPath && allowedRoots.has(rootPath) ? rootPath : null) ||
+      manualRootPath ||
       projectFolderPath;
     if (!loadRoot) return;
     const requestId = loadRequestIdRef.current + 1;
     loadRequestIdRef.current = requestId;
     setIsLoading(true);
 
-    const candidatePaths = Array.from(
-      new Set(
-        [loadRoot, ...workspaceRootCandidates].filter(
-          (candidate): candidate is string => Boolean(candidate)
-        )
-      )
-    );
+    const candidatePaths =
+      manualRootPath && loadRoot === manualRootPath
+        ? [loadRoot]
+        : Array.from(
+            new Set(
+              [loadRoot, ...workspaceRootCandidates].filter(
+                (candidate): candidate is string => Boolean(candidate)
+              )
+            )
+          );
 
     try {
       let resolvedResponse: DirectoryChildrenResponse | null = null;
@@ -299,7 +311,13 @@ function DockviewFileTreePanel(_props: IDockviewPanelProps) {
         setIsLoading(false);
       }
     }
-  }, [projectFolderPath, rootPath, setRootPath, workspaceRootCandidates]);
+  }, [
+    manualRootPath,
+    projectFolderPath,
+    rootPath,
+    setRootPath,
+    workspaceRootCandidates,
+  ]);
 
   const refreshFileTree = useCallback(async () => {
     await loadRootChildren();
@@ -369,7 +387,11 @@ function DockviewFileTreePanel(_props: IDockviewPanelProps) {
         title: t('fileTreePanel.pickFolderTitle'),
       });
       if (selected && typeof selected === 'string') {
-        setRootPath(selected);
+        const trimmed = selected.trim();
+        if (trimmed) {
+          setManualRootPath(trimmed);
+          setRootPath(trimmed);
+        }
       }
     } catch {
       // User cancelled

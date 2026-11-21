@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { BoundHostTransport } from './boundHostTransport';
 import type { RemoteDesktopTransport } from './remoteDesktopTransport';
-import { TauriTransport, tauriBackendTransport } from './tauriTransport';
+import { fallbackDesktopTransport } from './transportRegistry';
 
 describe('BoundHostTransport', () => {
   afterEach(() => {
@@ -14,7 +14,7 @@ describe('BoundHostTransport', () => {
       call: vi.fn(async (command: string) => `remote:${command}`),
     } as unknown as RemoteDesktopTransport;
     const localCall = vi
-      .spyOn(tauriBackendTransport, 'call')
+      .spyOn(fallbackDesktopTransport, 'call')
       .mockImplementation(async (command: string) => `local:${command}`);
     const transport = new BoundHostTransport(remote);
 
@@ -54,7 +54,12 @@ describe('BoundHostTransport', () => {
       listen: vi.fn(async () => remoteUnlisten),
     } as unknown as RemoteDesktopTransport;
     const localListen = vi
-      .spyOn(tauriBackendTransport as TauriTransport, 'listen')
+      .spyOn(
+        fallbackDesktopTransport as {
+          listen: NonNullable<typeof fallbackDesktopTransport.listen>;
+        },
+        'listen'
+      )
       .mockResolvedValue(localUnlisten);
     const transport = new BoundHostTransport(remote);
     const handler = vi.fn();

@@ -659,7 +659,8 @@ export function TurnActivity({
       const editStats =
         action.action === 'file_edit'
           ? countFileChangesStats(
-              entry.fileEdits?.flatMap((edit) => edit.changes) ?? action.changes
+              entry.fileEdits?.flatMap((edit) => edit.changes) ?? action.changes,
+              entry.toolArguments
             )
           : { additions: undefined, deletions: undefined };
       const detailText =
@@ -1071,9 +1072,6 @@ export function TurnActivity({
           ),
           workspacePath ?? attempt.container_ref
         );
-        const errorEntries = unit.entries.filter(
-          (entry) => entry.kind === 'tool' && entry.call.status === 'error'
-        );
         return (
           <TurnToolChipsBatch
             key={key}
@@ -1081,11 +1079,6 @@ export function TurnActivity({
             label={label}
             diffs={batchDiffs}
             onOpenDiff={openDiffChip}
-            collapsedErrors={
-              errorEntries.length > 0
-                ? errorEntries.map((entry) => renderActivity(entry, true))
-                : undefined
-            }
           >
             {unit.entries.map((entry) => renderActivity(entry, true))}
           </TurnToolChipsBatch>

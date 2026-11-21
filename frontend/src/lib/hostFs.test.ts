@@ -9,9 +9,20 @@ vi.mock('@/lib/transport', () => ({
   getBackendTransport,
 }));
 
-vi.mock('@tauri-apps/plugin-dialog', () => ({
-  open: openDialog,
-}));
+vi.mock('@/lib/desktopShell', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/lib/desktopShell')>();
+  return {
+    ...actual,
+    getDesktopShell: () => {
+      const shell = actual.getDesktopShell();
+      return {
+        ...shell,
+        dialog: { ...shell.dialog, open: openDialog },
+      };
+    },
+  };
+});
 
 vi.mock('@/components/dialogs/shared/FolderPickerDialog', () => ({
   FolderPickerDialog: { show: folderPickerShow },

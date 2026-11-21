@@ -636,7 +636,10 @@ impl AgentConnectionRunner {
                 let auto_resp = if force_manual {
                     None
                 } else {
-                    let auto_mode = *self.auto_approve_mode.lock().await;
+                    let configured = *self.auto_approve_mode.lock().await;
+                    let auto_mode =
+                        effective_auto_approve_mode(configured, &self.session_controls, session_id)
+                            .await;
                     decide_auto_permission_response(auto_mode, &request)
                 };
                 if let Some(auto_resp) = auto_resp {
@@ -647,13 +650,6 @@ impl AgentConnectionRunner {
                         }
                         AgentPermissionResponse::Cancelled => None,
                     };
-                    self.emit(
-                        Some(session_id),
-                        Some(prompt_id),
-                        AgentEvent::PermissionRequested {
-                            request: request.clone(),
-                        },
-                    );
                     self.emit(
                         Some(session_id),
                         Some(prompt_id),

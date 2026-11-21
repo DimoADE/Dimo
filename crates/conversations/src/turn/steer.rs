@@ -706,6 +706,15 @@ impl ConversationSessionService {
                 "invalid permission id `{permission_id}`: {error}"
             ))
         })?;
+        let persist_for_agent = response.should_persist_agent_auto_approve()
+            && self
+                .ctx
+                .agent_runtime
+                .permission_allows_auto_approve_persistence(
+                    connection_id,
+                    AgentPermissionId(permission_uuid),
+                )
+                .await;
         self.ctx
             .agent_runtime
             .respond_permission(RespondAgentPermissionInput {
@@ -714,6 +723,30 @@ impl ConversationSessionService {
                 response: response.clone(),
             })
             .await?;
+        if persist_for_agent {
+            let agent_id = match self
+                .ctx
+                .agent_runtime
+                .connection_agent_id(connection_id)
+                .await
+            {
+                Some(agent_id) => Some(agent_id),
+                None => db::models::conversation::ConversationAgentBindingRecord::latest_for_conversation(
+                    &self.ctx.deployment.db().pool,
+                    conversation_id,
+                )
+                .await?
+                .map(|binding| binding.agent_id),
+            };
+            if let Some(agent_id) = agent_id {
+                self.ctx
+                    .persist_and_apply_agent_auto_approve_mode(
+                        &agent_id,
+                        agents::AgentAutoApproveMode::AllowAlways,
+                    )
+                    .await?;
+            }
+        }
         self.append_event(
             conversation_id,
             turn_id,
@@ -738,9 +771,12 @@ impl ConversationSessionService {
         .await;
         let decision = match &response {
             AgentPermissionResponse::Selected {
-                option_id, persist, ..
+                option_id,
+                persist,
+                persist_for_agent,
+                ..
             } => {
-                if *persist || option_id == "allow_always" {
+                if *persist || *persist_for_agent || option_id == "allow_always" {
                     "allow_always"
                 } else if option_id == "allow_once" || option_id.starts_with("allow") {
                     "allow_once"

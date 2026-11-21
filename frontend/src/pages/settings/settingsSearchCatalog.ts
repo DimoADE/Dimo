@@ -47,7 +47,7 @@ const PAGES = {
   }),
   plugins: page('plugins', '/plugins', { capability: 'plugin.read' }),
   webService: page('webService', '/settings/web-service', {
-    anyOf: ['desktop.tauri', 'device.pair'],
+    anyOf: ['desktop.electron', 'desktop.tauri', 'device.pair'],
   }),
   logs: page('logs', '/settings/logs', { capability: 'application.call' }),
   system: page('system', '/settings/system', {

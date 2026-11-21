@@ -2,9 +2,11 @@ use std::{
     collections::HashMap,
     fs::File,
     future::Future,
+    net::SocketAddr,
     path::{Path, PathBuf},
     pin::Pin,
     sync::Arc,
+    time::Duration,
 };
 
 use agents::{AgentRuntime, runtime_event_channel};
@@ -21,7 +23,10 @@ use deployment::{Deployment, DeploymentError};
 use local_deployment::LocalDeployment;
 use plugins::{PluginControlPlane, PluginPreviewHost, SqlitePluginRegistry};
 use sqlx::SqlitePool;
-use tokio::{sync::Mutex, task::JoinHandle};
+use tokio::{
+    sync::{Mutex, Notify},
+    task::JoinHandle,
+};
 
 use crate::{
     PreviewProxyRegistry, ServerConfig, ServerRuntime, ServerToken, SqliteTokenHashStore,
@@ -43,6 +48,8 @@ pub enum ServerBootstrapError {
     Conversation(String),
     #[error("host identity failed: {0}")]
     HostIdentity(String),
+    #[error("desktop runtime failed: {0}")]
+    Desktop(String),
 }
 
 pub struct ServerBootstrapConfig {
@@ -50,6 +57,11 @@ pub struct ServerBootstrapConfig {
     pub server: ServerConfig,
     pub token: Option<ServerToken>,
     pub allow_loopback_outbox_for_tests: bool,
+    pub desktop_mode: bool,
+    pub desktop_token: Option<ServerToken>,
+    pub resources_dir: Option<PathBuf>,
+    pub shutdown_notify: Option<Arc<Notify>>,
+    pub autostart_web_service: bool,
 }
 
 impl ServerBootstrapConfig {
@@ -59,11 +71,41 @@ impl ServerBootstrapConfig {
             server: ServerConfig::default(),
             token: None,
             allow_loopback_outbox_for_tests: false,
+            desktop_mode: false,
+            desktop_token: None,
+            resources_dir: None,
+            shutdown_notify: None,
+            autostart_web_service: true,
         }
     }
 
     pub fn with_token(mut self, token: ServerToken) -> Self {
         self.token = Some(token);
+        self
+    }
+
+    pub fn with_desktop_mode(mut self, enabled: bool) -> Self {
+        self.desktop_mode = enabled;
+        self
+    }
+
+    pub fn with_desktop_token(mut self, token: ServerToken) -> Self {
+        self.desktop_token = Some(token);
+        self
+    }
+
+    pub fn with_resources_dir(mut self, dir: impl AsRef<Path>) -> Self {
+        self.resources_dir = Some(dir.as_ref().to_path_buf());
+        self
+    }
+
+    pub fn with_shutdown_notify(mut self, notify: Arc<Notify>) -> Self {
+        self.shutdown_notify = Some(notify);
+        self
+    }
+
+    pub fn with_autostart_web_service(mut self, autostart: bool) -> Self {
+        self.autostart_web_service = autostart;
         self
     }
 
@@ -88,6 +130,9 @@ pub struct HeadlessServer {
     local_discovery_task: JoinHandle<()>,
     _delegation_runtime: HeadlessDelegationRuntime,
     workflow_dispatch_task: JoinHandle<()>,
+    backfill_task: Option<JoinHandle<()>>,
+    desktop_mode: bool,
+    shutdown_notify: Arc<Notify>,
 }
 
 impl HeadlessServer {
@@ -99,6 +144,9 @@ impl HeadlessServer {
         mut config: ServerBootstrapConfig,
     ) -> Result<Self, ServerBootstrapError> {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        if config.desktop_mode {
+            config.server = config.server.with_desktop_mode(true);
+        }
         config.server.host_id = utils::assets::load_or_create_host_id(&config.data_dir)
             .map_err(|error| ServerBootstrapError::HostIdentity(error.to_string()))?;
         if config.server.reachability.is_empty() {
@@ -245,6 +293,7 @@ impl HeadlessServer {
             .recover_interrupted_turns()
             .await
             .map_err(|error| ServerBootstrapError::Conversation(error.to_string()))?;
+        crate::host::surface::recover_interrupted_agent_operations(&pool).await;
         conversations::ConversationRelationControl::new(pool.clone())
             .backfill_legacy_delegations()
             .await
@@ -301,17 +350,32 @@ impl HeadlessServer {
                     conversation_context.clone(),
                 ))),
         );
-        let capability_broker = Arc::new(
-            plugins::HostCapabilityBroker::with_hosts_and_prompts(
-                plugin_control_plane.clone(),
-                preview_host.clone(),
-                provider_preset_host,
-                remote_profile_host,
-                bind_prompts,
-            )
-            .with_conversation_host(conversation_host.clone())
-            .with_collaboration_host(collaboration_host.clone()),
-        );
+        let desktop_browser_bridge = if config.desktop_mode {
+            Some(crate::desktop::browser_bridge::ElectronBrowserBridge::new(
+                events.clone(),
+            ))
+        } else {
+            None
+        };
+        let mut capability_broker = plugins::HostCapabilityBroker::with_hosts_and_prompts(
+            plugin_control_plane.clone(),
+            preview_host.clone(),
+            provider_preset_host,
+            remote_profile_host,
+            bind_prompts,
+        )
+        .with_conversation_host(conversation_host.clone())
+        .with_collaboration_host(collaboration_host.clone());
+        if let Some(ref bridge) = desktop_browser_bridge {
+            let browser_service = Arc::new(browser_host::BrowserService::with_data_dir(
+                bridge.clone(),
+                true,
+                Some(config.data_dir.clone()),
+            ));
+            bridge.attach_service(&browser_service);
+            capability_broker = capability_broker.with_browser_host(browser_service);
+        }
+        let capability_broker = Arc::new(capability_broker);
         let host_call = plugins::PluginHostCall::new(
             capability_broker.clone() as Arc<dyn plugins::CapabilityBroker>
         );
@@ -499,7 +563,11 @@ impl HeadlessServer {
                 deployment: deployment.clone(),
                 runtime_root: config.data_dir.join("plugins/runtimes"),
                 worker_runtime,
-                adapter: application::AdapterCapabilities::server_http(),
+                adapter: if config.desktop_mode {
+                    application::AdapterCapabilities::desktop_host()
+                } else {
+                    application::AdapterCapabilities::server_http()
+                },
                 events: Some(events),
                 terminal_bridges: None,
                 agent_management_runtime: None,
@@ -508,6 +576,7 @@ impl HeadlessServer {
             },
             config.allow_loopback_outbox_for_tests,
         );
+        crate::desktop::logging::attach_event_bus(host.events.clone());
         product_mcp_commands
             .attach_commands(host.commands.clone())
             .await;
@@ -554,12 +623,86 @@ impl HeadlessServer {
                 }
             }
         });
-        let runtime = ServerRuntime::from_host(
+        let shutdown_notify = config
+            .shutdown_notify
+            .unwrap_or_else(|| Arc::new(Notify::new()));
+        let mut backfill_task = None;
+        let desktop_state = if config.desktop_mode {
+            if let Err(error) = crate::start_loopback_preview_proxy(preview_proxy.clone()).await {
+                tracing::warn!(%error, "loopback preview proxy could not start");
+            }
+            let search_pool = pool.clone();
+            backfill_task = Some(tokio::spawn(async move {
+                match conversations::backfill_missing(&search_pool).await {
+                    Ok(indexed) if indexed > 0 => {
+                        tracing::info!("indexed {indexed} conversations for search");
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!("conversation search backfill failed: {error}");
+                    }
+                }
+                crate::desktop::release_startup_working_set(&search_pool).await;
+            }));
+            let proxy_handle = tokio::runtime::Handle::current();
+            crate::desktop::settings_watcher::start(
+                host.events.clone(),
+                Some(Arc::new(move || {
+                    proxy_handle.spawn(async {
+                        crate::init_system_proxy().await;
+                    });
+                })),
+            );
+            let desktop_token = config
+                .desktop_token
+                .unwrap_or_else(crate::issue_host_token);
+            let remote_desktop = Arc::new(
+                crate::desktop::remote_desktop::RemoteDesktopRegistry::new()
+                    .map_err(|error| ServerBootstrapError::Desktop(error.to_string()))?,
+            );
+            let web_service = crate::desktop::web_service::DesktopWebServiceContext {
+                pool: pool.clone(),
+                host: host.clone(),
+                pty: deployment.pty().clone(),
+                resources_dir: config.resources_dir.clone(),
+                static_asset_resolver: config.server.static_asset_resolver.clone(),
+                server_version: config.server.server_version.clone(),
+            };
+            if config.autostart_web_service {
+                let autostart_ctx = web_service.clone();
+                tokio::spawn(async move {
+                    if let Err(error) =
+                        crate::desktop::web_service::ensure_web_service_autostart(&autostart_ctx)
+                            .await
+                    {
+                        tracing::warn!(%error, "Failed to autostart web service");
+                    }
+                });
+            }
+            let browser_bridge = desktop_browser_bridge.unwrap_or_else(|| {
+                crate::desktop::browser_bridge::ElectronBrowserBridge::new(host.events.clone())
+            });
+            Some(crate::desktop::DesktopRuntimeState {
+                token_digest: desktop_token.digest(),
+                shutdown: Arc::clone(&shutdown_notify),
+                deployment: deployment.clone(),
+                web_service,
+                remote_desktop,
+                browser_bridge,
+                events: host.events.clone(),
+            })
+        } else {
+            None
+        };
+        let mut runtime = ServerRuntime::from_host(
             config.server,
             Arc::new(crate::SqliteServerAuth::new(pool.clone())),
             host,
             deployment.pty().clone(),
         );
+        if let Some(desktop) = desktop_state {
+            runtime = runtime.with_desktop(desktop);
+        }
 
         Ok(Self {
             pool,
@@ -575,6 +718,9 @@ impl HeadlessServer {
             local_discovery_task,
             _delegation_runtime: delegation_runtime,
             workflow_dispatch_task,
+            backfill_task,
+            desktop_mode: config.desktop_mode,
+            shutdown_notify,
         })
     }
 
@@ -590,6 +736,10 @@ impl HeadlessServer {
     /// such as delegation and durable conversation event persistence.
     pub const fn agent_runtime(&self) -> &Arc<AgentRuntime> {
         &self._agent_runtime
+    }
+
+    pub fn shutdown_handle(&self) -> Arc<Notify> {
+        Arc::clone(&self.shutdown_notify)
     }
 
     pub fn take_issued_token(&mut self) -> Option<ServerToken> {
@@ -609,19 +759,36 @@ impl HeadlessServer {
     }
 
     pub async fn serve_with_shutdown(
+        self,
+        shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> std::io::Result<()> {
+        self.serve_with_ready_and_shutdown(|_| {}, shutdown).await
+    }
+
+    pub async fn serve_with_ready_and_shutdown(
         mut self,
+        on_ready: impl FnOnce(SocketAddr),
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> std::io::Result<()> {
         let listen_addr = self.runtime.config().listen_addr;
         let listener = tokio::net::TcpListener::bind(listen_addr).await?;
+        let bound_addr = listener.local_addr()?;
         let automation_task = self.automation_owner.take().map(|engine| {
             let runtime = self.automation_runtime.clone();
             let recovery = self.automation_recovery.take();
             tokio::spawn(runtime.run(engine, recovery))
         });
-        tracing::info!(%listen_addr, "dimo-server listening");
+        tracing::info!(listen_addr = %bound_addr, desktop_mode = self.desktop_mode, "dimo-server listening");
+        on_ready(bound_addr);
+        let notify = Arc::clone(&self.shutdown_notify);
+        let combined_shutdown = async move {
+            tokio::select! {
+                _ = shutdown => {}
+                _ = notify.notified() => {}
+            }
+        };
         let result = axum::serve(listener, self.runtime.router())
-            .with_graceful_shutdown(shutdown)
+            .with_graceful_shutdown(combined_shutdown)
             .await;
         if let Some(task) = automation_task {
             task.abort();
@@ -630,6 +797,25 @@ impl HeadlessServer {
         if let Some(task) = self.agent_event_task.take() {
             task.abort();
             let _ = task.await;
+        }
+        if let Some(task) = self.backfill_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        if self.desktop_mode {
+            let _ = crate::desktop::web_service::stop_web_server().await;
+            self._agent_runtime.kill_all_processes_on_exit();
+            let _ = tokio::time::timeout(
+                Duration::from_secs(1),
+                agents::terminal::agent_terminal_registry().release_all(),
+            )
+            .await;
+            let _ = tokio::time::timeout(
+                Duration::from_secs(1),
+                sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)").execute(&self.pool),
+            )
+            .await;
+            crate::desktop::kill_companion_processes_on_exit();
         }
         result
     }
@@ -641,6 +827,9 @@ impl Drop for HeadlessServer {
         self.terminal_task.abort();
         self.idle_recycle_task.abort();
         self.local_discovery_task.abort();
+        if let Some(task) = self.backfill_task.take() {
+            task.abort();
+        }
         if let Some(task) = self.agent_event_task.take() {
             task.abort();
         }

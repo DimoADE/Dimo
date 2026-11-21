@@ -210,14 +210,16 @@ describe('conversation tool cards', () => {
       name: '运行 3 个命令',
     });
     expect(updatedDisclosure).toHaveAttribute('aria-expanded', 'false');
-    const group = updatedDisclosure.parentElement!;
     for (let index = 0; index < 3; index += 1) {
-      const call = screen.getByRole('button', {
-        name: new RegExp(`Error:.*batch-command-${index}`),
-      });
-      expect(group).toContainElement(call);
+      expect(
+        screen.queryByRole('button', {
+          name: new RegExp(`Error:.*batch-command-${index}`),
+        })
+      ).not.toBeInTheDocument();
     }
-    expect(group).not.toContainElement(screen.getByText('batch-command-3'));
+    expect(updatedDisclosure.parentElement!).not.toContainElement(
+      screen.getByText('batch-command-3')
+    );
 
     rerender(
       <MessageTurnView
@@ -234,7 +236,17 @@ describe('conversation tool cards', () => {
     const finalBatch = screen.getByRole('button', { name: '运行 5 个命令' });
     expect(finalBatch).toHaveAttribute('aria-expanded', 'false');
     expect(screen.getByText('Retrying safely')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /Error:.*batch-command-/ })
+    ).not.toBeInTheDocument();
     fireEvent.click(finalBatch);
+    const finalGroup = finalBatch.parentElement!;
+    for (let index = 0; index < 3; index += 1) {
+      const call = screen.getByRole('button', {
+        name: new RegExp(`Error:.*batch-command-${index}`),
+      });
+      expect(finalGroup).toContainElement(call);
+    }
     fireEvent.click(
       screen.getByRole('button', { name: /Error:.*batch-command-0/ })
     );
@@ -767,8 +779,10 @@ describe('conversation tool cards', () => {
   });
 
   it('opens and copies web fetch targets without expanding the card', async () => {
-    const { open } = await import('@tauri-apps/plugin-shell');
-    vi.mocked(open).mockRejectedValueOnce(new Error('shell unavailable'));
+    const { getDesktopShell } = await import('@/lib/desktopShell');
+    vi.spyOn(getDesktopShell().shell, 'openExternal').mockRejectedValueOnce(
+      new Error('shell unavailable')
+    );
     const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
 
     render(

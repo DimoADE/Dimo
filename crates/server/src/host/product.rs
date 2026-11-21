@@ -6,6 +6,7 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use db::models::{
     attention as attention_model,
     conversation_turn::ConversationTurnRecord,
+    image::TaskImage,
     repo::{Repo, UpdateRepo},
     scratch::{CreateScratch, Scratch, ScratchType, UpdateScratch},
     session::{CreateSession, Session, SessionStatus},
@@ -170,7 +171,7 @@ struct ScratchWriteArgs<T> {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateTagArgs {
-    #[serde(alias = "tagName")]
+    #[serde(alias = "tag_name")]
     tag_name: String,
     content: String,
 }
@@ -180,7 +181,7 @@ struct CreateTagArgs {
 struct UpdateTagArgs {
     #[serde(alias = "tagId")]
     id: Uuid,
-    #[serde(default, alias = "tagName")]
+    #[serde(default, alias = "tag_name")]
     tag_name: Option<String>,
     #[serde(default)]
     content: Option<String>,
@@ -197,8 +198,10 @@ struct UpdateTaskArgs {
     description: Option<String>,
     #[serde(default)]
     status: Option<TaskStatus>,
-    #[serde(default)]
+    #[serde(default, alias = "parent_workspace_id")]
     parent_workspace_id: Option<Uuid>,
+    #[serde(default, alias = "image_ids")]
+    image_ids: Option<Vec<Uuid>>,
 }
 
 #[derive(Deserialize)]
@@ -406,10 +409,7 @@ impl ServerApplicationDomains {
                 )
                 .await
             }
-            DomainCommand::WorkspacePull => {
-                self.workspace_git_write(args, |git, path, _, _, _| git.pull(path).map(|_| ()))
-                    .await
-            }
+            DomainCommand::WorkspacePull => self.pull_workspace_branch(args).await,
             DomainCommand::WorkspaceFetch => {
                 self.workspace_git_write(args, |git, path, _, _, _| git.fetch_all(path))
                     .await
@@ -428,13 +428,7 @@ impl ServerApplicationDomains {
                 .await
             }
             DomainCommand::WorkspaceRebase => self.rebase_workspace(args).await,
-            DomainCommand::WorkspaceRebaseBack => {
-                self.workspace_git_write(args, |git, path, workspace, repo, target| {
-                    git.rebase_back(&repo.path, path, &workspace.branch, target, "")
-                        .map(|_| ())
-                })
-                .await
-            }
+            DomainCommand::WorkspaceRebaseBack => self.rebase_back_workspace(args).await,
             DomainCommand::WorkspaceContinueRebase => {
                 self.workspace_git_write(args, |git, path, _, _, _| git.continue_rebase(path))
                     .await
@@ -496,7 +490,7 @@ impl ServerApplicationDomains {
                 Workspace::update_branch_name(&self.pool, args.workspace_id, &args.new_name)
                     .await
                     .map_err(internal_error)?;
-                serialize(json!({ "new_branch": args.new_name }))
+                serialize(json!({ "branch": args.new_name }))
             }
             DomainCommand::WorkspaceChangeTargetBranch => {
                 let args: TargetBranchArgs = parse(args)?;
@@ -534,8 +528,8 @@ impl ServerApplicationDomains {
                     .get_branch_status(&repo.path, &workspace.branch, &args.target_branch)
                     .map_err(internal_error)?;
                 serialize(json!({
-                    "repoId": repo_id,
-                    "newTargetBranch": args.target_branch,
+                    "repo_id": repo_id,
+                    "new_target_branch": args.target_branch,
                     "status": status,
                 }))
             }
@@ -655,19 +649,26 @@ impl ServerApplicationDomains {
                     .await
                     .map_err(internal_error)?
                     .ok_or_else(|| ApplicationError::not_found("task not found"))?;
-                serialize(
-                    Task::update(
-                        &self.pool,
-                        args.id,
-                        existing.project_id,
-                        args.title.unwrap_or(existing.title),
-                        args.description.or(existing.description),
-                        args.status.unwrap_or(existing.status),
-                        args.parent_workspace_id.or(existing.parent_workspace_id),
-                    )
-                    .await
-                    .map_err(internal_error)?,
+                let updated = Task::update(
+                    &self.pool,
+                    args.id,
+                    existing.project_id,
+                    args.title.unwrap_or(existing.title),
+                    args.description.or(existing.description),
+                    args.status.unwrap_or(existing.status),
+                    args.parent_workspace_id.or(existing.parent_workspace_id),
                 )
+                .await
+                .map_err(internal_error)?;
+                if let Some(image_ids) = args.image_ids.as_deref() {
+                    TaskImage::delete_by_task_id(&self.pool, args.id)
+                        .await
+                        .map_err(internal_error)?;
+                    TaskImage::associate_many_dedup(&self.pool, args.id, image_ids)
+                        .await
+                        .map_err(internal_error)?;
+                }
+                serialize(updated)
             }
             DomainCommand::TaskDelete => {
                 let args: IdArgs = parse(args)?;
@@ -1335,6 +1336,76 @@ impl ServerApplicationDomains {
         Ok(Value::Null)
     }
 
+    async fn resolve_workspace_git_context(
+        &self,
+        args: &Value,
+    ) -> Result<(Workspace, Repo, String, std::path::PathBuf), ApplicationError> {
+        let workspace_id = workspace_id_from_value(args)?;
+        let repo_id = args
+            .get("repoId")
+            .or_else(|| args.get("repo_id"))
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok());
+        let workspace = self.require_workspace(workspace_id).await?;
+        let repo = match repo_id {
+            Some(repo_id) => Repo::find_by_id(&self.pool, repo_id)
+                .await
+                .map_err(internal_error)?
+                .ok_or_else(|| ApplicationError::not_found("repository not found"))?,
+            None => self.primary_repo(workspace_id).await?,
+        };
+        let target = self.workspace_repo_target(&workspace, &repo).await?;
+        let path = self
+            .worktree_path(WorkspaceRepoArgs {
+                workspace_id,
+                repo_id: repo.id,
+            })
+            .await?;
+        Ok((workspace, repo, target, path))
+    }
+
+    async fn pull_workspace_branch(&self, args: Value) -> Result<Value, ApplicationError> {
+        let (_workspace, _repo, _target, path) = self.resolve_workspace_git_context(&args).await?;
+        let git = self.deployment.git().clone();
+        let result = tokio::task::spawn_blocking(move || git.pull(&path))
+            .await
+            .map_err(|error| ApplicationError::internal(error.to_string()))?
+            .map_err(internal_error)?;
+        serialize(result)
+    }
+
+    async fn rebase_back_workspace(&self, args: Value) -> Result<Value, ApplicationError> {
+        let (workspace, repo, target, path) = self.resolve_workspace_git_context(&args).await?;
+        let git = self.deployment.git().clone();
+        let branch = workspace.branch.clone();
+        let repo_path = repo.path.clone();
+        let target_for_error = target.clone();
+        match tokio::task::spawn_blocking(move || {
+            git.rebase_back(&repo_path, &path, &branch, &target, "")
+        })
+        .await
+        .map_err(|error| ApplicationError::internal(error.to_string()))?
+        {
+            Ok(_) => serialize(json!({ "error": null })),
+            Err(git::GitServiceError::MergeConflicts {
+                message,
+                conflicted_files,
+            }) => serialize(json!({
+                "error": {
+                    "type": "merge_conflicts",
+                    "message": message,
+                    "op": "rebase",
+                    "conflicted_files": conflicted_files,
+                    "target_branch": target_for_error,
+                }
+            })),
+            Err(git::GitServiceError::RebaseInProgress) => serialize(json!({
+                "error": { "type": "rebase_in_progress" }
+            })),
+            Err(error) => Err(internal_error(error)),
+        }
+    }
+
     async fn rebase_workspace(&self, args: Value) -> Result<Value, ApplicationError> {
         let args: RebaseWorkspaceArgs = parse(args)?;
         let workspace = self.require_workspace(args.workspace_id).await?;
@@ -1392,8 +1463,8 @@ impl ServerApplicationDomains {
                     "type": "merge_conflicts",
                     "message": message,
                     "op": "rebase",
-                    "conflictedFiles": conflicted_files,
-                    "targetBranch": new_base_for_error,
+                    "conflicted_files": conflicted_files,
+                    "target_branch": new_base_for_error,
                 }
             })),
             Err(git::GitServiceError::RebaseInProgress) => serialize(json!({

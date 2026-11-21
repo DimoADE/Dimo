@@ -1164,3 +1164,96 @@ async fn shared_resource_lease_serializes_different_agents() {
         1
     );
 }
+
+#[tokio::test]
+async fn recover_interrupted_clears_dangling_active_operation_and_persist_installation_clears_active_fields() {
+    let pool = migrated_pool().await;
+    let agent_id = AgentId::parse("codex").unwrap();
+    AgentMembershipRepository::new(pool.clone())
+        .add(NewAgentMembership {
+            agent_id: agent_id.clone(),
+            source: AgentSource::BuiltInProfile,
+            built_in: true,
+            retired: false,
+            enabled: true,
+            position: 0,
+            retained_metadata_json: None,
+            retained_icon_svg: None,
+        })
+        .await
+        .unwrap();
+    let operations = InstallationOperationRepository::new(pool.clone());
+    let locks = InstallationRepository::new(pool.clone());
+
+    let lock = InstallLockRecord {
+        id: uuid::Uuid::new_v4(),
+        agent_id: agent_id.clone(),
+        registry_version: "1.0.0".to_string(),
+        platform: "windows-x86_64".to_string(),
+        distribution_kind: "npx".to_string(),
+        resolved_json: "{}".to_string(),
+        created_at: "2026-11-21T00:00:00Z".to_string(),
+    };
+    locks
+        .set_current_lock(&lock, "external", "ready")
+        .await
+        .unwrap();
+
+    let op = operations
+        .enqueue(NewInstallationOperation {
+            agent_id: agent_id.clone(),
+            kind: "update".to_string(),
+            frozen_plan_json: "{}".to_string(),
+            host_instance_id: "old-host".to_string(),
+            resource_claims: Vec::new(),
+            staging_path: None,
+        })
+        .await
+        .unwrap();
+    // Simulate finished operation whose installation row still carries active_operation.
+    operations.finish(op.id, "succeeded").await.unwrap();
+
+    operations.recover_interrupted("new-host").await.unwrap();
+    let row: (String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT lifecycle, active_operation, active_operation_id FROM agent_installation WHERE agent_id = 'codex'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row, ("ready".to_string(), None, None));
+
+    // Enqueue another operation and verify set_current_lock atomically clears active fields.
+    let second = operations
+        .enqueue(NewInstallationOperation {
+            agent_id: agent_id.clone(),
+            kind: "update".to_string(),
+            frozen_plan_json: "{}".to_string(),
+            host_instance_id: "new-host".to_string(),
+            resource_claims: Vec::new(),
+            staging_path: None,
+        })
+        .await
+        .unwrap();
+    let next_lock = InstallLockRecord {
+        id: uuid::Uuid::new_v4(),
+        agent_id,
+        registry_version: "1.1.0".to_string(),
+        platform: "windows-x86_64".to_string(),
+        distribution_kind: "npx".to_string(),
+        resolved_json: "{}".to_string(),
+        created_at: "2026-11-21T01:00:00Z".to_string(),
+    };
+    locks
+        .set_current_lock(&next_lock, "external", "ready")
+        .await
+        .unwrap();
+    operations.finish(second.id, "succeeded").await.unwrap();
+
+    let after_persist: (String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT lifecycle, active_operation, active_operation_id FROM agent_installation WHERE agent_id = 'codex'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(after_persist, ("ready".to_string(), None, None));
+}

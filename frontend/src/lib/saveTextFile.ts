@@ -1,3 +1,4 @@
+import { getDesktopShell } from '@/lib/desktopShell';
 import { getBackendTransport } from '@/lib/transport';
 
 export interface SaveTextFileOptions {
@@ -30,13 +31,12 @@ export async function saveTextFile(
     downloadTextFile(options);
     return true;
   }
-  const { save } = await import('@tauri-apps/plugin-dialog');
-  const { writeTextFile } = await import('@tauri-apps/plugin-fs');
-  const path = await save({
+  const shell = getDesktopShell();
+  const path = await shell.dialog.save({
     defaultPath: options.filename,
     filters: [{ name: options.filterName, extensions: [options.extension] }],
   });
   if (!path) return false;
-  await writeTextFile(path, options.content);
+  await shell.fs.writeTextFile(path, options.content);
   return true;
 }

@@ -10,7 +10,7 @@ import {
 } from 'react';
 import { ConversationMessageNav } from '@/components/conversation-thread/ConversationMessageNav';
 import { Button } from '@/components/ui/button';
-import { PermissionRequestCard } from '@/components/NormalizedConversation/conversation/PermissionRequestCard';
+import { PermissionRequestStack } from '@/components/NormalizedConversation/conversation/PermissionRequestCard';
 import { ConversationSelectionToolbar } from '@/components/NormalizedConversation/ConversationSelectionToolbar';
 import i18n from '@/i18n';
 import {
@@ -40,7 +40,6 @@ import {
 } from '../SpaceMessageBody';
 import { CollaborationWorkingStatus } from '../CollaborationWorkingStatus';
 import { CollaborationCrossChatNotice } from '../CollaborationCrossChatNotice';
-import { CollaborationThreadPermissionDock } from '../CollaborationThreadPermissionDock';
 import { spaceMessageRefKey } from '../collaborationMessageNav';
 import { isCollabThreadLogAtBottom } from '../collaborationThreadLog';
 import { EMPTY_RECEIPTS } from './types';
@@ -403,7 +402,6 @@ const MESSAGE_STREAM_PICK_KEYS = [
   'openCreateSpaceDialog',
   'openMemberAvatarMenu',
   'openMessageBubbleMenu',
-  'pendingApprovalCardIds',
   'pendingApprovalCards',
   'receiptLabels',
   'receiptsBySeq',
@@ -418,7 +416,6 @@ const MESSAGE_STREAM_PICK_KEYS = [
   'threadLogRef',
   'threadQueryId',
   'visibleRoster',
-  'workingConversationIds',
   'workingMembers',
   'workspace',
   'workspacePath',
@@ -461,10 +458,8 @@ export const MessageStream = memo(function MessageStream() {
     threadLogRef,
     threadQueryId,
     visibleRoster,
-    workingConversationIds,
     workingMembers,
     pendingApprovalCards,
-    pendingApprovalCardIds,
     respondingApprovalCardId,
     handleResolveApprovalCard,
     workspace,
@@ -760,6 +755,7 @@ export const MessageStream = memo(function MessageStream() {
               navScrollRafRef.current = null;
               const currentEl = threadLogRef.current;
               if (!currentEl || ignoreThreadScrollRef.current) return;
+              if (pendingNavTargetIndexRef.current !== null) return;
               if (isCollabThreadLogAtBottom(currentEl)) {
                 setActiveNavIndex((current) =>
                   current === null ? current : null
@@ -932,28 +928,20 @@ export const MessageStream = memo(function MessageStream() {
             {selected ? (
               <CollaborationWorkingStatus members={workingMembers} />
             ) : null}
-            {workingConversationIds.map((conversationId) => (
-              <CollaborationThreadPermissionDock
-                key={`permission-dock-${conversationId}`}
-                conversationId={conversationId}
-                excludePermissionIds={pendingApprovalCardIds}
-              />
-            ))}
             {pendingApprovalCards.length > 0 ? (
               <div
                 className="collaboration-thread-permission-dock"
                 data-testid="collaboration-thread-approval-dock"
               >
-                {pendingApprovalCards.map((card) => (
-                  <PermissionRequestCard
-                    key={`approval-card-${card.id}`}
-                    request={approvalCardToPermissionView(card)}
-                    responding={respondingApprovalCardId === card.id}
-                    onRespond={(_permissionId, response) => {
+                <PermissionRequestStack
+                  items={pendingApprovalCards.map((card) => ({
+                    request: approvalCardToPermissionView(card),
+                    responding: respondingApprovalCardId === card.id,
+                    onRespond: (_permissionId, response) => {
                       void handleResolveApprovalCard(card.id, response);
-                    }}
-                  />
-                ))}
+                    },
+                  }))}
+                />
               </div>
             ) : null}
           </div>

@@ -59,7 +59,7 @@ async fn permission_responded_folds_status_onto_row() {
 }
 
 #[tokio::test]
-async fn auto_allowed_permissions_fold_into_a_count_notice() {
+async fn auto_allowed_permissions_leave_no_cards_or_notices() {
     let pool = setup_pool().await;
     let (conversation_id, turn_id) = seed_turn(&pool).await;
 
@@ -129,23 +129,15 @@ async fn auto_allowed_permissions_fold_into_a_count_notice() {
         .filter(|row| matches!(row.row, ConversationTimelineRow::PermissionRequest { .. }))
         .count();
     assert_eq!(permission_cards, 0);
-    let notice = timeline.rows.iter().find_map(|row| match &row.row {
-        ConversationTimelineRow::SessionNotice { notice } if notice.title == "已自动批准权限" => {
-            Some(notice)
-        }
-        _ => None,
+    let notice = timeline.rows.iter().find(|row| {
+        row.row_id == "notice:auto-permission-approved"
+            || matches!(
+                &row.row,
+                ConversationTimelineRow::SessionNotice { notice }
+                    if notice.title == "已自动批准权限"
+            )
     });
-    let notice = notice.expect("auto-permission notice");
-    assert_eq!(notice.severity, "info");
-    assert_eq!(notice.message.as_deref(), Some("已自动批准 2 项权限请求"));
-    assert_eq!(
-        timeline
-            .rows
-            .iter()
-            .find(|row| row.row_id == "notice:auto-permission-approved")
-            .map(|row| row.row_id.as_str()),
-        Some("notice:auto-permission-approved")
-    );
+    assert!(notice.is_none(), "expected no auto-permission notice");
 }
 
 #[tokio::test]

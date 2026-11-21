@@ -14,6 +14,7 @@ import {
   type ComposerImageInsertDetail,
   type ComposerInsertDetail,
 } from '@/lib/composerInsert';
+import { getDesktopShell } from '@/lib/desktopShell';
 import { prepareImageFileForUpload } from '@/utils/clipboard';
 import { formatFileRangeRef } from '@/utils/codeSelection';
 import { clearCurrentDraggedFileReference } from '@/utils/fileReferenceDrag';
@@ -244,14 +245,16 @@ export function useSessionComposerInsert({
   const handleHostDroppedPaths = useCallback(
     async (paths: string[]) => {
       if (disabled || paths.length === 0) return;
-      const { readFile } = await import('@tauri-apps/plugin-fs');
+      const shell = getDesktopShell();
       const files: File[] = [];
       const otherPaths: string[] = [];
       for (const path of paths) {
         if (!mountedRef.current) return;
         try {
           files.push(
-            await fileFromHostPath(path, (filePath) => readFile(filePath))
+            await fileFromHostPath(path, (filePath) =>
+              shell.fs.readFile(filePath)
+            )
           );
         } catch {
           otherPaths.push(path);
@@ -354,33 +357,31 @@ export function useSessionComposerInsert({
     let disposed = false;
     let unlisten: (() => void) | undefined;
 
-    void import('@tauri-apps/api/webview')
-      .then(({ getCurrentWebview }) =>
-        getCurrentWebview().onDragDropEvent((event) => {
-          const payload = event.payload;
-          const zone = dropZoneRef.current;
-          if (payload.type === 'leave') {
-            setComposerDropActive(false);
-            return;
-          }
-          if (payload.type === 'enter' || payload.type === 'over') {
-            setComposerDropActive(
-              !!zone &&
-                'position' in payload &&
-                isPointInElement(zone, payload.position.x, payload.position.y)
-            );
-            return;
-          }
-          if (payload.type !== 'drop') return;
-          const overZone =
-            !!zone &&
-            isPointInElement(zone, payload.position.x, payload.position.y);
-          const accept = overZone || dropActiveRef.current;
+    void getDesktopShell()
+      .window.onDragDropEvent((event) => {
+        const payload = event.payload;
+        const zone = dropZoneRef.current;
+        if (payload.type === 'leave') {
           setComposerDropActive(false);
-          if (!accept) return;
-          void handleHostDroppedPaths(payload.paths);
-        })
-      )
+          return;
+        }
+        if (payload.type === 'enter' || payload.type === 'over') {
+          setComposerDropActive(
+            !!zone &&
+              'position' in payload &&
+              isPointInElement(zone, payload.position.x, payload.position.y)
+          );
+          return;
+        }
+        if (payload.type !== 'drop') return;
+        const overZone =
+          !!zone &&
+          isPointInElement(zone, payload.position.x, payload.position.y);
+        const accept = overZone || dropActiveRef.current;
+        setComposerDropActive(false);
+        if (!accept) return;
+        void handleHostDroppedPaths(payload.paths);
+      })
       .then((stopListening) => {
         if (disposed) stopListening();
         else unlisten = stopListening;

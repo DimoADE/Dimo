@@ -190,7 +190,8 @@ impl ServerApplicationDomains {
         let use_normalized = args.normalized.unwrap_or(true);
         let process_id = args.execution_process_id;
         let task_key = channel.clone();
-        self.events.ensure_stream_task(task_key, || {
+        self.events.replace_stream_task(
+            task_key,
             tokio::spawn(async move {
                 let stream_opt = if use_normalized {
                     deployment
@@ -206,8 +207,8 @@ impl ServerApplicationDomains {
                     }
                 }
                 host_events.emit(&channel, &LogMsg::Finished);
-            })
-        });
+            }),
+        );
         Ok(Value::Null)
     }
 
@@ -263,6 +264,7 @@ impl ServerApplicationDomains {
         })?;
         let canonical_root_str = canonical_root.to_string_lossy().to_string();
         let host_events = self.events.clone();
+        let channel = format!("file-tree-stream:{canonical_root_str}");
         let task_key = format!("file-tree:{canonical_root_str}");
         self.events.ensure_stream_task(task_key, || {
             tokio::spawn(async move {
@@ -279,7 +281,7 @@ impl ServerApplicationDomains {
                                             services::services::filesystem_watcher::MAX_ADDED_PATHS,
                                         );
                                     host_events.emit(
-                                        "file-tree-stream",
+                                        &channel,
                                         &FileTreeChangedPayload {
                                             root_path: normalized_root_str.clone(),
                                             added_paths,

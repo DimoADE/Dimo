@@ -145,6 +145,26 @@ pub const HOST_EVENT_CHANNELS: &[HostEventChannel] = &[
         required_scope: "application.call",
     },
     HostEventChannel {
+        prefix: "dimo://backup-progress",
+        durability: EventDurability::BestEffort,
+        required_scope: "application.call",
+    },
+    HostEventChannel {
+        prefix: "host-client-changed",
+        durability: EventDurability::Invalidation,
+        required_scope: "application.call",
+    },
+    HostEventChannel {
+        prefix: "dimo://remote-host-event",
+        durability: EventDurability::BestEffort,
+        required_scope: "application.call",
+    },
+    HostEventChannel {
+        prefix: "dimo://remote-subscription-event",
+        durability: EventDurability::BestEffort,
+        required_scope: "application.call",
+    },
+    HostEventChannel {
         prefix: LOCAL_APP_DATA_CLEARED_EVENT,
         durability: EventDurability::Invalidation,
         required_scope: "application.call",
@@ -243,6 +263,11 @@ pub const HOST_EVENT_CHANNELS: &[HostEventChannel] = &[
         prefix: "provider-bind-confirm",
         durability: EventDurability::BestEffort,
         required_scope: "plugin.write",
+    },
+    HostEventChannel {
+        prefix: "plugin:browser",
+        durability: EventDurability::BestEffort,
+        required_scope: "application.call",
     },
     HostEventChannel {
         prefix: "vibex://pulse-deck-changed",
@@ -575,7 +600,16 @@ pub fn patch_stream_channel(stream: &str, args: &serde_json::Value) -> Result<St
     };
     match stream {
         "projects" => Ok("projects-stream".to_string()),
-        "file_tree" => Ok("file-tree-stream".to_string()),
+        "file_tree" => {
+            let root_path = args
+                .get("rootPath")
+                .or_else(|| args.get("root_path"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "rootPath is required".to_string())?;
+            let canonical = std::fs::canonicalize(root_path)
+                .map_err(|error| format!("Invalid file tree root '{root_path}': {error}"))?;
+            Ok(format!("file-tree-stream:{}", canonical.to_string_lossy()))
+        }
         "project_workspaces" => field("projectId", "project_id")
             .map(|id| format!("project-workspaces-stream:{id}"))
             .ok_or_else(|| "projectId is required".to_string()),

@@ -1,7 +1,10 @@
-import type { BackendTransport } from './backendTransport';
-import { tauriBackendTransport } from './tauriTransport';
+import { getDesktopShell } from '@/lib/desktopShell';
+import { hasElectronDesktopRuntime } from '@/lib/desktopShell/electronShellBridge';
 
-let configuredTransport = tauriBackendTransport;
+import type { BackendTransport } from './backendTransport';
+import { getElectronBackendTransport } from './electronTransport';
+
+let configuredTransport: BackendTransport | undefined;
 let mountedTransport:
   | {
       token: symbol;
@@ -9,12 +12,36 @@ let mountedTransport:
     }
   | undefined;
 
+export const fallbackDesktopTransport: BackendTransport = {
+  environment: 'desktop',
+  call(command, args) {
+    return getDesktopShell().invoke(command, args);
+  },
+  listen(event, handler) {
+    return getDesktopShell().events.listen(event, handler);
+  },
+  emit(event, payload) {
+    return getDesktopShell().events.emit(event, payload);
+  },
+};
+
+export function getLocalDesktopTransport(): BackendTransport {
+  if (hasElectronDesktopRuntime() && window.dimoDesktop?.backend) {
+    return getElectronBackendTransport();
+  }
+  return fallbackDesktopTransport;
+}
+
 export function configureBackendTransport(transport: BackendTransport): void {
   configuredTransport = transport;
 }
 
 export function getBackendTransport(): BackendTransport {
-  return mountedTransport?.transport ?? configuredTransport;
+  return (
+    mountedTransport?.transport ??
+    configuredTransport ??
+    getLocalDesktopTransport()
+  );
 }
 
 export function mountBackendTransport(transport: BackendTransport): () => void {

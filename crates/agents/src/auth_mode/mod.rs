@@ -1421,6 +1421,32 @@ pub fn auto_approve_mode_for_launch(
     env: &HashMap<String, String>,
 ) -> AgentAutoApproveMode {
     match agent_id.as_str() {
+        "claude_code" => {
+            if crate::end_turn_usage::read_claude_default_permission_mode(env).as_deref()
+                == Some("bypassPermissions")
+            {
+                AgentAutoApproveMode::Yolo
+            } else {
+                AgentAutoApproveMode::Off
+            }
+        }
+        "codex" => {
+            let mode = env
+                .get("INITIAL_AGENT_MODE")
+                .map(String::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .or_else(|| read_codex_initial_agent_mode(env));
+            if matches!(
+                mode.as_deref(),
+                Some("agent-full-access" | "full-access" | "danger-full-access")
+            ) {
+                AgentAutoApproveMode::Yolo
+            } else {
+                AgentAutoApproveMode::Off
+            }
+        }
         "grok" => {
             let mode = env.get("GROK_PERMISSION_MODE").map(String::as_str);
             if grok_mode_skips_permission_prompts(mode.map(str::trim)) {

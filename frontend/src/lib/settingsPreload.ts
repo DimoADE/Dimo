@@ -62,6 +62,14 @@ export function loadWebServiceSettings() {
   return import('@/pages/settings/WebServiceSettings');
 }
 
+export function loadSettingsAppRoutes() {
+  return import('@/SettingsAppRoutes');
+}
+
+export function loadPluginSettingsPage() {
+  return import('@/pages/settings/PluginSettingsPage');
+}
+
 export function loadPluginsPage() {
   return import('@/pages/Plugins');
 }
@@ -97,6 +105,7 @@ export function warmDefaultSettingsSurface(
   pathname = typeof window === 'undefined' ? '' : window.location.pathname
 ): void {
   if (pathname.startsWith('/plugins')) {
+    void loadSettingsAppRoutes();
     void loadPluginsPage();
     if (pathname !== '/plugins' && pathname !== '/plugins/') {
       void loadPluginDetailPage();
@@ -104,6 +113,11 @@ export function warmDefaultSettingsSurface(
     return;
   }
   if (pathname.startsWith('/settings')) {
+    void loadSettingsAppRoutes();
+    if (pathname.startsWith('/settings/plugin/')) {
+      void loadPluginSettingsPage();
+      return;
+    }
     const exactLoader = SETTINGS_PATH_LOADERS[pathname];
     if (exactLoader) {
       void exactLoader();

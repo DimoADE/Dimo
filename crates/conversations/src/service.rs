@@ -324,6 +324,23 @@ pub struct ConversationContext {
     pub event_publisher: Arc<dyn ConversationEventPublisher>,
 }
 
+impl ConversationContext {
+    /// Persist `mode` in `agent_setting` and apply it to all live runtime
+    /// connections belonging to `agent_id`.
+    pub async fn persist_and_apply_agent_auto_approve_mode(
+        &self,
+        agent_id: &AgentId,
+        mode: AgentAutoApproveMode,
+    ) -> Result<(), ConversationServiceError> {
+        crate::host::persist_agent_auto_approve_mode(&self.deployment.db().pool, agent_id, mode)
+            .await?;
+        self.agent_runtime
+            .set_agent_auto_approve_mode(agent_id, mode)
+            .await;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationRuntimeState {
