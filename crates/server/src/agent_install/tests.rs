@@ -854,7 +854,7 @@ async fn install_npm_falls_back_to_user_prefix_on_ebusy_and_reports_lock_if_both
     .expect_err("EBUSY on user prefix must fail with actionable hint");
     assert!(err.to_string().contains("EBUSY"), "{err}");
     assert!(
-        err.to_string().contains("正被其他进程占用"),
+        err.to_string().contains("存在文件锁定或权限拒绝"),
         "expected lock guidance in error: {err}"
     );
 }

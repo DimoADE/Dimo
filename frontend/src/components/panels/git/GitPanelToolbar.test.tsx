@@ -311,10 +311,12 @@ describe('GitPanel Row 1 view toggle and read-only branch diff', () => {
     // Commit box visible on live default directory
     expect(screen.getByPlaceholderText('提交信息...')).toBeTruthy();
 
-    // Select non-checked-out local branch from the standard two-level Selector
-    fireEvent.change(screen.getByTestId('git-worktree-branch-selector'), {
-      target: { value: 'branch:feat/readonly-branch' },
-    });
+    // Select non-checked-out local branch from the two-level popover selector
+    fireEvent.click(screen.getByTestId('git-worktree-branch-selector'));
+    fireEvent.click(screen.getByTestId('git-dir-group-dir:main'));
+    fireEvent.click(
+      screen.getByRole('option', { name: /feat\/readonly-branch/ })
+    );
 
     expect(screen.queryByPlaceholderText('提交信息...')).toBeNull();
     expect(screen.getByTestId('git-readonly-branch-banner')).toBeTruthy();
