@@ -42,6 +42,7 @@ function conversation(
 
 const commit: GitLogEntry = {
   sha: 'abcdef1234567890',
+  parents: [],
   summary: 'Fix token parsing',
   author: 'Ada',
   timestamp: 1,

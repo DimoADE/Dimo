@@ -6,13 +6,19 @@ import { fileURLToPath } from 'node:url';
 
 import appModule, {
   PLUGIN_ID,
+  PcmResampler,
   VoiceSessionController,
+  createDictationShortcutHandler,
   doesEventMatchShortcut,
   encodeMonoWavBase64,
   formatDuration,
   formatKeyboardEventToShortcut,
+  formatTranscriptInsertion,
+  moveMicrophoneInOrder,
   normalizeVoiceConfig,
   parseShortcut,
+  rememberMicrophones,
+  resolvePreferredMicrophone,
 } from '../app/main.js';
 import {
   DEFAULT_VOICE_CONFIG,
@@ -20,11 +26,17 @@ import {
   buildChatAudioRequest,
   buildCleanupChatRequest,
   buildMultipartAudioRequest,
+  buildOpenRouterAudioRequest,
   buildWhisperPrompt,
+  buildXaiSttRequest,
+  classifyCloudError,
   cleanTranscriptText,
   createVoiceInputWorkerDefinition,
+  filterSilenceFromWavBase64,
   normalizeVocabularyTerms,
+  parseVocabularyEntries,
   parseVocabularyList,
+  stripSpokenFillers,
 } from '../worker/index.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -609,6 +621,532 @@ describe('dimo.voice-input plugin', () => {
       globalThis.document = prevDocument;
       globalThis.window = prevWindow;
       globalThis.localStorage = prevLocalStorage;
+    }
+  });
+
+  it('downsamples 48kHz audio to 16kHz using anti-aliased FIR PcmResampler', () => {
+    const inputRate = 48000;
+    const outputRate = 16000;
+    const resampler = new PcmResampler(inputRate, outputRate);
+    const n = inputRate / 2; // 0.5s
+    const lowTone = new Float32Array(n);
+    const highAliasTone = new Float32Array(n);
+    for (let i = 0; i < n; i += 1) {
+      lowTone[i] = Math.sin((2 * Math.PI * 1000 * i) / inputRate);
+      highAliasTone[i] = Math.sin((2 * Math.PI * 14000 * i) / inputRate);
+    }
+
+    const resampledLow = resampler.resample(lowTone);
+    const resampledHigh = resampler.resample(highAliasTone);
+    assert.equal(resampledLow.length, Math.floor(n / 3));
+
+    const rms = (arr) => {
+      let sum = 0;
+      for (let i = 50; i < arr.length - 50; i += 1) sum += arr[i] * arr[i];
+      return Math.sqrt(sum / (arr.length - 100));
+    };
+    assert.ok(rms(resampledLow) > 0.6, '1kHz passband tone should be preserved');
+    assert.ok(rms(resampledHigh) < 0.05, '14kHz above-Nyquist tone should be attenuated');
+  });
+
+  it('filters silence via VAD and blocks empty silent cloud uploads', async () => {
+    const sampleRate = 16000;
+    const silentWav = encodeMonoWavBase64(new Float32Array(sampleRate), sampleRate);
+    const silentCheck = filterSilenceFromWavBase64(silentWav);
+    assert.equal(silentCheck.analyzed, true);
+    assert.equal(silentCheck.hasSpeech, false);
+
+    // 1.0s silence + 0.5s 440Hz speech + 1.0s silence
+    const voiced = new Float32Array(Math.floor(sampleRate * 2.5));
+    for (let i = sampleRate; i < Math.floor(sampleRate * 1.5); i += 1) {
+      voiced[i] = 0.25 * Math.sin((2 * Math.PI * 440 * i) / sampleRate);
+    }
+    const voicedWav = encodeMonoWavBase64(voiced, sampleRate);
+    const trimmed = filterSilenceFromWavBase64(voicedWav);
+    assert.equal(trimmed.hasSpeech, true);
+    assert.ok(
+      trimmed.trimmedDurationMs < trimmed.originalDurationMs - 800,
+      `Expected leading/trailing silence trimmed (${trimmed.trimmedDurationMs}ms vs ${trimmed.originalDurationMs}ms)`,
+    );
+
+    let fetchCalled = false;
+    const engine = new VoiceInputEngine({
+      config: {
+        ...DEFAULT_VOICE_CONFIG,
+        providerProtocol: 'openai-whisper',
+        apiKey: 'sk-test',
+        silenceFiltering: true,
+      },
+      fetchImpl: async () => {
+        fetchCalled = true;
+        return { ok: true, status: 200, json: async () => ({ text: 'unexpected' }) };
+      },
+    });
+    await assert.rejects(
+      () => engine.transcribe({ wavBase64: silentWav, mimeType: 'audio/wav' }),
+      (err) => err?.code === 'no-speech',
+    );
+    assert.equal(fetchCalled, false);
+  });
+
+  it('supports xAI STT, OpenRouter Audio, localhost custom-openai without key, translateToEnglish, and redirect:error', async () => {
+    const sampleAudio = Buffer.from('RIFF-mock-audio').toString('base64');
+
+    const xaiReq = buildXaiSttRequest({
+      apiKey: 'xai-key',
+      audioBase64: sampleAudio,
+      mimeType: 'audio/wav',
+      language: 'en',
+      vocabulary: 'Dimo, Worktree',
+      removeFillerWords: true,
+    });
+    assert.equal(xaiReq.url, 'https://api.x.ai/v1/stt');
+    assert.equal(xaiReq.model, 'grok-voice-transcribe-2.0');
+    const xaiBody = xaiReq.body.toString('utf8');
+    assert.match(xaiBody, /name="keyterm"\r\n\r\nDimo/);
+    assert.match(xaiBody, /name="filler_words"\r\n\r\nfalse/);
+    assert.ok(
+      xaiBody.lastIndexOf('name="file"') > xaiBody.lastIndexOf('name="keyterm"'),
+      'xAI multipart file part must come after metadata fields',
+    );
+
+    const orReq = buildOpenRouterAudioRequest({
+      apiKey: 'or-key',
+      audioBase64: sampleAudio,
+      mimeType: 'audio/wav',
+      zdr: true,
+    });
+    assert.equal(orReq.url, 'https://openrouter.ai/api/v1/audio/transcriptions');
+    const orBody = JSON.parse(orReq.body);
+    assert.equal(orBody.input_audio.format, 'wav');
+    assert.deepEqual(orBody.provider, { zdr: true });
+
+    const translateReq = buildMultipartAudioRequest({
+      baseUrl: 'http://127.0.0.1:8080/v1',
+      apiKey: '',
+      providerProtocol: 'custom-openai',
+      model: 'whisper-large-v3',
+      audioBase64: sampleAudio,
+      mimeType: 'audio/wav',
+      translateToEnglish: true,
+    });
+    assert.equal(translateReq.url, 'http://127.0.0.1:8080/v1/audio/translations');
+    assert.equal(translateReq.headers.Authorization, undefined);
+    assert.equal(translateReq.requiresApiKey, false);
+
+    // Local custom-openai engine works with empty API key and enforces redirect: 'error'
+    const fetchCalls = [];
+    const localEngine = new VoiceInputEngine({
+      config: {
+        ...DEFAULT_VOICE_CONFIG,
+        providerProtocol: 'custom-openai',
+        baseUrl: 'http://127.0.0.1:8080/v1',
+        apiKey: '',
+        model: 'whisper-local',
+        silenceFiltering: false,
+      },
+      fetchImpl: async (url, init) => {
+        fetchCalls.push({ url, init });
+        return { ok: true, status: 200, json: async () => ({ text: 'hello from local whisper' }) };
+      },
+    });
+    const localRes = await localEngine.transcribe({
+      audioBase64: sampleAudio,
+      mimeType: 'audio/webm',
+    });
+    assert.equal(localRes.text, 'hello from local whisper');
+    assert.equal(fetchCalls[0].init.redirect, 'error');
+
+    // Structured HTTP error classification
+    assert.equal(classifyCloudError(401, 'bad key').code, 'rejected-key');
+    assert.equal(classifyCloudError(401, 'bad key').action, 'settings');
+    assert.equal(classifyCloudError(429, 'slow down').code, 'rate-limit');
+    assert.equal(classifyCloudError(429, 'slow down').action, 'retry');
+  });
+
+  it('supports explicit vocabulary aliases, possessive preservation, and Soundex/Levenshtein fuzzy correction', () => {
+    const entries = parseVocabularyEntries('Dimo = vibe x | vibex, TypeScript: ts lang, Monaco');
+    assert.equal(entries.length, 3);
+    assert.deepEqual(entries[0], { term: 'Dimo', aliases: ['vibe x', 'vibex'] });
+
+    const normalized = normalizeVocabularyTerms(
+      "check vibex's monacco plugin written in typescrpt and ts lang",
+      'Dimo = vibe x | vibex, TypeScript: ts lang, Monaco',
+    );
+    assert.match(normalized, /Dimo's/);
+    assert.match(normalized, /Monaco/);
+    assert.match(normalized, /TypeScript/);
+  });
+
+  it('preserves hyphenated words like uh-huh, protects correctionCue, and includes draft context in LLM cleanup prompt', () => {
+    const cleaned = stripSpokenFillers('um, uh-huh, I mean uh fix it 不对 make it faster', {
+      removeFillerWords: true,
+      correctionCue: '不对',
+    });
+    assert.match(cleaned, /uh-huh/);
+    assert.ok(!/\bum\b/i.test(cleaned));
+    assert.match(cleaned, /不对/);
+
+    const req = buildCleanupChatRequest({
+      apiKey: 'sk-clean',
+      rawText: 'use rust不对use typescript',
+      vocabulary: 'TypeScript, Rust',
+      correctionCue: '不对',
+      cleanupInstructions: 'Keep technical terms concise.',
+      draftContext: {
+        before: 'Please refactor the parser to ',
+        selection: '',
+        after: ' in the workspace.',
+      },
+    });
+    const body = JSON.parse(req.body);
+    assert.match(body.messages[0].content, /Correction cue: "不对"/);
+    assert.match(body.messages[0].content, /Keep technical terms concise/);
+    assert.match(body.messages[1].content, /<composer_before>/);
+    assert.match(body.messages[1].content, /<transcript>/);
+  });
+
+  it('implements auto shortcut mode (tap = toggle, hold >= 300ms = push-to-talk), IME guard, and Escape cancel', async () => {
+    let fakeNow = 1000;
+    const calls = [];
+    const mockController = {
+      state: 'idle',
+      config: normalizeVoiceConfig({ enabled: true, recordingMode: 'auto', shortcut: 'Alt+V' }),
+      async startRecording() {
+        calls.push('start');
+        this.state = 'recording';
+      },
+      async stopRecording() {
+        calls.push('stop');
+        this.state = 'idle';
+      },
+      cancelRecording() {
+        calls.push('cancel');
+        this.state = 'idle';
+      },
+      cancelPreview() {
+        calls.push('cancelPreview');
+        this.state = 'idle';
+      },
+      async commitPreview() {
+        calls.push('commitPreview');
+        this.state = 'idle';
+      },
+      async toggleRecording() {
+        calls.push('toggle');
+      },
+    };
+
+    const handler = createDictationShortcutHandler(mockController, {
+      now: () => fakeNow,
+      holdThresholdMs: 300,
+    });
+
+    // IME composition should be ignored
+    handler.onKeyDown({
+      isComposing: true,
+      altKey: true,
+      key: 'v',
+      code: 'KeyV',
+    });
+    assert.deepEqual(calls, []);
+
+    // Quick tap (< 300ms): stays recording after keyup, second tap stops
+    handler.onKeyDown({ altKey: true, key: 'v', code: 'KeyV' });
+    fakeNow += 120;
+    handler.onKeyUp({ key: 'v', code: 'KeyV' });
+    assert.deepEqual(calls, ['start']);
+    assert.equal(mockController.state, 'recording');
+
+    handler.onKeyDown({ altKey: true, key: 'v', code: 'KeyV' });
+    assert.deepEqual(calls, ['start', 'stop']);
+    assert.equal(mockController.state, 'idle');
+
+    // Hold (>= 300ms): stops automatically on keyup (push-to-talk)
+    calls.length = 0;
+    handler.onKeyDown({ altKey: true, key: 'v', code: 'KeyV' });
+    fakeNow += 450;
+    handler.onKeyUp({ key: 'v', code: 'KeyV' });
+    assert.deepEqual(calls, ['start', 'stop']);
+
+    // Escape cancels active recording
+    calls.length = 0;
+    mockController.state = 'post-processing';
+    handler.onKeyDown({ key: 'Escape' });
+    assert.deepEqual(calls, ['cancel']);
+  });
+
+  it('retains failed recording for retryLastRecording and supports skipPostProcessing and testOnly mode', async () => {
+    let attempt = 0;
+    let inserted = [];
+    let cancelledIds = [];
+
+    const controller = new VoiceSessionController({
+      config: normalizeVoiceConfig({
+        enabled: true,
+        providerProtocol: 'openai-whisper',
+        cleanupMode: 'auto-clean',
+        useLlmCleanup: true,
+      }),
+      getUserMedia: async () => null,
+      speechRecognitionFactory: () => null,
+      invokeWorker: async (handler, params) => {
+        if (handler === 'voice.cancel') {
+          cancelledIds.push(params.requestId);
+          return { cancelled: true };
+        }
+        if (handler === 'voice.transcribe') {
+          attempt += 1;
+          if (attempt === 1) {
+            const err = new Error('rate limit');
+            err.code = 'rate-limit';
+            err.action = 'retry';
+            throw err;
+          }
+          return {
+            id: `res-${attempt}`,
+            rawText: 'hello dimo voice architecture test',
+            cleanedText: 'hello Dimo voice architecture test',
+            text: 'hello Dimo voice architecture test',
+            provider: 'openai-whisper',
+            usedLlm: false,
+          };
+        }
+        if (handler === 'voice.cleanup') {
+          // Simulate slow LLM cleanup so we can test skipping it immediately
+          await new Promise((r) => setTimeout(r, 500));
+          return {
+            cleanedText: 'LLM polished text',
+            usedLlm: true,
+          };
+        }
+        return null;
+      },
+      insertIntoComposer: async (text) => {
+        inserted.push(text);
+        return true;
+      },
+    });
+
+    // Simulate captured audio failing on attempt 1
+    await controller.startRecording();
+    controller._pcmChunks.push(new Float32Array(1600).fill(0.2));
+    const failRes = await controller.stopRecording();
+    assert.equal(failRes.inserted, false);
+    assert.equal(controller.state, 'error');
+    assert.equal(controller.errorCode, 'rate-limit');
+    assert.equal(controller.getSnapshot().canRetry, true);
+
+    // Retry retained capture and skip slow LLM post-processing mid-flight
+    const retryPromise = controller.retryLastRecording();
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(controller.state, 'post-processing');
+    assert.equal(controller.skipPostProcessing(), true);
+    const retryRes = await retryPromise;
+
+    assert.equal(retryRes.inserted, true);
+    assert.equal(inserted[0], 'hello Dimo voice architecture test');
+    assert.ok(cancelledIds.length >= 1);
+
+    // Test-only mode stores lastTestResult without modifying composer draft
+    inserted = [];
+    controller.updateConfig({ useLlmCleanup: false });
+    await controller.startRecording({ testOnly: true });
+    controller._pcmChunks.push(new Float32Array(1600).fill(0.2));
+    const testRes = await controller.stopRecording({ testOnly: true });
+    assert.equal(testRes.testOnly, true);
+    assert.equal(testRes.inserted, false);
+    assert.equal(inserted.length, 0);
+    assert.equal(
+      controller.getSnapshot().lastTestResult?.text,
+      'hello Dimo voice architecture test',
+    );
+  });
+
+  it('orders preferred microphones with fallback and applies smart spacing on transcript insertion', () => {
+    let order = rememberMicrophones([], [
+      { deviceId: 'usb-mic', label: 'USB Yeti' },
+      { deviceId: 'builtin', label: 'Built-in Mic' },
+    ]);
+    assert.deepEqual(
+      order.map((d) => d.deviceId),
+      ['usb-mic', 'builtin'],
+    );
+    order = moveMicrophoneInOrder(order, 'builtin', 'up');
+    assert.deepEqual(
+      order.map((d) => d.deviceId),
+      ['builtin', 'usb-mic'],
+    );
+
+    // If 'builtin' disconnects, falls back to next connected device 'usb-mic'
+    const chosen = resolvePreferredMicrophone(
+      order,
+      [{ deviceId: 'usb-mic', label: 'USB Yeti' }],
+      'default',
+    );
+    assert.equal(chosen, 'usb-mic');
+
+    // Smart Latin vs CJK insertion spacing
+    assert.equal(
+      formatTranscriptInsertion('world', { before: 'hello', after: 'again' }),
+      ' world ',
+    );
+    assert.equal(
+      formatTranscriptInsertion('你好', { before: '测试', after: '世界' }),
+      '你好',
+    );
+  });
+
+  it('bundles app/main.js as zero-import single-file ESM compatible with PluginRuntimeLoader', () => {
+    const code = readFileSync(join(pluginRoot, 'app', 'main.js'), 'utf8');
+    assert.ok(
+      !/^\s*import\s+/m.test(code),
+      'Bundled app/main.js must have no external bare import statements',
+    );
+    assert.ok(
+      code.includes('VoiceSessionController'),
+      'Bundled app/main.js should export VoiceSessionController',
+    );
+  });
+
+  it('renders interactive Preview Comparison HUD card in preview mode and allows switching raw/cleaned and committing edited text', async () => {
+    const prevDocument = globalThis.document;
+    const prevWindow = globalThis.window;
+
+    const makeMockEl = (tag) => {
+      const attrs = new Map();
+      const el = {
+        tagName: tag.toUpperCase(),
+        type: '',
+        value: '',
+        textContent: '',
+        innerHTML: '',
+        rows: 0,
+        disabled: false,
+        style: {},
+        children: [],
+        parentNode: null,
+        onclick: null,
+        oninput: null,
+        onpointerdown: null,
+        setAttribute: (k, v) => attrs.set(k, String(v)),
+        getAttribute: (k) => attrs.get(k) ?? null,
+        appendChild: (c) => {
+          c.parentNode = el;
+          el.children.push(c);
+          return c;
+        },
+        append: (...nodes) => nodes.forEach((n) => el.appendChild(n)),
+        remove: () => {
+          if (el.parentNode) {
+            el.parentNode.children = el.parentNode.children.filter((c) => c !== el);
+            el.parentNode = null;
+          }
+        },
+      };
+      return el;
+    };
+
+    const findByTestId = (node, id) => {
+      if (!node) return null;
+      if (node.getAttribute?.('data-testid') === id) return node;
+      for (const child of node.children || []) {
+        const found = findByTestId(child, id);
+        if (found) return found;
+      }
+      return null;
+    };
+
+    const body = makeMockEl('body');
+    globalThis.document = {
+      body,
+      createElement: (tag) => makeMockEl(tag),
+      querySelectorAll: () => [],
+    };
+    globalThis.window = {
+      innerWidth: 1280,
+      innerHeight: 800,
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent() {},
+    };
+
+    let insertedText = '';
+    let activated = null;
+    try {
+      activated = appModule.activate({
+        config: {
+          enabled: true,
+          showFloatingHud: true,
+          providerProtocol: 'browser-speech',
+          cleanupMode: 'preview',
+        },
+        conversation: {
+          call: async (_op, payload) => {
+            insertedText = payload.text;
+            return { inserted: true };
+          },
+        },
+        worker: {
+          invoke: async (handler) => {
+            if (handler === 'voice.transcribe') {
+              return {
+                id: 'prev-1',
+                rawText: '嗯 帮我打开 vibe x 设置',
+                cleanedText: '帮我打开 Dimo 设置',
+                text: '帮我打开 Dimo 设置',
+                provider: 'browser-speech',
+                latencyMs: 42,
+              };
+            }
+            return null;
+          },
+        },
+      });
+
+      const { controller } = activated;
+      controller.getUserMedia = async () => null;
+      controller.speechRecognitionFactory = () => ({
+        continuous: false,
+        interimResults: false,
+        lang: '',
+        start() {},
+        stop() {},
+      });
+
+      await controller.startRecording();
+      controller.liveTranscript = '嗯 帮我打开 vibe x 设置';
+      const stopRes = await controller.stopRecording();
+      assert.equal(stopRes.preview, true);
+      assert.equal(controller.state, 'preview');
+
+      const previewCard = findByTestId(body, 'voice-hud-preview');
+      assert.ok(previewCard, 'Preview comparison HUD card should be mounted');
+
+      const textarea = findByTestId(previewCard, 'voice-preview-textarea');
+      assert.equal(textarea.value, '帮我打开 Dimo 设置');
+
+      // Switch to raw tab
+      const rawTab = findByTestId(previewCard, 'voice-preview-tab-raw');
+      rawTab.onclick({ preventDefault() {} });
+      assert.equal(textarea.value, '嗯 帮我打开 vibe x 设置');
+
+      // Switch back to cleaned and edit text before confirming
+      const cleanedTab = findByTestId(previewCard, 'voice-preview-tab-cleaned');
+      cleanedTab.onclick({ preventDefault() {} });
+      textarea.oninput({ target: { value: '帮我打开 Dimo 语音设置' } });
+
+      const confirmBtn = findByTestId(previewCard, 'voice-preview-confirm');
+      confirmBtn.onclick({ preventDefault() {} });
+      await new Promise((r) => setTimeout(r, 20));
+
+      assert.equal(controller.state, 'idle');
+      assert.equal(insertedText, '帮我打开 Dimo 语音设置');
+      assert.equal(findByTestId(body, 'voice-hud-preview'), null);
+    } finally {
+      activated?.dispose();
+      globalThis.document = prevDocument;
+      globalThis.window = prevWindow;
     }
   });
 });

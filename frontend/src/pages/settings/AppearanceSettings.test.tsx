@@ -256,14 +256,17 @@ describe('AppearanceSettings', () => {
     expect(mocks.setSettingsNavFloat).toHaveBeenCalledWith(true);
   });
 
-  it('places preview settings before page layout', () => {
+  it('renders preview settings and omits the removed page layout section', () => {
     render(<AppearanceSettings />);
 
-    const preview = screen.getByRole('heading', { name: '预览' });
-    const layout = screen.getByRole('heading', { name: '页面布局' });
+    expect(screen.getByRole('heading', { name: '预览' })).toBeInTheDocument();
     expect(
-      preview.compareDocumentPosition(layout) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy();
+      screen.queryByRole('heading', { name: '页面布局' })
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText('workspace schematic')).not.toBeInTheDocument();
+    expect(
+      screen.queryByText('collaboration schematic')
+    ).not.toBeInTheDocument();
     expect(
       screen.getByRole('combobox', { name: 'Markdown默认预览方式' })
     ).toBeInTheDocument();
@@ -324,39 +327,6 @@ describe('AppearanceSettings', () => {
         })
       );
     });
-  });
-
-  it('switches the ABC layout preview between workspace and collaboration without a kanban tab', async () => {
-    const user = userEvent.setup();
-    render(<AppearanceSettings />);
-
-    expect(screen.getByText('workspace schematic')).toBeInTheDocument();
-    expect(screen.queryByText('kanban schematic')).not.toBeInTheDocument();
-    expect(
-      screen.queryByText('collaboration schematic')
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole('radio', { name: '看板' })
-    ).not.toBeInTheDocument();
-    expect(screen.queryByText('Workspace 页面')).not.toBeInTheDocument();
-    expect(screen.queryByText('Kanban 页面')).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole('button', { name: '恢复默认' })
-    ).not.toBeInTheDocument();
-
-    const workspaceRadio = screen.getByRole('radio', { name: '工作区' });
-    const collaborationRadio = screen.getByRole('radio', { name: '协作空间' });
-    expect(workspaceRadio.parentElement?.querySelector('svg')).not.toBeNull();
-    expect(
-      collaborationRadio.parentElement?.querySelector('svg')
-    ).not.toBeNull();
-
-    await user.click(collaborationRadio);
-    expect(screen.getByText('collaboration schematic')).toBeInTheDocument();
-    expect(screen.queryByText('workspace schematic')).not.toBeInTheDocument();
-    expect(
-      screen.getByText('协作空间（A）、消息区（B）与预览区（C）的排列。')
-    ).toBeInTheDocument();
   });
 
   it('renames workspace panel view and reveals toolbar/viewport position selectors when infinite canvas is selected', async () => {

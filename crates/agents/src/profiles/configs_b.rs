@@ -877,6 +877,14 @@ pub(super) const CODEX_SETTINGS: &[AgentSettingsFeature] = &[
     AgentSettingsFeature::NativeMcp,
     AgentSettingsFeature::NativeSkills,
 ];
+pub(super) const MUSE_SETTINGS: &[AgentSettingsFeature] = &[
+    AgentSettingsFeature::AuthenticationMode,
+    AgentSettingsFeature::ReusableModelProviders,
+    AgentSettingsFeature::ModelCatalog,
+    AgentSettingsFeature::MusePlugins,
+    AgentSettingsFeature::NativeMcp,
+    AgentSettingsFeature::NativeSkills,
+];
 pub(super) const ANTIGRAVITY_SETTINGS: &[AgentSettingsFeature] = &[
     AgentSettingsFeature::AuthenticationMode,
     AgentSettingsFeature::ReusableModelProviders,

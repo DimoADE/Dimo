@@ -73,6 +73,18 @@ pub async fn apply(
     api_key: &str,
     model: &str,
 ) -> Result<(), String> {
+    apply_with_url_fallback(agent_dir, provider_id, name, api_url, api_key, model, true).await
+}
+
+pub async fn apply_with_url_fallback(
+    agent_dir: &Path,
+    provider_id: &str,
+    name: &str,
+    api_url: &str,
+    api_key: &str,
+    model: &str,
+    allow_url_fallback: bool,
+) -> Result<(), String> {
     let models_path = agent_dir.join("models.yml");
     let config_path = agent_dir.join("config.yml");
     let filesystem = TokioNativeFileSystem;
@@ -87,7 +99,7 @@ pub async fn apply(
     let mut models = mapping_from(models_original.as_deref(), &models_path)?;
     let mut config = mapping_from(config_original.as_deref(), &config_path)?;
     let providers = mapping_entry(&mut models, "providers");
-    let key = provider_key(providers, provider_id, name, api_url);
+    let key = provider_key(providers, provider_id, name, api_url, allow_url_fallback);
     let model_id = model_id(model);
     let api = wire_api(model);
     let node = mapping_entry(providers, &key);
@@ -126,8 +138,41 @@ pub async fn set_enabled(
     model: &str,
     enabled: bool,
 ) -> Result<(), String> {
+    set_enabled_with_url_fallback(
+        agent_dir,
+        provider_id,
+        name,
+        api_url,
+        api_key,
+        model,
+        enabled,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn set_enabled_with_url_fallback(
+    agent_dir: &Path,
+    provider_id: &str,
+    name: &str,
+    api_url: &str,
+    api_key: &str,
+    model: &str,
+    enabled: bool,
+    allow_url_fallback: bool,
+) -> Result<(), String> {
     if enabled {
-        return apply(agent_dir, provider_id, name, api_url, api_key, model).await;
+        return apply_with_url_fallback(
+            agent_dir,
+            provider_id,
+            name,
+            api_url,
+            api_key,
+            model,
+            allow_url_fallback,
+        )
+        .await;
     }
     let models_path = agent_dir.join("models.yml");
     let config_path = agent_dir.join("config.yml");
@@ -145,7 +190,7 @@ pub async fn set_enabled(
     let key = models
         .get(Value::String("providers".to_string()))
         .and_then(Value::as_mapping)
-        .map(|providers| provider_key(providers, provider_id, name, api_url))
+        .map(|providers| provider_key(providers, provider_id, name, api_url, allow_url_fallback))
         .unwrap_or_else(|| {
             let s = slug(name);
             if s.is_empty() {
@@ -300,20 +345,35 @@ pub async fn remove(agent_dir: &Path, provider_id: &str, name: &str) -> Result<(
         .map_err(|error| error.to_string())
 }
 
-fn provider_key(providers: &Mapping, provider_id: &str, name: &str, api_url: &str) -> String {
+pub fn provider_slug(name: &str) -> String {
+    slug(name)
+}
+
+fn provider_key(
+    providers: &Mapping,
+    provider_id: &str,
+    name: &str,
+    api_url: &str,
+    allow_url_fallback: bool,
+) -> String {
     if providers.contains_key(Value::String(provider_id.to_string())) {
         return provider_id.to_string();
     }
-    if let Some(existing) = providers.iter().find_map(|(key, provider)| {
-        let same_url = provider
-            .as_mapping()
-            .is_some_and(|node| text(node, "baseUrl") == api_url);
-        same_url.then(|| key.as_str().unwrap_or("").to_string())
-    }) && !existing.is_empty()
+    let slug = slug(name);
+    if !slug.is_empty() && providers.contains_key(Value::String(slug.clone())) {
+        return slug;
+    }
+    if allow_url_fallback
+        && let Some(existing) = providers.iter().find_map(|(key, provider)| {
+            let same_url = provider
+                .as_mapping()
+                .is_some_and(|node| text(node, "baseUrl") == api_url);
+            same_url.then(|| key.as_str().unwrap_or("").to_string())
+        })
+        && !existing.is_empty()
     {
         return existing;
     }
-    let slug = slug(name);
     if slug.is_empty() {
         "provider".to_string()
     } else {

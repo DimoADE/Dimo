@@ -594,6 +594,30 @@ const MimoCodeMonoIcon = memo(function MimoCodeMonoIcon({
   );
 });
 
+const MuseCodeMonoIcon = memo(function MuseCodeMonoIcon({
+  size = '1em',
+}: IconProps) {
+  return (
+    <svg
+      fill="none"
+      height={size}
+      style={baseSvgStyle}
+      viewBox="1.75 4 12.5 7.6"
+      width={size}
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <title>Muse Code</title>
+      <path
+        d="M4.2 10.6C3.1 10.6 2.5 9.6 2.5 8.2C2.5 6.4 3.6 5.0 5.0 5.0C6.3 5.0 7.1 6.1 8.0 7.6C8.9 6.1 9.7 5.0 11.0 5.0C12.4 5.0 13.5 6.4 13.5 8.2C13.5 9.6 12.9 10.6 11.8 10.6C10.5 10.6 9.6 9.5 8.0 7.6C6.4 9.5 5.5 10.6 4.2 10.6Z"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.45"
+      />
+    </svg>
+  );
+});
+
 type AnyIcon = FunctionComponent<IconProps>;
 
 const COLOR_ICONS: Partial<Record<string, AnyIcon>> = {
@@ -623,6 +647,7 @@ const MONO_ICONS: Partial<Record<string, AnyIcon>> = {
   qoder: QoderMonoIcon,
   auggie: AuggieMonoIcon,
   mimo_code: MimoCodeMonoIcon,
+  muse_code: MuseCodeMonoIcon,
 };
 
 export function hasAgentTypeIcon(agentType: string): boolean {

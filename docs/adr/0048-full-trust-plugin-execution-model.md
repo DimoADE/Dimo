@@ -1,59 +1,23 @@
 ---
 status: accepted
 date: 2026-08-13
-decision-makers:
-  - Dimo maintainers
+decision-makers: Dimo maintainers
 ---
 
 # Dimo Plugin 采用全信任执行模型
 
-> 安装信任的可见化已由 [ADR-0066](0066-plugin-marketplace-authoring-and-session-honesty.md)
-> 修订：市场、`.vxp` 与 CLI 安装必须弹出预览与 Full Trust 确认。这不是逐 capability 审批。
-
-## Context
-
-ADR-0046 以开放任意第三方 Marketplace 为目标，设计了 Sandboxed Worker、Capability
-Broker scope、Trusted Native 二次授权、受限 App iframe 与更新时 permission delta。
-该模型让最小完整插件同时承担多平台 OS sandbox、权限 UI、授权迁移、scope 校验和 Runtime
-授权，显著拖慢 SDK、扩展点与真实插件体验的成熟。
-
-Dimo 当前的产品目标是本地开发者主动安装的 IDE 类插件生态。其信任假设与 VS Code、bb
-等桌面开发工具更接近：插件作者代码是安装物的一部分，安装行为本身就是信任决定。用户已
-明确选择优先完成能力、开发体验与产品完整性，暂不建设恶意插件安全边界。
+Dimo 面向本地开发者主动安装的 IDE 级插件生态，其信任模型与桌面开发工具一致：插件代码属于安装物本身，用户在明确预览并确认后安装或启用即构成信任决定，优先保障插件能力完整性、跨平台一致性与开发体验。
 
 ## Decision
 
-1. Dimo Plugin Package 采用单一 **Full Trust** 模型。安装或启用包即允许其 Worker、App
-   和声明 Runtime 使用与 Dimo Host 相同的本机文件、网络、环境变量与进程能力。
-2. 产品界面不展示逐 capability 审批、scope、permission delta 或 Trusted Native 弹窗。
-   manifest 中既有 `permissions` 只作为旧 v4 包的兼容元数据与 Host API 使用说明，不产生
-   运行门禁；新包可以完全省略。
-3. Worker 继续运行在独立 Node 进程，但目的仅是 candidate-first 热更新、超时终止、崩溃
-   隔离与 dispose。Host 不再使用 Seatbelt、bubblewrap、Node Permission Model、环境清空或
-   Windows fail-closed sandbox。
-4. App surface 继续使用独立 frame 与版本化 bridge 管理 mount/revoke/generation，但不使用
-   CSP、opaque origin 或 Permissions Policy 限制插件代码。frame 是 UI 生命周期容器，不是
-   安全边界。
-5. Host RPC 的 contribution identity、handler registration、generation 与协议校验继续存在；
-   它们保证 API 正确性和原子生命周期，不代表限制插件的本机权限。
-6. Runtime 仍使用内容寻址、精确 lock、probe、candidate readiness 和 generation drain。这些
-   是可复现性与可靠性机制，不是用户权限审批。
-7. 包 digest、publisher identity、原子更新、失败保留旧代、rollback 与审计继续保留。完整性
-   证据用于诊断与可复现更新，不将来源安全包装成权限门禁。
+1. **单一 Full Trust 执行模型**：用户安装或启用 Dimo Plugin Package，即信任其 Worker、App 扩展面与声明的 Runtime 以与 Dimo Host 相同的本机文件、网络、环境变量与进程权限运行。
+2. **显式安装预览确认，无逐项权限弹窗**：市场、`.vxp` 与 CLI 安装前必须向用户展示包含身份、来源与能力的安装预览和 **Full Trust 确认弹窗**（见 [ADR-0066](0066-plugin-marketplace-authoring-and-session-honesty.md)）。产品界面不存在逐 capability 审批、scope 授权、permission delta 或 Trusted Native 二次弹窗；manifest 中的 `permissions` 仅作声明式元信息与文档说明，不构成运行时权限门禁。
+3. **Worker 进程用于生命周期与崩溃隔离**：Plugin Worker（Node / Python / Rust）运行在独立进程中，目的仅是支持 candidate-first 热更新、超时终止、崩溃隔离与干净 dispose；Host 不施加 Seatbelt、bubblewrap、Node Permission Model、环境变量清空或 Windows fail-closed OS 沙箱。
+4. **App 扩展面容器用于 UI 生命周期管理**：iframe 等独立 App surface 容器与版本化 bridge 用于管理 mount、revoke 与 `ActivationGeneration` 切换，不作为限制插件代码的安全边界。
+5. **保留可靠性与可复现契约**：Host RPC 的 contribution 身份校验、handler 注册校验、代际路由、内容寻址 Runtime 锁与探针、包 digest、publisher 身份、原子更新、失败保留旧代、回滚与操作审计全部保留——它们保障 API 正确性、可复现性与可诊断性，而非本机权限封堵。
 
 ## Consequences
 
-- 插件作者无需设计 capability scope、授权迁移或 Trusted Native recipe，CLI `dev`、linked
-  reload 与普通启用使用同一条直接路径。
-- Windows、macOS 与 Linux 共享同一种 Worker 启动模型，不再因缺少 OS sandbox 拒绝插件。
-- 插件可以读取用户文件、凭据并启动任意程序。Dimo 必须在安装来源和文档中诚实标明这是
-  全信任生态，不能声称第三方插件被隔离。
-- 未来若产品转向不受信任 Marketplace，必须通过新的 ADR 引入不同 package class 或独立
-  sandbox runtime；不得在当前 full-trust API 上悄悄恢复零散权限弹窗。
-
-## Superseded parts of ADR-0046
-
-本 ADR 取代 ADR-0046 第 2 节中的“manifest 是权限上界”、第 5 节 trust tiers、第 6 节
-permission grant、App sandbox 要求、测试 harness 的真实 sandbox 要求，以及相应迁移和
-Consequences。ADR-0046 的统一产品包、Contribution Registry、candidate generation、Runtime、
-SDK、Office reference plugin 与 Application Core seam 继续有效。
+- 插件作者无需设计 capability scope、授权迁移或 Trusted Native 特殊路径，CLI `dev`、linked reload 与常规启停共享同一直接路径；Windows、macOS 与 Linux 采用一致的 Worker 启动模型。
+- 已安装插件与 Dimo Host 拥有同等本机能力，因此安装确认与文档必须诚实告知这是全信任生态，绝不宣称插件运行在安全沙箱中。
+- 若未来引入面向不受信任第三方的隔离插件类型，须通过新 ADR 建立独立的受限 package class 与沙箱运行时，不得在当前全信任模型上零散拼凑权限弹窗。

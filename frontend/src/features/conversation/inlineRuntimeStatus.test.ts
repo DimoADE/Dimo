@@ -390,4 +390,84 @@ describe('deriveInlineStreamRuntimeStatus', () => {
     });
     expect(parseReconnectProgressTitle('正在连接 Agent…')).toBeNull();
   });
+
+  it('does not inherit stale closed/bound connection timestamps or error messages while connecting', () => {
+    const connectingSince = '2026-11-15T00:16:17Z';
+    const fromClosed = deriveInlineStreamRuntimeStatus({
+      connecting: true,
+      connectingSince,
+      connection: readyConnection({
+        status: 'closed',
+        bound: false,
+        message: 'previous idle disconnect',
+        since: '2026-11-15T00:00:00Z',
+      }),
+      request: null,
+      hasUserMessage: false,
+      isTurnInFlight: false,
+      hasStreamingAssistantRow: false,
+    });
+
+    expect(fromClosed.status?.kind).toBe('connection');
+    expect(fromClosed.status?.notice.connection_status?.status).toBe(
+      'connecting'
+    );
+    expect(fromClosed.status?.notice.connection_status?.since).toBe(
+      connectingSince
+    );
+    expect(fromClosed.status?.notice.connection_status?.message).toBeNull();
+
+    const fromBound = deriveInlineStreamRuntimeStatus({
+      connecting: true,
+      connectingSince,
+      connection: readyConnection({
+        status: 'ready',
+        bound: true,
+        since: '2026-11-15T00:00:00Z',
+      }),
+      request: null,
+      hasUserMessage: false,
+      isTurnInFlight: false,
+      hasStreamingAssistantRow: false,
+    });
+
+    expect(fromBound.status?.notice.connection_status?.since).toBe(
+      connectingSince
+    );
+
+    const withoutConnectingSince = deriveInlineStreamRuntimeStatus({
+      connecting: true,
+      connection: readyConnection({
+        status: 'closed',
+        bound: false,
+        since: '2026-11-15T00:00:00Z',
+      }),
+      request: null,
+      hasUserMessage: false,
+      isTurnInFlight: false,
+      hasStreamingAssistantRow: false,
+    });
+    expect(withoutConnectingSince.status?.notice.connection_status?.since).toBe(
+      ''
+    );
+  });
+
+  it('stays silent when sessionBindReady is already true despite a stale unbound connection row', () => {
+    const res = deriveInlineStreamRuntimeStatus({
+      connecting: false,
+      sessionBindReady: true,
+      connection: readyConnection({
+        status: 'connecting',
+        bound: false,
+        since: '2026-11-15T00:00:00Z',
+      }),
+      request: null,
+      hasUserMessage: false,
+      isTurnInFlight: false,
+      hasStreamingAssistantRow: false,
+    });
+
+    expect(res.status).toBeNull();
+    expect(res.placement).toBeNull();
+  });
 });

@@ -53,10 +53,14 @@ import {
   ALLOWED_EXTERNAL_SCHEMES,
   AuthorizedLocalPathRegistry,
   INTERNAL_FS_AUTHORIZE_DROPPED_PATHS_CHANNEL,
+  MAX_LOCAL_FILE_READ_BYTES,
+  isValidAbsolutePath,
   openExternalTarget,
   readLocalFile,
+  revealInFileManager,
   showOpenDialog,
   showSaveDialog,
+  stripWindowsVerbatimPrefix,
   writeLocalFile,
   writeLocalTextFile,
 } from './osBridge';
@@ -75,13 +79,14 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop()!;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-describe('openExternalTarget external schemes', () => {
+describe('openExternalTarget external schemes & local paths', () => {
   it('allows remote SSH editor schemes including vscode-insiders: and antigravity:', async () => {
     expect(ALLOWED_EXTERNAL_SCHEMES.has('vscode-insiders:')).toBe(true);
     expect(ALLOWED_EXTERNAL_SCHEMES.has('antigravity:')).toBe(true);
@@ -107,6 +112,39 @@ describe('openExternalTarget external schemes', () => {
       /Refused to open unsupported external target/
     );
     expect(electronMocks.openExternal).not.toHaveBeenCalled();
+  });
+
+  it('normalizes forward-slash Windows paths for shell.openPath and shell.showItemInFolder and rejects drive-relative paths on win32', async () => {
+    electronMocks.openPath.mockResolvedValue('');
+    await openExternalTarget('C:/Users/Alice/docs/report.pdf', 'win32');
+    expect(electronMocks.openPath).toHaveBeenCalledWith(
+      'C:\\Users\\Alice\\docs\\report.pdf'
+    );
+
+    await expect(openExternalTarget('/drive-relative/foo', 'win32')).rejects.toThrow(
+      /Refused to open unsupported external target/
+    );
+    await expect(revealInFileManager('/drive-relative/foo', 'win32')).rejects.toThrow(
+      /Path must be absolute/
+    );
+
+    if (process.platform === 'win32') {
+      const root = makeTempDir('dimo-reveal-');
+      const file = path.join(root, 'sample.txt');
+      fs.writeFileSync(file, 'hello');
+      const forwardSlashFile = file.replace(/\\/g, '/');
+      const forwardSlashDir = root.replace(/\\/g, '/');
+
+      await revealInFileManager(forwardSlashFile, 'win32');
+      expect(electronMocks.showItemInFolder).toHaveBeenCalledWith(
+        path.win32.normalize(file)
+      );
+
+      await revealInFileManager(forwardSlashDir, 'win32');
+      expect(electronMocks.openPath).toHaveBeenCalledWith(
+        path.win32.normalize(root)
+      );
+    }
   });
 });
 
@@ -282,6 +320,54 @@ describe('AuthorizedLocalPathRegistry & gated local FS operations', () => {
       writeLocalTextFile(danglingEscape, 'pwned', registry)
     ).rejects.toThrow(/Refused unauthorized local file write/);
     expect(fs.readFileSync(outsideTarget, 'utf8')).toBe('original');
+  });
+
+  it('strips Windows verbatim prefixes, rejects drive-relative paths, enforces max read size, and writes Uint8Array views cleanly', async () => {
+    expect(stripWindowsVerbatimPrefix('\\\\?\\C:\\temp\\a.txt', 'win32')).toBe(
+      'C:\\temp\\a.txt'
+    );
+    expect(stripWindowsVerbatimPrefix('\\\\?\\UNC\\srv\\share\\a.txt', 'win32')).toBe(
+      '\\\\srv\\share\\a.txt'
+    );
+    expect(isValidAbsolutePath('/foo', 'win32')).toBe(false);
+    expect(isValidAbsolutePath('\\foo', 'win32')).toBe(false);
+    expect(isValidAbsolutePath('C:foo', 'win32')).toBe(false);
+    expect(isValidAbsolutePath('\\\\?\\C:\\foo', 'win32')).toBe(true);
+    expect(isValidAbsolutePath('/foo', 'linux')).toBe(true);
+    expect(MAX_LOCAL_FILE_READ_BYTES).toBe(64 * 1024 * 1024);
+
+    const root = makeTempDir('dimo-fs-bounds-');
+    const dataFile = path.join(root, 'payload.bin');
+    fs.writeFileSync(dataFile, Buffer.alloc(64, 0x41));
+
+    const registry = new AuthorizedLocalPathRegistry();
+    expect(registry.grantDirectory(root, { writable: true })).toBe(true);
+
+    // Enforces max byte limit before reading into memory.
+    await expect(readLocalFile(dataFile, registry, 32)).rejects.toThrow(
+      /Refused to read local file exceeding 32 bytes/
+    );
+    const okBytes = await readLocalFile(dataFile, registry, 64);
+    expect(okBytes.byteLength).toBe(64);
+
+    // Zero-copy subarray view writes only the selected byte slice.
+    const backing = new Uint8Array([0, 1, 2, 3, 4, 5, 6]);
+    const slice = backing.subarray(2, 5);
+    const outFile = path.join(root, 'slice.bin');
+    await writeLocalFile(outFile, slice, registry);
+    expect(Array.from(fs.readFileSync(outFile))).toEqual([2, 3, 4]);
+
+    if (process.platform === 'win32') {
+      const verbatimFile = `\\\\?\\${dataFile}`;
+      const verbatimOut = `\\\\?\\${path.join(root, 'verbatim-write.bin')}`;
+      expect(registry.canRead(verbatimFile)).toBe(true);
+      expect(registry.canWrite(verbatimOut)).toBe(true);
+
+      const verbatimRegistry = new AuthorizedLocalPathRegistry({ platform: 'win32' });
+      expect(verbatimRegistry.grantReadFile(verbatimFile)).toBe(true);
+      expect(verbatimRegistry.canRead(dataFile)).toBe(true);
+      expect(verbatimRegistry.grantReadFile('/drive-relative/file.bin')).toBe(false);
+    }
   });
 });
 

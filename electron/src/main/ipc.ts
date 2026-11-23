@@ -45,6 +45,7 @@ export interface IpcContext {
   browser: ElectronBrowserController;
   browserRpc: NativeTabsRpcClient;
   updater: DesktopUpdaterManager;
+  getGpuMode?: () => 'hardware' | 'software';
   onExitRequested: () => Promise<void>;
 }
 
@@ -118,6 +119,7 @@ export function registerIpcHandlers(context: IpcContext): void {
     browser,
     browserRpc,
     updater,
+    getGpuMode,
     onExitRequested,
   } = context;
 
@@ -129,6 +131,7 @@ export function registerIpcHandlers(context: IpcContext): void {
       appVersion,
       backend: sidecar.getConnectionOrNull(),
       sidecarStatus: sidecar.getStatus(),
+      gpuMode: getGpuMode?.() ?? 'hardware',
     };
     event.returnValue = payload;
   });
@@ -159,7 +162,10 @@ export function registerIpcHandlers(context: IpcContext): void {
   });
 
   ipcMain.handle(IPC_CHANNELS.WINDOW_SHOW, (event) => {
-    windows.getWindowForWebContents(event.sender)?.show();
+    const win = windows.getWindowForWebContents(event.sender);
+    if (win) {
+      windows.showWindow(win);
+    }
   });
 
   ipcMain.handle(IPC_CHANNELS.WINDOW_HIDE, (event) => {
@@ -167,7 +173,10 @@ export function registerIpcHandlers(context: IpcContext): void {
   });
 
   ipcMain.handle(IPC_CHANNELS.WINDOW_SET_FOCUS, (event) => {
-    windows.getWindowForWebContents(event.sender)?.focus();
+    const win = windows.getWindowForWebContents(event.sender);
+    if (win) {
+      windows.focusWindow(win);
+    }
   });
 
   ipcMain.handle(IPC_CHANNELS.WINDOW_SET_TITLE, (event, title: string) => {
@@ -271,6 +280,12 @@ export function registerIpcHandlers(context: IpcContext): void {
     IPC_CHANNELS.DESKTOP_TOAST_SET_IGNORE_MOUSE_EVENTS,
     (_event, ignore: boolean) => {
       toast.setIgnoreMouseEvents(Boolean(ignore));
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.DESKTOP_TOAST_SET_CONTENT_HEIGHT,
+    (_event, height: number) => {
+      toast.setContentHeight(Number(height));
     }
   );
 

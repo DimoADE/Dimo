@@ -1,39 +1,42 @@
-import { createElement, useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { getDesktopShell } from '@/lib/desktopShell';
 import type { BrowserSurfaceHost } from './browserPanelLifetime';
+import {
+  canvasLayerCoversBrowser,
+  clipBrowserSurfaceRect,
+} from './browserSurfaceBounds';
+import {
+  acquireElectronBrowserSurface,
+  registerElectronBrowserCallbacks,
+  registerElectronBrowserTab,
+  subscribeCanvasBrowserViewportChange,
+  updateElectronBrowserTab,
+  useElectronBrowserSurfaceStore,
+  type ElectronBrowserSurfaceLease,
+} from './electronBrowserSurfaceStore';
+import {
+  isSurfaceRectIntersectingClip,
+  resolveHostBrowserZIndex,
+  type ElectronBrowserClipRect,
+  type ElectronBrowserRect,
+} from './electronBrowserViewportLayout';
+import {
+  HostedElectronBrowserWebview,
+  electronPartitionForProfile,
+} from './HostedElectronBrowserWebview';
+
+export { electronPartitionForProfile };
 
 export const CANVAS_HIBERNATE_DELAY_MS = 60_000;
-
-interface ElectronWebviewElement extends HTMLElement {
-  getWebContentsId?: () => number;
-  canGoBack?: () => boolean;
-  getURL?: () => string;
-  src?: string;
-}
+const CANVAS_HIBERNATE_VIEWPORT_MARGIN_PX = 120;
+const DOCKVIEW_CLIP_SELECTOR =
+  '.dv-content-container, .dv-groupview, .workspace-stage-host';
+const CANVAS_CLIP_SELECTOR =
+  '[data-testid="workspace-canvas-stage"], [data-canvas-surface], .react-flow, .workspace-stage-host';
 
 interface FreezeThumbnailPayload {
   mime?: string;
   data?: string;
-}
-
-export function electronPartitionForProfile(
-  profileId: string,
-  tabId: string
-): string {
-  const sanitize = (raw: string) => {
-    const cleaned = raw
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9_-]+/g, '-')
-      .replace(/^-+|-+$/g, '');
-    return cleaned.length > 0 ? cleaned.slice(0, 64) : 'default';
-  };
-
-  const trimmed = profileId.trim();
-  if (trimmed === 'ephemeral') {
-    return `dimo-browser-ephemeral-${sanitize(tabId || 'session')}`;
-  }
-  return `persist:dimo-browser-${sanitize(trimmed || 'default')}`;
 }
 
 export interface ElectronBrowserWebviewProps {
@@ -44,13 +47,90 @@ export interface ElectronBrowserWebviewProps {
   panelVisible: boolean;
   canHibernate?: boolean;
   hibernateDelayMs?: number;
+  surfaceZIndex?: number | null;
+  backgroundColor?: string;
   onHistoryAvailabilityChange?: (canGoBack: boolean) => void;
+  onSurfacePointerDown?: () => void;
+}
+
+function resolveStageClipRect(
+  element: HTMLElement,
+  surfaceHost: BrowserSurfaceHost
+): ElectronBrowserClipRect | null {
+  const selector =
+    surfaceHost === 'canvas' ? CANVAS_CLIP_SELECTOR : DOCKVIEW_CLIP_SELECTOR;
+  let clip: ElectronBrowserClipRect | null = null;
+  let parent = element.parentElement;
+  while (
+    parent &&
+    parent !== document.body &&
+    parent !== document.documentElement
+  ) {
+    if (parent.matches(selector)) {
+      const bounds = parent.getBoundingClientRect();
+      if (bounds.width > 0 && bounds.height > 0) {
+        if (!clip) {
+          clip = {
+            left: bounds.left,
+            top: bounds.top,
+            right: bounds.right,
+            bottom: bounds.bottom,
+          };
+        } else {
+          clip = {
+            left: Math.max(clip.left, bounds.left),
+            top: Math.max(clip.top, bounds.top),
+            right: Math.min(clip.right, bounds.right),
+            bottom: Math.min(clip.bottom, bounds.bottom),
+          };
+        }
+      }
+    }
+    parent = parent.parentElement;
+  }
+  return clip;
+}
+
+function resolveCornerRadius(
+  element: HTMLElement,
+  surfaceHost: BrowserSurfaceHost
+): number {
+  if (surfaceHost === 'canvas') {
+    return 12;
+  }
+  const group = element.closest('.dv-groupview') as HTMLElement | null;
+  if (!group) return 0;
+  const isBottomCorner =
+    group.getAttribute('data-stage-bottommost') === 'true' &&
+    (group.getAttribute('data-stage-leftmost') === 'true' ||
+      group.getAttribute('data-stage-rightmost') === 'true');
+  return isBottomCorner ? 14 : 0;
+}
+
+function measureSlotScale(
+  element: HTMLElement,
+  rect: DOMRect,
+  surfaceHost: BrowserSurfaceHost
+): number {
+  if (surfaceHost !== 'canvas') {
+    return 1;
+  }
+  if (element.offsetWidth > 1 && rect.width > 1) {
+    const ratio = rect.width / element.offsetWidth;
+    if (Number.isFinite(ratio) && ratio > 0.05 && ratio < 10) {
+      return ratio;
+    }
+  }
+  return useElectronBrowserSurfaceStore.getState().canvasZoom || 1;
 }
 
 /**
- * Renders an Electron `<webview>` directly inside Chromium's DOM compositor tree,
- * attaches its `webContentsId` to Electron Main's `ElectronBrowserController`, and
- * hibernates offscreen infinite-canvas cards to a lightweight snapshot to cap memory.
+ * Slot controller for an Electron Host Browser surface.
+ *
+ * When `<ElectronBrowserHost />` is mounted at app root, this component renders
+ * only a lightweight placeholder slot and leases the persistent root-mounted
+ * `<webview>` to overlay this slot's geometry (with stage clipping, canvas zoom
+ * scaling, occlusion freeze fallback, and true offscreen-viewport hibernation).
  */
 export function ElectronBrowserWebview({
   tabId,
@@ -60,51 +140,156 @@ export function ElectronBrowserWebview({
   panelVisible,
   canHibernate = true,
   hibernateDelayMs = CANVAS_HIBERNATE_DELAY_MS,
+  surfaceZIndex,
+  backgroundColor,
   onHistoryAvailabilityChange,
+  onSurfacePointerDown,
 }: ElectronBrowserWebviewProps) {
-  const webviewRef = useRef<ElectronWebviewElement | null>(null);
-  const attachedWcIdRef = useRef<number | null>(null);
+  const hostMounted = useElectronBrowserSurfaceStore(
+    (state) => state.hostMounted
+  );
+
+  const slotRef = useRef<HTMLDivElement | null>(null);
+  const leaseRef = useRef<ElectronBrowserSurfaceLease | null>(null);
+  const lastUrlTabIdRef = useRef<string>(tabId);
   const lastUrlRef = useRef<string>(url || 'about:blank');
-  const [mountSrc, setMountSrc] = useState<string>(url || 'about:blank');
+  const latestUrlPropRef = useRef<string>(url);
+  latestUrlPropRef.current = url;
+
   const [hibernated, setHibernated] = useState(false);
   const [hibernatedSnapshot, setHibernatedSnapshot] = useState<string | null>(
     null
   );
-  const onHistoryChangeRef = useRef(onHistoryAvailabilityChange);
-  onHistoryChangeRef.current = onHistoryAvailabilityChange;
+  const [occluded, setOccluded] = useState(false);
+  const [occlusionSnapshot, setOcclusionSnapshot] = useState<string | null>(
+    null
+  );
+  const [occlusionCaptureNonce, setOcclusionCaptureNonce] = useState(0);
+  const [inCanvasViewport, setInCanvasViewport] = useState(true);
 
-  const partition = electronPartitionForProfile(profileId, tabId);
+  const occludedRef = useRef(false);
+  occludedRef.current = occluded;
+  const occlusionCaptureInFlightRef = useRef(false);
+  const lastCapturedOcclusionKeyRef = useRef<string | null>(null);
+  const hibernatedRef = useRef(false);
+  hibernatedRef.current = hibernated;
+  const panelVisibleRef = useRef(panelVisible);
+  panelVisibleRef.current = panelVisible;
+  const surfaceHostRef = useRef(surfaceHost);
+  surfaceHostRef.current = surfaceHost;
+  const surfaceZIndexRef = useRef(surfaceZIndex);
+  surfaceZIndexRef.current = surfaceZIndex;
+  const backgroundColorRef = useRef(backgroundColor);
+  backgroundColorRef.current = backgroundColor;
 
-  // Track latest external URL for wake-up restoration without reloading mounted webviews.
   useEffect(() => {
     if (url && url.trim().length > 0) {
       lastUrlRef.current = url;
     }
   }, [url]);
 
-  // Reset initial src if the logical tabId changes.
+  // Register tab in root host store & keep metadata synced.
+  useLayoutEffect(() => {
+    if (lastUrlTabIdRef.current !== tabId) {
+      lastUrlTabIdRef.current = tabId;
+      lastUrlRef.current = url || 'about:blank';
+    } else if (url && url.trim().length > 0) {
+      lastUrlRef.current = url;
+    }
+    registerElectronBrowserTab({
+      tabId,
+      url: url || lastUrlRef.current || 'about:blank',
+      profileId,
+      backgroundColor,
+      hibernated,
+    });
+  }, [backgroundColor, hibernated, profileId, tabId, url]);
+
+  // Register callbacks for history, guest pointerdown, and load completion notifications.
   useEffect(() => {
+    const callbacks = {
+      onHistoryAvailabilityChange,
+      onPointerDown: onSurfacePointerDown,
+      onLoadFinished: () => {
+        if (
+          occludedRef.current &&
+          surfaceHostRef.current === 'canvas' &&
+          !hibernatedRef.current
+        ) {
+          setOcclusionCaptureNonce((prev) => prev + 1);
+        }
+      },
+    };
+    return registerElectronBrowserCallbacks(tabId, callbacks);
+  }, [onHistoryAvailabilityChange, onSurfacePointerDown, tabId]);
+
+  // Reset local hibernation/occlusion state on logical tabId switch.
+  useEffect(() => {
+    const nextUrl = latestUrlPropRef.current || 'about:blank';
     setHibernated(false);
     setHibernatedSnapshot(null);
-    setMountSrc(url || 'about:blank');
-    lastUrlRef.current = url || 'about:blank';
-    // Only reset on tabId switch, not on in-page URL changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    setOccluded(false);
+    setOcclusionSnapshot(null);
+    setOcclusionCaptureNonce(0);
+    lastCapturedOcclusionKeyRef.current = null;
+    setInCanvasViewport(true);
+    lastUrlRef.current = nextUrl;
   }, [tabId]);
 
-  // Infinite-canvas hibernation: release guest Chromium process after offscreen idle.
+  // Trigger a snapshot when a higher-z-index canvas node covers this browser card.
+  useEffect(() => {
+    if (!occluded || surfaceHost !== 'canvas' || hibernated) {
+      lastCapturedOcclusionKeyRef.current = null;
+      return undefined;
+    }
+    const captureKey = `${tabId}:${url}:${occlusionCaptureNonce}`;
+    if (
+      lastCapturedOcclusionKeyRef.current === captureKey ||
+      occlusionCaptureInFlightRef.current
+    ) {
+      return undefined;
+    }
+    let cancelled = false;
+    occlusionCaptureInFlightRef.current = true;
+    void (async () => {
+      try {
+        const frame =
+          await getDesktopShell().invoke<FreezeThumbnailPayload | null>(
+            'electron_browser_capture_thumbnail',
+            { tabId }
+          );
+        if (!cancelled && frame?.data) {
+          const mime = frame.mime || 'image/jpeg';
+          lastCapturedOcclusionKeyRef.current = captureKey;
+          setOcclusionSnapshot(`data:${mime};base64,${frame.data}`);
+        }
+      } catch {
+        // Proceed without snapshot if unavailable.
+      } finally {
+        occlusionCaptureInFlightRef.current = false;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [hibernated, occluded, occlusionCaptureNonce, surfaceHost, tabId, url]);
+
+  // Infinite-canvas hibernation: release guest Chromium process only after offscreen idle.
+  const effectivelyVisibleForHibernate =
+    surfaceHost === 'canvas' ? panelVisible && inCanvasViewport : panelVisible;
+
   useEffect(() => {
     if (surfaceHost !== 'canvas' || !canHibernate) {
       if (hibernated) {
-        setMountSrc(lastUrlRef.current || url || 'about:blank');
+        updateElectronBrowserTab(tabId, { hibernated: false });
         setHibernated(false);
       }
       return undefined;
     }
 
-    if (panelVisible) {
+    if (effectivelyVisibleForHibernate) {
       if (hibernated) {
-        setMountSrc(lastUrlRef.current || url || 'about:blank');
+        updateElectronBrowserTab(tabId, { hibernated: false });
         setHibernated(false);
       }
       return undefined;
@@ -119,10 +304,11 @@ export function ElectronBrowserWebview({
       void (async () => {
         let dataUrl: string | null = null;
         try {
-          const frame = await getDesktopShell().invoke<FreezeThumbnailPayload | null>(
-            'electron_browser_capture_thumbnail',
-            { tabId }
-          );
+          const frame =
+            await getDesktopShell().invoke<FreezeThumbnailPayload | null>(
+              'electron_browser_capture_thumbnail',
+              { tabId }
+            );
           if (frame?.data) {
             const mime = frame.mime || 'image/jpeg';
             dataUrl = `data:${mime};base64,${frame.data}`;
@@ -132,6 +318,7 @@ export function ElectronBrowserWebview({
         }
         if (cancelled) return;
         setHibernatedSnapshot(dataUrl);
+        updateElectronBrowserTab(tabId, { hibernated: true });
         setHibernated(true);
       })();
     }, hibernateDelayMs);
@@ -140,92 +327,220 @@ export function ElectronBrowserWebview({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [canHibernate, hibernateDelayMs, hibernated, panelVisible, surfaceHost, tabId, url]);
+  }, [
+    canHibernate,
+    effectivelyVisibleForHibernate,
+    hibernateDelayMs,
+    hibernated,
+    surfaceHost,
+    tabId,
+    url,
+  ]);
 
-  // Attach/detach the live <webview> guest WebContents with Electron Main.
-  useEffect(() => {
-    if (hibernated) {
+  // Acquire surface lease and synchronize slot geometry -> root ElectronBrowserHost.
+  useLayoutEffect(() => {
+    const el = slotRef.current;
+    if (!el || hibernated) {
+      leaseRef.current?.release();
+      leaseRef.current = null;
       return undefined;
     }
-    const el = webviewRef.current;
-    if (!el) {
-      return undefined;
-    }
 
-    let disposed = false;
+    let lease = acquireElectronBrowserSurface(tabId);
+    leaseRef.current = lease;
+    let rafId: number | null = null;
 
-    const attach = () => {
-      if (disposed || typeof el.getWebContentsId !== 'function') {
-        return;
-      }
-      let wcId: number;
-      try {
-        wcId = el.getWebContentsId();
-      } catch {
-        return;
-      }
-      if (!Number.isFinite(wcId) || wcId <= 0 || attachedWcIdRef.current === wcId) {
-        return;
-      }
-      attachedWcIdRef.current = wcId;
-      const currentUrl =
-        (typeof el.getURL === 'function' ? el.getURL() : '') ||
-        lastUrlRef.current ||
-        'about:blank';
-      void getDesktopShell()
-        .invoke('electron_browser_attach', {
-          tabId,
-          webContentsId: wcId,
-          profileId,
-          url: currentUrl,
-        })
-        .catch(() => undefined);
-    };
+    const measureAndSync = (liveOnly: boolean) => {
+      const target = slotRef.current;
+      if (!target) return;
 
-    const syncHistory = () => {
-      if (disposed) return;
-      if (typeof el.getURL === 'function') {
-        const nextUrl = el.getURL();
-        if (nextUrl) lastUrlRef.current = nextUrl;
-      }
-      if (typeof el.canGoBack === 'function') {
-        try {
-          onHistoryChangeRef.current?.(Boolean(el.canGoBack()));
-        } catch {
-          // Ignore before dom-ready
+      const domRect = target.getBoundingClientRect();
+      const rect: ElectronBrowserRect = {
+        x: Math.round(domRect.x),
+        y: Math.round(domRect.y),
+        width: Math.max(0, Math.round(domRect.width)),
+        height: Math.max(0, Math.round(domRect.height)),
+      };
+      const hostKind = surfaceHostRef.current;
+      const clipRect = resolveStageClipRect(target, hostKind);
+      const scale = measureSlotScale(target, domRect, hostKind);
+      const zIndex = resolveHostBrowserZIndex(
+        hostKind,
+        surfaceZIndexRef.current
+      );
+      const cornerRadius = resolveCornerRadius(target, hostKind);
+
+      let nextOccluded = false;
+      if (hostKind === 'canvas' && rect.width > 1 && rect.height > 1) {
+        const clipped = clipBrowserSurfaceRect(target, {
+          left: domRect.left,
+          top: domRect.top,
+          right: domRect.right,
+          bottom: domRect.bottom,
+        });
+        if (
+          clipped.right - clipped.left >= 2 &&
+          clipped.bottom - clipped.top >= 2
+        ) {
+          nextOccluded = canvasLayerCoversBrowser(target);
         }
       }
+      if (nextOccluded !== occludedRef.current) {
+        occludedRef.current = nextOccluded;
+        setOccluded(nextOccluded);
+        if (!nextOccluded) {
+          setOcclusionSnapshot(null);
+        }
+      }
+
+      const intersectsStage = isSurfaceRectIntersectingClip(rect, clipRect, 0);
+      if (hostKind === 'canvas') {
+        const withinHibernateMargin =
+          rect.width > 0 &&
+          rect.height > 0 &&
+          isSurfaceRectIntersectingClip(
+            rect,
+            clipRect,
+            CANVAS_HIBERNATE_VIEWPORT_MARGIN_PX
+          );
+        setInCanvasViewport((prev) =>
+          prev === withinHibernateMargin ? prev : withinHibernateMargin
+        );
+      }
+
+      const visible =
+        panelVisibleRef.current &&
+        !hibernatedRef.current &&
+        !nextOccluded &&
+        rect.width > 0 &&
+        rect.height > 0 &&
+        intersectsStage;
+
+      const interactive =
+        visible &&
+        !(
+          hostKind === 'canvas' &&
+          useElectronBrowserSurfaceStore.getState().canvasInteracting
+        );
+
+      if (liveOnly) {
+        lease.pushLive({
+          rect,
+          clipRect,
+          visible,
+          scale,
+          zIndex,
+          cornerRadius,
+          interactive,
+          backgroundColor: backgroundColorRef.current,
+        });
+        return;
+      }
+
+      const presented = lease.present({
+        rect,
+        clipRect,
+        visible,
+        scale,
+        zIndex,
+        cornerRadius,
+        interactive,
+        surfaceHost: hostKind,
+        slotElement: target,
+      });
+      if (visible && !presented) {
+        lease.release();
+        lease = acquireElectronBrowserSurface(tabId);
+        leaseRef.current = lease;
+        lease.present({
+          rect,
+          clipRect,
+          visible,
+          scale,
+          zIndex,
+          cornerRadius,
+          interactive,
+          surfaceHost: hostKind,
+          slotElement: target,
+        });
+      }
     };
 
-    const onDomReady = () => {
-      attach();
-      syncHistory();
+    const scheduleFullSync = () => {
+      measureAndSync(false);
     };
 
-    el.addEventListener('dom-ready', onDomReady);
-    el.addEventListener('did-navigate', syncHistory);
-    el.addEventListener('did-navigate-in-page', syncHistory);
-    el.addEventListener('did-stop-loading', syncHistory);
+    const scheduleLiveSync = () => {
+      if (rafId !== null) return;
+      rafId = window.requestAnimationFrame(() => {
+        rafId = null;
+        measureAndSync(true);
+      });
+    };
 
-    // Attempt immediate attach in case the guest is already initialized.
-    attach();
+    measureAndSync(false);
+
+    const resizeObserver =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(scheduleFullSync)
+        : null;
+    if (resizeObserver) {
+      resizeObserver.observe(el);
+      const groupEl = el.closest('.dv-groupview');
+      if (groupEl) resizeObserver.observe(groupEl);
+      const stageEl = el.closest(
+        '[data-testid="workspace-canvas-stage"], .workspace-stage-host'
+      );
+      if (stageEl) resizeObserver.observe(stageEl);
+    }
+
+    let canvasMutationObserver: MutationObserver | null = null;
+    if (surfaceHost === 'canvas' && typeof MutationObserver !== 'undefined') {
+      const flowRoot =
+        el.closest('.react-flow') ?? el.closest('[data-canvas-surface]');
+      if (flowRoot) {
+        canvasMutationObserver = new MutationObserver(() => {
+          scheduleFullSync();
+        });
+        canvasMutationObserver.observe(flowRoot, {
+          attributes: true,
+          attributeFilter: ['style', 'class', 'hidden', 'aria-hidden'],
+          childList: true,
+          subtree: true,
+        });
+      }
+    }
+
+    const unsubscribeCanvasViewport =
+      surfaceHost === 'canvas'
+        ? subscribeCanvasBrowserViewportChange(scheduleLiveSync)
+        : undefined;
+
+    window.addEventListener('resize', scheduleFullSync);
+    window.addEventListener('scroll', scheduleFullSync, true);
 
     return () => {
-      disposed = true;
-      el.removeEventListener('dom-ready', onDomReady);
-      el.removeEventListener('did-navigate', syncHistory);
-      el.removeEventListener('did-navigate-in-page', syncHistory);
-      el.removeEventListener('did-stop-loading', syncHistory);
-      const wcId = attachedWcIdRef.current;
-      attachedWcIdRef.current = null;
-      void getDesktopShell()
-        .invoke('electron_browser_detach', {
-          tabId,
-          ...(wcId !== null ? { webContentsId: wcId } : {}),
-        })
-        .catch(() => undefined);
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+      }
+      resizeObserver?.disconnect();
+      canvasMutationObserver?.disconnect();
+      unsubscribeCanvasViewport?.();
+      window.removeEventListener('resize', scheduleFullSync);
+      window.removeEventListener('scroll', scheduleFullSync, true);
+      lease.release();
+      if (leaseRef.current === lease) {
+        leaseRef.current = null;
+      }
     };
-  }, [hibernated, profileId, tabId]);
+  }, [
+    backgroundColor,
+    hibernated,
+    panelVisible,
+    surfaceHost,
+    surfaceZIndex,
+    tabId,
+  ]);
 
   if (hibernated) {
     return (
@@ -233,7 +548,7 @@ export function ElectronBrowserWebview({
         type="button"
         data-testid="electron-browser-hibernated"
         onClick={() => {
-          setMountSrc(lastUrlRef.current || url || 'about:blank');
+          updateElectronBrowserTab(tabId, { hibernated: false });
           setHibernated(false);
         }}
         className="relative block h-full w-full cursor-pointer overflow-hidden border-0 bg-background p-0 text-left"
@@ -254,14 +569,27 @@ export function ElectronBrowserWebview({
     );
   }
 
-  return createElement('webview', {
-    ref: webviewRef,
-    src: mountSrc,
-    partition,
-    allowpopups: 'true',
-    'data-testid': 'electron-browser-webview',
-    'data-tab-id': tabId,
-    className: 'block h-full w-full border-0',
-    style: { width: '100%', height: '100%' },
-  });
+  return (
+    <div
+      ref={slotRef}
+      data-testid="electron-browser-surface-slot"
+      data-browser-surface-slot={tabId}
+      data-surface-host={surfaceHost}
+      data-occluded={occluded ? 'true' : 'false'}
+      className="relative flex h-full w-full overflow-hidden"
+    >
+      {occluded && occlusionSnapshot ? (
+        <img
+          src={occlusionSnapshot}
+          alt=""
+          draggable={false}
+          data-testid="electron-browser-occlusion-snapshot"
+          className="pointer-events-none h-full w-full select-none object-cover"
+        />
+      ) : null}
+      {!hostMounted ? (
+        <HostedElectronBrowserWebview tabId={tabId} inlineFallback />
+      ) : null}
+    </div>
+  );
 }

@@ -139,6 +139,7 @@ const KNOWN_AGENT_KINDS = new Set([
   'command_code',
   'zcode',
   'omp',
+  'muse_code',
   'qa_mock',
 ]);
 
@@ -162,6 +163,8 @@ const AGENT_KIND_ALIASES: Record<string, string> = {
   ohmypi: 'omp',
   'oh-my-pi': 'omp',
   cmdc: 'command_code',
+  muse: 'muse_code',
+  musecode: 'muse_code',
 };
 
 /**

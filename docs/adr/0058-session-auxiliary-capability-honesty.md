@@ -1,101 +1,62 @@
 ---
 status: accepted
 date: 2026-08-17
-decision-makers:
-  - Dimo maintainers
+decision-makers: Dimo maintainers
 ---
 
 # 会话辅助能力以协议事实为准，不猜测、不填零、不静默覆盖
 
-Composer 与时间线周围的辅助能力（用量、计划、目标、压缩、草稿、查找）必须
-只呈现 Agent 或用户明确给出的事实。缺失字段保持缺失；状态不得从自由文本或
-本地化文案反推；本机草稿不得静默覆盖服务器版本。
-
-本决定落实既有产品不变量，不另开第二套会话模型。无工作区会话仍由
-[ADR-0006](0006-workspace-less-conversation.md) 独立交付。自动标题只接受 Agent
-`SessionInfo.title` 回填，不另起 LLM 起名。`&Agent` 仍是 ADR-0031 的委派建议。
-导出、Review 评论预置、未知事件通知保持现有语义。
-
 ## Context
 
-审查发现这些能力已经上线，但读模型与协议事实不对齐：
+Composer 与时间线周围的辅助能力（用量、计划、目标、压缩、草稿、会话内查找、会话配置与人格投影）直接影响用户对会话状态的判断。若将上下文占用冒充输入 token、用正则从助手自由文本反推目标或压缩状态、用 last-write-wins 静默覆盖草稿，或在快照缺失时捏造默认配置，读模型就会与真实协议事实分叉。本决定确立会话辅助能力的诚实性不变量，适用于所有客户端表面。
 
-- ACP v1 `UsageUpdate` 是上下文占用（`used` / `size` / `cost`），被写成
-  `input_tokens`，output/cache 被填 0。用量环因此把窗口占用谎称成输入 token。
-- ACP `PlanEntry` 带 `status` 与 `priority`，进 `AgentPlan` 时只剩字符串，投影
-  再一律写成 `pending`，并且每次更新追加一块 Plan。
-- Codex Goal 从助手自由文本用中英正则猜测状态，文案写死中文，误报容易。
-- `/compact` 的成功/失败靠匹配本地化助手文案，换语言或改文案即失效。
-- Composer 草稿走 scratch last-write-wins，违反 ADR-0042 的 revision 冲突规则。
-- 会话内查找不存在，只能用全局 FTS，且 FTS 故意不含 thinking/tool I/O。
-- 失效的新会话默认只 `tracing::warn`；`SessionConfigStale` 已能进时间线通知，
-  但默认应用失败仍可能被当成已生效。
-- ADR-0006 的无工作区会话仍未开工，不能塞进本次辅助能力修复。
-
-## Decision drivers
+## Decision Drivers
 
 1. 未知不等于零，也不等于成功。
-2. 状态只来自用户命令、Turn 终态或 Agent 结构化字段。
+2. 状态只来自用户显式命令、Turn 终态、持久化快照或 Agent 结构化字段。
 3. 草稿冲突必须同时保留服务器版本与本机版本。
-4. 一次交付只修辅助能力的诚实性；不把无工作区会话或 LLM 起名混进来。
 
 ## Decision
 
 ### 1. 用量区分窗口占用与分项 token
 
-`UsageUpdate.used` / `size` 映射为 `context_used` / `context_window_max`。
-`input_tokens`、`output_tokens`、cache 只在 Agent 通过 `_meta` 或后续稳定
-end-turn Usage 提供时写入；否则为 0 且 UI 不得把它们显示成分项事实。
+上下文占用（`context_used` / `context_window_max`）与分项 token（`input_tokens`、`output_tokens`、`cache_*`）严格区分存储与展示。分项 token 仅在 Agent 引擎或协议明确提供结构化分项数据时写入；未提供时保持缺失，UI 不得以 0 冒充分项事实。Composer 用量环优先使用 `context_used`（缺失时仅在存在真实分项时求和）与 `context_window_max`；缺少窗口大小时隐藏比值。
 
-Composer 用量环使用 `context_used`（若无则用已提供的分项之和）与
-`context_window_max`。没有窗口大小则隐藏比值。
+### 2. Plan 按结构化条目整体替换
 
-### 2. Plan 按 ACP 条目整体替换
+`AgentPlan` 完整保存每条计划项的 `content`、`status` 与 `priority`。同一回合收到计划更新时，投影以最新 Plan 块整体替换而非追加重复块；Composer 待办读取最新 Plan 块。
 
-`AgentPlan` 保存每条 `content`、`status`、`priority`。投影对同一回合用 Plan
-块整体替换，不再追加。Composer 待办读取最新 Plan 块。
+### 3. Codex Goal 仅响应用户 `/goal` 命令
 
-### 3. Codex Goal 只认用户 `/goal` 命令
+`/goal <objective>` 设置目标，`pause` / `resume` / `complete` / `clear` 变更状态。宿主永不从助手自由文本通过正则猜测 Goal 状态；所有可见文案走 i18n。
 
-`/goal <objective>` 设置，`pause` / `resume` / `complete` / `clear` 改状态。
-助手自由文本不再改 Goal。可见文案走 i18n。
+### 4. Compact 由用户命令与 Turn 终态决定
 
-### 4. Compact 由用户 prompt 与 Turn 终态决定
+用户消息以 `/compact` 开头即标记该回合为压缩回合。压缩状态严格取该 Turn 的生命周期相位：在途为 `running`，`Failed` / `Cancelled` / `Interrupted` 为 `failed`，`Completed` 为 `success`；禁止匹配本地化助手文本。
 
-用户消息以 `/compact` 开头即标记该回合为压缩。状态取 Turn 相位：在途为
-running，Failed/Cancelled/Interrupted 为 failed，Completed 为 success。
-删除对本地化助手文案的匹配。
+### 5. Composer 草稿使用单调 revision 冲突检测
 
-### 5. Composer 草稿使用 scratch revision
+`scratch` 维护单调 `revision`。每次保存必须携带 `expected_revision`（新建草稿为 0）。发生并发冲突时服务端返回最新草稿，前端同时保留本机未保存内容，由用户显式选择保留服务器版本或本机版本；仅在提交成功且 revision 仍匹配时清除草稿。
 
-`scratch` 增加单调 `revision`。保存必须带 `expected_revision`（新草稿为 0）。
-冲突返回服务器草稿，前端同时保留本机未保存内容，用户选择保留服务器或保留
-本机。提交成功且 revision 仍匹配时才清除草稿。
+### 6. 会话内查找基于当前时间线可见文本
 
-### 6. 会话内查找搜索当前时间线可见文本
+Conversation 面板的查找能力覆盖当前投影中的用户/助手文本、thinking 与 Plan 条目。它不是第二套 FTS；全局 FTS 仍刻意排除 thinking 与工具 I/O。
 
-Conversation 面板提供查找，范围是当前投影里用户/助手文本、thinking 与 Plan
-条目。它不是第二套 FTS。全局 FTS 仍排除 thinking 与 tool I/O。
+### 7. 会话配置与人格投影只认持久化快照
 
-### 7. 本次不交付的能力
+- 会话列表与 Composer 展示的会话配置仅来自已持久化的快照；快照缺失时保持缺失，不得从角色模板、委派默认值或界面文案补齐 `mode` 或配置项。
+- 会话人格投影（Conversation persona）是创建当时的不可变快照；后续编辑角色或 bot 配置不得回写已有会话。人设不出现在 Composer 一级菜单中。
+- 失效的会话默认值通过 `SessionConfigStale` 通知诚实呈现，不得假装已生效。
 
-| 能力 | 决定 |
-|---|---|
-| 无工作区会话 | 仍按 ADR-0006 单独落地 |
-| 独立 LLM 自动标题 | 不增加。Agent `SessionInfo.title` 回填未锁定标题即可 |
-| 导出 | 保持 Markdown/HTML/bundle |
-| `&Agent` | 保持 ADR-0031：chip 是建议，不是强制委派 |
-| Review 评论 | 继续在发送时预置进 prompt |
-| 未知/较新事件通知 | 保持现有降级显示 |
-| 失效 session default | 继续走 `SessionConfigStale` 通知，不得假装已应用 |
+### 8. 明确边界
+
+- **无工作区会话**：由 [ADR-0006](0006-workspace-less-conversation.md) 独立约束。
+- **自动标题**：仅接受 Agent 返回的 `SessionInfo.title` 回填未锁定标题，不另起独立 LLM 起名。
+- **`&Agent` 提及**：遵循 [ADR-0031](0031-llm-mediated-delegation-and-ampersand-agent-mentions.md)，仅作为委派建议而非强制前端创建子会话。
+- **导出与 Review 评论**：保持 Markdown/HTML/bundle 导出与发送前预置 Review 评论语义；未知/较新事件保持降级显示。
 
 ## Consequences
 
-- 用量、计划、目标、压缩与草稿冲突都有单一事实来源。
-- `AgentPlan` / `ConversationUsage` / `Scratch` 形状变化，需生成类型与投影版本提升。
-- 助手回复里的 “Goal completed” 不再改变 Goal 指示器。
-- 无工作区会话与 LLM 起名仍是明确的后续工作，不是隐藏债。
-
-## Amendment（2026-10-19）
-
-列表和 Composer 上的会话配置只来自已持久化的快照。没有快照就保持缺失，不从角色模板、委派默认或文案补一项 mode。会话人格投影是创建当时的快照；之后编辑角色不回写它。人设不出现在 Composer 一级菜单。
+- 用量、计划、目标、压缩、草稿冲突与会话配置均具备单一事实来源，避免多端或换语言时的状态误报。
+- 助手回复中出现「Goal completed」或类似自然语言表述不会改变 Goal 指示器状态。
+- 缺失数据在 UI 上保持诚实留白或「未提供」，为 [ADR-0074](0074-turn-failure-taxonomy-and-recovery-visibility.md) 与 [ADR-0075](0075-usage-accounting-from-conversation-events.md) 提供统一前提。

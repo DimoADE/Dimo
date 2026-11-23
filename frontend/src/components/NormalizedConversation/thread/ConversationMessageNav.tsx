@@ -61,6 +61,7 @@ export function ConversationMessageNav({
   const rafIdRef = useRef<number | null>(null);
   const lastScrubbedIndexRef = useRef<number | null>(null);
   const suppressNextClickRef = useRef(false);
+  const windowCleanupRef = useRef<(() => void) | null>(null);
   const [scrubState, setScrubState] = useState<{
     entryIndex: number;
     offsetY: number;
@@ -73,7 +74,18 @@ export function ConversationMessageNav({
     }
   }, []);
 
-  useEffect(() => () => cancelPendingRaf(), [cancelPendingRaf]);
+  const clearWindowCleanup = useCallback(() => {
+    windowCleanupRef.current?.();
+    windowCleanupRef.current = null;
+  }, []);
+
+  useEffect(
+    () => () => {
+      cancelPendingRaf();
+      clearWindowCleanup();
+    },
+    [cancelPendingRaf, clearWindowCleanup]
+  );
 
   const applyScrubAtClientY = useCallback(
     (clientY: number, session: PointerScrubSession) => {
@@ -148,6 +160,7 @@ export function ConversationMessageNav({
       if (!session) return;
       if (pointerId !== undefined && session.pointerId !== pointerId) return;
 
+      clearWindowCleanup();
       cancelPendingRaf();
       if (session.didDrag && pendingClientYRef.current !== null) {
         applyScrubAtClientY(pendingClientYRef.current, session);
@@ -164,7 +177,7 @@ export function ConversationMessageNav({
       lastScrubbedIndexRef.current = null;
       setScrubState(null);
     },
-    [applyScrubAtClientY, cancelPendingRaf]
+    [applyScrubAtClientY, cancelPendingRaf, clearWindowCleanup]
   );
 
   const handlePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -172,6 +185,7 @@ export function ConversationMessageNav({
     const listEl = listRef.current;
     if (!listEl) return;
 
+    clearWindowCleanup();
     const rect = listEl.getBoundingClientRect();
     pointerSessionRef.current = {
       pointerId: event.pointerId,
@@ -183,13 +197,35 @@ export function ConversationMessageNav({
     };
     pendingClientYRef.current = null;
     lastScrubbedIndexRef.current = null;
+
+    // Without pointer capture on pointerdown, releasing outside the narrow
+    // rail would never reach the list element and would leave a stale session.
+    const pointerId = event.pointerId;
+    const onWindowPointerEnd = (nativeEvent: PointerEvent) => {
+      if (nativeEvent.pointerId !== pointerId) return;
+      endScrubSession(pointerId);
+    };
+    const onWindowBlur = () => endScrubSession(pointerId);
+    window.addEventListener('pointerup', onWindowPointerEnd);
+    window.addEventListener('pointercancel', onWindowPointerEnd);
+    window.addEventListener('blur', onWindowBlur);
+    windowCleanupRef.current = () => {
+      window.removeEventListener('pointerup', onWindowPointerEnd);
+      window.removeEventListener('pointercancel', onWindowPointerEnd);
+      window.removeEventListener('blur', onWindowBlur);
+    };
   };
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     const session = pointerSessionRef.current;
     if (!session || session.pointerId !== event.pointerId) return;
 
-    if (!session.didDrag && Math.abs(event.clientY - session.startY) < 2) {
+    if (event.pointerType === 'mouse' && (event.buttons & 1) === 0) {
+      endScrubSession(event.pointerId);
+      return;
+    }
+
+    if (!session.didDrag && Math.abs(event.clientY - session.startY) < 4) {
       return;
     }
 

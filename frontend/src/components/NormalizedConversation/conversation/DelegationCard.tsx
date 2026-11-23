@@ -310,6 +310,7 @@ const AGENT_LABELS: Record<string, string> = {
   command_code: 'Command Code',
   zcode: 'ZCode',
   omp: 'OMP',
+  muse_code: 'Muse Code',
   qa_mock: 'QA Mock',
 };
 

@@ -603,6 +603,24 @@ pub(in crate::manager) fn apply_current_mode_to_config_options(
     }
 }
 
+pub(in crate::manager) fn apply_config_option_value(
+    options: &mut [AcpSessionConfigOption],
+    config_id: &str,
+    value: &str,
+) {
+    if config_id == "mode" {
+        apply_current_mode_to_config_options(options, value);
+    }
+    for option in options {
+        if option.id.0.as_ref() != config_id {
+            continue;
+        }
+        if let SessionConfigKind::Select(select) = &mut option.kind {
+            select.current_value = SessionConfigValueId::new(value);
+        }
+    }
+}
+
 pub(in crate::manager) fn advertised_option_is_thought_level(
     options: &[AcpSessionConfigOption],
     config_id: &str,

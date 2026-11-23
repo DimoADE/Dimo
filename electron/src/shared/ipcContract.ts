@@ -4,13 +4,21 @@ export const DESKTOP_APP_ORIGIN = `${DESKTOP_APP_SCHEME}://localhost`;
 export const DEFAULT_APP_USER_MODEL_ID = 'com.dimo.app';
 export const SIDECAR_EXITED_EVENT = 'sidecar-exited';
 export const SIDECAR_RESTARTED_EVENT = 'sidecar-restarted';
+export const GPU_MODE_CHANGED_EVENT = 'gpu-mode-changed';
+export const SYSTEM_POWER_RESUMED_EVENT = 'system-power-resumed';
 
 export type SidecarRuntimeStatus = 'running' | 'restarting' | 'stopped';
+export type DesktopGpuMode = 'hardware' | 'software';
 
 export interface ElectronBackendConnectionInfo {
   baseUrl: string;
   token: string;
   dataDir?: string;
+}
+
+export interface SidecarRestartedPayload {
+  backend: ElectronBackendConnectionInfo;
+  attempt?: number;
 }
 
 export interface BootstrapPayload {
@@ -19,6 +27,7 @@ export interface BootstrapPayload {
   appVersion: string;
   backend: ElectronBackendConnectionInfo | null;
   sidecarStatus?: SidecarRuntimeStatus;
+  gpuMode?: DesktopGpuMode;
 }
 
 export const IPC_CHANNELS = {
@@ -36,6 +45,7 @@ export const IPC_CHANNELS = {
   WINDOW_SET_ZOOM: 'dimo:window:setZoom',
   WINDOW_RESIZED: 'dimo:window:resized',
   DESKTOP_TOAST_SET_IGNORE_MOUSE_EVENTS: 'dimo:desktopToast:setIgnoreMouseEvents',
+  DESKTOP_TOAST_SET_CONTENT_HEIGHT: 'dimo:desktopToast:setContentHeight',
   DIALOG_OPEN: 'dimo:dialog:open',
   DIALOG_SAVE: 'dimo:dialog:save',
   FS_READ_FILE: 'dimo:fs:readFile',
@@ -108,6 +118,7 @@ export const SERVER_DESKTOP_COMMANDS = new Set<string>([
   'cancel_create_host_tunnel',
   'remove_saved_host_tunnel',
   'set_account_relay_lease',
+  'reconnect_host_tunnel',
   // Remote desktop proxy
   'remote_desktop_connect',
   'remote_desktop_disconnect',
@@ -234,7 +245,7 @@ export function convertFileSrcToAssetUrl(
 ): string {
   const scheme = protocol === 'asset' ? DESKTOP_ASSET_SCHEME : protocol;
   let normalized = filePath.trim();
-  if (normalized.startsWith('\\\\?\\UNC\\')) {
+  if (/^\\\\\?\\unc\\/i.test(normalized)) {
     normalized = `\\\\${normalized.slice(8)}`;
   } else if (normalized.startsWith('\\\\?\\')) {
     normalized = normalized.slice(4);

@@ -174,7 +174,7 @@ impl AgentConnectionRunner {
     }
 
     pub(in crate::manager) async fn persist_connection_auto_approve(&self) {
-        self.set_connection_auto_approve_mode(AgentAutoApproveMode::Yolo)
+        self.set_connection_auto_approve_mode_if_lower(AgentAutoApproveMode::AllowAlways)
             .await;
     }
 

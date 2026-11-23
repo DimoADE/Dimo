@@ -27,6 +27,7 @@ function agentAccentColor(agentId: string): string {
     case 'antigravity':
     case 'gemini':
     case 'deepseek_harness':
+    case 'muse_code':
       return 'color-mix(in srgb, hsl(var(--session-slot-19)) 78%, var(--text-strong))';
     case 'codex':
       return 'color-mix(in srgb, hsl(var(--session-slot-8)) 72%, var(--text-strong))';

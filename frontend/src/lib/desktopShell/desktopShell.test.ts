@@ -64,7 +64,9 @@ function createMockElectronBridge(): ElectronDesktopBridge {
     desktopToast: {
       setIgnoreMouseEvents: vi.fn(async () => undefined),
     },
-    invoke: vi.fn(async () => ({ ok: true })) as ElectronDesktopBridge['invoke'],
+    invoke: vi.fn(async () => ({
+      ok: true,
+    })) as ElectronDesktopBridge['invoke'],
   };
 }
 

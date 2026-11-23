@@ -258,7 +258,12 @@ struct PluginRollbackArgs {
 struct PluginMarketplaceInstallSource {
     #[serde(alias = "owner")]
     publisher: String,
-    #[serde(alias = "pluginId", alias = "plugin_id", alias = "pluginName", alias = "plugin_name")]
+    #[serde(
+        alias = "pluginId",
+        alias = "plugin_id",
+        alias = "pluginName",
+        alias = "plugin_name"
+    )]
     id: String,
     #[serde(default)]
     version: Option<String>,
@@ -748,8 +753,15 @@ impl ServerApplicationDomains {
             DomainCommand::DshPlugins => {
                 super::native_commands::dispatch_dsh_plugins(&self.pool).await
             }
-            DomainCommand::GrokPlugins => {
-                super::native_commands::dispatch_grok_plugins(&self.pool).await
+            DomainCommand::GrokPlugins
+            | DomainCommand::GrokPluginAdd
+            | DomainCommand::GrokPluginRemove
+            | DomainCommand::MusePlugins
+            | DomainCommand::MusePluginInstall
+            | DomainCommand::MusePluginApprove
+            | DomainCommand::MusePluginSetEnabled
+            | DomainCommand::MusePluginRemove => {
+                super::native_commands::dispatch_cli_plugin_command(&self.pool, command, args).await
             }
             DomainCommand::PiPlugins => {
                 super::native_commands::dispatch_pi_plugins(&self.pool).await
@@ -762,12 +774,6 @@ impl ServerApplicationDomains {
             }
             DomainCommand::DshPluginRemove => {
                 super::native_commands::dispatch_dsh_plugin_remove(&self.pool, args).await
-            }
-            DomainCommand::GrokPluginAdd => {
-                super::native_commands::dispatch_grok_plugin_add(&self.pool, args).await
-            }
-            DomainCommand::GrokPluginRemove => {
-                super::native_commands::dispatch_grok_plugin_remove(&self.pool, args).await
             }
             DomainCommand::PiPluginAdd => {
                 super::native_commands::dispatch_pi_plugin_add(&self.pool, args).await
@@ -1337,12 +1343,11 @@ impl ServerApplicationDomains {
                 args.agent_id
             ))
         })?;
-        let entries = tokio::task::spawn_blocking(move || {
-            scan_configured_history(kind, &HashMap::new())
-        })
-        .await
-        .map_err(internal_error)?
-        .map_err(|error| ApplicationError::internal(error.to_string()))?;
+        let entries =
+            tokio::task::spawn_blocking(move || scan_configured_history(kind, &HashMap::new()))
+                .await
+                .map_err(internal_error)?
+                .map_err(|error| ApplicationError::internal(error.to_string()))?;
         serialize(json!({
             "sessions": entries.into_iter().map(|entry| json!({
                 "acpSessionId": entry.external_session_id,
@@ -2626,8 +2631,7 @@ impl ServerApplicationDomains {
         }
 
         // 4. Remote marketplace artifact registry
-        if let Ok(listing) =
-            plugins::fetch_artifact(publisher, short_name, requested_version).await
+        if let Ok(listing) = plugins::fetch_artifact(publisher, short_name, requested_version).await
             && let Some(url) = listing.download_url.clone()
             && !url.starts_with("builtin://")
             && !url.starts_with("offline://")
@@ -2739,9 +2743,9 @@ fn catalog_listing_to_marketplace_listing(
     listing: plugins::CatalogListing,
 ) -> plugins::MarketplaceListing {
     let plugin_id = plugins::canonical_listing_id(&listing);
-    let archive = listing.download_url.unwrap_or_else(|| {
-        plugins::marketplace_listing_url(&listing.owner, &listing.plugin_name)
-    });
+    let archive = listing
+        .download_url
+        .unwrap_or_else(|| plugins::marketplace_listing_url(&listing.owner, &listing.plugin_name));
     plugins::MarketplaceListing {
         publisher: listing.owner,
         plugin_id,
@@ -2927,9 +2931,8 @@ impl Drop for HistoryImportJobGuard {
                 job.snapshot.status,
                 agents::LocalHistoryImportJobStatus::Running
             ) {
-                job.snapshot.fail_to_start(
-                    "Local conversation import terminated unexpectedly".to_string(),
-                );
+                job.snapshot
+                    .fail_to_start("Local conversation import terminated unexpectedly".to_string());
             }
             job.snapshot.clone()
         };
@@ -3306,7 +3309,10 @@ mod tests {
             })
             .await
             .expect("enqueue");
-        repository.mark_running(op.id, "host").await.expect("running");
+        repository
+            .mark_running(op.id, "host")
+            .await
+            .expect("running");
 
         assert_ne!(host_instance_id(), "host");
         recover_interrupted_agent_operations(&pool).await;
@@ -3389,11 +3395,11 @@ mod tests {
 
     #[test]
     fn dedicated_plugin_and_weixin_arg_structs_deserialize_frontend_payloads() {
-        let contrib: PluginContributionsArgs = parse(json!({ "pluginId": "acme.notes" }))
-            .expect("camelCase PluginContributionsArgs");
+        let contrib: PluginContributionsArgs =
+            parse(json!({ "pluginId": "acme.notes" })).expect("camelCase PluginContributionsArgs");
         assert_eq!(contrib.plugin_id, "acme.notes");
-        let contrib_snake: PluginContributionsArgs =
-            parse(json!({ "plugin_id": "acme.notes" })).expect("snake_case PluginContributionsArgs");
+        let contrib_snake: PluginContributionsArgs = parse(json!({ "plugin_id": "acme.notes" }))
+            .expect("snake_case PluginContributionsArgs");
         assert_eq!(contrib_snake.plugin_id, "acme.notes");
 
         let rollback: PluginRollbackArgs = parse(json!({
@@ -3491,7 +3497,10 @@ mod tests {
         assert_eq!(value["version"], json!("1.2.3"));
         assert_eq!(value["summary"], json!("Headless browser plugin"));
         assert_eq!(value["packageDigest"], json!("sha256:deadbeef"));
-        assert_eq!(value["archive"], json!("https://example.invalid/browser.zip"));
+        assert_eq!(
+            value["archive"],
+            json!("https://example.invalid/browser.zip")
+        );
         assert_eq!(value["icon"], json!("https://example.invalid/icon.png"));
     }
 

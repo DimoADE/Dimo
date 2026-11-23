@@ -64,9 +64,6 @@ Assistant text 即为最终回复。
 `inputBindings` 仍决定显式数据依赖；默认情况下，每个直接前置 Agent Step 的原始输出都会进入
 Prompt。Definition validator 只校验 DAG、ID、引用、尺寸和字段类型，不解释 Schema 示例内容。
 
-本决定取代 ADR-0045 第 4、5 节以及 ADR-0050 第 3 条中关于结构化输出解析、Schema validation、
-repair Turn 和 “只有校验成功才能进入下游” 的要求。
-
 ### 4. 节点先保存，后进入可执行状态
 
 Studio 新增节点时先创建本地未保存草稿。只有节点配置通过最小完整性检查并点击“保存节点”后，

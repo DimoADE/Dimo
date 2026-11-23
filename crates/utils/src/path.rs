@@ -313,10 +313,15 @@ pub fn unique_dimo_scratch_dir(purpose: &str) -> io::Result<PathBuf> {
 }
 
 fn directory_is_writable(path: &Path) -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
     if std::fs::create_dir_all(path).is_err() {
         return false;
     }
-    let probe = path.join(format!(".dimo-write-{}", std::process::id()));
+    let seq = PROBE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let probe = path.join(format!(".dimo-write-{}-{seq}", std::process::id()));
     match std::fs::write(&probe, b"") {
         Ok(()) => {
             let _ = std::fs::remove_file(&probe);

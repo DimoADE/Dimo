@@ -1,14 +1,27 @@
-# Agent 身份收敛为单一枚举 AgentKind，住在 api-types，serde 用既有 snake_case 键
+---
+status: accepted
+date: 2026-07-04
+decision-makers: Dimo maintainers
+---
 
-历史上 agent 身份有三套并行概念（`AgentType`、`BaseCodingAgent`、`CodingAgent`），因 `agents` 与 `executors` 互不依赖而只能靠六处字符串 match 桥接，新增 agent 漏改任何一处都不会编译报错。我们决定：单一枚举 `AgentKind` 放进 `crates/api-types`（两者共同的叶子依赖，同时清除其中零引用的 issue-tracker 死模块），serde 采用 DB 已持久化的 snake_case 键（`claude_code` 等）实现零数据迁移，读边界保留对历史杂拼写（SCREAMING/Pascal）的宽容解析。
+# Agent 身份收敛为 `crates/api-types` 中的单一枚举 `AgentKind`
+
+Agent 身份在全仓库统一为单一编译期枚举 `AgentKind`，避免多套并行枚举通过字符串匹配桥接导致新增 Agent 时漏改。
+
+## Decision
+
+- `AgentKind` 定义在共享叶子 crate `crates/api-types` 中，供 `crates/agents`、`crates/conversations`、`crates/db`、`crates/application` 与前端生成类型共同引用。
+- 序列化采用数据库持久化的 `snake_case` 键（如 `claude_code`、`codex`），读边界保留对历史大小写格式（SCREAMING / Pascal）的宽容解析。
+- `QaMock` 作为枚举的常驻变体存在：`qa-mode` Cargo feature 仅门控 mock 运行时的可用性，不条件编译枚举变体，避免 serde 与 TypeScript 类型导出漂移。
+- `registry_id`（如 `claude-acp`）属于 ACP Registry 条目元数据，与内置身份枚举分离，保留在 registry 层。
+- `crates/executors` 仅保留工作区生命周期脚本与日志归一化辅助，不运行任何 Coding Agent；历史会话导入统一归于 `conversation_imports`。
 
 ## Considered Options
 
-- 新建专用叶子 crate —— 被否决：为一个枚举增加 workspace 成员，且 api-types 的垃圾抽屉问题仍悬置。
-- 让 executors 依赖 agents 复用 AgentType —— 被否决：与 executor 退役方向相反，legacy crate 反而与目标 crate 绑得更紧，并把 agents 的重依赖拖进所有 executors 依赖方。
+- **新建专用叶子 crate 仅存放 `AgentKind`**：否决。仅为单个枚举增加 workspace 成员会徒增包图复杂度。
+- **让 `crates/executors` 反向依赖 `crates/agents`**：否决。与 `crates/executors` 退出 Agent 运行路径的边界相悖，并会向下游传播重依赖。
 
 ## Consequences
 
-- QaMock 作为枚举的常驻第 8 个变体：`qa-mode` 特性门控的是 mock 执行器的**可用性**，不是身份本身——特性门控枚举变体会给 serde/TS 导出带来无谓麻烦。
-- `registry_id`（如 `claude-acp`）是注册表条目的元数据，与身份枚举是两个概念，保留在 registry 层，不参与统一。
-- `agent_runtime` 表群（第一代 ACP 表）在迁走三处活跃用途后 DROP：只写不读的影子事件槽直接删除；`agent_permissions` 快照合并在启动恢复（ADR-0001）落地后失去存在理由随之删除；`agent_history_imports` 的存量数据 INSERT SELECT 迁入 `conversation_imports`，导入功能保留。
+- 新增内置 Agent 时，Rust 编译器与 TypeScript 穷举检查可立即定位所有缺失分支。
+- 动态 Registry Agent 与用户声明 Agent 使用开放的 `AgentId` 表示，内置成员与 `AgentKind` 保持一一映射。

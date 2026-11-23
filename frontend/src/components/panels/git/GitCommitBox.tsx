@@ -96,7 +96,7 @@ export const GitCommitBox = memo(function GitCommitBox({
       {/* Commit message input with standard TextInput styling */}
       <div
         data-control-frame=""
-        className="astryx-text-input flex min-h-7 w-full items-center gap-1 rounded-lg border border-input bg-background px-2.5 py-1 text-xs text-foreground shadow-none"
+        className="astryx-text-input flex min-h-7 w-full items-center gap-1 rounded-lg px-2.5 py-1.5 text-xs text-foreground"
         onClick={() => textareaRef.current?.focus()}
       >
         <textarea

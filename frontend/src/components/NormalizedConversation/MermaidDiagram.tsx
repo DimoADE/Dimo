@@ -62,28 +62,80 @@ function getMermaidTheme(): 'default' | 'dark' {
     : 'default';
 }
 
+const MAX_MERMAID_SVG_CACHE = 64;
+const mermaidSvgCache = new Map<string, string>();
+
+function getCachedMermaidSvg(cacheKey: string): string | undefined {
+  const cached = mermaidSvgCache.get(cacheKey);
+  if (cached !== undefined) {
+    mermaidSvgCache.delete(cacheKey);
+    mermaidSvgCache.set(cacheKey, cached);
+  }
+  return cached;
+}
+
+function setCachedMermaidSvg(cacheKey: string, svg: string): void {
+  if (mermaidSvgCache.has(cacheKey)) {
+    mermaidSvgCache.delete(cacheKey);
+  }
+  mermaidSvgCache.set(cacheKey, svg);
+  while (mermaidSvgCache.size > MAX_MERMAID_SVG_CACHE) {
+    const oldestKey = mermaidSvgCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    mermaidSvgCache.delete(oldestKey);
+  }
+}
+
+export function resetMermaidSvgCache(): void {
+  mermaidSvgCache.clear();
+  lastMermaidTheme = null;
+}
+
+const themeSubscribers = new Set<(theme: 'default' | 'dark') => void>();
+let sharedThemeObserver: MutationObserver | null = null;
+let lastObservedTheme: 'default' | 'dark' | null = null;
+
+function subscribeMermaidTheme(
+  listener: (theme: 'default' | 'dark') => void
+): () => void {
+  if (
+    typeof document === 'undefined' ||
+    typeof MutationObserver === 'undefined'
+  ) {
+    return () => {};
+  }
+  themeSubscribers.add(listener);
+  if (!sharedThemeObserver) {
+    lastObservedTheme = getMermaidTheme();
+    sharedThemeObserver = new MutationObserver(() => {
+      const nextTheme = getMermaidTheme();
+      if (nextTheme === lastObservedTheme) return;
+      lastObservedTheme = nextTheme;
+      for (const subscriber of themeSubscribers) {
+        subscriber(nextTheme);
+      }
+    });
+    sharedThemeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['class'],
+    });
+  }
+  return () => {
+    themeSubscribers.delete(listener);
+    if (themeSubscribers.size === 0 && sharedThemeObserver) {
+      sharedThemeObserver.disconnect();
+      sharedThemeObserver = null;
+      lastObservedTheme = null;
+    }
+  };
+}
+
 function useMermaidTheme(): 'default' | 'dark' {
   const [theme, setTheme] = useState(getMermaidTheme);
 
   useEffect(() => {
-    if (
-      typeof document === 'undefined' ||
-      typeof MutationObserver === 'undefined'
-    ) {
-      return undefined;
-    }
-
-    const root = document.documentElement;
-    const observer = new MutationObserver(() => {
-      setTheme(getMermaidTheme());
-    });
-
-    observer.observe(root, {
-      attributes: true,
-      attributeFilter: ['class'],
-    });
-
-    return () => observer.disconnect();
+    setTheme(getMermaidTheme());
+    return subscribeMermaidTheme(setTheme);
   }, []);
 
   return theme;
@@ -94,15 +146,23 @@ export const MermaidDiagram = memo(function MermaidDiagram({
 }: MermaidDiagramProps) {
   const reactId = useId();
   const theme = useMermaidTheme();
+  const cacheKey = `${theme}:${value}`;
   const diagramId = useMemo(
     () => `mermaid-${sanitizeDomId(reactId)}-${hashString(value)}`,
     [reactId, value]
   );
-  const [renderState, setRenderState] = useState<RenderState>({
-    status: 'loading',
+  const [renderState, setRenderState] = useState<RenderState>(() => {
+    const cached = getCachedMermaidSvg(cacheKey);
+    return cached ? { status: 'ready', svg: cached } : { status: 'loading' };
   });
 
   useEffect(() => {
+    const cached = getCachedMermaidSvg(cacheKey);
+    if (cached) {
+      setRenderState({ status: 'ready', svg: cached });
+      return;
+    }
+
     let cancelled = false;
 
     async function renderDiagram() {
@@ -126,6 +186,7 @@ export const MermaidDiagram = memo(function MermaidDiagram({
           );
         }
 
+        setCachedMermaidSvg(cacheKey, sanitized);
         if (!cancelled) {
           setRenderState({ status: 'ready', svg: sanitized });
         }
@@ -151,7 +212,7 @@ export const MermaidDiagram = memo(function MermaidDiagram({
     return () => {
       cancelled = true;
     };
-  }, [diagramId, theme, value]);
+  }, [cacheKey, diagramId, theme, value]);
 
   return (
     <figure className="conv-md-mermaid">

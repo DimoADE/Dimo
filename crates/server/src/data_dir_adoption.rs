@@ -535,7 +535,10 @@ fn rename_dir_with_windows_retry(from: &Path, to: &Path) -> std::io::Result<()> 
     }
 }
 
-fn evacuate_or_set_aside_legacy_dir(legacy_dir: &Path, target_dir: &Path) -> std::io::Result<PathBuf> {
+fn evacuate_or_set_aside_legacy_dir(
+    legacy_dir: &Path,
+    target_dir: &Path,
+) -> std::io::Result<PathBuf> {
     if utils::assets::is_inside_macos_app_bundle(legacy_dir) {
         preserve_sqlite_dir_beside_stable(legacy_dir, target_dir)
     } else {

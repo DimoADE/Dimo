@@ -628,8 +628,10 @@ impl PluginControlPlane {
         if active_matches && self.plugin_is_live(plugin_id).await.unwrap_or(false) {
             return Ok(plugin);
         }
-        self.remember_worker_restore(node_executable, broker.clone())
-            .await;
+        if plugin.entrypoints.worker.is_some() {
+            self.remember_worker_restore(node_executable, broker.clone())
+                .await;
+        }
         let worker =
             plugin
                 .entrypoints
@@ -675,8 +677,10 @@ impl PluginControlPlane {
                 "candidate publisher does not own the installed plugin identity",
             ));
         }
-        self.remember_worker_restore(node_executable, broker.clone())
-            .await;
+        if package.entrypoints.worker.is_some() {
+            self.remember_worker_restore(node_executable, broker.clone())
+                .await;
+        }
         let _ = self.auto_satisfy_plugin_dependencies(&package).await;
         self.ensure_plugin_dependencies(&package).await?;
         self.ensure_runtime_readiness(&plugin_id, &package).await?;

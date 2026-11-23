@@ -4,10 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { toast } from '@/components/ui/toast';
 import { hostClientApi, settingsWindowApi } from '@/lib/api';
 import { backendListen } from '@/lib/backendTransport';
-import {
-  getDesktopWindowLabel,
-  useTauriClient,
-} from '@/lib/desktopShell';
+import { getDesktopWindowLabel, useTauriClient } from '@/lib/desktopShell';
 import { isHostAppWindowLabel } from '@/lib/hostBoundWindow';
 
 const HOST_CLIENT_CHANGED = 'host-client-changed';

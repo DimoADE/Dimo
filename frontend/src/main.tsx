@@ -22,6 +22,9 @@ import { initMonoFont } from '@/lib/uiFont';
 import { initResolvedTheme } from '@/lib/resolvedTheme';
 import { initColorThemes } from '@/lib/theme/colorThemeStore';
 import { warmDefaultSettingsSurface } from '@/lib/settingsPreload';
+import { configApi } from '@/lib/api';
+import { getDesktopWindowLabel } from '@/lib/desktopShell';
+import { isHostBoundWindowLabel } from '@/lib/hostBoundWindow';
 // Initialize the i18n runtime before first render.
 import { i18nReady } from '@/i18n';
 // Import modal type definitions
@@ -83,6 +86,15 @@ initAccentColor();
 warmDefaultSettingsSurface();
 if (getAppRouteMode(window.location.pathname) === 'desktop-toast') {
   document.documentElement.classList.add('desktop-toast-shell');
+} else if (
+  isDesktopShell() &&
+  !isHostBoundWindowLabel(getDesktopWindowLabel())
+) {
+  void queryClient.prefetchQuery({
+    queryKey: ['user-system'],
+    queryFn: configApi.getConfig,
+    staleTime: 5 * 60 * 1000,
+  });
 }
 
 void i18nReady.finally(() => {

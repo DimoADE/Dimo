@@ -1,48 +1,38 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-21
-decision-makers:
-  - Dimo maintainers
+decision-makers: Dimo maintainers
 ---
 
-# Kiro、Auggie、TRAE、Command Code 与 ZCode 走现有 ACP 管线
+# Kiro、Auggie、TRAE、Command Code 与 ZCode 通过 ACP 兼容管线接入
 
-Kiro、Auggie、TRAE 与 Command Code 有官方 ACP。ZCode 没有官方 ACP，会话经固定
-版本的社区桥 `zcode-acp-server@0.72.0` 接入，启动参数是 `server`。五者都进入
-`AgentKind` 与 `BuiltInProfileCatalog`。安装、鉴权、会话、取消和错误走现有
-管线。不实现 `app-server` 客户端，也不复制凭据。
+## Context
 
-## 分发
+Kiro、Auggie、TRAE 与 Command Code 提供官方原生 ACP 协议支持；ZCode 无官方 ACP，可通过固定版本的社区桥 `zcode-acp-server@0.72.0`（启动参数 `server`）接入。按照 [ADR-0087](0087-dedicated-agent-engine-first-acp-fallback.md) 的主次分层策略，五者作为内置一等档案进入 `AgentKind` 与 `BuiltInProfileCatalog`，通过次选 ACP 兼容管线复用安装、鉴权、会话控制、取消握手与错误分类机制，不复制凭据。
 
-- Auggie 与 Command Code 用 npm 托管安装，和 Qoder 一样。Command Code 在
-  Windows 上探测 `command-code`、`cmdc`、`commandcode`，不探测裸 `cmd`。
-- Kiro 只托管 Linux zip。macOS DMG 与 Windows MSI 不能被现有归档安装器解包，
-  也不执行未签名的安装脚本。这两个平台仍列入可运行平台，以便 PATH 上的
-  `kiro-cli` 能启动 `kiro-cli acp`。
-- TRAE 的公开制品是单个二进制的 gzip。安装器增加通用的单文件 gzip 解压，
-  不为 TRAE 单独写安装器，也不下载 `code_mode_host` 旁路文件。
-- ZCode 的桥用 npm 托管安装。官方 ZCode 运行时单独发现：桌面安装包里的
-  `zcode.cjs`，否则 PATH 上的 `zcode`。桥的启动文件必须解析到 JavaScript
-  入口，再由已验证的 Node.js 22（含 `node:sqlite`）执行。不把裸 `zcode` 当作
-  ACP 程序，也不探测不带 `server` 的桥。
+## Decision
 
-## 鉴权
+### 1. 分发与运行时发现
 
-Kiro 同时有官方账号和 `KIRO_API_KEY`。选择账号时清掉 API Key。Auggie 的
-`AUGMENT_SESSION_AUTH` 与 TRAE 的 `TRAECLI_PERSONAL_ACCESS_TOKEN` 是同一账号的
-无浏览器令牌，不是另一套官方 API，因此不出现在 API Key 模式里。Command Code
-的 BYOK 文件格式未核实，只提供官方登录。ZCode 只提供官方订阅模式。登录留在
-官方 ZCode。没有核实过的无浏览器令牌，也不发明登录命令。Start Plan 的桌面
-验证码不在这里完成。
+- **Auggie 与 Command Code**：采用标准 npm 托管安装（同 [ADR-0072](0072-qoder-first-class-agent.md) 形态）。Command Code 在 Windows 上探测 `command-code`、`cmdc`、`commandcode`，不探测裸 `cmd`。
+- **Kiro**：托管 Linux zip 归档；macOS DMG 与 Windows MSI 不由通用归档安装器解包，也不执行未签名的远端安装脚本，但两平台均列入可运行平台，支持直接发现并启动用户 `PATH` 上的 `kiro-cli acp`。
+- **TRAE**：公开产物为单文件 gzip；安装器采用通用单文件 gzip 解压能力处理，不为 TRAE 编写专用安装器，也不额外下载 `code_mode_host` 旁路文件。
+- **ZCode**：社区桥由 npm 托管安装；官方 ZCode 运行时独立发现（优先桌面安装包内 `zcode.cjs`，否则 `PATH` 上的 `zcode`）。桥的启动文件解析到 JavaScript 入口并交由已验证的 Node.js 22（含 `node:sqlite`）执行；不将裸 `zcode` 当作 ACP 服务，也不探测缺失 `server` 参数的桥。
 
-## 会话
+### 2. 鉴权边界
 
-ZCode 的 `session/new` 只是占位。新建会话在第一条 prompt 之前确认 `mode`，
-即使用户没有改选择，也发送 `session/set_config_option`。已保存且仍被通告的
-模式优先，否则用 `build`。确认超过 60 秒、模式未被通告或应答与请求不一致时，
-会话失败并且不发送 prompt。恢复与加载不重复这个确认。不设置进程级
-`ZCODE_ACP_MODE`。
+- **Kiro**：同时支持官方账号登录与 `KIRO_API_KEY`；选择官方账号模式时清除 API Key 覆盖。
+- **Auggie 与 TRAE**：`AUGMENT_SESSION_AUTH` 与 `TRAECLI_PERSONAL_ACCESS_TOKEN` 均为对应账号的无浏览器个人令牌，并非独立官方 API Key 模式，因此不作为 API Key 模式呈现。
+- **Command Code**：仅提供官方登录模式，不虚构未核实的 BYOK 文件格式。
+- **ZCode**：仅提供官方订阅模式，登录流程留在官方 ZCode 应用中，不发明额外登录命令或环境变量令牌。
 
-Fork、附件和原生历史格式未核实。能力跟随 ACP 通告。不扫描 ZCode 的 SQLite。
-macOS 与 Linux 的官方运行时发现尚未在本机执行；Windows 发现逻辑已移植，但没有
-对真实安装跑过会话。
+### 3. 会话行为与能力边界
+
+- **ZCode 显式模式确认**：ZCode 的 `session/new` 仅作占位；新建会话在发送第一条 prompt 前必须发送 `session/set_config_option` 显式确认 `mode`（优先使用已保存且仍被通告的模式，否则默认 `build`）。若确认超过 60 秒、模式未被通告或应答与请求不一致，则会话失败且不发送 prompt。恢复与加载会话不重复该确认，且不设置进程级 `ZCODE_ACP_MODE`。
+- **能力诚实边界**：五者的 Fork、附件等能力严格跟随 ACP 实时能力通告，不扫描 ZCode 内部 SQLite 数据库。
+
+## Consequences
+
+- 五个 CLI Agent 纳入 `AgentKind` 与内置名册，统一受 [ADR-0060](0060-agent-installs-use-user-environment.md) 用户环境安装与 [ADR-0081](0081-connect-time-session-bind-codeg-parity.md) 连接时会话绑定约束。
+- 单文件 gzip 解压成为通用安装器能力，后续同类分发可直接复用。
+- 若未来任一 Agent 发布官方原生 SDK 或服务协议，可按 [ADR-0087](0087-dedicated-agent-engine-first-acp-fallback.md) 平滑升级为独立引擎驱动，而无需改变其 `AgentKind` 身份。

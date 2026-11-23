@@ -276,8 +276,25 @@ class PreviewSubviewErrorBoundary extends Component<
 }
 
 /** Remembered rendered/source choice per file, so a tab keeps its view. */
+const MAX_REMEMBERED_PREVIEW_STATES = 64;
 const renderStateMap = new Map<string, boolean>();
 const markdownViewStateMap = new Map<string, MarkdownPreviewMode>();
+
+function setBoundedPreviewState<T>(
+  map: Map<string, T>,
+  key: string,
+  value: T
+): void {
+  if (map.has(key)) {
+    map.delete(key);
+  }
+  map.set(key, value);
+  while (map.size > MAX_REMEMBERED_PREVIEW_STATES) {
+    const oldestKey = map.keys().next().value;
+    if (oldestKey === undefined) break;
+    map.delete(oldestKey);
+  }
+}
 
 function DockviewPreviewPanel(props: IDockviewPanelProps) {
   const { t } = useTranslation(['conversation', 'common', 'settings']);
@@ -620,7 +637,7 @@ function DockviewPreviewPanel(props: IDockviewPanelProps) {
         deriveRelativeFilePath(renamedFrom, rootPath) ?? renamedFrom;
       const previousView = markdownViewStateMap.get(previousKey);
       if (previousView) {
-        markdownViewStateMap.set(filePath, previousView);
+        setBoundedPreviewState(markdownViewStateMap, filePath, previousView);
         setMarkdownViewState(previousView);
         return;
       }
@@ -640,7 +657,7 @@ function DockviewPreviewPanel(props: IDockviewPanelProps) {
     (next: boolean) => {
       setIsRendered(next);
       if (filePath && previewForm && previewForm !== 'markdown') {
-        renderStateMap.set(filePath, next);
+        setBoundedPreviewState(renderStateMap, filePath, next);
       }
     },
     [filePath, previewForm]
@@ -650,7 +667,7 @@ function DockviewPreviewPanel(props: IDockviewPanelProps) {
       const mode = parseMarkdownPreviewMode(next);
       setMarkdownViewState(mode);
       if (filePath && previewForm === 'markdown') {
-        markdownViewStateMap.set(filePath, mode);
+        setBoundedPreviewState(markdownViewStateMap, filePath, mode);
       }
     },
     [filePath, previewForm]
@@ -1321,17 +1338,11 @@ function DockviewPreviewPanel(props: IDockviewPanelProps) {
           ) : (
             <div className="h-full bg-muted/10 p-3">
               {fileAssetSrc ? (
-                <object
-                  data={fileAssetSrc}
-                  type="application/pdf"
+                <iframe
+                  src={fileAssetSrc}
+                  title={resolvedDisplayPath ?? filePath}
                   className="h-full w-full rounded-lg border border-border bg-background shadow-sm"
-                >
-                  <iframe
-                    src={fileAssetSrc}
-                    title={resolvedDisplayPath ?? filePath}
-                    className="h-full w-full rounded-lg border border-border bg-background"
-                  />
-                </object>
+                />
               ) : (
                 <PreviewPlaceholder
                   icon={FileText}

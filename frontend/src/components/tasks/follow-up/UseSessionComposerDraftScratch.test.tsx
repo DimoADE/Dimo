@@ -270,4 +270,46 @@ describe('useSessionComposerDraftScratch', () => {
     );
     errorSpy.mockRestore();
   });
+
+  it('drops stale mode_override and config_overrides on save when preserveSessionControls is false', async () => {
+    mockScratch({
+      ...draftScratch(),
+      payload: {
+        type: 'DRAFT_FOLLOW_UP',
+        data: {
+          message: 'stored draft',
+          images: ['.vibe-images/stored.png'],
+          executor_config: profile,
+          queued: false,
+          mode_override: 'plan',
+          config_overrides: { model: 'stale-model' },
+        },
+      },
+    });
+
+    const { result } = renderHook(() =>
+      useSessionComposerDraftScratch({
+        ...draftArgs,
+        preserveSessionControls: false,
+      })
+    );
+
+    await act(async () => {
+      await result.current.saveToScratch('updated text', profile);
+    });
+
+    expect(updateScratchMock).toHaveBeenCalledWith({
+      payload: {
+        type: 'DRAFT_FOLLOW_UP',
+        data: {
+          message: 'updated text',
+          images: ['.vibe-images/current.png'],
+          executor_config: profile,
+          queued: false,
+          config_overrides: {},
+        },
+      },
+      expected_revision: 1,
+    });
+  });
 });

@@ -1057,6 +1057,21 @@ export class ClaudeNativeSidecarServer {
     return { resolved: true, requestId, cancelled: false };
   }
 
+  async handleSessionSetMode(params = {}) {
+    const permissionMode = toPermissionMode(readString(params.permissionMode ?? params.mode));
+    if (!permissionMode) {
+      throw rpcError(JSONRPC_INVALID_PARAMS, 'Missing or invalid parameter: permissionMode');
+    }
+    this.config.permissionMode = permissionMode;
+    let appliedImmediately = false;
+    const queryHandle = this.activeTurn?.queryHandle;
+    if (queryHandle && typeof queryHandle.setPermissionMode === 'function') {
+      await queryHandle.setPermissionMode(permissionMode);
+      appliedImmediately = true;
+    }
+    return { ok: true, permissionMode, appliedImmediately };
+  }
+
   async handleStatusGet() {
     return {
       officialAnthropicSession: this.officialSession,
@@ -1132,6 +1147,9 @@ export class ClaudeNativeSidecarServer {
         case 'session/revert':
           result = await this.handleSessionRevert(params);
           break;
+        case 'session/set_mode':
+          result = await this.handleSessionSetMode(params);
+          break;
         case 'permission/respond':
           result = await this.handlePermissionRespond(params);
           break;
@@ -1164,6 +1182,7 @@ export class ClaudeNativeSidecarServer {
 const IN_TURN_CONCURRENT_METHODS = new Set([
   'prompt/steer',
   'prompt/interrupt',
+  'session/set_mode',
   'permission/respond',
   'question/respond',
   'status/get',

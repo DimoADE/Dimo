@@ -176,6 +176,12 @@ pub struct HostClientRuntime {
 
 pub use super::host_windows::{host_app_window_label, host_window_label};
 
+impl Default for HostClientRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HostClientRuntime {
     pub fn new() -> Self {
         Self::with_path(utils::assets::asset_dir().join(STORE_FILE_NAME))
@@ -292,7 +298,9 @@ impl HostClientRuntime {
             if let Ok(envelope) = serde_json::from_slice::<remote_protocol::ErrorEnvelope>(&body) {
                 return Err(DesktopError::BadRequest(envelope.message));
             }
-            return Err(DesktopError::BadRequest(HOST_UPDATE_UNREACHABLE.to_string()));
+            return Err(DesktopError::BadRequest(
+                HOST_UPDATE_UNREACHABLE.to_string(),
+            ));
         }
         let payload = serde_json::from_slice::<CommandResponse<ApplyHostUpdateResult>>(&body)
             .map_err(internal)?;
@@ -345,7 +353,9 @@ impl HostClientRuntime {
             return Err(DesktopError::BadRequest(NEEDS_TOKEN.to_string()));
         };
         let Some(profile) = self.profile(profile_id).await? else {
-            return Err(DesktopError::NotFound("saved Host was not found".to_string()));
+            return Err(DesktopError::NotFound(
+                "saved Host was not found".to_string(),
+            ));
         };
         self.bind_window(registry, profile_id, &profile.origin, token)
             .await?;
@@ -568,7 +578,9 @@ impl HostClientRuntime {
             .iter()
             .position(|profile| profile.id == profile_id)
         else {
-            return Err(DesktopError::NotFound("saved Host was not found".to_string()));
+            return Err(DesktopError::NotFound(
+                "saved Host was not found".to_string(),
+            ));
         };
         let removed = state.profiles.remove(index);
         self::sync::record_pending_cloud_delete(&mut state, &removed);
@@ -1161,10 +1173,7 @@ fn collapse_provisioned_duplicates(state: &mut StoredState) -> bool {
     true
 }
 
-pub fn advertised_connect_origin(
-    origin: &str,
-    provision: Option<&serde_json::Value>,
-) -> String {
+pub fn advertised_connect_origin(origin: &str, provision: Option<&serde_json::Value>) -> String {
     let origin = origin.trim().trim_end_matches('/');
     if !origin.is_empty() && !is_loopback_http_origin(origin) {
         return origin.to_string();
@@ -1239,7 +1248,9 @@ fn origin_from_provision(provision: Option<&serde_json::Value>) -> Option<String
 pub(crate) fn normalize_origin(value: &str) -> Result<String, DesktopError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return Err(DesktopError::BadRequest("Host address is required".to_string()));
+        return Err(DesktopError::BadRequest(
+            "Host address is required".to_string(),
+        ));
     }
     let with_scheme = if trimmed.contains("://") {
         trimmed.to_string()

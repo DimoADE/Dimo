@@ -18,6 +18,7 @@ import {
 } from '@/lib/api';
 import { showDesktopToast } from '@/lib/desktopToast';
 import { backendListen } from '@/lib/backendTransport';
+import { getDesktopShell, hasElectronDesktopRuntime } from '@/lib/desktopShell';
 import { desktopApi } from '@/lib/api';
 import { useWindowProjectsStore } from '@/stores/useWindowProjectsStore';
 import { useStopToastSuppression } from '@/stores/useTaskDetailsUiStore';
@@ -155,14 +156,71 @@ function ProjectNotificationBridge() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let cancelled = false;
+    let drainInFlight = false;
+    const liveKeysBeforeDrain = new Set<string>();
+    let recentDrainedActivation: { key: string; at: number } | null = null;
 
-    backendListen<ProjectSessionTarget>(
+    const activationKey = (target: ProjectSessionTarget) =>
+      `${target.projectId}:${target.workspaceId}:${target.sessionId}`;
+
+    const handleLiveActivation = (target: ProjectSessionTarget) => {
+      if (cancelled) return;
+      const key = activationKey(target);
+      if (drainInFlight) {
+        liveKeysBeforeDrain.add(key);
+      }
+      if (
+        recentDrainedActivation &&
+        recentDrainedActivation.key === key &&
+        Date.now() - recentDrainedActivation.at < 1_000
+      ) {
+        recentDrainedActivation = null;
+        return;
+      }
+      openProjectSession(target);
+    };
+
+    void backendListen<ProjectSessionTarget>(
       'desktop-toast-activated',
-      openProjectSession
-    ).then((dispose) => {
-      if (cancelled) dispose();
-      else unlisten = dispose;
-    });
+      handleLiveActivation
+    )
+      .then((dispose) => {
+        if (cancelled) {
+          dispose();
+          return;
+        }
+        unlisten = dispose;
+        if (!hasElectronDesktopRuntime()) {
+          return;
+        }
+        drainInFlight = true;
+        void getDesktopShell()
+          .invoke<ProjectSessionTarget | null>(
+            'take_pending_desktop_toast_activation'
+          )
+          .catch(() => null)
+          .then((pending) => {
+            drainInFlight = false;
+            if (
+              cancelled ||
+              !pending ||
+              !pending.projectId ||
+              !pending.workspaceId ||
+              !pending.sessionId
+            ) {
+              return;
+            }
+            const key = activationKey(pending);
+            if (liveKeysBeforeDrain.has(key)) {
+              return;
+            }
+            recentDrainedActivation = { key, at: Date.now() };
+            openProjectSession(pending);
+          });
+      })
+      .catch(() => {
+        // Ignore listener registration errors outside the desktop shell.
+      });
 
     return () => {
       cancelled = true;

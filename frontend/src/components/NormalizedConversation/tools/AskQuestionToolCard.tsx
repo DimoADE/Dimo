@@ -1,4 +1,4 @@
-import { ChevronRight } from 'lucide-react';
+import { Check, ChevronRight } from 'lucide-react';
 import { useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type {
@@ -11,7 +11,9 @@ import { AgentQuestionCard } from '@/components/tasks/follow-up/AgentQuestionCar
 import {
   answerStateFromResponse,
   answerStateFromToolResult,
+  displayAnswerLabels,
   firstQuestionTitle,
+  isQuestionDeclined,
   mergeQuestionRequestWithToolUse,
   questionRequestFromToolUse,
   questionTabsFromRequest,
@@ -57,6 +59,19 @@ export function AskQuestionToolCard({
       answerStateFromToolResult(questions, result),
     [questions, response, result]
   );
+  const declined = useMemo(
+    () => !answers && isQuestionDeclined(response, result),
+    [answers, response, result]
+  );
+  const answeredSummary = useMemo(() => {
+    if (!answers) return [];
+    return questions.flatMap((question, index) => {
+      const labels = displayAnswerLabels(question, answers[question.id]);
+      if (labels.length === 0) return [];
+      return [{ question, index, labels }];
+    });
+  }, [answers, questions]);
+  const hasAnyAnswer = answeredSummary.length > 0;
   const [activeQuestionIndex, setActiveQuestionIndex] = useState(0);
   const activeQuestionTitle =
     questions[activeQuestionIndex]?.question ||
@@ -85,25 +100,47 @@ export function AskQuestionToolCard({
       role="group"
       aria-label={title}
       data-testid="ask-question-tool-card"
-      className="ask-question-tool-card rounded-lg border border-border bg-card px-5 py-4 text-sm text-card-foreground"
+      data-expanded={open ? 'true' : 'false'}
+      data-status={
+        hasAnyAnswer ? 'answered' : declined ? 'declined' : 'pending'
+      }
+      className="ask-question-tool-card rounded-lg border border-border bg-card text-sm text-card-foreground"
     >
-      <div className="min-w-0">
+      <div className="ask-question-tool-header">
         <span
           ref={titleRef}
           data-testid="ask-question-title"
           title={title}
           className={cn(
-            'ask-question-tool-title min-w-0 w-full font-medium text-foreground',
+            'ask-question-tool-title min-w-0 flex-1 font-medium text-foreground',
             titleOverflows && 'is-overflow'
           )}
         >
           {title}
         </span>
-        <div className="mt-2 flex min-w-0 items-center gap-2">
+        <div className="ask-question-tool-badges">
+          {hasAnyAnswer ? (
+            <span
+              data-testid="ask-question-status"
+              className="ask-question-status-pill is-answered"
+            >
+              <span className="ask-question-status-dot" aria-hidden="true">
+                <Check className="h-2.5 w-2.5" strokeWidth={3} />
+              </span>
+              <span>{t('questionRequestCard.answered')}</span>
+            </span>
+          ) : declined ? (
+            <span
+              data-testid="ask-question-status"
+              className="ask-question-status-pill is-declined"
+            >
+              <span>{t('askQuestion.declined')}</span>
+            </span>
+          ) : null}
           {questions.length > 0 ? (
             <button
               type="button"
-              className="flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
+              className="ask-question-details-toggle"
               aria-expanded={open}
               onClick={() => {
                 onExpandedChange?.(!open);
@@ -113,29 +150,81 @@ export function AskQuestionToolCard({
               <ChevronRight
                 aria-hidden
                 className={cn(
-                  'h-3.5 w-3.5 transition-transform',
+                  'h-3 w-3 transition-transform duration-150',
                   open && 'rotate-90'
                 )}
               />
-              {t('askQuestion.viewDetails')}
+              <span>{t('askQuestion.viewDetails')}</span>
             </button>
           ) : null}
-          <span
-            data-testid="ask-question-kind-tag"
-            className="ask-question-kind-tag ml-auto"
-          >
-            {t('askQuestion.kindTag')}
-          </span>
         </div>
-        {open && questions.length > 0 ? (
-          <AgentQuestionCard
-            request={resolvedRequest}
-            mode="readonly"
-            answers={answers}
-            onQuestionIndexChange={setActiveQuestionIndex}
-          />
-        ) : null}
       </div>
+
+      {!open && hasAnyAnswer ? (
+        <div
+          className="ask-question-summary"
+          data-testid="ask-question-summary"
+        >
+          {questions.length === 1 ? (
+            <div className="ask-question-summary-chips">
+              {answeredSummary[0].labels.map((label, idx) => (
+                <span
+                  key={`${idx}-${label}`}
+                  className="ask-question-answer-chip"
+                >
+                  <Check
+                    className="h-3 w-3 shrink-0"
+                    strokeWidth={2.5}
+                    aria-hidden="true"
+                  />
+                  <span className="min-w-0 truncate">{label}</span>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <div className="ask-question-summary-list">
+              {answeredSummary.map(({ question, index, labels }) => (
+                <div key={question.id} className="ask-question-summary-row">
+                  <span className="ask-question-summary-index tabular-nums">
+                    {index + 1}
+                  </span>
+                  <span
+                    className="ask-question-summary-question"
+                    title={question.question}
+                  >
+                    {question.question || question.header}
+                  </span>
+                  <span className="ask-question-summary-answers">
+                    {labels.map((label, idx) => (
+                      <span
+                        key={`${idx}-${label}`}
+                        className="ask-question-answer-chip"
+                        title={label}
+                      >
+                        <Check
+                          className="h-3 w-3 shrink-0"
+                          strokeWidth={2.5}
+                          aria-hidden="true"
+                        />
+                        <span className="min-w-0 truncate">{label}</span>
+                      </span>
+                    ))}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : null}
+
+      {open && questions.length > 0 ? (
+        <AgentQuestionCard
+          request={resolvedRequest}
+          mode="readonly"
+          answers={answers}
+          onQuestionIndexChange={setActiveQuestionIndex}
+        />
+      ) : null}
     </div>
   );
 }

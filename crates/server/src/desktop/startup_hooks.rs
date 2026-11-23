@@ -451,8 +451,8 @@ fn extract_plugin_tar_gz(path: &Path) -> Result<ExtractedPluginArchive, CliImpor
             std::fs::create_dir_all(parent)
                 .map_err(|error| CliImportError::Failed(error.to_string()))?;
         }
-        let mut out = File::create(&dest)
-            .map_err(|error| CliImportError::Failed(error.to_string()))?;
+        let mut out =
+            File::create(&dest).map_err(|error| CliImportError::Failed(error.to_string()))?;
         let written = std::io::copy(&mut entry, &mut out)
             .map_err(|error| CliImportError::Failed(error.to_string()))?;
         extracted_bytes = extracted_bytes.saturating_add(written);
@@ -516,8 +516,8 @@ fn extract_plugin_zip(path: &Path) -> Result<ExtractedPluginArchive, CliImportEr
             std::fs::create_dir_all(parent)
                 .map_err(|error| CliImportError::Failed(error.to_string()))?;
         }
-        let mut out = File::create(&dest)
-            .map_err(|error| CliImportError::Failed(error.to_string()))?;
+        let mut out =
+            File::create(&dest).map_err(|error| CliImportError::Failed(error.to_string()))?;
         let written = std::io::copy(&mut entry, &mut out)
             .map_err(|error| CliImportError::Failed(error.to_string()))?;
         extracted_bytes = extracted_bytes.saturating_add(written);
@@ -546,30 +546,30 @@ pub async fn reconcile_managed_cli_exposures(pool: &SqlitePool) {
 
 async fn reconcile_managed_cli_exposures_in(home_dir: Option<&Path>, pool: &SqlitePool) {
     match home_dir.map(Path::to_path_buf) {
-        Some(home) => match tokio::task::spawn_blocking(move || {
-            agents::remove_orphaned_cli_shims(&home)
-        })
-        .await
-        {
-            Ok(Ok(removed)) if !removed.is_empty() => {
-                tracing::info!(
-                    count = removed.len(),
-                    commands = %removed
-                        .iter()
-                        .map(|shim| shim.command_name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    "removed Agent CLI shims whose Runtime no longer exists"
-                );
+        Some(home) => {
+            match tokio::task::spawn_blocking(move || agents::remove_orphaned_cli_shims(&home))
+                .await
+            {
+                Ok(Ok(removed)) if !removed.is_empty() => {
+                    tracing::info!(
+                        count = removed.len(),
+                        commands = %removed
+                            .iter()
+                            .map(|shim| shim.command_name.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        "removed Agent CLI shims whose Runtime no longer exists"
+                    );
+                }
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "failed to sweep orphaned Agent CLI shims");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "orphaned Agent CLI shim sweep task failed");
+                }
             }
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
-                tracing::warn!(%error, "failed to sweep orphaned Agent CLI shims");
-            }
-            Err(error) => {
-                tracing::warn!(%error, "orphaned Agent CLI shim sweep task failed");
-            }
-        },
+        }
         None => {
             tracing::warn!("failed to locate the home directory for the CLI shim sweep");
         }
@@ -673,8 +673,9 @@ async fn refresh_authentication_probes(pool: &SqlitePool) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    use super::*;
 
     #[tokio::test]
     async fn reconcile_managed_cli_exposures_reclassifies_managed_rows() {

@@ -142,6 +142,7 @@ export type RouterProvision = {
   /** Every model this key can reach over `protocol`. */
   models: { id: string; name: string }[];
   group?: string;
+  groups?: string[];
   keyName?: string;
 };
 

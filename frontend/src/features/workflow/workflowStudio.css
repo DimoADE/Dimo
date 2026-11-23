@@ -61,6 +61,22 @@
   backdrop-filter: blur(18px) saturate(1.18);
 }
 
+html.host-windows .workflow-studio-floating-controls,
+html[data-gpu-mode='software'] .workflow-studio-floating-controls,
+.app.reduced-transparency .workflow-studio-floating-controls {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  background: var(--surface-card-strong);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .workflow-studio-floating-controls {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background: var(--surface-card-strong);
+  }
+}
+
 .workflow-studio-floating-controls[data-testid='workflow-canvas-controls'] {
   border-radius: 9999px;
 }
@@ -264,9 +280,20 @@
 }
 
 .workflow-confirmation-waiting {
+  position: relative;
   border-color: color-mix(in srgb, hsl(var(--warning)) 72%, hsl(var(--border)));
   color: hsl(var(--warning));
+}
+
+.workflow-confirmation-waiting::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: inherit;
+  border: 2px solid color-mix(in srgb, hsl(var(--warning)) 38%, transparent);
+  pointer-events: none;
   animation: workflow-confirmation-pulse 1.45s ease-in-out infinite;
+  will-change: transform, opacity;
 }
 
 .workflow-studio-node:hover,
@@ -292,8 +319,19 @@
 }
 
 .workflow-node-running {
+  position: relative;
   border-color: color-mix(in srgb, hsl(var(--primary)) 68%, hsl(var(--border)));
+}
+
+.workflow-node-running::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: inherit;
+  border: 2px solid color-mix(in srgb, hsl(var(--primary)) 28%, transparent);
+  pointer-events: none;
   animation: workflow-node-pulse 1.8s ease-in-out infinite;
+  will-change: transform, opacity;
 }
 
 .workflow-node-completed {
@@ -675,22 +713,24 @@
 @keyframes workflow-node-pulse {
   0%,
   100% {
-    box-shadow: 0 0 0 0 color-mix(in srgb, hsl(var(--primary)) 18%, transparent);
+    opacity: 0.9;
+    transform: scale(0.99);
   }
   50% {
-    box-shadow: 0 0 0 5px
-      color-mix(in srgb, hsl(var(--primary)) 0%, transparent);
+    opacity: 0;
+    transform: scale(1.03);
   }
 }
 
 @keyframes workflow-confirmation-pulse {
   0%,
   100% {
-    box-shadow: 0 0 0 0 color-mix(in srgb, hsl(var(--warning)) 28%, transparent);
+    opacity: 0.95;
+    transform: scale(0.99);
   }
   50% {
-    box-shadow: 0 0 0 7px
-      color-mix(in srgb, hsl(var(--warning)) 0%, transparent);
+    opacity: 0;
+    transform: scale(1.04);
   }
 }
 
@@ -703,6 +743,19 @@
     opacity: 1;
     transform: translateY(0);
   }
+}
+
+html[data-gpu-mode='software'] .workflow-node-running::after,
+html[data-gpu-mode='software'] .workflow-confirmation-waiting::after {
+  animation: none;
+  opacity: 0.45;
+  will-change: auto;
+}
+
+html[data-gpu-mode='software']
+  .workflow-studio-edge.react-flow__edge.animated
+  path {
+  animation: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -719,12 +772,11 @@
     transform: none;
   }
 
-  .workflow-node-running {
+  .workflow-node-running::after,
+  .workflow-confirmation-waiting::after {
     animation: none;
-  }
-
-  .workflow-confirmation-waiting {
-    animation: none;
+    opacity: 0.45;
+    will-change: auto;
   }
 
   .workflow-studio-edge.react-flow__edge.animated path {

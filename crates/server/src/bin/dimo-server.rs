@@ -1,10 +1,4 @@
-use std::{
-    io::Write,
-    net::SocketAddr,
-    path::PathBuf,
-    process::ExitCode,
-    sync::Arc,
-};
+use std::{io::Write, net::SocketAddr, path::PathBuf, process::ExitCode, sync::Arc};
 
 use server::{
     HeadlessServer, LaunchCommand, ParsedArgs, ServerBootstrapConfig, ServerConfig, ServerLaunch,

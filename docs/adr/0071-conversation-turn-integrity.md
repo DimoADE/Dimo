@@ -1,163 +1,54 @@
 ---
 status: accepted
 date: 2026-09-04
-decision-makers:
-  - Dimo maintainers
+decision-makers: Dimo maintainers
 ---
 
 # Conversation Turn 完整性：取消、恢复回放、连接隔离与终态可达
 
-`session/load` 的历史回放不再把事件日志当 UI transcript。已有 JSONL 时不把
-回放再录一遍。见 [ADR-0082](0082-jsonl-transcript-window.md)。Turn 终态与
-「不自动重发」不变。
-
-用户在一次连续使用中报告了七个现象：第二轮把第一轮的 AI 消息重新吐一遍并粘成
-「AI 消息 AB」、点中断中断不了同时内存涨到 4 GB 以上、重发消息报
-`CHECK constraint failed: status IN (...)`、中断过的对话稍后仍给出输出、Mode 从
-「完全访问」自己变回「Approve for me」、重发失败后重新发送导致并行对话、AI 输出
-结束后停止按钮不肯变回发送按钮。
-
-这七个现象不是七个 bug，而是五个根因在事件溯源会话核心上的组合表现（诊断记录于 `.scratch/conversation-turn-integrity/PRD.md`）。
-本 ADR 固定其中四条不可回退的语义约束。
-
-它不改变 [ADR-0044](0044-conversation-control-plane-and-durable-inputs.md) 的
-Turn 控制面模型、[ADR-0001](0001-crash-recovery-semantics.md) 的崩溃恢复语义，也不
-放宽 [ADR-0061](0061-host-local-safety-and-performance-baseline.md) 的锁与内存基线；
-它把这三者在「一个 Turn 从发出到终态」这条路径上的实现要求写成硬约束。
-
 ## Context
 
-事件溯源的前提是：**宿主的事件日志是唯一权威，投影只是它的函数**（ADR-0044）。
-一旦有第二个事实来源，或者权威日志接受了不是新事实的写入，投影就会分叉，而分叉
-在 UI 上表现为「消息重复」「归属错乱」「状态卡住」——这正是上面七个现象的形状。
-
-审查发现四处破坏了这个前提，一处破坏了终态的可达性：
-
-1. **恢复回放被当成新事实。** ACP `session/load` / `session/resume` 期间，Agent 会
-   把整段历史以 `session/update` 通知重放。连接管理器没有「正在恢复」的门控，于是
-   宿主把自己已经持久化的事实又 append 了一遍。长会话每次重连近似平方级膨胀，
-   这是内存现象的主要来源；而无在途 Turn 时这些回放会落到上一轮的 assistant
-   消息，是「AI 消息 AB」的起点。
-
-2. **取消只是通知，不是握手。** 取消分支发出 `session/cancel` 后立刻宣布
-   `PromptFinished{cancelled}` 并丢弃 `session/prompt` 的请求 future，不等 Agent 以
-   `StopReason::Cancelled` 回应。Agent 之后继续产出的内容此时已无在途 Turn 可归，
-   落进下一轮。用户看到的就是「中断没生效」。
-
-3. **Turn 归属依赖一份会过期的缓存。** 记录器的 `active_turns` 只在它自己看到
-   `PromptFinished` 时清除，而服务端的 `cancel_turn` / `interrupt_orphaned_turn`
-   直接写终态事件、不经过记录器。缓存于是指向已终结的 Turn，新一轮的 chunk 与
-   ToolCall 全部以旧 `turn_id` 落库。文本还能靠投影重定向勉强救回，ToolCall 与
-   Plan 没有重定向路径，直接挂错。
-
-4. **连接跨 Conversation 复用。** `ensure_session` 在会话自己的连接失效后会回退去
-   复用同 workspace / agent / working_dir 的另一个 Ready 连接。但 prompt 循环是按
-   **连接**串行的：复用后第二个 `Prompt` 命令落到「已有活跃 prompt」分支，只留一条
-   诊断就被静默丢弃，服务端 Turn 永远 `running`；两个 Conversation 交叉写同一 ACP
-   会话则表现为并行对话。任何走到 `session/new` 的路径还会拿回 Agent 的默认 mode,
-   而宿主不持久化用户的显式选择——这是一次**权限收敛方向相反**的静默回退。
-
-5. **终态 op 存在丢失窗口。** 行操作发布分三段取锁（读游标 → 读事件 → 载入投影器
-   → apply），并发发布者中后到者建立的投影器会静默吸收尚未发布的序号，先到者随后
-   因 `sequence <= last_sequence()` 跳过它。settle 时刻恰好是并发最高点，而当时的
-   实现又在 settle 时丢弃投影器，保证下一次是冷载入。丢掉的正是最后一条终态 op，
-   它没有「下一批」来触发 gap 自愈，所以只能刷新页面。
-
-另有一处数据一致性缺陷把上面几条串成了用户看到的 #6：`invalidate_agent_session`
-把 binding 状态写成裸字符串 `"rebind_required"`，违反迁移里的 CHECK 约束；而
-`truncate_to_turn` 先物理删除事件再调用它，失败后留下「事件已截断、binding 仍指向
-旧 ACP 会话、`AgentBindingRecovered` 未写入」的半提交状态。
+在 SQLite 单一权威的事件溯源会话核心中（[ADR-0044](0044-conversation-control-plane-and-durable-inputs.md)、ADR-0091），`conversation_events` 是唯一权威事实来源，`conversation_timeline_rows` 投影只是它的确定性函数。若恢复回放被当作新事实重复写入、取消不等待 Agent 确认、连接跨 Conversation 复用、用户权限配置在重连时静默回退，或行操作发布在并发 settle 窗口丢失终态，UI 就会出现消息粘连、中断失效、并行串话、权限回退与按钮卡死。本 ADR 确立六条从 Turn 发出到终态可达的硬约束，配合 [ADR-0001](0001-crash-recovery-semantics.md)、[ADR-0061](0061-host-local-safety-and-performance-baseline.md) 与 [ADR-0089](0089-conversation-binding-generations-and-history-segments.md) 共同保证会话记账正确性。
 
 ## Decision
 
-### 1. 会话恢复的回放不进入事件日志
+### 1. 会话恢复回放不进入事件日志
 
-连接管理器必须知道自己正在恢复哪个 ACP 会话。在恢复窗口内，内容类
-`session/update`（assistant 消息、思考、工具调用与更新、计划）一律丢弃；控制类
-更新（mode、config option、available commands）保留，因为它们描述的是会话当前
-能力，不是历史事实。
+连接管理器显式追踪正在恢复的会话窗口（如 `session/load` / `session/resume` 期间）。在恢复窗口内，所有内容类更新（assistant 消息、思考、工具调用与更新、计划）一律丢弃，不得重复写入 `conversation_events`；仅保留控制类更新（mode、config options、available commands）以反映会话当前能力。宿主事件日志已是完整历史权威（ADR-0091），Agent 侧回放永不构成新事实。
 
-宿主重放自己的历史给 Agent 是**同步**，Agent 回放给宿主不是新事实。任何让恢复
-产生新事件的实现都违反 ADR-0044，按缺陷处理。
+### 2. 取消是与 Agent 的握手，孤立更新永不归属上一轮
 
-### 2. 取消是与 Agent 的握手，不是单向通知
+发出取消请求后必须等待 Agent 对在途 prompt 给出终态确认（如 `StopReason::Cancelled`），收到确认后才宣布 `PromptFinished { cancelled }`。等待设置上限（10 秒）；超时则强制收尾并**退役该活连接/进程**（保留 DB 中的持久化原生会话 ID，见 [ADR-0081](0081-connect-time-session-bind-codeg-parity.md)），防止失控进程向后续回合吐出无归属输出。
 
-发出 `session/cancel` 后必须继续等待 `session/prompt` 的响应，收到后才宣布
-`PromptFinished{cancelled}`。等待有上限（当前 10 秒）；超时则强制收尾，并把该 ACP
-会话标记为不可再复用——因为一个不确认取消的会话随时可能吐出无处归属的内容，让它
-继续服务下一个 Turn 就是把错乱推迟而不是消除。
+Turn 归属只有两个合法答案：当前活跃在途 Turn，或「无归属」。仅在途有意义的事件（消息增量、思考、工具调用、计划）在无活跃在途 Turn 时必须丢弃并记录诊断，严禁回落归属到上一个已终结 Turn。
 
-推论：Turn 归属只有两个合法答案——当前在途 Turn，或者「无归属」。仅在途才有意义的
-事件（消息 chunk、思考、工具调用、计划）在没有在途 Turn 时必须**丢弃并记诊断**，
-不得回落到「最新的那个 Turn」。把「无归属」翻译成「归给上一轮」是本次事故里最贵的
-一行代码。
+### 3. 一个 Conversation 一个连接，并发冲突显式报错
 
-### 3. 一个 Conversation 一个连接
+`ensure_session` 严禁将另一 Conversation 正在使用的连接跨会话复用，即使 workspace、agent 与 working directory 完全相同。连接命令环在已有活跃 prompt 时收到新的 `Prompt` 命令，必须显式返回错误（`prompt_conflict`）使服务端将 Turn 标为可重发失败，严禁静默丢弃导致 Turn 永不到达终态。
 
-`ensure_session` 不得返回其它 Conversation 正在使用的连接。连接不跨 Conversation
-复用，即使 workspace、agent 和 working_dir 完全相同。
+### 4. 用户选择的 mode / config 持久记忆并在首次广播前应用
 
-prompt 循环遇到已有活跃 prompt 的 `Prompt` 命令时，必须回传错误（`prompt_conflict`）
-让服务端把该 Turn 标为失败并可重排，不得静默丢弃。静默丢弃会制造一个永不到达终态的
-Turn，而永不终态的 Turn 在 UI 上就是一个停不下来的按钮。
+用户显式设置的 `preferred_mode_id` 与 `preferred_config_values` 在会话建立/恢复完成时、首次向 UI 广播 `session_modes` / `session_config_options` 之前应用，并拦截建立期间的中间默认值广播，杜绝权限或模式先闪回默认再覆盖的窗口。
 
-### 4. 用户显式选择的 mode / config 由宿主持久化，并在第一次广播前 apply
+记忆分两层按 key 合并，权威始终在 Host SQLite 而非浏览器 `localStorage`：
 
-对齐 CodeG：`preferred_mode_id` + `preferred_config_values` 在 `session/new` /
-`session/load` / `session/resume` 完成时、**第一次** `session_modes` /
-`session_config_options` 发出之前 apply。UI 从未见过 Agent 默认值，因此不存在
-「先闪默认再改回来」的窗口。建立期间的中间 `session/update`（mode / config）
-同样被拦住，直到 apply 结束。
+1. **Conversation binding 层**：该对话的权威记忆；每次显式 `set_mode` / `set_config_option` 成功后按 key 合并写入，Agent 默认广播不得回写。
+2. **Agent last-used 层**：同步 upsert 至 `agent_session_default`，供新建会话继承；已有会话中 binding 层按 key 覆盖 last-used 层。
 
-记忆分两层，按 key 合并（CodeG `saveConfigPreference` / `getSavedPrefsForConnect`）：
+每个 Turn 按「profile / slash 默认 ← last-used ← binding 记忆 ← 本轮显式选择」合并覆盖；权限相关配置不得因重连或重绑静默回退到 Agent 默认值（[ADR-0058](0058-session-auxiliary-capability-honesty.md)）。
 
-1. **Conversation binding 是该对话的权威。** `session/set_mode` 与
-   `session/set_config_option` 成功后按 key 合并写入；改一个 option 不得丢掉其它
-   key。Agent 广播默认值不得回写这份记录。
-2. **Agent last-used 是新会话的继承。** 同一选择同时 upsert 到
-   `agent_session_default`（已有的 per-agent 默认表，对应 CodeG 的 per-`agentType`
-   `selector-prefs`）。新建对话读这层；已有对话里 binding 按 key 覆盖 last-used。
-   不把偏好写进浏览器 localStorage——宿主 / DB 是权威（ADR-0044）。
+### 5. Binding 状态类型收口与原子截断顺序
 
-解析出的 `SessionControlPreferences` 随 prepare / resume / prompt 进入连接管理器。
-建立后的 skip-if-current 重放只是保险（in-memory 驱动或被 Agent 拒绝的记忆值）。
-重放不是新选择，不得回写 binding。
+`conversation_agent_bindings.status` 只能通过与数据库 `CHECK` 约束严格对齐的 Rust 枚举写入（`pending` / `connecting` / `ready` / `recovering` / `failed` / `closed`），禁止裸字符串写入。涉及历史截断（`truncate_to_turn`）的操作必须先失效当前会话绑定再截断事件，失效失败则中止截断，不留半提交状态。
 
-每个 Turn 仍按「profile / slash 默认 ← last-used ← binding 记忆 ← 本轮显式选择」
-合并 override。权限相关设置不得因为重连而静默回退到 Agent 默认值，实际生效的值和
-界面显示的值都不行（ADR-0058）。
+### 6. 投影器缓存有界保留，发布路径单一临界区
 
-### 5. binding 状态由枚举收口
-
-`conversation_agent_bindings.status` 只能通过 Rust 枚举写入，取值与迁移的 CHECK
-约束一一对应（`pending` / `connecting` / `ready` / `recovering` / `failed` /
-`closed`）。「等待 rebind」的语义归入 `recovering`。
-
-涉及事件截断的操作必须先失效会话再截断事件：失效失败就不截断，不留半提交状态。
-
-### 6. 投影器缓存有界，而非 settle 即弃
-
-行操作的发布路径（读游标 → 读事件 → 载入投影器 → apply）在同一临界区内完成。
-settle 后保留投影器，改用容量上限淘汰最久未用的会话——既消除冷载入竞态窗口，也
-满足 ADR-0061 §8.2 对重复重放的约束。
+时间线行操作的发布路径（读游标 → 读事件 → 载入投影器 → apply）在同一临界区内原子执行。Turn settle 后不丢弃投影器，而是使用有界容量缓存按最久未用淘汰，彻底消除冷载入并发竞态导致的终态 row-op 丢失窗口，并满足 [ADR-0061](0061-host-local-safety-and-performance-baseline.md) 的性能基线。
 
 ## Consequences
 
-- 会话恢复后，Agent 侧的历史回放对宿主是不可见的。这意味着宿主的事件日志必须
-  本来就完整；ADR-0001 的崩溃恢复语义因此从「最好如此」变成了这条路径的前置条件。
-- 取消变成有延迟的操作（最坏 10 秒）。UI 需要表达「正在取消」这个中间态，不能假设
-  点击后立即终态。不确认取消的 Agent 会失去会话复用能力，下一轮走冷启动。
-- 连接不再跨 Conversation 复用，同一 workspace 下多开对话会占用更多 Agent 进程。
-  这是为隔离付的确定成本，优于交叉写同一 ACP 会话。
-- `prompt_conflict` 成为前端需要处理的一类 Turn 失败，它可重发。
-- mode / config 的权威在 Conversation 上是 binding，在新会话上是 Agent last-used。
-  Agent 单方面改变 mode 时，宿主的持久化选择在下一次重绑时胜出。
-- 本 ADR 不引入新的隔离承诺：Agent 仍是全信任本机代码（ADR-0061 §1）。这里约束的
-  只是宿主自己的记账正确性。
-
-## 边界
-
-- 静态审查加针对性回归测试，没有对长会话或多 Agent 并发做压测。
-- 10 秒取消上限是工程取值，不是从任何 ACP 规范推出的；如果实测有 Agent 稳定超过
-  这个值，应调整常量而不是取消握手。
-- 投影器缓存上限同理，按实测调整。
+- 恢复窗口屏蔽内容回放要求宿主 SQLite 历史本身完整可靠，[ADR-0001](0001-crash-recovery-semantics.md) 崩溃恢复与 ADR-0091 单一权威成为强前置条件。
+- 取消存在最长 10 秒的握手延迟，UI 呈现「正在取消」中间态；拒绝确认取消的 Agent 会被退役活连接，下一轮冷重连恢复。
+- 连接不跨 Conversation 复用会增加同工作区多会话的进程数，但彻底消灭交叉写入同一底层会话的串话故障。
+- `prompt_conflict` 成为标准可重发失败码，保证任何 Turn 都能确定到达终态。
+- 10 秒取消上限与投影器缓存容量属于工程参数，可按实测调整，但不得取消握手或退回 settle 即弃。

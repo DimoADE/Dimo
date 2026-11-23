@@ -26,12 +26,15 @@ import {
   Plus,
   PanelLeft,
   PanelRight,
+  PanelsTopLeft,
   RotateCcw,
   GitBranch,
   ArrowDown,
   ArrowUp,
   AlertTriangle,
+  Infinity as InfinityIcon,
   LayoutDashboard,
+  LayoutGrid,
   List,
   Columns2,
   MessagesSquare,
@@ -76,6 +79,10 @@ import {
 import { useKanbanViews } from '@/hooks/useKanbanViews';
 import { usePanelActions } from '@/hooks/usePanelActions';
 import { useKanbanBoardStyle } from '@/lib/kanbanBoardStyle';
+import {
+  setWorkspaceStageStyle,
+  useWorkspaceStageStyle,
+} from '@/lib/workspaceStageStyle';
 import { shouldShowKanbanMonitor } from '@/lib/kanbanZoneVisibility';
 import {
   toggleKanbanCanvasListVisible,
@@ -371,9 +378,9 @@ export function CollaborationLayoutToggles() {
 
 export function WorkspaceLayoutToggles() {
   const { t } = useTranslation('panels');
-  const resetLayout = useLayoutStore((state) => state.resetLayout);
+  const workspaceStageStyle = useWorkspaceStageStyle();
   const {
-    openWelcomeTab,
+    autoArrangeLayout,
     hasRightSidebarPanels,
     isRightSidebarVisible,
     toggleRightSidebar,
@@ -381,7 +388,19 @@ export function WorkspaceLayoutToggles() {
   const showRightSidebarToggle = hasRightSidebarPanels();
   const rightSidebarVisible = isRightSidebarVisible();
   const toggleRightSidebarLabel = t('toolbar.toggleRightSidebar', '切换侧边栏');
-  const newTabLabel = t('tabCreation.newTab', '新建标签页');
+  const isCanvasStage = workspaceStageStyle === 'canvas';
+  const stageStyleLabel = isCanvasStage
+    ? t('toolbar.stageStyleCanvas', '无限画布')
+    : t('toolbar.stageStyleTabs', '自由标签');
+  const switchStageStyleTooltip = isCanvasStage
+    ? t('toolbar.switchToTabs', '切换到自由标签')
+    : t('toolbar.switchToCanvas', '切换到无限画布');
+  const autoArrangeLabel = t('toolbar.autoArrangeLayout', '自动整理布局');
+  const StageIcon = isCanvasStage ? InfinityIcon : PanelsTopLeft;
+
+  const handleToggleStageStyle = () => {
+    setWorkspaceStageStyle(isCanvasStage ? 'tabs' : 'canvas');
+  };
 
   return (
     <div className="flex items-center gap-0.5">
@@ -410,16 +429,16 @@ export function WorkspaceLayoutToggles() {
         <TooltipTrigger asChild>
           <Button
             variant="ghost"
-            size="icon"
-            data-testid="toolbar-new-tab-button"
-            className="workspace-toolbar-button h-7 w-7"
-            onClick={openWelcomeTab}
-            aria-label={newTabLabel}
+            size="sm"
+            data-testid="toolbar-stage-style-toggle"
+            className="workspace-toolbar-button h-7 gap-1.5 px-2 text-xs font-medium"
+            onClick={handleToggleStageStyle}
           >
-            <Plus className="h-3.5 w-3.5" />
+            <StageIcon className="h-3.5 w-3.5 shrink-0" />
+            <span>{stageStyleLabel}</span>
           </Button>
         </TooltipTrigger>
-        <TooltipContent side="bottom">{newTabLabel}</TooltipContent>
+        <TooltipContent side="bottom">{switchStageStyleTooltip}</TooltipContent>
       </Tooltip>
 
       <Tooltip>
@@ -427,16 +446,15 @@ export function WorkspaceLayoutToggles() {
           <Button
             variant="ghost"
             size="icon"
+            data-testid="toolbar-auto-arrange-layout"
             className="workspace-toolbar-button h-7 w-7"
-            onClick={resetLayout}
-            aria-label={t('toolbar.resetLayout')}
+            onClick={autoArrangeLayout}
+            aria-label={autoArrangeLabel}
           >
-            <RotateCcw className="h-3.5 w-3.5" />
+            <LayoutGrid className="h-3.5 w-3.5" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent side="bottom">
-          {t('toolbar.resetLayout')}
-        </TooltipContent>
+        <TooltipContent side="bottom">{autoArrangeLabel}</TooltipContent>
       </Tooltip>
     </div>
   );
@@ -1029,13 +1047,6 @@ export function Toolbar() {
     <TooltipProvider delayDuration={300}>
       <div className="workspace-topbar window-chrome relative w-full px-1.5">
         <div data-window-drag-region className="absolute inset-0" />
-        {hasProject || isCollaborationTab ? (
-          <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center">
-            <div className="pointer-events-auto" data-no-drag>
-              <WorkspaceTabSwitcher />
-            </div>
-          </div>
-        ) : null}
         <div
           data-window-drag-region
           className="relative z-10 flex h-9 items-center gap-0.5"
@@ -1063,7 +1074,9 @@ export function Toolbar() {
               )
             ) : null}
             {showLayoutToggles ? <ToolbarDivider /> : null}
-            <Slot name="toolbar.actions" />
+            <div className="contents" data-no-drag>
+              <Slot name="toolbar.actions" />
+            </div>
             {visibleToolbar.map((item) => {
               const Icon = item.icon;
               return (
@@ -1167,6 +1180,13 @@ export function Toolbar() {
             {logoLeads ? null : <HomeLogoMenu align="end" />}
           </div>
         </div>
+        {hasProject || isCollaborationTab ? (
+          <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center">
+            <div className="pointer-events-auto" data-no-drag>
+              <WorkspaceTabSwitcher />
+            </div>
+          </div>
+        ) : null}
       </div>
     </TooltipProvider>
   );

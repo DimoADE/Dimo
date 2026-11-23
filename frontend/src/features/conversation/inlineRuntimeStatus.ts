@@ -48,6 +48,8 @@ export type InlineStreamRuntimePresentation = {
 
 export type DeriveInlineStreamRuntimeStatusInput = {
   connecting: boolean;
+  connectingSince?: string | null;
+  sessionBindReady?: boolean;
   connection: ConversationConnectionStatus | null;
   request: ConversationRequestStatus | null;
   reconnectNotice?: ConversationSessionNotice | null;
@@ -109,6 +111,8 @@ export function deriveInlineStreamRuntimeStatus(
 ): InlineStreamRuntimePresentation {
   const {
     connecting,
+    connectingSince = null,
+    sessionBindReady = false,
     connection,
     request,
     reconnectNotice,
@@ -133,9 +137,13 @@ export function deriveInlineStreamRuntimeStatus(
   const connectionPending =
     connecting ||
     Boolean(reconnectNotice) ||
-    (connection != null && !connection.bound && !connectionFailed);
+    (!sessionBindReady &&
+      connection != null &&
+      !connection.bound &&
+      !connectionFailed);
   const isConnectionRecovering =
-    Boolean(reconnectNotice) || connection?.status === 'recovering';
+    Boolean(reconnectNotice) ||
+    (!sessionBindReady && connection?.status === 'recovering');
   const requestPhase = request?.activity.phase ?? null;
   const requestTerminal =
     requestPhase != null && isRequestTerminal(requestPhase);
@@ -157,8 +165,11 @@ export function deriveInlineStreamRuntimeStatus(
             status: reconnectNotice ? 'recovering' : 'connecting',
             bound: false,
             connection_id: connection?.connection_id ?? null,
-            message: connection?.message ?? reconnectNotice?.message ?? null,
-            since: connection?.since ?? '',
+            message:
+              (!connectionFailed ? connection?.message : null) ??
+              reconnectNotice?.message ??
+              null,
+            since: connectingSince ?? '',
           };
     const titleOverride =
       reconnectNotice?.title &&

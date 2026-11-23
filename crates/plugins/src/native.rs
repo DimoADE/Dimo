@@ -14,6 +14,7 @@ use crate::{ConflictDecision, PluginError, PluginSourceKind};
 pub enum NativeEcosystem {
     Codex,
     ClaudeCode,
+    MuseCode,
 }
 
 impl NativeEcosystem {
@@ -21,6 +22,7 @@ impl NativeEcosystem {
         match self {
             Self::Codex => "Codex",
             Self::ClaudeCode => "Claude Code",
+            Self::MuseCode => "Muse Code",
         }
     }
 }
@@ -63,6 +65,7 @@ pub fn parse_official_plugin_import_commands(
     let expected_program = match ecosystem {
         NativeEcosystem::Codex => "codex",
         NativeEcosystem::ClaudeCode => "claude",
+        NativeEcosystem::MuseCode => "muse",
     };
     let mut commands = Vec::new();
     for line in input.lines().map(str::trim).filter(|line| !line.is_empty()) {
@@ -107,6 +110,19 @@ pub fn parse_official_plugin_import_commands(
                     args,
                     [plugin, marketplace, action, ..]
                         if plugin == "plugin"
+                            && marketplace == "marketplace"
+                            && action == "add"
+                )
+            }
+            NativeEcosystem::MuseCode => {
+                matches!(
+                    args,
+                    [plugin, action, ..]
+                        if plugin == "plugins" && matches!(action.as_str(), "install" | "approve")
+                ) || matches!(
+                    args,
+                    [plugin, marketplace, action, ..]
+                        if plugin == "plugins"
                             && marketplace == "marketplace"
                             && action == "add"
                 )
@@ -392,12 +408,38 @@ impl OfficialCliNativePluginAdapter {
         }
     }
 
+    pub fn muse_code(program: impl Into<PathBuf>) -> Self {
+        Self {
+            ecosystem: NativeEcosystem::MuseCode,
+            program: program.into(),
+        }
+    }
+
+    fn plugin_subcommand(&self) -> &'static str {
+        match self.ecosystem {
+            NativeEcosystem::MuseCode => "plugins",
+            NativeEcosystem::Codex | NativeEcosystem::ClaudeCode => "plugin",
+        }
+    }
+
+    fn build_command<I, S>(&self, args: I) -> tokio::process::Command
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let mut command = utils::process::new_hidden_tokio_command(&self.program, args);
+        if self.ecosystem == NativeEcosystem::MuseCode {
+            command.env("MUSE_EXPERIMENTAL_PLUGINS", "1");
+        }
+        command
+    }
+
     async fn list_json(&self) -> Result<Value, PluginError> {
-        let output =
-            utils::process::new_hidden_tokio_command(&self.program, ["plugin", "list", "--json"])
-                .output()
-                .await
-                .map_err(|error| PluginError::io("run official plugin list command", error))?;
+        let output = self
+            .build_command([self.plugin_subcommand(), "list", "--json"])
+            .output()
+            .await
+            .map_err(|error| PluginError::io("run official plugin list command", error))?;
         if !output.status.success() {
             return Err(PluginError::native_command_failed(
                 self.ecosystem.label(),
@@ -443,7 +485,7 @@ impl OfficialCliNativePluginAdapter {
     }
 
     fn entry_path(entry: &Value) -> Option<PathBuf> {
-        ["installPath", "path", "cachePath"]
+        ["installPath", "path", "cachePath", "directory", "dir"]
             .into_iter()
             .find_map(|key| entry.get(key).and_then(Value::as_str))
             .map(PathBuf::from)
@@ -454,6 +496,14 @@ impl OfficialCliNativePluginAdapter {
                     .and_then(Value::as_str)
                     .map(PathBuf::from)
             })
+    }
+
+    fn fallback_muse_plugin_path(id: &str) -> Option<PathBuf> {
+        let base = std::env::var_os("XDG_DATA_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|home| home.join(".local").join("share")))?;
+        Some(base.join("muse").join("plugins").join(id))
     }
 
     async fn installed_entry(&self, plugin_id: &str) -> Result<Value, PluginError> {
@@ -482,7 +532,8 @@ impl OfficialCliNativePluginAdapter {
     }
 
     async fn run_operation(&self, operation: &str, args: Vec<String>) -> Result<(), PluginError> {
-        let output = utils::process::new_hidden_tokio_command(&self.program, args)
+        let output = self
+            .build_command(args)
             .output()
             .await
             .map_err(|error| PluginError::io("run official plugin command", error))?;
@@ -517,7 +568,7 @@ impl NativePluginAdapter for OfficialCliNativePluginAdapter {
                 update: false,
                 uninstall: true,
             },
-            NativeEcosystem::ClaudeCode => NativeAdapterCapabilities {
+            NativeEcosystem::ClaudeCode | NativeEcosystem::MuseCode => NativeAdapterCapabilities {
                 discover: true,
                 install: false,
                 enable: true,
@@ -534,7 +585,11 @@ impl NativePluginAdapter for OfficialCliNativePluginAdapter {
             .iter()
             .filter_map(|entry| {
                 let id = Self::selector(entry)?.to_owned();
-                let path = Self::entry_path(entry)?;
+                let path = Self::entry_path(entry).or_else(|| {
+                    (self.ecosystem == NativeEcosystem::MuseCode)
+                        .then(|| Self::fallback_muse_plugin_path(&id))
+                        .flatten()
+                })?;
                 let name = Self::entry_name(entry)
                     .unwrap_or_else(|| id.split('@').next().unwrap_or(&id))
                     .to_owned();
@@ -577,11 +632,13 @@ impl NativePluginAdapter for OfficialCliNativePluginAdapter {
         let entry = self.installed_entry(plugin_id).await?;
         let selector = Self::selector(&entry).ok_or_else(|| PluginError::not_found(plugin_id))?;
         let mut args = vec![
-            "plugin".to_owned(),
+            self.plugin_subcommand().to_owned(),
             if enabled { "enable" } else { "disable" }.to_owned(),
             selector.to_owned(),
         ];
-        if let Some(scope) = Self::scope(&entry) {
+        if self.ecosystem == NativeEcosystem::ClaudeCode
+            && let Some(scope) = Self::scope(&entry)
+        {
             args.extend(["--scope".to_owned(), scope.to_owned()]);
         }
         self.run_operation(if enabled { "enable" } else { "disable" }, args)
@@ -598,11 +655,13 @@ impl NativePluginAdapter for OfficialCliNativePluginAdapter {
         let entry = self.installed_entry(plugin_id).await?;
         let selector = Self::selector(&entry).ok_or_else(|| PluginError::not_found(plugin_id))?;
         let mut args = vec![
-            "plugin".to_owned(),
+            self.plugin_subcommand().to_owned(),
             "update".to_owned(),
             selector.to_owned(),
         ];
-        if let Some(scope) = Self::scope(&entry) {
+        if self.ecosystem == NativeEcosystem::ClaudeCode
+            && let Some(scope) = Self::scope(&entry)
+        {
             args.extend(["--scope".to_owned(), scope.to_owned()]);
         }
         self.run_operation("update", args).await
@@ -623,6 +682,11 @@ impl NativePluginAdapter for OfficialCliNativePluginAdapter {
                 "uninstall".to_owned(),
                 selector.to_owned(),
                 "--yes".to_owned(),
+            ],
+            NativeEcosystem::MuseCode => vec![
+                "plugins".to_owned(),
+                "remove".to_owned(),
+                selector.to_owned(),
             ],
         };
         if self.ecosystem == NativeEcosystem::ClaudeCode

@@ -21,6 +21,15 @@ fn agent_skill_listing_is_available_through_the_application_domain() {
 }
 
 #[test]
+fn session_workspace_switch_uses_conversation_write_scope() {
+    let command = "update_session_workspace"
+        .parse::<DomainCommand>()
+        .expect("update_session_workspace should parse");
+    assert_eq!(command, DomainCommand::SessionUpdateWorkspace);
+    assert_eq!(command.required_scope(), "conversation.write");
+}
+
+#[test]
 fn coding_loop_commands_share_the_workstation_application_scope() {
     for name in [
         "create_project",

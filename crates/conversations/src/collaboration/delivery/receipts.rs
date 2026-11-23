@@ -448,13 +448,23 @@ fn project_visible_space_row(
     audience: MessageAudience,
 ) -> Option<SpaceMessage> {
     let stored: Value = serde_json::from_str(raw).ok()?;
+    if origin == "system"
+        && audience == MessageAudience::Agent
+        && stored.get("spaceEvent").is_some()
+    {
+        return None;
+    }
+    let has_provision_activity = stored.get("provisionActivity").is_some();
     let mut parsed = parse_space_envelope(&stored);
     if origin == "agent" {
         let stripped = strip_stray_pass_tokens(&parsed.content);
         if is_pass_token(stripped) {
-            return None;
-        }
-        if stripped != parsed.content {
+            if has_provision_activity {
+                parsed.content = String::new();
+            } else {
+                return None;
+            }
+        } else if stripped != parsed.content {
             parsed.content = stripped.to_string();
         }
     }
@@ -741,17 +751,25 @@ pub async fn list_space_messages_window(
                 .flatten()
                 .unwrap_or_default();
             let body = strip_own_nickname_prefix(step.text.trim(), &nickname);
-            if body.is_empty() || is_pass_token(&body) {
+            let has_provision = step.provision_activity.is_some();
+            if !has_provision && (body.is_empty() || is_pass_token(&body)) {
                 continue;
             }
-            let already_in_loaded = messages.iter().rev().take(10).any(|msg| {
-                if msg.origin != "agent" {
-                    return false;
-                }
-                let parsed = parse_space_envelope(&msg.envelope);
-                envelope_sender_is_conversation(&parsed, cid, Some(&nickname))
-                    && strip_own_nickname_prefix(parsed.content.trim(), &nickname) == body
-            });
+            let effective_body = if is_pass_token(&body) {
+                String::new()
+            } else {
+                body
+            };
+            let already_in_loaded = !has_provision
+                && messages.iter().rev().take(10).any(|msg| {
+                    if msg.origin != "agent" {
+                        return false;
+                    }
+                    let parsed = parse_space_envelope(&msg.envelope);
+                    envelope_sender_is_conversation(&parsed, cid, Some(&nickname))
+                        && strip_own_nickname_prefix(parsed.content.trim(), &nickname)
+                            == effective_body
+                });
             if already_in_loaded {
                 continue;
             }
@@ -777,11 +795,13 @@ pub async fn list_space_messages_window(
                 .await
                 .map_err(db)?
             };
-            let already_posted_same = posted_rows.iter().any(|raw| {
-                let parsed = parse_space_envelope_str(raw);
-                envelope_sender_is_conversation(&parsed, cid, Some(&nickname))
-                    && strip_own_nickname_prefix(parsed.content.trim(), &nickname) == body
-            });
+            let already_posted_same = !has_provision
+                && posted_rows.iter().any(|raw| {
+                    let parsed = parse_space_envelope_str(raw);
+                    envelope_sender_is_conversation(&parsed, cid, Some(&nickname))
+                        && strip_own_nickname_prefix(parsed.content.trim(), &nickname)
+                            == effective_body
+                });
             if already_posted_same {
                 continue;
             }
@@ -797,21 +817,24 @@ pub async fn list_space_messages_window(
                 nickname.trim().to_string()
             };
             let sender_label = envelope_member_name(&sender_nickname);
-            let envelope = json!({
+            let mut envelope = json!({
                 "id": draft_id,
                 "sender": sender_label,
                 "sender_nickname": sender_nickname,
                 "actor": sender_nickname,
                 "conversation_id": cid.to_string(),
                 "to": [ENVELOPE_USER_ACTOR],
-                "content": body,
-                "display_text": body,
+                "content": effective_body,
+                "display_text": effective_body,
                 "in_reply_to": trigger_msg_id,
                 "reply_to": trigger_msg_id,
                 "created_at": step.updated_at,
                 "turn_id": turn_id,
                 "streaming": true,
             });
+            if let Some(ref activity) = step.provision_activity {
+                envelope["provisionActivity"] = json!(activity);
+            }
             messages.push(SpaceMessage {
                 id: draft_id,
                 seq: draft_seq,

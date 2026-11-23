@@ -318,7 +318,7 @@ pub(super) fn record_rebuilt_projector_fold(conversation_id: Uuid, fold: &Projec
         .get(&conversation_id)
         .map(|entry| entry.generation.saturating_add(1))
         .unwrap_or(1);
-    if map.len() >= 64
+    if map.len() >= 16
         && !map.contains_key(&conversation_id)
         && let Some(first_key) = map.keys().next().copied()
     {
@@ -672,11 +672,10 @@ pub(super) fn target_turn_id_for_fold(
 /// `db_cursor` is the last SQLite sequence folded into this process. Transcript
 /// deltas advance `projector.last_sequence()` without moving `db_cursor`, so the
 /// next durable event (turn completed, checkpoint) is still applied.
-const MAX_CACHED_ROW_PROJECTORS: usize = 96;
+const MAX_CACHED_ROW_PROJECTORS: usize = 32;
 const HARD_MAX_CACHED_ROW_PROJECTORS: usize = MAX_CACHED_ROW_PROJECTORS * 2;
 
-static NEXT_LIVE_OP_SEQUENCE: std::sync::atomic::AtomicI64 =
-    std::sync::atomic::AtomicI64::new(1);
+static NEXT_LIVE_OP_SEQUENCE: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(1);
 
 pub struct CachedRowProjector {
     pub projector: IncrementalRowProjector,

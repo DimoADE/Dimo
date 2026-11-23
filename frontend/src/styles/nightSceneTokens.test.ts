@@ -50,13 +50,13 @@ describe('dark night scene tokens', () => {
   it('documents Astryx neutral surfaces and Pearl Ink accent', () => {
     expect(design).toContain('dark-primary: "#E7EBEF"');
     expect(design).toContain('dark-primary-foreground: "#0E1319"');
-    expect(design).toContain('shell-bg: "#ffffff"');
+    expect(design).toContain('shell-bg: "#f4f4f4"');
     expect(design).toContain('content-bg: "#ffffff"');
     expect(design).toContain('dark-shell-bg: "#1b1b1b"');
     expect(design).toContain('dark-content-bg: "#262626"');
     expect(design).toContain('dark-panel-bg: "#262626"');
     expect(design).toContain('Pearl Ink');
-    expect(design).toContain('same hex on macOS and Windows');
+    expect(design).toContain('same hex on macOS, Windows, and Linux');
     expect(design).not.toContain('dark-switch-checked-border: "#ffffff57"');
     expect(design).toContain(
       'dark-switch-checked-track: "hsl(var(--primary))"'

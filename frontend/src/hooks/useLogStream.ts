@@ -46,22 +46,49 @@ export const useLogStream = (processId: string): UseLogStreamResult => {
 
     let cancelled = false;
     let iterator: AsyncIterator<RemoteEvent> | undefined;
+    let pendingEntries: LogEntry[] = [];
+    let flushFrame: number | null = null;
+
+    const flushPending = () => {
+      flushFrame = null;
+      if (cancelled || currentProcessIdRef.current !== processId) {
+        pendingEntries = [];
+        return;
+      }
+      if (pendingEntries.length === 0) return;
+      const batch = pendingEntries;
+      pendingEntries = [];
+      setLogs((prev) => appendCappedLogs(prev, batch));
+    };
+
+    const enqueueEntries = (entries: LogEntry[]) => {
+      if (entries.length === 0) return;
+      pendingEntries.push(...entries);
+      if (pendingEntries.length > MAX_LOG_ENTRIES) {
+        pendingEntries = pendingEntries.slice(
+          pendingEntries.length - MAX_LOG_ENTRIES
+        );
+      }
+      if (flushFrame == null) {
+        if (typeof requestAnimationFrame === 'function') {
+          flushFrame = requestAnimationFrame(flushPending);
+        } else {
+          flushPending();
+        }
+      }
+    };
 
     const applyMessage = (raw: unknown) => {
       if (cancelled || currentProcessIdRef.current !== processId) return;
       const msg = raw as TauriLogMsg;
       try {
         if (typeof msg === 'object' && msg !== null && 'Stdout' in msg) {
-          setLogs((prev) =>
-            appendCappedLogs(prev, [{ type: 'STDOUT', content: msg.Stdout }])
-          );
+          enqueueEntries([{ type: 'STDOUT', content: msg.Stdout }]);
           return;
         }
 
         if (typeof msg === 'object' && msg !== null && 'Stderr' in msg) {
-          setLogs((prev) =>
-            appendCappedLogs(prev, [{ type: 'STDERR', content: msg.Stderr }])
-          );
+          enqueueEntries([{ type: 'STDERR', content: msg.Stderr }]);
           return;
         }
 
@@ -78,10 +105,18 @@ export const useLogStream = (processId: string): UseLogStreamResult => {
               });
             }
           }
-          if (newEntries.length > 0) {
-            setLogs((prev) => appendCappedLogs(prev, newEntries));
-          }
+          enqueueEntries(newEntries);
           return;
+        }
+
+        if (msg === 'Finished') {
+          if (
+            flushFrame != null &&
+            typeof cancelAnimationFrame === 'function'
+          ) {
+            cancelAnimationFrame(flushFrame);
+          }
+          flushPending();
         }
       } catch (err) {
         console.error('Failed to process log stream event:', err);
@@ -128,6 +163,11 @@ export const useLogStream = (processId: string): UseLogStreamResult => {
 
     return () => {
       cancelled = true;
+      if (flushFrame != null && typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(flushFrame);
+        flushFrame = null;
+      }
+      pendingEntries = [];
       void iterator?.return?.();
     };
   }, [processId]);

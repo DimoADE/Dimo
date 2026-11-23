@@ -74,6 +74,14 @@ pub fn built_in_auth_mode_policy(agent_id: &AgentId) -> Option<BuiltInAuthModePo
             subscription_scrub_env: CLAUDE_SCRUB_ENV,
             default_mode: "official_subscription",
         }),
+        "muse_code" => Some(BuiltInAuthModePolicy {
+            mode_env: "MUSE_AUTH_MODE",
+            credential_env: "META_API_KEY",
+            modes: MUSE_MODES,
+            credential_modes: MUSE_CREDENTIAL_MODES,
+            subscription_scrub_env: MUSE_SCRUB_ENV,
+            default_mode: "official_subscription",
+        }),
         id if AgentKind::Antigravity.matches_id(id) => Some(BuiltInAuthModePolicy {
             mode_env: "AGY_AUTH_METHOD",
             credential_env: "GEMINI_API_KEY",
@@ -264,6 +272,9 @@ const ZCODE_SCRUB_ENV: &[&str] = &["ZHIPU_API_KEY"];
 const KIRO_MODES: &[&str] = &["official_subscription", "official_api"];
 const KIRO_CREDENTIAL_MODES: &[&str] = &["official_api"];
 const KIRO_SCRUB_ENV: &[&str] = &["KIRO_API_KEY"];
+const MUSE_MODES: &[&str] = &["official_subscription", "official_api", "model_provider"];
+const MUSE_CREDENTIAL_MODES: &[&str] = &["official_api"];
+const MUSE_SCRUB_ENV: &[&str] = &["META_API_KEY"];
 const MIMO_MODES: &[&str] = &["official_subscription", "official_api", "model_provider"];
 const MIMO_CREDENTIAL_MODES: &[&str] = &["official_api"];
 const MIMO_SCRUB_ENV: &[&str] = &["MIMO_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"];
@@ -361,6 +372,7 @@ pub fn native_uses_custom_endpoint(agent_id: &AgentId, snapshot: &NativeConfigSn
         "cline" => snapshot.field_text("cline_base_url"),
         "hermes" => snapshot.field_text("hermes_base_url"),
         "codex" => snapshot.field_text("codex_openai_base_url"),
+        "muse_code" => snapshot.field_text("muse_base_url"),
         "codebuddy" => snapshot.field_text("codebuddy_base_url"),
         _ => None,
     }) else {
@@ -415,6 +427,7 @@ pub fn official_api_url(agent_id: &AgentId, mode: &str) -> Option<&'static str> 
     match (agent_id.as_str(), mode) {
         ("claude_code", "official_api" | "custom") => Some("https://api.anthropic.com"),
         ("codex", "api_key") => Some("https://api.openai.com/v1"),
+        ("muse_code", "official_api") => Some("https://api.meta.ai"),
         ("grok", "api_key") => Some("https://api.x.ai/v1"),
         ("deepseek_harness", "deepseek") => Some(DEEPSEEK_OFFICIAL_BASE_URL),
         (id, "gemini-api-key") if AgentKind::Antigravity.matches_id(id) => {
@@ -565,6 +578,7 @@ pub fn auth_mode_credential_env(agent_id: &AgentId, mode: &str) -> Option<&'stat
         (id, "agent-platform") if AgentKind::Antigravity.matches_id(id) => Some("GOOGLE_API_KEY"),
         (id, "gemini-api-key") if AgentKind::Antigravity.matches_id(id) => Some("GEMINI_API_KEY"),
         ("claude_code", "official_api" | "custom") => Some("ANTHROPIC_API_KEY"),
+        ("muse_code", "official_api") => Some("META_API_KEY"),
         ("grok", "api_key") => Some("XAI_API_KEY"),
         ("cursor", "custom") => Some("CURSOR_API_KEY"),
         ("deepseek_harness", "deepseek" | "custom") => Some("DEEPSEEK_API_KEY"),
@@ -601,6 +615,7 @@ pub fn headless_account_env(agent_id: &AgentId) -> Option<&'static str> {
 fn auth_mode_scrubbed_env_keys(agent_id: &AgentId, mode: &str) -> &'static [&'static str] {
     match (agent_id.as_str(), mode) {
         ("claude_code", "official_subscription" | "model_provider") => CLAUDE_SCRUB_ENV,
+        ("muse_code", "official_subscription" | "model_provider") => MUSE_SCRUB_ENV,
         (id, "oauth-personal" | "oauth-business") if AgentKind::Antigravity.matches_id(id) => {
             ANTIGRAVITY_ALL_AUTH_ENV
         }
@@ -738,6 +753,10 @@ pub fn apply_built_in_launch_policy_for_program(
                 env.remove("OPENAI_BASE_URL");
             }
             apply_codex_initial_agent_mode(env);
+        }
+        "muse_code" => {
+            env.entry("MUSE_NO_AUTO_UPDATE".to_string())
+                .or_insert_with(|| "1".to_string());
         }
         // pi-acp only advertises embedded-context support behind this switch.
         "pi" => {

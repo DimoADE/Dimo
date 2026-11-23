@@ -10,8 +10,7 @@ const getCurrentWindow = vi.hoisted(() => vi.fn(() => ({ label: 'main' })));
 const isTauriDesktopShell = vi.hoisted(() => vi.fn(() => true));
 
 vi.mock('@/lib/desktopShell', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('@/lib/desktopShell')>();
+  const actual = await importOriginal<typeof import('@/lib/desktopShell')>();
   return {
     ...actual,
     getDesktopWindowLabel: () => getCurrentWindow().label,

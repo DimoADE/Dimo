@@ -54,6 +54,7 @@ const names = {
   zcode: 'ZCode',
   omp: 'OMP',
   mimo_code: 'MiMo Code',
+  muse_code: 'Muse Code',
 };
 const agents: AgentManagementView[] = Object.entries(names).map(
   ([id, name], position) => ({

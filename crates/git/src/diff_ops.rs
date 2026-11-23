@@ -145,7 +145,7 @@ impl GitService {
         }
     }
 
-    fn convert_diff_to_file_diffs(
+    pub(crate) fn convert_diff_to_file_diffs(
         &self,
         diff: git2::Diff,
         repo: &Repository,

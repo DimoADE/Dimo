@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="./src-tauri/icons/icon.png" alt="Dimo Logo" width="108" height="108" />
+  <img src="./electron/build/icons/icon.png" alt="Dimo Logo" width="108" height="108" />
 
   <h1>Dimo</h1>
 
@@ -10,7 +10,7 @@
   <p><strong>The All-in-One Agent-Native Development Platform Uniting a Multi-Agent Dev Environment &amp; Vibe Coding Toolkit</strong></p>
   <p>
     Visual multi-agent orchestration, Mobile / Desktop / WebUI / Server multi-Host connectivity, multi-Worktree engineering,<br/>
-    a 3-tier agent collaboration engine, cross-agent session migration, unified auth &amp; config management, and Free Tabs / Infinite Canvas workspaces.<br/>
+    a 3-tier agent collaboration &amp; Pulse event automation engine, cross-agent session migration, unified auth &amp; config management, and Free Tabs / Infinite Canvas workspaces.<br/>
     Highly decoupled and high-performance with an <strong>Everything-is-a-Plugin</strong> design — built for the ultimate Vibe Coding experience.
   </p>
 
@@ -45,10 +45,10 @@ Natively integrates **20+ leading coding agents**—including **Claude Code, Cod
 ### 2. Free Tabs & Infinite Canvas Dual Workspaces
 Work in **free multi-split tabs** for deep focus, or switch losslessly in one click to the **Infinite Canvas**—tiling dozens of live agent windows alongside code editors, Git diffs, built-in browsers, and terminals with free zoom, spatial grouping, and visual links.
 
-### 3. 3-Tier Agent Collaboration Engine
+### 3. 3-Tier Agent Collaboration & Pulse Automation Engine
 - **In-Session `&Agent` Delegation**: Mention `&Codex` or `&Claude` right inside any prompt to spin up parallel sub-sessions on the fly.
 - **AI Team Collaboration Spaces**: Assemble persistent role Bots (Architect, Frontend, QA, Docs) in 1-on-1 chats or multi-agent group rooms with `@` handoffs.
-- **Visual Workflows & Scheduled Automations**: Orchestrate multi-step pipelines with approval gates, interactive breakpoints, and scheduled background runs.
+- **Pulse Event Automation & Dual-Primitive Workflows**: Trigger isolated Sessions, persistent Bots, Group stages, or visual DAG pipelines from GitHub/Jira/Feishu webhooks, custom SDK events, SLA timers, or scheduled runs with approval gates and interactive breakpoints.
 
 ### 4. Cross-Agent Session Migration, Live Steering & Forking
 Seamlessly **migrate a session across different agents** mid-stream (e.g., plan architecture with one agent and hand implementation straight to another). Course-correct running turns in real time with **Live Steering** without restarting, or **Fork** any turn to explore alternative approaches side by side.
@@ -60,7 +60,7 @@ Concurrent agents automatically work in isolated **Git Worktrees**, keeping your
 Manage official subscriptions, API keys, and reusable provider presets in one place (with one-click CC Switch import and latency checks), route models through a unified gateway, and track live subscription quotas, token usage, and costs from a single dashboard.
 
 ### 7. Mobile / Desktop / WebUI / Server Multi-Host Connectivity
-Connect local Desktop apps, headless Servers, browser WebUIs, one-click SSH remote hosts, and zero-config end-to-end encrypted peer links. Pair with native **iOS / Android apps** or **Telegram, Discord, Slack, WeChat, WeCom, and Feishu/Lark** bots to monitor runs, approve permissions, and keep Vibe Coding from anywhere.
+Connect local Desktop apps, headless Servers, browser WebUIs, one-click SSH remote hosts, and zero-config end-to-end encrypted peer links. Pair with native **iOS / Android apps** or **Telegram, Feishu/Lark, WeCom, Weixin iLink, and QQ** chat bots to monitor runs, approve permissions, and keep Vibe Coding from anywhere.
 
 ### 8. "Everything is a Plugin" — Decoupled & High-Performance
 Built on a lightweight native Rust core where **everything is a plugin**. Equip Vibe Coding essentials on demand—including a **Built-in Browser** (click any page element to pass live context to AI), **Office Document Creation & Preview**, **Desktop Computer Use**, **AI Inline Code Completion**, **Hybrid Voice Input**, **Prompt Enhancement**, and **Scientific Research Skills**—or extend freely through the open Plugin Marketplace.
@@ -109,28 +109,32 @@ Built on a lightweight native Rust core where **everything is a plugin**. Equip 
   <img src="./docs/readme/iade-architecture.en.svg" alt="Dimo Agent-Native Development Platform Overview" width="100%" />
 </p>
 
+<p align="center">
+  <img src="./docs/readme/collaboration-flow.svg" alt="Dimo Multi-Agent Collaboration Flow" width="100%" />
+</p>
+
 | Dimension | Juggling Terminal CLIs | Single-Agent AI Editor | Dimo Agent-Native Platform |
 | :--- | :--- | :--- | :--- |
 | **Agents** | Isolated terminal tabs | Locked to one built-in agent | **20+ visual agents orchestrated together** |
 | **Workspace** | Scrolling text buffers | Fixed single-window layout | **Free Split Tabs ↔ Infinite Canvas in one click** |
 | **Session Continuity** | Lost when switching tools | Stop and restart on drift | **Cross-Agent Migration + Live Steering + Session Fork** |
-| **Collaboration** | Manual copy-paste | Single-session subtools | **`&Agent` Delegation + AI Group Rooms + Visual Workflows** |
+| **Collaboration** | Manual copy-paste | Single-session subtools | **`&Agent` Delegation + AI Group Rooms + Pulse & Visual Workflows** |
 | **Parallel Coding** | Manual branches & conflicts | Single working directory | **Auto Git Worktrees + Diff Review + 3-Pane Merge** |
 | **Auth & Config** | Repeated per-CLI setup | Closed vendor account | **Unified Subscriptions / APIs / Presets + Quota Dashboard** |
-| **Multi-Host Access** | Manual `ssh` + `tmux` | Desktop-only | **Mobile / Desktop / WebUI / Server + 6 Chat Apps** |
+| **Multi-Host Access** | Manual `ssh` + `tmux` | Desktop-only | **Mobile / Desktop / WebUI / Server + Chat Bots** |
 | **Extensibility** | Scattered per-CLI configs | Monolithic & closed | **"Everything is a Plugin" — modular, fast, on-demand** |
 
 ---
 
 ## Quick Start
 
-### 1. Native Desktop App (Recommended)
+### 1. Desktop App (Recommended)
 
-Download the native installer (with built-in auto-updates) from the [Official Download Page](https://dimo-ai.com/#download):
+Download the installer (with built-in auto-updates) from the [Official Download Page](https://dimo-ai.com/#download):
 
 - **macOS**: Apple Silicon (`aarch64` `.dmg`) · Intel (`x64` `.dmg`)
 - **Windows**: Windows 10 / 11 (`x64` / `arm64` `.exe`)
-- **Linux**: Major distributions (`x64` / `arm64` `.AppImage`)
+- **Linux**: Major distributions (`x64` / `arm64` `.AppImage` / `.deb`)
 
 ### 2. CLI / Server / WebUI in One Command
 
@@ -152,13 +156,13 @@ npx dimoai serve    # Serve WebUI for LAN / remote access
 npx dimoai list     # List coding agents available for one-click install
 ```
 
-Docker Compose is also ready out of the box: `docker compose up -d` (see [Headless Server Guide](./docs/deployment/headless-server.md)).
+Docker Compose is also ready out of the box: `docker compose up -d` (see [Headless Server Guide](./docs/guides/headless-server.md)).
 
 ---
 
 ## Local Development & Documentation
 
-Prerequisites: Rust (see [`rust-toolchain.toml`](./rust-toolchain.toml)), Node.js `>= 20`, `pnpm 10.x`.
+Prerequisites: Rust (see [`rust-toolchain.toml`](./rust-toolchain.toml)), Node.js `>= 18`, `pnpm 10.x`.
 
 ```bash
 pnpm install      # Install workspace dependencies
@@ -166,7 +170,7 @@ pnpm run dev      # Start Desktop app in hot-reload dev mode
 pnpm run check    # Run frontend & Rust type/compile checks
 ```
 
-- Architecture, Remote Protocol & Engineering Docs: [**Documentation Index (`docs/README.md`)**](./docs/README.md)
+- Documentation Index & Directory Map: [**`docs/INDEX.md`**](./docs/INDEX.md) / [**`docs/README.md`**](./docs/README.md)
 - Plugin Usage & Extension Guides: [**Plugin Ecosystem Docs (`docs/plugins/README.md`)**](./docs/plugins/README.md)
 
 ---

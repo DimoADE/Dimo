@@ -1,4 +1,11 @@
 import i18n from '@/i18n';
+import type {
+  ProvisionedBotEntry,
+  ProvisionedGroupEntry,
+  ProvisionedGroupMemberSummary,
+  SpaceSystemEvent,
+  SpaceTurnProvisionActivity,
+} from './space/types';
 export const COPY = {
   get emptyRoles() {
     return i18n.t('panels:collabCopy.emptyRoles');
@@ -594,8 +601,11 @@ export type SpaceEnvelopeParties = {
   sender?: string;
   to?: readonly string[] | null;
   summary?: string;
+  content?: string;
   conversation_id?: string;
   conversationId?: string;
+  spaceEvent?: SpaceSystemEvent | null;
+  provisionActivity?: SpaceTurnProvisionActivity | null;
 };
 
 const CONVERSATION_ID_RE =
@@ -684,6 +694,9 @@ export type SpaceMember = {
   private_thread_id?: string | null;
   private_conversation_id?: string | null;
   agent?: string | null;
+  agent_id?: string | null;
+  model?: string | null;
+  model_label?: string | null;
   /** Whether this bot is the workspace Supervisor (主管/总管). */
   is_supervisor?: boolean;
 };
@@ -1373,13 +1386,231 @@ export function insertMention(
   return source.replace(/@[^\s@]*$/, `@${nickname} `);
 }
 
+export function parseSpaceSystemEvent(message: {
+  origin?: string;
+  envelope?: SpaceEnvelopeParties | null;
+}): SpaceSystemEvent | null {
+  const raw = message.envelope?.spaceEvent;
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as Record<string, unknown>;
+  const kind = String(record.kind ?? '').trim();
+  if (kind === 'group_created') {
+    const actorName =
+      typeof record.actorName === 'string' ? record.actorName.trim() : '';
+    const groupName =
+      typeof record.groupName === 'string' ? record.groupName.trim() : '';
+    const members = Array.isArray(record.members)
+      ? record.members.map((item) => String(item ?? '').trim()).filter(Boolean)
+      : [];
+    return {
+      kind: 'group_created',
+      actorName: actorName || null,
+      actorIsUser: Boolean(record.actorIsUser),
+      groupName: groupName || null,
+      members,
+    };
+  }
+  if (kind === 'member_invited' || kind === 'member_joined') {
+    const actorName =
+      typeof record.actorName === 'string' ? record.actorName.trim() : '';
+    const memberName =
+      typeof record.memberName === 'string' ? record.memberName.trim() : '';
+    return {
+      kind,
+      actorName: actorName || null,
+      actorIsUser: Boolean(record.actorIsUser),
+      memberName: memberName || null,
+    };
+  }
+  return null;
+}
+
+export function formatSpaceSystemEventCopy(
+  event: SpaceSystemEvent,
+  fallbackContent?: string | null
+): string {
+  if (event.kind === 'group_created') {
+    const group = String(event.groupName ?? '').trim();
+    const members = (event.members ?? [])
+      .map((item) => String(item ?? '').trim())
+      .filter(Boolean);
+    const membersList = members.join(', ');
+    if (event.actorIsUser) {
+      if (members.length > 0) {
+        return i18n.t('panels:collabCopy.eventYouCreatedGroupWithMembers', {
+          group,
+          members: membersList,
+        });
+      }
+      return i18n.t('panels:collabCopy.eventYouCreatedGroup', { group });
+    }
+    const actor = String(event.actorName ?? '').trim() || COPY.you;
+    if (members.length > 0) {
+      return i18n.t('panels:collabCopy.eventGroupCreatedWithMembers', {
+        actor,
+        group,
+        members: membersList,
+      });
+    }
+    return i18n.t('panels:collabCopy.eventGroupCreated', { actor, group });
+  }
+  const member = String(event.memberName ?? '').trim();
+  if (!member) {
+    return String(fallbackContent ?? '').trim();
+  }
+  if (event.kind === 'member_joined') {
+    return i18n.t('panels:collabCopy.eventMemberJoined', { member });
+  }
+  if (event.actorIsUser) {
+    return i18n.t('panels:collabCopy.eventMemberInvitedByUser', { member });
+  }
+  const actor = String(event.actorName ?? '').trim();
+  if (actor && actor !== member) {
+    return i18n.t('panels:collabCopy.eventMemberInvitedByActor', {
+      actor,
+      member,
+    });
+  }
+  return i18n.t('panels:collabCopy.eventMemberJoined', { member });
+}
+
 export function isCollaborationLimitNotice(message: {
   origin?: string;
   envelope?: SpaceEnvelopeParties | null;
 }): boolean {
+  if (parseSpaceSystemEvent(message)) return false;
+  if (message.envelope?.summary === 'space_event') return false;
   if (message.origin === 'system') return true;
   if (message.envelope?.summary === 'collaboration_limit') return true;
   return isSystemPartyName(envelopeSenderRaw(message.envelope));
+}
+
+export function isSpaceSystemNotice(message: {
+  origin?: string;
+  envelope?: SpaceEnvelopeParties | null;
+}): boolean {
+  return (
+    isCollaborationLimitNotice(message) ||
+    Boolean(parseSpaceSystemEvent(message)) ||
+    message.envelope?.summary === 'space_event'
+  );
+}
+
+export function extractProvisionActivity(
+  envelope: SpaceEnvelopeParties | null | undefined
+): SpaceTurnProvisionActivity | null {
+  const raw = envelope?.provisionActivity;
+  if (!raw || typeof raw !== 'object') return null;
+  const record = raw as Record<string, unknown>;
+  const botsRaw = Array.isArray(record.bots) ? record.bots : [];
+  const bots: ProvisionedBotEntry[] = [];
+  for (const item of botsRaw) {
+    if (!item || typeof item !== 'object') continue;
+    const bot = item as Record<string, unknown>;
+    const nickname = String(bot.nickname ?? bot.name ?? '').trim();
+    const identityMemberId =
+      typeof bot.identityMemberId === 'string' && bot.identityMemberId.trim()
+        ? bot.identityMemberId.trim()
+        : typeof bot.memberId === 'string' && bot.memberId.trim()
+          ? bot.memberId.trim()
+          : null;
+    if (!nickname && !identityMemberId) continue;
+    bots.push({
+      nickname: nickname || identityMemberId || '',
+      identityMemberId,
+      conversationId:
+        typeof bot.conversationId === 'string' && bot.conversationId.trim()
+          ? bot.conversationId.trim()
+          : null,
+      agentId:
+        typeof bot.agentId === 'string' && bot.agentId.trim()
+          ? bot.agentId.trim()
+          : null,
+      model:
+        typeof bot.model === 'string' && bot.model.trim()
+          ? bot.model.trim()
+          : null,
+      modelLabel:
+        typeof bot.modelLabel === 'string' && bot.modelLabel.trim()
+          ? bot.modelLabel.trim()
+          : null,
+      avatar: bot.avatar,
+      color:
+        typeof bot.color === 'string' && bot.color.trim()
+          ? bot.color.trim()
+          : null,
+      status:
+        typeof bot.status === 'string' && bot.status.trim()
+          ? bot.status.trim()
+          : null,
+    });
+  }
+  const groupsRaw = Array.isArray(record.groups)
+    ? record.groups
+    : record.group && typeof record.group === 'object'
+      ? [record.group]
+      : [];
+  const groups: ProvisionedGroupEntry[] = [];
+  for (const rawGroup of groupsRaw) {
+    if (!rawGroup || typeof rawGroup !== 'object') continue;
+    const grp = rawGroup as Record<string, unknown>;
+    const spaceId = String(grp.spaceId ?? '').trim();
+    const name = String(grp.name ?? '').trim();
+    if (!spaceId && !name) continue;
+    const membersRaw = Array.isArray(grp.members) ? grp.members : [];
+    const members: ProvisionedGroupMemberSummary[] = [];
+    for (const m of membersRaw) {
+      if (!m || typeof m !== 'object') continue;
+      const entry = m as Record<string, unknown>;
+      const mNick = String(entry.nickname ?? entry.name ?? '').trim();
+      const mId =
+        typeof entry.identityMemberId === 'string' &&
+        entry.identityMemberId.trim()
+          ? entry.identityMemberId.trim()
+          : typeof entry.memberId === 'string' && entry.memberId.trim()
+            ? entry.memberId.trim()
+            : null;
+      if (!mNick && !mId) continue;
+      members.push({
+        nickname: mNick || mId || '',
+        identityMemberId: mId,
+        avatar: entry.avatar,
+        color:
+          typeof entry.color === 'string' && entry.color.trim()
+            ? entry.color.trim()
+            : null,
+      });
+    }
+    const memberCount =
+      typeof grp.memberCount === 'number' && Number.isFinite(grp.memberCount)
+        ? Math.max(0, Math.trunc(grp.memberCount))
+        : members.length;
+    groups.push({
+      spaceId,
+      name: name || spaceId,
+      memberCount,
+      members,
+      status:
+        typeof grp.status === 'string' && grp.status.trim()
+          ? grp.status.trim()
+          : null,
+    });
+  }
+  if (bots.length === 0 && groups.length === 0) return null;
+  return { bots, groups };
+}
+
+export function resolveMemberAgentModelDisplay(
+  member:
+    | Pick<SpaceMember, 'agent' | 'agent_id' | 'model' | 'model_label'>
+    | null
+    | undefined
+): { agentId: string | null; modelLabel: string | null } {
+  const agentId =
+    String(member?.agent ?? member?.agent_id ?? '').trim() || null;
+  const modelLabel =
+    String(member?.model_label ?? member?.model ?? '').trim() || null;
+  return { agentId, modelLabel };
 }
 
 const HUMAN_PERSON_LABELS = new Set(['user', 'person', '你']);
@@ -2012,6 +2243,8 @@ export type SidebarMember = {
   color?: string;
   conversation_id?: string | null;
   agent?: string;
+  model?: string | null;
+  model_label?: string | null;
   is_supervisor?: boolean;
 };
 
@@ -2046,6 +2279,8 @@ export function sidebarMemberToSpaceMember(member: SidebarMember): SpaceMember {
     nickname: member.name,
     conversation_id: member.conversation_id ?? undefined,
     ...(member.agent ? { agent: member.agent } : {}),
+    ...(member.model ? { model: member.model } : {}),
+    ...(member.model_label ? { model_label: member.model_label } : {}),
     ...(typeof member.is_supervisor === 'boolean'
       ? { is_supervisor: member.is_supervisor }
       : {}),

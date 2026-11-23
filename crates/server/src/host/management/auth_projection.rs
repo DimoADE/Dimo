@@ -575,6 +575,17 @@ fn auth_mode_translation_keys(agent_id: &AgentId, mode: &str) -> (&'static str, 
             "agents.authDescOmpSubscription",
         ),
         ("omp", "model_provider") => ("agents.authModeProvider", "agents.authDescOmpProvider"),
+        ("muse_code", "official_subscription") => (
+            "agents.authModeOfficialSubscription",
+            "agents.authDescMuseSubscription",
+        ),
+        ("muse_code", "official_api") => (
+            "agents.authModeOfficialApi",
+            "agents.authDescMuseOfficialApi",
+        ),
+        ("muse_code", "model_provider") => {
+            ("agents.authModeProvider", "agents.authDescMuseProvider")
+        }
         _ => ("agents.authModeUnknown", "agents.authDescUnknown"),
     }
 }
@@ -701,6 +712,24 @@ mod tests {
         assert!(options[1].credential_required);
         assert_eq!(options[2].value, "model_provider");
         assert_eq!(options[2].kind, AgentAuthModeKind::Provider);
+    }
+
+    #[test]
+    fn muse_code_auth_options_cover_subscription_api_and_provider() {
+        let agent_id = AgentId::parse("muse_code").unwrap();
+        let policy = built_in_auth_mode_policy(&agent_id).unwrap();
+        let options = project_auth_mode_options(&agent_id, policy.modes);
+        assert_eq!(options.len(), 3);
+        assert_eq!(options[0].value, "official_subscription");
+        assert_eq!(options[0].kind, AgentAuthModeKind::Subscription);
+        assert!(!options[0].credential_required);
+        assert_eq!(options[1].value, "official_api");
+        assert_eq!(options[1].kind, AgentAuthModeKind::OfficialApi);
+        assert!(options[1].credential_required);
+        assert_eq!(options[1].credential_env.as_deref(), Some("META_API_KEY"));
+        assert_eq!(options[2].value, "model_provider");
+        assert_eq!(options[2].kind, AgentAuthModeKind::Provider);
+        assert_eq!(options[2].description_key, "agents.authDescMuseProvider");
     }
 
     #[test]

@@ -102,6 +102,7 @@ type Slot = {
   surfaceRefs: number;
   bindReady: boolean;
   connecting: boolean;
+  connectingSince: string | null;
   staleBindRetries: number;
   connectionStatus?: string;
   connectionSequence?: number;
@@ -110,6 +111,13 @@ type Slot = {
   bindGeneration?: number;
   keepalive?: () => void;
   controller: Controller | null;
+};
+
+type InflightBind = {
+  promise: Promise<unknown>;
+  slot: Slot;
+  bindGeneration: number;
+  startedAt: string;
 };
 
 export type ConversationTimelineView = {
@@ -153,6 +161,7 @@ export type ConversationTimelineView = {
   userTurnsBeforeOffset: number;
   sessionBindReady: boolean;
   connecting: boolean;
+  connectingSince: string | null;
   handoffPending: boolean;
 };
 
@@ -160,12 +169,13 @@ type PendingEngineHandoff = {
   token: number;
   targetAgentId: string;
   targetAgentKey: string;
+  startedAt: string;
 };
 
 const listeners = new Set<() => void>();
 const listenersByConversation = new Map<string, Set<() => void>>();
 const slots = new Map<string, Slot>();
-const inflightBinds = new Map<string, Promise<unknown>>();
+const inflightBinds = new Map<string, InflightBind>();
 const pendingEngineHandoffs = new Map<string, PendingEngineHandoff>();
 let nextEngineHandoffToken = 1;
 const viewCache = new Map<
@@ -174,6 +184,7 @@ const viewCache = new Map<
     entry: ConversationStoreState['byConversationId'][string] | undefined;
     bindReady: boolean;
     connecting: boolean;
+    connectingSince: string | null;
     handoffPending: boolean;
     connectionStatus?: string;
     view: ConversationTimelineView;
@@ -262,8 +273,24 @@ const EMPTY_VIEW: ConversationTimelineView = {
   userTurnsBeforeOffset: 0,
   sessionBindReady: false,
   connecting: false,
+  connectingSince: null,
   handoffPending: false,
 };
+
+function setSlotConnecting(
+  slot: Slot,
+  next: boolean,
+  options?: { resetSince?: boolean }
+): void {
+  slot.connecting = next;
+  if (next) {
+    if (options?.resetSince || !slot.connectingSince) {
+      slot.connectingSince = new Date().toISOString();
+    }
+  } else {
+    slot.connectingSince = null;
+  }
+}
 
 function notify(conversationId?: string): void {
   if (conversationId) {
@@ -462,6 +489,7 @@ export function beginConversationEngineHandoff(
     token,
     targetAgentId: normalized,
     targetAgentKey,
+    startedAt: new Date().toISOString(),
   });
   syncConversationSelectedAgent(id, normalized, {
     deferBind: true,
@@ -518,7 +546,7 @@ export function cancelConversationEngineHandoff(
   }
   const slot = slots.get(id);
   if (slot && !slot.bindReady && !inflightBinds.has(id)) {
-    slot.connecting = false;
+    setSlotConnecting(slot, false);
   }
   viewCache.delete(id);
   notify(id);
@@ -545,7 +573,7 @@ export function syncConversationSelectedAgent(
       const slot = slots.get(id);
       if (slot) {
         slot.bindReady = false;
-        slot.connecting = deferBind;
+        setSlotConnecting(slot, deferBind, { resetSince: deferBind });
         slot.bindGeneration = (slot.bindGeneration ?? 0) + 1;
         inflightBinds.delete(id);
       }
@@ -608,7 +636,7 @@ export function syncConversationSelectedAgent(
       slot.connectionSequence = undefined;
       slot.connectionStatus = undefined;
       slot.bindReady = false;
-      slot.connecting = deferBind;
+      setSlotConnecting(slot, deferBind, { resetSince: deferBind });
       slot.staleBindRetries = 0;
       slot.bindGeneration = (slot.bindGeneration ?? 0) + 1;
       slot.keepalive?.();
@@ -656,10 +684,18 @@ export function getConversationTimelineView(
   const entry = state.byConversationId[conversationId];
   const slot = slots.get(conversationId);
   const bindReady = slot?.bindReady ?? false;
-  const handoffPending = pendingEngineHandoffs.has(conversationId);
+  const pendingHandoff = pendingEngineHandoffs.get(conversationId);
+  const handoffPending = Boolean(pendingHandoff);
+  const inflightBind = inflightBinds.get(conversationId);
   const connecting = Boolean(
-    handoffPending || slot?.connecting || inflightBinds.has(conversationId)
+    handoffPending || slot?.connecting || inflightBind
   );
+  const connectingSince = connecting
+    ? (slot?.connectingSince ??
+      inflightBind?.startedAt ??
+      pendingHandoff?.startedAt ??
+      null)
+    : null;
   const connectionStatus = slot?.connectionStatus;
   const cached = viewCache.get(conversationId);
   if (
@@ -667,6 +703,7 @@ export function getConversationTimelineView(
     cached.entry === entry &&
     cached.bindReady === bindReady &&
     cached.connecting === connecting &&
+    cached.connectingSince === connectingSince &&
     cached.handoffPending === handoffPending &&
     cached.connectionStatus === connectionStatus
   ) {
@@ -677,12 +714,14 @@ export function getConversationTimelineView(
     entry,
     bindReady,
     connecting,
+    connectingSince,
     handoffPending
   );
   viewCache.set(conversationId, {
     entry,
     bindReady,
     connecting,
+    connectingSince,
     handoffPending,
     connectionStatus,
     view,
@@ -737,6 +776,7 @@ function createSlot(): Slot {
     surfaceRefs: 0,
     bindReady: false,
     connecting: false,
+    connectingSince: null,
     staleBindRetries: 0,
     controller: null,
   };
@@ -764,6 +804,11 @@ export function retainConversationTimeline(conversationId: string): () => void {
   if (!slot) {
     slot = createSlot();
     slots.set(conversationId, slot);
+  }
+  const inflight = inflightBinds.get(conversationId);
+  if (inflight && slot !== inflight.slot) {
+    inflight.slot = slot;
+    inflight.bindGeneration = slot.bindGeneration ?? 0;
   }
   slot.refs += 1;
   if (slot.refs === 1) {
@@ -896,7 +941,7 @@ function startController(conversationId: string, slot: Slot): void {
           current.connectionSequence = undefined;
           current.bindGeneration = (current.bindGeneration ?? 0) + 1;
           current.bindReady = false;
-          current.connecting = true;
+          setSlotConnecting(current, true, { resetSince: true });
           current.staleBindRetries = 0;
           current.keepalive?.();
           current.keepalive = undefined;
@@ -919,7 +964,7 @@ function startController(conversationId: string, slot: Slot): void {
         return;
       }
       current.bindGeneration = (current.bindGeneration ?? 0) + 1;
-      current.connecting = false;
+      setSlotConnecting(current, false);
       current.staleBindRetries = 0;
       current.connectionStatus = 'ready';
       current.bindReady = true;
@@ -940,8 +985,10 @@ function startController(conversationId: string, slot: Slot): void {
           ? envelope.event.snapshot.status
           : 'connecting';
       current.connectionStatus = nextStatus;
-      current.connecting =
-        nextStatus === 'connecting' || nextStatus === 'recovering';
+      setSlotConnecting(
+        current,
+        nextStatus === 'connecting' || nextStatus === 'recovering'
+      );
       current.bindReady = false;
       current.bindGeneration = (current.bindGeneration ?? 0) + 1;
       current.keepalive?.();
@@ -949,14 +996,29 @@ function startController(conversationId: string, slot: Slot): void {
       notify(conversationId);
       return;
     }
+    if (envelope.event.kind === 'connection_status_changed') {
+      current.connectionStatus = envelope.event.snapshot.status;
+      if (connectionChanged) {
+        setSlotConnecting(
+          current,
+          current.connectionStatus === 'connecting' ||
+            current.connectionStatus === 'recovering'
+        );
+        notify(conversationId);
+      }
+      return;
+    }
     if (connectionChanged) {
       const nextStatus: string =
-        envelope.event.kind === 'connection_status_changed'
-          ? envelope.event.snapshot.status
+        envelope.event.kind === 'session_created' &&
+        envelope.event.snapshot?.status === 'ready'
+          ? 'ready'
           : 'connecting';
       current.connectionStatus = nextStatus;
-      current.connecting =
-        nextStatus === 'connecting' || nextStatus === 'recovering';
+      setSlotConnecting(
+        current,
+        nextStatus === 'connecting' || nextStatus === 'recovering'
+      );
       notify(conversationId);
     }
   }).then((unsubscribe) => {
@@ -988,7 +1050,11 @@ function stopController(slot: Slot): void {
   slot.keepalive?.();
   slot.keepalive = undefined;
   slot.bindReady = false;
-  slot.connecting = false;
+  setSlotConnecting(slot, false);
+  slot.connectionStatus = undefined;
+  slot.connectionSequence = undefined;
+  slot.connectionId = undefined;
+  slot.retiredConnectionIds = undefined;
   if (!controller) return;
   controller.stopped = true;
   controller.loadEpoch += 1;
@@ -1219,6 +1285,12 @@ function ensureLive(conversationId: string, controller: Controller): void {
     }
     if (!state.byConversationId[conversationId]?.detail) {
       controller.preDetailBatches.push(batch);
+      if (controller.preDetailBatches.length > 512) {
+        controller.preDetailBatches.splice(
+          0,
+          controller.preDetailBatches.length - 512
+        );
+      }
       return;
     }
     controller.pendingBatches.push(batch);
@@ -1282,13 +1354,18 @@ function scheduleBind(
 ): void {
   const slot = slots.get(conversationId);
   if (!slot || controller.stopped || slot.bindReady) return;
-  if (inflightBinds.has(conversationId)) {
-    slot.connecting = true;
+  const inflight = inflightBinds.get(conversationId);
+  if (inflight) {
+    if (slot !== inflight.slot) {
+      inflight.slot = slot;
+      inflight.bindGeneration = slot.bindGeneration ?? 0;
+    }
+    setSlotConnecting(slot, true);
     notify(conversationId);
     return;
   }
   if (!canBind(conversationId)) return;
-  slot.connecting = true;
+  setSlotConnecting(slot, true);
   notify(conversationId);
   const start = () => {
     controller.cancelBindIdle = null;
@@ -1298,7 +1375,7 @@ function scheduleBind(
     if (!current || current.refs <= 0 || current.bindReady) return;
     if (inflightBinds.has(conversationId)) return;
     if (!canBind(conversationId)) {
-      current.connecting = false;
+      setSlotConnecting(current, false);
       notify(conversationId);
       return;
     }
@@ -1336,30 +1413,48 @@ function beginBind(conversationId: string): void {
   if (inflightBinds.has(conversationId)) return;
   const startingSlot = slots.get(conversationId);
   if (!startingSlot) return;
-  startingSlot.connecting = true;
+  setSlotConnecting(startingSlot, true);
   startingSlot.bindGeneration = (startingSlot.bindGeneration ?? 0) + 1;
   const bindGeneration = startingSlot.bindGeneration;
-  const pending = conversationApi
+  const inflight: InflightBind = {
+    promise: Promise.resolve(),
+    slot: startingSlot,
+    bindGeneration,
+    startedAt: startingSlot.connectingSince ?? new Date().toISOString(),
+  };
+  inflight.promise = conversationApi
     .ensureSessionControls(conversationId, { reload: false })
     .then((controls) => {
-      if (inflightBinds.get(conversationId) === pending) {
+      const wasCurrentInflight = inflightBinds.get(conversationId) === inflight;
+      if (wasCurrentInflight) {
         inflightBinds.delete(conversationId);
       }
       const current = slots.get(conversationId);
+      const generationMatched =
+        (current?.bindGeneration ?? 0) === inflight.bindGeneration;
+      const canRecoverReadyBind =
+        wasCurrentInflight &&
+        current === inflight.slot &&
+        current.refs > 0 &&
+        !current.bindReady &&
+        !pendingEngineHandoffs.has(conversationId) &&
+        current.connectionStatus === 'ready';
       if (
+        !wasCurrentInflight ||
         !current ||
-        current !== startingSlot ||
+        current !== inflight.slot ||
         current.refs <= 0 ||
-        (current.bindGeneration ?? 0) !== bindGeneration
+        (!generationMatched && !canRecoverReadyBind)
       ) {
         if (
-          current === startingSlot &&
+          current &&
+          current === inflight.slot &&
           !current.bindReady &&
           !inflightBinds.has(conversationId) &&
           current.connectionStatus !== 'connecting' &&
           current.connectionStatus !== 'recovering'
         ) {
-          current.connecting = false;
+          setSlotConnecting(current, false);
         }
         notify(conversationId);
         return;
@@ -1369,7 +1464,7 @@ function beginBind(conversationId: string): void {
         conversationId,
         controls,
       });
-      current.connecting = false;
+      setSlotConnecting(current, false);
       current.staleBindRetries = 0;
       current.bindReady = true;
       current.connectionStatus = 'ready';
@@ -1377,29 +1472,32 @@ function beginBind(conversationId: string): void {
       startKeepalive(conversationId, current);
     })
     .catch((error: unknown) => {
-      if (inflightBinds.get(conversationId) === pending) {
+      const wasCurrentInflight = inflightBinds.get(conversationId) === inflight;
+      if (wasCurrentInflight) {
         inflightBinds.delete(conversationId);
       }
       const current = slots.get(conversationId);
       if (
+        !wasCurrentInflight ||
         !current ||
-        current !== startingSlot ||
+        current !== inflight.slot ||
         current.refs <= 0 ||
-        (current.bindGeneration ?? 0) !== bindGeneration
+        (current.bindGeneration ?? 0) !== inflight.bindGeneration
       ) {
         if (
-          current === startingSlot &&
+          current &&
+          current === inflight.slot &&
           !current.bindReady &&
           !inflightBinds.has(conversationId) &&
           current.connectionStatus !== 'connecting' &&
           current.connectionStatus !== 'recovering'
         ) {
-          current.connecting = false;
+          setSlotConnecting(current, false);
         }
         notify(conversationId);
         return;
       }
-      current.connecting = false;
+      setSlotConnecting(current, false);
       if (isStaleAgentConnectionError(error)) {
         if (
           current.staleBindRetries < MAX_STALE_BIND_RETRIES &&
@@ -1422,7 +1520,7 @@ function beginBind(conversationId: string): void {
       notify(conversationId);
       report(conversationId, error);
     });
-  inflightBinds.set(conversationId, pending);
+  inflightBinds.set(conversationId, inflight);
   notify(conversationId);
 }
 
@@ -1552,10 +1650,7 @@ function report(conversationId: string, error: unknown): void {
 async function resetAndReload(conversationId: string): Promise<void> {
   const controller = slots.get(conversationId)?.controller;
   if (!controller) return;
-  if (controller.flushFrame != null) {
-    cancelAnimationFrame(controller.flushFrame);
-    controller.flushFrame = null;
-  }
+  cancelScheduledFlush(controller);
   controller.preDetailBatches = [];
   controller.pendingBatches = [];
   dispatch({ type: 'reset', conversationId });
@@ -1565,10 +1660,19 @@ async function resetAndReload(conversationId: string): Promise<void> {
 async function reconnectAndReload(conversationId: string): Promise<void> {
   const slot = slots.get(conversationId);
   if (!slot?.controller) return;
+  if (slot.connectionId) {
+    (slot.retiredConnectionIds ??= new Set()).add(slot.connectionId);
+    slot.connectionId = undefined;
+  }
+  slot.connectionSequence = undefined;
+  slot.connectionStatus = undefined;
+  slot.keepalive?.();
+  slot.keepalive = undefined;
+  inflightBinds.delete(conversationId);
   slot.bindGeneration = (slot.bindGeneration ?? 0) + 1;
   const bindGeneration = slot.bindGeneration;
   slot.bindReady = false;
-  slot.connecting = true;
+  setSlotConnecting(slot, true, { resetSince: true });
   slot.staleBindRetries = 0;
   notify(conversationId);
   try {
@@ -1577,19 +1681,37 @@ async function reconnectAndReload(conversationId: string): Promise<void> {
       { reload: true }
     );
     const current = slots.get(conversationId);
+    const generationMatched = (current?.bindGeneration ?? 0) === bindGeneration;
+    const canRecoverReadyBind =
+      current === slot &&
+      current.refs > 0 &&
+      !current.bindReady &&
+      !pendingEngineHandoffs.has(conversationId) &&
+      current.connectionStatus === 'ready';
     if (
       !current ||
       current !== slot ||
       current.refs <= 0 ||
-      (current.bindGeneration ?? 0) !== bindGeneration
-    )
+      (!generationMatched && !canRecoverReadyBind)
+    ) {
+      if (
+        current === slot &&
+        !current.bindReady &&
+        !inflightBinds.has(conversationId) &&
+        current.connectionStatus !== 'connecting' &&
+        current.connectionStatus !== 'recovering'
+      ) {
+        setSlotConnecting(current, false);
+        notify(conversationId);
+      }
       return;
+    }
     dispatch({
       type: 'session_controls_hydrated',
       conversationId,
       controls,
     });
-    current.connecting = false;
+    setSlotConnecting(current, false);
     current.bindReady = true;
     current.connectionStatus = 'ready';
     notify(conversationId);
@@ -1603,9 +1725,20 @@ async function reconnectAndReload(conversationId: string): Promise<void> {
       current !== slot ||
       current.refs <= 0 ||
       (current.bindGeneration ?? 0) !== bindGeneration
-    )
+    ) {
+      if (
+        current === slot &&
+        !current.bindReady &&
+        !inflightBinds.has(conversationId) &&
+        current.connectionStatus !== 'connecting' &&
+        current.connectionStatus !== 'recovering'
+      ) {
+        setSlotConnecting(current, false);
+        notify(conversationId);
+      }
       return;
-    current.connecting = false;
+    }
+    setSlotConnecting(current, false);
     current.bindReady = false;
     notify(conversationId);
     report(conversationId, error);
@@ -1671,6 +1804,7 @@ function buildView(
   entry: ConversationStoreState['byConversationId'][string] | undefined,
   bindReady: boolean,
   slotConnecting: boolean,
+  slotConnectingSince: string | null,
   handoffPending: boolean
 ): ConversationTimelineView {
   const timeline = timelineTurnsForEntry(entry ?? null);
@@ -1682,6 +1816,19 @@ function buildView(
     sideRows
   );
   const hasDetail = Boolean(entry?.detail);
+  const isConnecting =
+    handoffPending ||
+    (hasDetail &&
+      Boolean(entry?.detail?.summary.workspace_id) &&
+      !bindReady &&
+      slotConnecting &&
+      !['failed', 'disconnected'].includes(
+        slots.get(conversationId)?.connectionStatus ?? ''
+      ) &&
+      !entry?.error &&
+      !(entry?.rows ?? []).some(
+        (row) => row.row_id === AGENT_BINDING_LOAD_FAILURE_NOTICE_ROW_ID
+      ));
   return {
     timeline,
     items,
@@ -1744,19 +1891,8 @@ function buildView(
     olderTurnsPrependEpoch: entry?.olderTurnsPrependEpoch ?? 0,
     userTurnsBeforeOffset: entry?.userTurnsBeforeOffset ?? 0,
     sessionBindReady: bindReady,
-    connecting:
-      handoffPending ||
-      (hasDetail &&
-        Boolean(entry?.detail?.summary.workspace_id) &&
-        !bindReady &&
-        slotConnecting &&
-        !['failed', 'disconnected'].includes(
-          slots.get(conversationId)?.connectionStatus ?? ''
-        ) &&
-        !entry?.error &&
-        !(entry?.rows ?? []).some(
-          (row) => row.row_id === AGENT_BINDING_LOAD_FAILURE_NOTICE_ROW_ID
-        )),
+    connecting: isConnecting,
+    connectingSince: isConnecting ? slotConnectingSince : null,
     handoffPending,
   };
 }

@@ -262,17 +262,60 @@ impl GitService {
         worktree_path: &Path,
         max_count: usize,
     ) -> Result<Vec<GitLogEntry>, GitServiceError> {
+        self.get_log_with_refs(worktree_path, &[], max_count)
+    }
+
+    /// Get topological git log entries across one or more refs (or HEAD when `refs` is empty).
+    /// Non-existent refs are filtered out so stale branch selections do not fail the query.
+    pub fn get_log_with_refs(
+        &self,
+        worktree_path: &Path,
+        refs: &[String],
+        max_count: usize,
+    ) -> Result<Vec<GitLogEntry>, GitServiceError> {
         let git = GitCli::new();
-        let raw = git
-            .get_log(worktree_path, max_count)
-            .map_err(|e| GitServiceError::InvalidRepository(format!("git log failed: {e}")))?;
+        let valid_refs: Vec<String> = if refs.is_empty() {
+            Vec::new()
+        } else {
+            let repo = self.open_repo(worktree_path)?;
+            let mut filtered = Vec::with_capacity(refs.len());
+            for r in refs {
+                let trimmed = r.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if repo.revparse_single(trimmed).is_ok() {
+                    filtered.push(trimmed.to_string());
+                }
+            }
+            if filtered.is_empty() {
+                return Ok(Vec::new());
+            }
+            filtered
+        };
+
+        let raw = match git.get_log_for_refs(worktree_path, &valid_refs, max_count) {
+            Ok(out) => out,
+            Err(e) => {
+                let msg = e.to_string().to_ascii_lowercase();
+                if msg.contains("does not have any commits yet")
+                    || msg.contains("bad default revision 'head'")
+                {
+                    return Ok(Vec::new());
+                }
+                return Err(GitServiceError::InvalidRepository(format!(
+                    "git log failed: {e}"
+                )));
+            }
+        };
 
         let mut entries = Vec::new();
         for line in raw.lines() {
-            let parts: Vec<&str> = line.splitn(5, '\0').collect();
-            if parts.len() >= 4 {
-                let refs = if parts.len() >= 5 && !parts[4].is_empty() {
-                    parts[4]
+            let parts: Vec<&str> = line.splitn(6, '\0').collect();
+            if parts.len() >= 5 {
+                let parents = parts[1].split_whitespace().map(str::to_string).collect();
+                let refs = if parts.len() >= 6 && !parts[5].is_empty() {
+                    parts[5]
                         .split(", ")
                         .map(|r| r.strip_prefix("HEAD -> ").unwrap_or(r).to_string())
                         .filter(|r| r != "HEAD")
@@ -282,9 +325,10 @@ impl GitService {
                 };
                 entries.push(GitLogEntry {
                     sha: parts[0].to_string(),
-                    summary: parts[1].to_string(),
-                    author: parts[2].to_string(),
-                    timestamp: parts[3].parse::<i64>().unwrap_or(0),
+                    parents,
+                    summary: parts[2].to_string(),
+                    author: parts[3].to_string(),
+                    timestamp: parts[4].parse::<i64>().unwrap_or(0),
                     refs,
                 });
             }
@@ -355,7 +399,19 @@ impl GitService {
 
     /// Get ahead/behind counts for the current branch vs its upstream.
     pub fn get_log_status(&self, worktree_path: &Path) -> Result<GitLogStatus, GitServiceError> {
+        self.get_log_status_with_options(worktree_path, None, None)
+    }
+
+    /// Get git log entries (optionally filtered to specific refs) plus current branch ahead/behind.
+    pub fn get_log_status_with_options(
+        &self,
+        worktree_path: &Path,
+        refs: Option<&[String]>,
+        max_count: Option<usize>,
+    ) -> Result<GitLogStatus, GitServiceError> {
         let git = GitCli::new();
+        let limit = max_count.unwrap_or(100).clamp(1, 1000);
+        let refs_slice = refs.unwrap_or(&[]);
         let branch_from_repo = self.open_repo(worktree_path).ok().and_then(|repo| {
             repo.head().ok().and_then(|head| {
                 if head.is_branch() {
@@ -367,7 +423,7 @@ impl GitService {
         });
 
         let ((branch, upstream, ahead, behind), entries_res) = std::thread::scope(|s| {
-            let log_handle = s.spawn(|| self.get_log(worktree_path, 100));
+            let log_handle = s.spawn(|| self.get_log_with_refs(worktree_path, refs_slice, limit));
             let branch = branch_from_repo
                 .unwrap_or_else(|| git.get_current_branch(worktree_path).unwrap_or_default());
             let upstream = git.get_upstream_branch(worktree_path).unwrap_or(None);
@@ -392,6 +448,85 @@ impl GitService {
             upstream,
             branch_name: branch,
         })
+    }
+
+    /// Read-only three-dot diff (`merge-base(base, branch)..branch`) for browsing
+    /// an unchecked-out local or remote branch without mutating any worktree.
+    pub fn get_branch_diffs(
+        &self,
+        repo_path: &Path,
+        branch_name: &str,
+        base_branch: Option<&str>,
+    ) -> Result<Vec<utils::diff::Diff>, GitServiceError> {
+        let repo = self.open_repo(repo_path)?;
+        let branch_commit = Self::find_branch(&repo, branch_name)?
+            .get()
+            .peel_to_commit()?;
+        let branch_oid = branch_commit.id();
+
+        let mut base_candidates: Vec<String> = Vec::new();
+        if let Some(base) = base_branch.map(str::trim).filter(|s| !s.is_empty()) {
+            base_candidates.push(base.to_string());
+        }
+        if let Ok(current) = self.get_current_branch(repo_path) {
+            base_candidates.push(current);
+        }
+        base_candidates.push("main".to_string());
+        base_candidates.push("master".to_string());
+
+        let base_oid = base_candidates.into_iter().find_map(|candidate| {
+            if candidate == branch_name {
+                return None;
+            }
+            let base_ref = Self::find_branch(&repo, &candidate).ok()?;
+            let base_commit = base_ref.get().peel_to_commit().ok()?;
+            Some(
+                repo.merge_base(branch_oid, base_commit.id())
+                    .ok()
+                    .unwrap_or_else(|| base_commit.id()),
+            )
+        });
+
+        let Some(base_oid) = base_oid else {
+            return Ok(Vec::new());
+        };
+
+        if base_oid == branch_oid {
+            return Ok(Vec::new());
+        }
+
+        let base_tree = repo.find_commit(base_oid)?.tree()?;
+        let branch_tree = branch_commit.tree()?;
+
+        let mut diff_opts = git2::DiffOptions::new();
+        diff_opts.include_typechange(true);
+        let mut diff =
+            repo.diff_tree_to_tree(Some(&base_tree), Some(&branch_tree), Some(&mut diff_opts))?;
+        let mut find_opts = git2::DiffFindOptions::new();
+        diff.find_similar(Some(&mut find_opts))?;
+
+        self.convert_diff_to_file_diffs(diff, &repo)
+    }
+
+    /// Working-tree diffs relative to HEAD for any registered worktree path
+    /// (including external worktrees not tracked in the Dimo `workspaces` table).
+    pub fn get_worktree_head_diffs(
+        &self,
+        worktree_path: &Path,
+    ) -> Result<Vec<utils::diff::Diff>, GitServiceError> {
+        let repo = self.open_repo(worktree_path)?;
+        let head_oid = match repo.head().and_then(|h| h.peel_to_commit()) {
+            Ok(commit) => commit.id(),
+            Err(_) => return Ok(Vec::new()),
+        };
+        let base_commit = crate::Commit::new(head_oid);
+        self.get_diffs(
+            crate::DiffTarget::Worktree {
+                worktree_path,
+                base_commit: &base_commit,
+            },
+            None,
+        )
     }
 
     /// Get detailed information about a single commit.
@@ -573,4 +708,170 @@ fn is_image_file(path: &str) -> bool {
     ];
     let lower = path.to_lowercase();
     image_exts.iter().any(|ext| lower.ends_with(ext))
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn git_cmd(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn init_repo_with_commit(dir: &Path) {
+        git_cmd(dir, &["init", "-b", "main"]);
+        git_cmd(dir, &["config", "user.email", "test@example.com"]);
+        git_cmd(dir, &["config", "user.name", "Test User"]);
+        std::fs::write(dir.join("README.md"), "hello\n").unwrap();
+        git_cmd(dir, &["add", "."]);
+        git_cmd(dir, &["commit", "-m", "initial commit"]);
+    }
+
+    #[test]
+    fn list_worktrees_and_resolve_membership() {
+        let root = TempDir::new().unwrap();
+        let main_dir = root.path().join("main-repo");
+        let wt_dir = root.path().join("linked-wt");
+        let outside_dir = root.path().join("outside");
+        std::fs::create_dir_all(&main_dir).unwrap();
+        std::fs::create_dir_all(&outside_dir).unwrap();
+
+        init_repo_with_commit(&main_dir);
+        git_cmd(
+            &main_dir,
+            &["worktree", "add", "-b", "feat/wt", wt_dir.to_str().unwrap()],
+        );
+
+        let git = GitService::new();
+        let worktrees = git.list_worktrees(&main_dir).unwrap();
+        assert_eq!(worktrees.len(), 2);
+        assert!(worktrees[0].is_main);
+        assert_eq!(worktrees[0].branch.as_deref(), Some("main"));
+        assert!(!worktrees[1].is_main);
+        assert_eq!(worktrees[1].branch.as_deref(), Some("feat/wt"));
+
+        assert!(
+            git.resolve_registered_worktree_path(&main_dir, &wt_dir)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            git.resolve_registered_worktree_path(&main_dir, &outside_dir)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn get_log_with_refs_returns_multi_branch_parents_and_ignores_missing_refs() {
+        let root = TempDir::new().unwrap();
+        let repo_dir = root.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        init_repo_with_commit(&repo_dir);
+
+        git_cmd(&repo_dir, &["checkout", "-b", "feat/a"]);
+        std::fs::write(repo_dir.join("a.txt"), "a\n").unwrap();
+        git_cmd(&repo_dir, &["add", "."]);
+        git_cmd(&repo_dir, &["commit", "-m", "feat a commit"]);
+
+        git_cmd(&repo_dir, &["checkout", "main"]);
+        std::fs::write(repo_dir.join("main.txt"), "m\n").unwrap();
+        git_cmd(&repo_dir, &["add", "."]);
+        git_cmd(&repo_dir, &["commit", "-m", "main second commit"]);
+
+        let git = GitService::new();
+        let refs = vec![
+            "main".to_string(),
+            "feat/a".to_string(),
+            "origin/nonexistent".to_string(),
+        ];
+        let entries = git.get_log_with_refs(&repo_dir, &refs, 50).unwrap();
+        assert_eq!(entries.len(), 3);
+        let summaries: Vec<&str> = entries.iter().map(|e| e.summary.as_str()).collect();
+        assert!(summaries.contains(&"feat a commit"));
+        assert!(summaries.contains(&"main second commit"));
+        assert!(summaries.contains(&"initial commit"));
+
+        let root_entry = entries
+            .iter()
+            .find(|e| e.summary == "initial commit")
+            .unwrap();
+        assert!(root_entry.parents.is_empty());
+
+        let feat_entry = entries
+            .iter()
+            .find(|e| e.summary == "feat a commit")
+            .unwrap();
+        assert_eq!(feat_entry.parents, vec![root_entry.sha.clone()]);
+    }
+
+    #[test]
+    fn get_branch_diffs_is_three_dot_and_does_not_mutate_head() {
+        let root = TempDir::new().unwrap();
+        let repo_dir = root.path().join("repo");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        init_repo_with_commit(&repo_dir);
+
+        git_cmd(&repo_dir, &["checkout", "-b", "feat/ro"]);
+        std::fs::write(repo_dir.join("feature.txt"), "line1\nline2\n").unwrap();
+        git_cmd(&repo_dir, &["add", "."]);
+        git_cmd(&repo_dir, &["commit", "-m", "add feature"]);
+
+        // Advance main so two-dot diff would include main-only.txt, while three-dot should NOT.
+        git_cmd(&repo_dir, &["checkout", "main"]);
+        std::fs::write(repo_dir.join("main-only.txt"), "main\n").unwrap();
+        git_cmd(&repo_dir, &["add", "."]);
+        git_cmd(&repo_dir, &["commit", "-m", "advance main"]);
+
+        let git = GitService::new();
+        let diffs = git
+            .get_branch_diffs(&repo_dir, "feat/ro", Some("main"))
+            .unwrap();
+        assert_eq!(diffs.len(), 1);
+        assert_eq!(diffs[0].new_path.as_deref(), Some("feature.txt"));
+        assert_eq!(git.get_current_branch(&repo_dir).unwrap(), "main");
+    }
+
+    #[test]
+    fn get_worktree_head_diffs_includes_modified_and_untracked() {
+        let root = TempDir::new().unwrap();
+        let main_dir = root.path().join("main-repo");
+        let wt_dir = root.path().join("linked-wt");
+        std::fs::create_dir_all(&main_dir).unwrap();
+        init_repo_with_commit(&main_dir);
+        git_cmd(
+            &main_dir,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat/dirty",
+                wt_dir.to_str().unwrap(),
+            ],
+        );
+
+        std::fs::write(wt_dir.join("README.md"), "hello\nmodified\n").unwrap();
+        std::fs::write(wt_dir.join("new.txt"), "brand new\n").unwrap();
+
+        let git = GitService::new();
+        let diffs = git.get_worktree_head_diffs(&wt_dir).unwrap();
+        let paths: Vec<String> = diffs
+            .iter()
+            .filter_map(|d| d.new_path.clone().or_else(|| d.old_path.clone()))
+            .collect();
+        assert!(paths.iter().any(|p| p == "README.md"));
+        assert!(paths.iter().any(|p| p == "new.txt"));
+    }
 }

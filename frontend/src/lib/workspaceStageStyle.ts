@@ -108,10 +108,36 @@ const stageStyleStore = createEnumPreferenceStore(
   DEFAULT_WORKSPACE_STAGE_STYLE
 );
 
+export interface WorkspaceStageTransition {
+  from: WorkspaceStageStyle;
+  to: WorkspaceStageStyle;
+}
+
+let pendingStageTransition: WorkspaceStageTransition | null = null;
+
 export const isWorkspaceStageStyle = stageStyleStore.isValid;
 export const getWorkspaceStageStyle = stageStyleStore.get;
-export const setWorkspaceStageStyle = stageStyleStore.set;
-export const resetWorkspaceStageStyle = stageStyleStore.reset;
+export const setWorkspaceStageStyle = (value: WorkspaceStageStyle): void => {
+  if (!stageStyleStore.isValid(value)) return;
+  const previous = stageStyleStore.get();
+  if (previous !== value) {
+    pendingStageTransition = { from: previous, to: value };
+  }
+  stageStyleStore.set(value);
+};
+export const resetWorkspaceStageStyle = (): void => {
+  pendingStageTransition = null;
+  stageStyleStore.reset();
+};
+export function consumePendingWorkspaceStageTransition(
+  expectedTo?: WorkspaceStageStyle
+): WorkspaceStageTransition | null {
+  if (!pendingStageTransition) return null;
+  if (expectedTo && pendingStageTransition.to !== expectedTo) return null;
+  const current = pendingStageTransition;
+  pendingStageTransition = null;
+  return current;
+}
 export const subscribeWorkspaceStageStyle = stageStyleStore.subscribe;
 export const useWorkspaceStageStyle = stageStyleStore.useValue;
 

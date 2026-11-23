@@ -199,9 +199,7 @@ describe('App lightweight settings shell', () => {
     const { default: App } = await import('./App');
     render(<App />);
 
-    expect(
-      await screen.findByTestId('desktop-toast-app')
-    ).toBeInTheDocument();
+    expect(await screen.findByTestId('desktop-toast-app')).toBeInTheDocument();
     expect(mounted.userSystemProvider).toBe(false);
     expect(mounted.projectProvider).toBe(false);
     expect(mounted.searchProvider).toBe(false);

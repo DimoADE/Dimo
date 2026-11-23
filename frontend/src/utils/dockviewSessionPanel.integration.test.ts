@@ -340,7 +340,9 @@ describe('empty tab bar prevention', () => {
     const backendSpy = vi
       .spyOn(backendTransport, 'backendCall')
       .mockResolvedValue({ ok: true });
-    const lifetime = await import('@/features/host-browser/browserPanelLifetime');
+    const lifetime = await import(
+      '@/features/host-browser/browserPanelLifetime'
+    );
     lifetime.clearAllBrowserSurfaces();
 
     useLayoutStore.getState().resetLayout();

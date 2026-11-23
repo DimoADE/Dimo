@@ -1162,6 +1162,158 @@ describe('useConversationTimeline', () => {
     expect(result.current.error).toBeNull();
   });
 
+  it('adopts an in-flight bind after full unmount and remount so connecting clears on resolve', async () => {
+    detailMock.mockResolvedValue(detail());
+    let resolveControls: (value: {
+      modes: never[];
+      current_mode: null;
+      config_options: never[];
+    }) => void = () => {};
+    ensureSessionControlsMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolveControls = resolve;
+      })
+    );
+
+    const first = renderHook(() => useConversationTimeline(CONVERSATION_ID));
+    await waitFor(() => expect(ensureSessionControlsMock).toHaveBeenCalled());
+    expect(first.result.current.connecting).toBe(true);
+    expect(first.result.current.connectingSince).not.toBeNull();
+
+    first.unmount();
+
+    const second = renderHook(() => useConversationTimeline(CONVERSATION_ID));
+    await waitFor(() => expect(second.result.current.loading).toBe(false));
+    expect(second.result.current.connecting).toBe(true);
+    expect(second.result.current.connectingSince).not.toBeNull();
+
+    await act(async () => {
+      resolveControls({
+        modes: [],
+        current_mode: null,
+        config_options: [],
+      });
+    });
+
+    await waitFor(() =>
+      expect(second.result.current.sessionBindReady).toBe(true)
+    );
+    expect(second.result.current.connecting).toBe(false);
+    expect(second.result.current.connectingSince).toBeNull();
+  });
+
+  it('completes bind when connection recovers to ready before ensureSessionControls resolves without session_bind_ready', async () => {
+    detailMock.mockResolvedValue(detail());
+    let resolveControls: (value: {
+      modes: never[];
+      current_mode: null;
+      config_options: never[];
+    }) => void = () => {};
+    ensureSessionControlsMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolveControls = resolve;
+      })
+    );
+
+    const { result } = renderHook(() =>
+      useConversationTimeline(CONVERSATION_ID)
+    );
+    await waitFor(() => expect(ensureSessionControlsMock).toHaveBeenCalled());
+
+    act(() => {
+      agentEventListeners[0]?.({
+        session_id: CONVERSATION_ID,
+        sequence: 1,
+        connection_id: 'connection-1',
+        event: {
+          kind: 'connection_status_changed',
+          snapshot: { status: 'recovering' },
+        },
+      });
+      agentEventListeners[0]?.({
+        session_id: CONVERSATION_ID,
+        sequence: 2,
+        connection_id: 'connection-1',
+        event: {
+          kind: 'connection_status_changed',
+          snapshot: { status: 'ready' },
+        },
+      });
+    });
+
+    await act(async () => {
+      resolveControls({
+        modes: [],
+        current_mode: null,
+        config_options: [],
+      });
+    });
+
+    await waitFor(() => expect(result.current.sessionBindReady).toBe(true));
+    expect(result.current.connecting).toBe(false);
+    expect(result.current.connectingSince).toBeNull();
+  });
+
+  it('retires the previous connection during reconnectAndReload so its disconnect event cannot strand connecting', async () => {
+    detailMock.mockResolvedValue(detail());
+    const { result } = renderHook(() =>
+      useConversationTimeline(CONVERSATION_ID)
+    );
+    await waitFor(() => expect(result.current.sessionBindReady).toBe(true));
+
+    act(() => {
+      agentEventListeners[0]?.({
+        session_id: CONVERSATION_ID,
+        sequence: 1,
+        connection_id: 'connection-old',
+        event: { kind: 'session_bind_ready', acp_session_id: 'acp-old' },
+      });
+    });
+
+    let resolveReload: (value: {
+      modes: never[];
+      current_mode: null;
+      config_options: never[];
+    }) => void = () => {};
+    ensureSessionControlsMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveReload = resolve;
+      })
+    );
+
+    let reloadPromise: Promise<void> | undefined;
+    act(() => {
+      reloadPromise = result.current.reconnectAndReload();
+    });
+    expect(result.current.connecting).toBe(true);
+    expect(result.current.connectingSince).not.toBeNull();
+
+    act(() => {
+      agentEventListeners[0]?.({
+        session_id: CONVERSATION_ID,
+        sequence: 2,
+        connection_id: 'connection-old',
+        event: {
+          kind: 'connection_status_changed',
+          snapshot: { status: 'disconnected' },
+        },
+      });
+    });
+
+    await act(async () => {
+      resolveReload({
+        modes: [],
+        current_mode: null,
+        config_options: [],
+      });
+      await reloadPromise;
+    });
+
+    expect(result.current.sessionBindReady).toBe(true);
+    expect(result.current.connecting).toBe(false);
+    expect(result.current.connectingSince).toBeNull();
+  });
+
   it('keeps projected controls for a zero-message conversation while auto-connecting', async () => {
     const projectedFastOption = {
       key: 'fast-mode',

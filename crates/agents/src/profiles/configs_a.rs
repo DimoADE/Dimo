@@ -21,6 +21,12 @@ pub(super) const CODEX_CANDIDATES: &[ProfileExternalCandidate] = &[ProfileExtern
     version_args: &["--version"],
     acp_args: &[],
 }];
+pub(super) const MUSE_CANDIDATES: &[ProfileExternalCandidate] = &[ProfileExternalCandidate {
+    component: ProfileComponent::CombinedRuntime,
+    executable: "muse",
+    version_args: &["--version"],
+    acp_args: &[],
+}];
 pub(super) const OPENCODE_ACP_ARGS: &[&str] = &["acp"];
 pub(super) const OPENCODE_CANDIDATES: &[ProfileExternalCandidate] =
     &[external_acp("opencode", OPENCODE_ACP_ARGS)];
@@ -265,6 +271,28 @@ pub(super) const CODEX_ACTIONS: &[ProfileManagementAction] = &[
         "管理订阅",
         "打开 ChatGPT 套餐管理页面",
         "https://chatgpt.com/#pricing",
+    ),
+];
+pub(super) const MUSE_ACTIONS: &[ProfileManagementAction] = &[
+    terminal_action(
+        "login",
+        "登录 Meta Muse",
+        "启动 Muse Code 官方账号登录",
+        ProfileManagementActionKind::Login,
+        &[program("muse", &["login"])],
+    ),
+    terminal_action(
+        "logout",
+        "退出登录",
+        "注销 Muse Code 本地账号",
+        ProfileManagementActionKind::Logout,
+        &[program("muse", &["logout"])],
+    ),
+    url_action(
+        "subscription",
+        "管理订阅",
+        "打开 Meta Muse Code 账号与文档页面",
+        "https://dev.meta.ai/docs/muse-code",
     ),
 ];
 // The ACP server owns the browser sign-in, so this action runs the server itself
@@ -805,6 +833,56 @@ pub(super) const CODEX_CONFIG: &[NativeConfigBinding] = &[
         fields: CODEX_CONFIG_FIELDS,
     },
 ];
+
+pub(super) const MUSE_PERMISSION_PROFILE_OPTIONS: &[(&str, &str)] = &[
+    (":ask-me", "按需确认 (:ask-me)"),
+    (":unrestricted", "无限制执行 (:unrestricted)"),
+];
+pub(super) const MUSE_SETTINGS_FIELDS: &[NativeConfigField] = &[
+    text_field(
+        "muse_model",
+        "默认模型",
+        "Muse Code 默认使用的模型 ID",
+        &["model"],
+    ),
+    with_default(
+        select_field(
+            "muse_permission_profile",
+            "默认权限配置",
+            "Muse Code 启动时的默认权限策略 (permissions.default_profile)",
+            &["permissions", "default_profile"],
+            MUSE_PERMISSION_PROFILE_OPTIONS,
+        ),
+        ":ask-me",
+    ),
+    boolean_field_default(
+        "muse_show_reasoning",
+        "显示推理过程",
+        "控制 Muse Code 是否展示推理摘要 (show_reasoning)",
+        &["show_reasoning"],
+        "true",
+    ),
+    number_field(
+        "muse_session_retention_days",
+        "会话保留天数",
+        "本地会话历史的保留天数 (session_retention_days)",
+        &["session_retention_days"],
+    ),
+    authentication(text_field(
+        "muse_base_url",
+        "API URL",
+        "自定义 Meta Muse API 端点 (endpoint_transport.base_url)",
+        &["endpoint_transport", "base_url"],
+    )),
+];
+pub(super) const MUSE_CONFIG: &[NativeConfigBinding] = &[NativeConfigBinding {
+    binding_id: "settings",
+    home_relative_path: ".config/muse/settings.json",
+    directory_override_env: Some("XDG_CONFIG_HOME"),
+    override_relative_path: "muse/settings.json",
+    format: NativeConfigFormat::Json,
+    fields: MUSE_SETTINGS_FIELDS,
+}];
 
 pub(super) const OPENCODE_AUTH_FIELDS: &[NativeConfigField] = &[
     authentication(tagged_secret_field(

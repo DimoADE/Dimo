@@ -12,8 +12,8 @@ import {
   agentManagementErrorMessage as errorMessage,
 } from '@/features/agent-management';
 import {
-  ROUTER_PROVIDER_NAME,
   providerSaveRequest,
+  resolveRouterProviderName,
   type RouterProvision,
 } from '@/features/model-router';
 import { contributionMetadata } from '@/hooks/usePluginHostContributions';
@@ -329,10 +329,15 @@ export function useProviderActions(
    * propagate so the ModelRouter dialog can show them next to the action.
    */
   const applyModelRouter = async (provision: RouterProvision) => {
-    const existing = view?.providers.find(
-      (provider) => provider.name === ROUTER_PROVIDER_NAME
+    const existingProviders = view?.providers ?? [];
+    const providerName = resolveRouterProviderName(
+      provision,
+      existingProviders.map((provider) => provider.name)
     );
-    if (signedIn && !existing?.bound) {
+    const existingIds = new Set(
+      existingProviders.map((provider) => provider.id)
+    );
+    if (signedIn) {
       const result = await ConfirmDialog.show({
         title: t('settings:agents.authEnableProviderSignsOutTitle'),
         message: t('settings:agents.authEnableProviderSignsOutMessage'),
@@ -347,13 +352,15 @@ export function useProviderActions(
     setSaving(true);
     try {
       const saved = await agentManagementApi.saveModelProvider({
-        ...providerSaveRequest(provision, existing?.id ?? null),
+        ...providerSaveRequest(provision, null, providerName),
         ...(providerInstanceId ? { providerInstanceId } : {}),
       });
       setView(saved);
-      const preset = saved.providers.find(
-        (provider) => provider.name === ROUTER_PROVIDER_NAME
-      );
+      const preset =
+        saved.providers.find(
+          (provider) =>
+            provider.name === providerName && !existingIds.has(provider.id)
+        ) ?? saved.providers.find((provider) => provider.name === providerName);
       if (!preset) throw new Error(t('settings:agents.providerActionFailed'));
       setView(
         providerInstanceId

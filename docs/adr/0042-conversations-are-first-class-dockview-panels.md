@@ -1,43 +1,25 @@
 ---
 status: accepted
 date: 2026-08-09
-decision-makers:
-  - Dimo maintainers
+decision-makers: Dimo maintainers
 ---
 
 # Conversation 是一等 Dockview 面板
 
-P1 的多会话 Split View 把每个 Conversation 建模为独立 Dockview panel，而不在锁定的
-右侧会话区域内部再实现第二套分屏框架。Conversation 默认仍在右侧打开，但可以被拖到
-编辑区、组成标签组，或创建左右/上下分组；同屏最多三个 Conversation group，与现有
-编辑区分组上限保持一致。
+在多会话 IDE 工作台中，每个 Conversation 都是一等 Dockview panel，由 Dockview 统一承担标签、分屏、拖拽、序列化与恢复，不在固定右侧区域内另建第二套分屏框架。
 
-## Consequences
+## Decision
 
-- 每个 Conversation panel 拥有独立的订阅、滚动位置、Composer 草稿视图和在途 Turn
-  展示状态，不再依赖一个全局会话 DOM 在不同槽位之间搬运；
-- 同一个 Server-bound window 内，一个 Conversation 最多存在一个 panel；重复打开只
-  聚焦现有 panel，不复制 Composer、滚动状态或事件订阅。不同窗口与设备仍可同时查看
-  同一 Conversation，并通过服务端事件序列和并发规则协调；
-- 关闭、移动或重排 panel 只改变视图，不取消 Turn、不关闭 Agent session，也不删除
-  Conversation；
-- Dockview 是标签、分组、拖拽、序列化与恢复的唯一布局权威；不得在 Conversation
-  panel 内再嵌套自定义 split tree；
-- Dockview 布局、打开的 panel、标签顺序、分组尺寸、激活标签与滚动位置只在当前设备
-  持久化，并按稳定 Server 身份、Project 与窗口身份隔离；它们不经 Server 同步，Profile
-  改名或地址更新也不得丢失。Android 和其它桌面设备各自维护适合自身屏幕的布局；
-- Composer draft 属于 Server 上的 Conversation，并在已授权桌面、浏览器与 Android
-  之间共享。每次保存必须携带 `base_revision`；冲突时同时保留 Server 版本和本机未保存
-  版本并要求用户选择或合并，禁止静默 last-write-wins。Turn 提交成功后仅在 revision
-  仍匹配实际提交内容时清除草稿；本地附件只有成为 Server 可识别的 Artifact 后才能
-  跨设备引用；
-- 现有默认右侧会话体验继续保留，用户未使用分屏时不承担额外交互成本。
+- **一等面板与同屏分组**：Conversation 默认在右侧打开，并可自由拖入编辑区、组成标签组或建立左右/上下分屏；同屏最多支持三个 Conversation group，与编辑区分组上限一致。每个 panel 拥有独立的事件订阅、滚动位置、Composer 草稿视图与在途 Turn 状态。
+- **窗口内唯一实例与聚焦导航**：同一个 Server-bound window 内，一个 Conversation 至多对应一个 panel；重复打开或通过 `workspace.focusConversation` 导航时，只切到工作区表面并聚焦已有 panel，不新建重复面板，也不将时间线嵌进插件 Tab。不同窗口与不同设备可同时查看同一 Conversation，并通过服务端事件序列协调。
+- **视图操作与领域解耦**：关闭、移动或重排 panel 只改变本地布局，绝不取消在途 Turn、不关闭 Agent 会话、不删除 Conversation。
+- **本地布局持久化**：Dockview 布局、打开的面板、标签顺序、分组尺寸、激活标签与滚动位置仅保存在当前设备，按稳定 Host 身份（[ADR-0059](0059-host-identity-and-pairing-invitation.md)）、Project 与窗口身份隔离，不经 Host 同步，不因 Server Profile 改名或地址更新而丢失。
+- **服务端共享草稿**：Composer draft 属于 Host 上的 Conversation，在已授权桌面、浏览器与移动端（iOS / Android）间共享。每次保存携带 `base_revision`，冲突时同时保留服务端版本与本机未保存版本并由用户选择或合并，禁止静默 last-write-wins；Turn 提交成功后仅在 revision 匹配时清除草稿；本地附件成为 Host 可识别 Artifact 后方可跨设备引用。
 
 ## Considered Options
 
-- 在固定右侧会话区域内新增嵌套 splitter：否决。它会制造第二套布局、拖拽、持久化和
-  无障碍模型，并继续保留会话单实例假设。
+- **在固定右侧会话槽位内嵌套自定义 splitter**：否决。会制造第二套布局、拖拽、持久化与无障碍模型，并固化单会话 DOM 假设。
 
-## Amendment（2026-10-19）
+## Consequences
 
-`workspace.focusConversation` 只做导航：打开或聚焦该窗口里这个 Conversation 的唯一面板，并切到工作区表面。重复调用不新建面板。它不创造第二种面板，也不把时间线嵌进插件 Tab。
+- Dockview 成为工作台唯一的布局权威，默认单会话体验零额外成本，多会话并行查看与 Spatial Canvas 联动均基于同一会话模型工作。

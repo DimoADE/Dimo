@@ -278,6 +278,10 @@ fn native_model_source(
             configured(&["CLAUDE_CONFIG_DIR"], ".claude"),
             &["settings.json"],
         ),
+        "muse_code" => (
+            configured(&["XDG_CONFIG_HOME"], ".config").join("muse"),
+            &["settings.json", "auth.json"],
+        ),
         // Pi reads `PI_CODING_AGENT_DIR`; `PI_HOME` is not a variable pi knows.
         // Kept as a fallback only so a lock written before this keeps hashing the
         // directory it always did.

@@ -685,7 +685,8 @@
       "snapshot": "Dimo snapshot",
       "developer_link": "Developer link (read-only)",
       "codex_native": "Codex native location",
-      "claude_code_native": "Claude Code native location"
+      "claude_code_native": "Claude Code native location",
+      "muse_code_native": "Muse Code native location"
     },
     "uninstall": "Uninstall plugin",
     "rollback": "Restore previous",
@@ -701,9 +702,11 @@
     "marketplaceMethod": "CLI import",
     "codexCliDescription": "Enter one official Codex plugin import command per line. Dimo runs them in order.",
     "claudeCliDescription": "Enter one official Claude Code plugin import command per line. Dimo runs them in order.",
+    "museCliDescription": "Enter one official Muse Code plugin command per line. Dimo runs them in order with MUSE_EXPERIMENTAL_PLUGINS=1.",
     "cliCommandLabel": "{{ecosystem}} CLI commands",
     "codexCliPlaceholder": "codex plugin marketplace add <source>\ncodex plugin add <plugin>@<marketplace>",
     "claudeCliPlaceholder": "claude plugin marketplace add <source>\nclaude plugin install <plugin>@<marketplace>",
+    "museCliPlaceholder": "muse plugins marketplace add <source>\nmuse plugins install <plugin>@<marketplace>",
     "runCliImport": "Run and import",
     "cliImportRunning": "Importing",
     "cliLogTitle": "Run log",
@@ -1124,8 +1127,8 @@
       },
       "voiceInput": {
         "name": "Voice Input",
-        "summary": "AI voice dictation and speech-to-text with live streaming captions, Whisper/Groq/multimodal audio transcription, custom vocabulary hotwords, and intelligent post-transcription cleanup.",
-        "readme": "# Voice Input\n\nProvides low-latency AI speech-to-text and post-transcription cleanup for Dimo's session composer and Monaco editors.\n\n## Key Capabilities\n\n- **Multi-Engine Speech-to-Text**: Supports `hybrid` (Web Speech live captions + cloud Whisper post-processing), `openai-whisper` (`/v1/audio/transcriptions`), `groq-whisper` (`whisper-large-v3-turbo`), `openai-chat-audio`, and `browser-speech`.\n- **Custom Vocabulary Hotwords**: Automatically biases Whisper decoding prompts and normalizes technical terminology spelling (`Dimo`, `Tauri`, `Monaco`, `TypeScript`, `Worktree`).\n- **Post-Transcription Cleanup**: Strips spoken filler words and stutters while preserving raw transcripts for comparison.",
+        "summary": "AI voice dictation with local offline GGUF models (transcribe.cpp), 16kHz FIR resampling, VAD silence filtering, multi-provider cloud STT, alias vocabulary, and preview HUD.",
+        "readme": "# Voice Input\n\nProvides low-latency AI speech-to-text and post-transcription cleanup for Dimo's session composer and Monaco editors, supporting both fully offline local GGUF models and cloud APIs.\n\n## Key Capabilities\n\n- **Local Offline Models (`local-model`)**: Curated catalog of 12 SHA-256 verified GGUF models (SenseVoice Small, Qwen3-ASR, Whisper Large v3 Turbo, Fun-ASR, Parakeet, Nemotron, Canary) with on-demand `transcribe.cpp` isolated child-process runtime, resumable downloads with HF-Mirror support, zero-copy linking of existing HuggingFace / T3 Code / Handy copies, and idle memory auto-unload.\n- **Multi-Engine Cloud & Native STT**: Supports `hybrid`, `openai-whisper`, `groq-whisper`, `xai-stt` (Grok STT), `openrouter-stt`, `openai-chat-audio`, `custom-openai` (local unauthenticated localhost Whisper servers), and `browser-speech`.\n- **Smart Trigger & Alias Cleanup**: Default `auto` trigger (tap to toggle, hold >= 300ms for push-to-talk), failed recording retention & retry, alias vocabulary (`Term = alias1 | alias2`), hyphen-safe filler removal, and interactive preview comparison.",
         "config": {
           "enabled": {
             "title": "Enable voice input",
@@ -1136,27 +1139,70 @@
             "description": "Choose the speech-to-text engine protocol.",
             "enum": {
               "hybrid": "Hybrid live captions + Cloud Whisper (Recommended)",
+              "local-model": "Local Offline Model (GGUF · Free & Private)",
               "openai-whisper": "OpenAI Whisper (/v1/audio/transcriptions)",
               "groq-whisper": "Groq Fast Whisper (whisper-large-v3-turbo)",
+              "xai-stt": "xAI Grok STT (grok-voice-transcribe-2.0)",
+              "openrouter-stt": "OpenRouter Audio Transcriptions",
               "openai-chat-audio": "Multimodal Chat Audio (/v1/chat/completions)",
+              "custom-openai": "Custom / Local OpenAI-Compatible Endpoint",
               "browser-speech": "Browser / OS native live speech (No API key)"
             }
           },
+          "localModelId": {
+            "title": "Local offline model (GGUF)",
+            "description": "Select the on-device speech recognition model (download, verify, or zero-copy link existing files from the status bar Models tab).",
+            "enum": {
+              "handy-computer/SenseVoiceSmall-gguf": "SenseVoice Small (241 MB · CN/EN/JA/KO/YUE · Recommended)",
+              "handy-computer/Qwen3-ASR-0.6B-gguf": "Qwen3-ASR 0.6B (811 MB · Bilingual CN/EN)",
+              "handy-computer/whisper-large-v3-turbo-gguf": "Whisper Large v3 Turbo (845 MB · 100 Languages)",
+              "handy-computer/Fun-ASR-MLT-Nano-2512-gguf": "Fun-ASR MLT Nano (850 MB · 31 Languages)",
+              "handy-computer/parakeet-unified-en-0.6b-gguf": "Parakeet Unified EN 0.6B (697 MB · EN Streaming)",
+              "handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf": "Nemotron 3.5 Streaming 0.6B (716 MB · 28 Lang Streaming)",
+              "handy-computer/whisper-medium-gguf": "Whisper Medium (793 MB · 99 Lang + EN Translate)",
+              "handy-computer/whisper-small-gguf": "Whisper Small (257 MB · Compact + EN Translate)",
+              "handy-computer/whisper-base-gguf": "Whisper Base (81 MB · Ultra-light)",
+              "handy-computer/whisper-tiny-gguf": "Whisper Tiny (44 MB · Fastest)",
+              "handy-computer/canary-180m-flash-gguf": "Canary 180M Flash (208 MB · EN/DE/ES/FR)",
+              "handy-computer/Qwen3-ASR-1.7B-gguf": "Qwen3-ASR 1.7B (2.08 GB · Flagship Accuracy)"
+            }
+          },
+          "localAcceleration": {
+            "title": "Local hardware acceleration",
+            "description": "Inference backend for local models: auto prefers GPU (Vulkan / Metal) with CPU fallback, CPU-only, or force GPU.",
+            "enum": {
+              "auto": "Auto (GPU preferred, CPU fallback)",
+              "cpu": "CPU only",
+              "gpu": "Force GPU (Vulkan / Metal)"
+            }
+          },
+          "localUnloadTimeoutSec": {
+            "title": "Idle auto-unload timeout (seconds)",
+            "description": "Unload the resident local model from RAM/VRAM after being idle for this many seconds (0 keeps it loaded)."
+          },
+          "hfMirrorUrl": {
+            "title": "Model download mirror URL",
+            "description": "Base URL for downloading GGUF models (default https://huggingface.co; use https://hf-mirror.com for faster downloads in China)."
+          },
+          "localModelsDir": {
+            "title": "Custom local models directory",
+            "description": "Leave empty for ~/.dimo/voice-input/models, or set a custom folder to store downloaded and linked GGUF models."
+          },
           "baseUrl": {
             "title": "API Base URL",
-            "description": "Base URL for OpenAI, Groq, or compatible transcription and cleanup endpoints."
+            "description": "Base URL for OpenAI, Groq, xAI, OpenRouter, or local Whisper (localhost) endpoints."
           },
           "apiKey": {
             "title": "API Key",
-            "description": "API key for cloud Whisper transcription and LLM text cleanup."
+            "description": "API key for cloud transcription and LLM cleanup (optional for local localhost servers)."
           },
           "model": {
             "title": "Transcription model",
-            "description": "Speech recognition model identifier (e.g. gpt-4o-mini-transcribe, whisper-1, whisper-large-v3-turbo)."
+            "description": "Speech recognition model identifier (e.g. gpt-4o-mini-transcribe, whisper-large-v3-turbo, grok-voice-transcribe-2.0)."
           },
           "cleanupModel": {
             "title": "Cleanup model",
-            "description": "Lightweight LLM model used for post-transcription cleanup."
+            "description": "Lightweight LLM model used for draft-aware post-transcription cleanup."
           },
           "language": {
             "title": "Language hint",
@@ -1166,13 +1212,21 @@
               "zh": "Chinese (zh-CN)",
               "en": "English (en-US)",
               "ja": "Japanese (ja-JP)",
-              "ko": "Korean (ko-KR)"
+              "ko": "Korean (ko-KR)",
+              "de": "German (de-DE)",
+              "fr": "French (fr-FR)",
+              "es": "Spanish (es-ES)"
             }
+          },
+          "translateToEnglish": {
+            "title": "Translate output to English",
+            "description": "Translate dictated speech directly into English text (for Whisper/multimodal cloud engines)."
           },
           "recordingMode": {
             "title": "Recording mode",
-            "description": "Click to toggle start/stop or hold shortcut to talk.",
+            "description": "Smart auto (tap to toggle, hold >= 300ms to talk), toggle, or push-to-talk.",
             "enum": {
+              "auto": "Smart auto (Tap toggle / Hold to talk, Recommended)",
               "toggle": "Toggle start / stop",
               "push-to-talk": "Push to talk"
             }
@@ -1183,24 +1237,44 @@
           },
           "cleanupMode": {
             "title": "Post-transcription cleanup",
-            "description": "Automatically remove spoken fillers and normalize punctuation, preview before inserting, or keep raw output.",
+            "description": "Automatically clean and insert, preview cleaned vs. raw before inserting, or keep raw output.",
             "enum": {
               "auto-clean": "Auto-clean and insert",
               "preview": "Preview cleaned vs. raw before insert",
               "off": "Off (insert raw transcript)"
             }
           },
+          "removeFillerWords": {
+            "title": "Remove spoken filler words",
+            "description": "Strip hesitation fillers and stutters while preserving hyphenated words like uh-huh."
+          },
+          "useLlmCleanup": {
+            "title": "Enable LLM context cleanup",
+            "description": "Use surrounding composer draft context for smart punctuation and term correction (skippable mid-run)."
+          },
+          "correctionCue": {
+            "title": "Spoken correction cue",
+            "description": "Phrase for spoken self-corrections (e.g. 'scratch that'); protected from filler stripping and applied during cleanup."
+          },
+          "cleanupInstructions": {
+            "title": "Custom cleanup instructions",
+            "description": "Extra formatting or style instructions passed to the cleanup LLM."
+          },
           "vocabulary": {
             "title": "Custom vocabulary hotwords",
-            "description": "Each hotword is stored as an individual token. Press Enter or comma to add, click to remove; used as Whisper prompt context and post-processing glossary."
+            "description": "Supports plain terms and explicit alias rules (e.g. Dimo = vibe x | vibex) for decoding prompts, alias substitution, and fuzzy phonetic correction."
+          },
+          "silenceFiltering": {
+            "title": "Silence filtering (VAD)",
+            "description": "Trim leading/trailing silence and long pauses before upload and block empty silent recordings."
           },
           "audioDeviceId": {
             "title": "Microphone input device",
-            "description": "Target microphone device ID (default uses system default microphone)."
+            "description": "Target microphone device ID (default uses system default with priority fallback; pick & test in the status bar popover)."
           },
           "showFloatingHud": {
             "title": "Show floating live caption pill",
-            "description": "Display a floating waveform and live caption pill while recording or previewing."
+            "description": "Display a draggable frosted-glass waveform pill and interactive preview/error card."
           }
         }
       }
@@ -2379,6 +2453,9 @@
     "authDescMimoSubscription": "Sign in with a Xiaomi MiMo account.",
     "authDescMimoOfficialApi": "Use a Xiaomi MiMo first-party API key.",
     "authDescMimoProvider": "Connect catalog or custom OpenAI-compatible providers in MiMo Code.",
+    "authDescMuseSubscription": "Sign in with your Meta account via muse login.",
+    "authDescMuseOfficialApi": "Authenticate with a Meta Developer API key (META_API_KEY).",
+    "authDescMuseProvider": "Route Muse Code through a saved custom gateway or Model Provider.",
     "qoderTokenLabel": "QODER_PERSONAL_ACCESS_TOKEN",
     "qoderTokenPlaceholder": "Personal access token",
     "qoderTokenHint": "Same-account token for machines without a browser.",
@@ -2473,6 +2550,30 @@
     "grokPluginRemoveAria": "Remove {{name}}",
     "grokPluginRemoved": "Removed {{name}}",
     "grokPluginRemoveFailed": "Could not remove the Grok plugin",
+    "musePluginTitle": "Plugins",
+    "musePluginSpec": "Source",
+    "musePluginSpecPlaceholder": "plugin@marketplace, git URL, or local path",
+    "musePluginAdd": "Install plugin",
+    "musePluginAdded": "Installed {{name}}",
+    "musePluginAddFailed": "Could not install the Muse Code plugin",
+    "musePluginLoadFailed": "Could not read Muse Code plugins",
+    "musePluginChecking": "Reading Muse Code plugins…",
+    "musePluginEmpty": "No Muse Code plugins are installed.",
+    "musePluginRefreshAria": "Refresh Muse Code plugins",
+    "musePluginApprove": "Approve",
+    "musePluginApproved": "Approved {{name}}",
+    "musePluginApproveFailed": "Could not approve the Muse Code plugin",
+    "musePluginEnable": "Enable",
+    "musePluginDisable": "Disable",
+    "musePluginEnabled": "Enabled {{name}}",
+    "musePluginDisabled": "Disabled {{name}}",
+    "musePluginToggleFailed": "Could not update plugin state",
+    "musePluginRemoveTitle": "Remove {{name}}",
+    "musePluginRemoveMessage": "This uninstalls the plugin with muse plugins remove.",
+    "musePluginRemoveConfirm": "Remove",
+    "musePluginRemoveAria": "Remove {{name}}",
+    "musePluginRemoved": "Removed {{name}}",
+    "musePluginRemoveFailed": "Could not remove the Muse Code plugin",
     "piPluginTitle": "Plugins",
     "piPluginSpec": "Source",
     "piPluginSpecPlaceholder": "npm:@scope/pkg, git:github.com/user/repo, or a path",
@@ -2894,6 +2995,20 @@
         "login": {
           "label": "Sign in to ZCode",
           "description": "Open the official ZCode sign-in flow."
+        }
+      },
+      "muse_code": {
+        "login": {
+          "label": "Sign in to Muse Code",
+          "description": "Run muse login to authenticate with your Meta account."
+        },
+        "logout": {
+          "label": "Sign out of Muse Code",
+          "description": "Run muse logout and clear the local Muse Code session."
+        },
+        "subscription": {
+          "label": "Manage Meta Developer account",
+          "description": "Open Meta Developer portal for Muse Code plans and API keys."
         }
       },
       "omp": {

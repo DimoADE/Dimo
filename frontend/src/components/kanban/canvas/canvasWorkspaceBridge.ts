@@ -32,19 +32,32 @@ export interface CanvasWorkspaceController {
   closeOtherNodes: (instanceId: string) => void;
   closeAllNodes: () => void;
   duplicateNode: (instanceId: string) => string | null;
+  focusNode?: (instanceId: string) => void;
+  autoArrange?: () => void;
 }
 
 const registeredControllers: CanvasWorkspaceController[] = [];
+const controllerListeners = new Set<
+  (controller: CanvasWorkspaceController | null) => void
+>();
 let scopedParentNodeId: string | null = null;
 let pendingParentNode: { nodeId: string; expiresAt: number } | null = null;
 
 const PENDING_PARENT_TTL_MS = 8_000;
+
+function notifyControllerListeners(): void {
+  const current = getCanvasWorkspaceController();
+  for (const listener of [...controllerListeners]) {
+    listener(current);
+  }
+}
 
 export function registerCanvasWorkspaceController(
   controller: CanvasWorkspaceController | null
 ): () => void {
   if (!controller) {
     registeredControllers.length = 0;
+    notifyControllerListeners();
     return () => undefined;
   }
   const existingIndex = registeredControllers.indexOf(controller);
@@ -52,10 +65,12 @@ export function registerCanvasWorkspaceController(
     registeredControllers.splice(existingIndex, 1);
   }
   registeredControllers.push(controller);
+  notifyControllerListeners();
   return () => {
     const idx = registeredControllers.indexOf(controller);
     if (idx !== -1) {
       registeredControllers.splice(idx, 1);
+      notifyControllerListeners();
     }
   };
 }
@@ -64,6 +79,15 @@ export function getCanvasWorkspaceController(): CanvasWorkspaceController | null
   return registeredControllers.length > 0
     ? (registeredControllers[registeredControllers.length - 1] ?? null)
     : null;
+}
+
+export function subscribeCanvasWorkspaceController(
+  listener: (controller: CanvasWorkspaceController | null) => void
+): () => void {
+  controllerListeners.add(listener);
+  return () => {
+    controllerListeners.delete(listener);
+  };
 }
 
 export function setPendingCanvasParentNode(

@@ -768,6 +768,7 @@ fn built_in_profiles_are_declarative_and_bind_explicitly() {
         [
             "claude_code",
             "codex",
+            "muse_code",
             "pi",
             "opencode",
             "grok",
@@ -825,7 +826,11 @@ fn built_in_profiles_are_declarative_and_bind_explicitly() {
     }
 
     // Native-engine Agents launch and authenticate directly through their official CLI.
-    for (id, expected_cli) in [("claude_code", "claude"), ("codex", "codex")] {
+    for (id, expected_cli) in [
+        ("claude_code", "claude"),
+        ("codex", "codex"),
+        ("muse_code", "muse"),
+    ] {
         let profile = catalog.profile(&AgentId::parse(id).unwrap()).unwrap();
         assert!(
             profile.registry_binding.is_none(),
@@ -891,6 +896,7 @@ fn built_in_profiles_are_declarative_and_bind_explicitly() {
         [
             ("claude_code", None),
             ("codex", None),
+            ("muse_code", None),
             ("pi", None),
             ("opencode", None),
             ("grok", None),

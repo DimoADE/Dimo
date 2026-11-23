@@ -8,6 +8,8 @@ type PollMode = 'active' | 'background' | 'paused';
 interface UseGitStatusOptions {
   workspaceId: string | null;
   repoId: string | null;
+  worktreePath?: string | null;
+  enabled?: boolean;
   pollMode?: PollMode;
 }
 
@@ -34,12 +36,14 @@ function getPollInterval(mode: PollMode, fileCount: number): number | false {
 export function useGitStatus({
   workspaceId,
   repoId,
+  worktreePath = null,
+  enabled = true,
   pollMode = 'active',
 }: UseGitStatusOptions): UseGitStatusReturn {
   const queryClient = useQueryClient();
   const queryKey = useMemo(
-    () => ['gitStatus', workspaceId, repoId],
-    [workspaceId, repoId]
+    () => ['gitStatus', workspaceId, repoId, worktreePath],
+    [workspaceId, repoId, worktreePath]
   );
 
   const {
@@ -49,11 +53,14 @@ export function useGitStatus({
   } = useQuery<DetailedGitStatus>({
     queryKey,
     queryFn: async () => {
+      if (worktreePath) {
+        return await repoApi.getGitStatus(repoId!, worktreePath);
+      }
       return workspaceId
         ? await attemptsApi.getGitStatus(workspaceId, repoId!)
         : await repoApi.getGitStatus(repoId!);
     },
-    enabled: !!repoId,
+    enabled: enabled && !!repoId,
     staleTime: 15_000,
     placeholderData: (previousData) => previousData,
     refetchOnWindowFocus: true,

@@ -217,10 +217,31 @@ pub(super) async fn update_profiles(args: Value) -> Result<Value, ApplicationErr
     serialize("Executor profiles updated successfully".to_string())
 }
 
+const EDITOR_AVAILABILITY_CACHE_TTL: Duration = Duration::from_secs(60);
+
+fn editor_availability_cache()
+-> &'static std::sync::Mutex<HashMap<String, (bool, std::time::Instant)>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<String, (bool, std::time::Instant)>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 pub(super) async fn check_editor_availability(args: Value) -> Result<Value, ApplicationError> {
     let args: EditorArgs = parse(args)?;
+    let key = format!("{:?}", args.editor_type);
+    if let Ok(cache) = editor_availability_cache().lock()
+        && let Some(&(available, checked_at)) = cache.get(&key)
+        && checked_at.elapsed() < EDITOR_AVAILABILITY_CACHE_TTL
+    {
+        return Ok(json!({ "available": available }));
+    }
     let editor_config = EditorConfig::new(args.editor_type, None, None, None);
-    Ok(json!({ "available": editor_config.check_availability().await }))
+    let available = editor_config.check_availability().await;
+    if let Ok(mut cache) = editor_availability_cache().lock() {
+        cache.insert(key, (available, std::time::Instant::now()));
+    }
+    Ok(json!({ "available": available }))
 }
 
 pub(super) async fn play_notification_sound(args: Value) -> Result<Value, ApplicationError> {
@@ -791,7 +812,10 @@ mod tests {
         let disk: Value =
             serde_json::from_str(&std::fs::read_to_string(&path).expect("read disk file"))
                 .expect("parse disk file");
-        assert_eq!(disk["env"]["ANTHROPIC_BASE_URL"], json!("https://updated.invalid"));
+        assert_eq!(
+            disk["env"]["ANTHROPIC_BASE_URL"],
+            json!("https://updated.invalid")
+        );
         assert_eq!(disk["env"]["FOO"], json!("bar"));
         assert_eq!(disk["enabledPlugins"]["dimo-official"], json!(true));
         assert_eq!(disk["enabledPlugins"]["legacy-plugin"], json!(false));

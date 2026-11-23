@@ -19,6 +19,7 @@ function renderDraftHydrationHook(initialProps: {
   scratchData: DraftFollowUpData | undefined;
   initialMessage?: string;
   initialImages?: SessionComposerImageAttachment[];
+  allowSessionControlsHydration?: boolean;
   cancelDebouncedSave?: () => void;
   deleteScratch?: () => Promise<void>;
 }) {
@@ -28,17 +29,30 @@ function renderDraftHydrationHook(initialProps: {
       const [images, setImages] = useState<SessionComposerImageAttachment[]>(
         props.initialImages ?? []
       );
+      const [selectedMode, setSelectedMode] = useState<string | null>(null);
+      const [selectedConfigValues, setSelectedConfigValues] = useState<
+        Record<string, string>
+      >({});
       const { handleAfterSendCleanup } = useSessionComposerDraftHydration({
         scratchId: props.scratchId,
         isScratchLoading: props.isScratchLoading,
         scratchData: props.scratchData,
         setLocalMessage: setMessage,
         setAttachedImages: setImages,
+        setSelectedMode,
+        setSelectedConfigValues,
+        allowSessionControlsHydration: props.allowSessionControlsHydration,
         cancelDebouncedSave: props.cancelDebouncedSave ?? vi.fn(),
         deleteScratch: props.deleteScratch ?? vi.fn(),
       });
 
-      return { message, images, handleAfterSendCleanup };
+      return {
+        message,
+        images,
+        selectedMode,
+        selectedConfigValues,
+        handleAfterSendCleanup,
+      };
     },
     { initialProps }
   );
@@ -99,6 +113,41 @@ describe('useSessionComposerDraftHydration', () => {
 
     expect(result.current.message).toBe('stored draft');
     revokeSpy.mockRestore();
+  });
+
+  it('skips stale draft mode and config overrides for established sessions while still hydrating text', () => {
+    const { result } = renderDraftHydrationHook({
+      scratchId: 'session-established',
+      isScratchLoading: false,
+      allowSessionControlsHydration: false,
+      scratchData: {
+        ...draftData,
+        mode_override: 'plan',
+        config_overrides: { model: 'stale-model' },
+      },
+    });
+
+    expect(result.current.message).toBe('stored draft');
+    expect(result.current.selectedMode).toBeNull();
+    expect(result.current.selectedConfigValues).toEqual({});
+  });
+
+  it('hydrates draft mode and config overrides before a session has established controls', () => {
+    const { result } = renderDraftHydrationHook({
+      scratchId: 'session-fresh',
+      isScratchLoading: false,
+      allowSessionControlsHydration: true,
+      scratchData: {
+        ...draftData,
+        mode_override: 'acceptEdits',
+        config_overrides: { model: 'claude-opus-4-6' },
+      },
+    });
+
+    expect(result.current.selectedMode).toBe('acceptEdits');
+    expect(result.current.selectedConfigValues).toEqual({
+      model: 'claude-opus-4-6',
+    });
   });
 
   it('cleans local draft state after send and deletes existing scratch', async () => {

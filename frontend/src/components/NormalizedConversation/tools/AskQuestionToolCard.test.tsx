@@ -50,7 +50,7 @@ const QUESTIONS = [
 ];
 
 describe('AskQuestionToolCard', () => {
-  it('shows a title row with a Questions tag and no leading icon', () => {
+  it('shows a title row with View Details replacing the Questions tag and no leading icon', () => {
     render(<AskQuestionToolCard use={use(QUESTIONS)} result={null} />);
 
     expect(
@@ -64,9 +64,8 @@ describe('AskQuestionToolCard', () => {
     expect(screen.getByTestId('ask-question-title')).toHaveClass(
       'ask-question-tool-title'
     );
-    expect(screen.getByTestId('ask-question-kind-tag')).toHaveTextContent(
-      'Questions'
-    );
+    expect(screen.queryByTestId('ask-question-kind-tag')).toBeNull();
+    expect(screen.queryByText('Questions')).toBeNull();
     expect(
       screen.queryByRole('button', { name: '提示词' })
     ).not.toBeInTheDocument();
@@ -75,6 +74,7 @@ describe('AskQuestionToolCard', () => {
     ).not.toBeInTheDocument();
 
     const details = screen.getByRole('button', { name: '查看详情' });
+    expect(details.closest('.ask-question-tool-header')).not.toBeNull();
     expect(details).toHaveAttribute('aria-expanded', 'false');
     fireEvent.click(details);
     expect(details).toHaveAttribute('aria-expanded', 'true');
@@ -193,7 +193,86 @@ describe('AskQuestionToolCard', () => {
       screen.queryByRole('button', { name: '拒绝回答' })
     ).not.toBeInTheDocument();
     expect(
+      screen.queryByRole('button', { name: '跳过' })
+    ).not.toBeInTheDocument();
+    expect(
       screen.queryByRole('button', { name: '提交回答' })
     ).not.toBeInTheDocument();
+  });
+
+  it('shows answered status pill, header View Details toggle, and inline answer summary when collapsed', () => {
+    render(
+      <AskQuestionToolCard
+        use={use(QUESTIONS)}
+        result={result({
+          outcome: 'accepted',
+          answers: {
+            tracker: ['Local markdown (推荐)'],
+            note: ['Keep tests at the public UI seam.'],
+            host: ['GitLab'],
+          },
+        })}
+      />
+    );
+
+    expect(screen.getByTestId('ask-question-tool-card')).toHaveAttribute(
+      'data-status',
+      'answered'
+    );
+    expect(screen.getByTestId('ask-question-status')).toHaveTextContent(
+      '已回答'
+    );
+    const summary = screen.getByTestId('ask-question-summary');
+    expect(summary).toHaveTextContent('Local markdown');
+    expect(summary).toHaveTextContent('Keep tests at the public UI seam.');
+    expect(summary).toHaveTextContent('GitLab');
+
+    const details = screen.getByRole('button', { name: '查看详情' });
+    expect(details.closest('.ask-question-tool-badges')).not.toBeNull();
+    fireEvent.click(details);
+    expect(screen.queryByTestId('ask-question-summary')).toBeNull();
+  });
+
+  it('shows single-question answer chip below the header with View Details in the top-right badges', () => {
+    render(
+      <AskQuestionToolCard
+        use={use([QUESTIONS[0]])}
+        result={result({
+          outcome: 'accepted',
+          answers: {
+            tracker: ['Local markdown (推荐)'],
+          },
+        })}
+      />
+    );
+
+    const summary = screen.getByTestId('ask-question-summary');
+    expect(summary).toHaveTextContent('Local markdown');
+    const details = screen.getByRole('button', { name: '查看详情' });
+    expect(details.closest('.ask-question-tool-badges')).not.toBeNull();
+    expect(screen.queryByTestId('ask-question-kind-tag')).toBeNull();
+  });
+
+  it('shows declined status pill when question was dismissed', () => {
+    render(
+      <AskQuestionToolCard
+        use={use([QUESTIONS[0]])}
+        result={result({ declined: true, answers: [] })}
+      />
+    );
+
+    expect(screen.getByTestId('ask-question-tool-card')).toHaveAttribute(
+      'data-status',
+      'declined'
+    );
+    expect(screen.getByTestId('ask-question-status')).toHaveTextContent(
+      '已跳过'
+    );
+    expect(screen.queryByTestId('ask-question-summary')).toBeNull();
+    expect(
+      screen
+        .getByRole('button', { name: '查看详情' })
+        .closest('.ask-question-tool-badges')
+    ).not.toBeNull();
   });
 });

@@ -38,8 +38,13 @@ export {
   ROUTER_OPENCODE_PROVIDER_ID,
   ROUTER_PROVIDER_NAME,
   dshProviderSaveRequest,
+  nextUniqueDshProviderId,
+  nextUniqueOpenCodeProviderId,
+  nextUniqueRouterProviderName,
   openCodeConnectRequest,
   providerSaveRequest,
+  resolveRouterProviderName,
+  routerProviderBaseName,
   supportsModelRouter,
 } from './preset';
 export {

@@ -113,9 +113,19 @@ impl ConversationSessionService {
             .set_session_mode(AgentSessionId(conversation_id), mode_id.clone())
             .await
         {
-            Ok(_) => {
-                self.remember_session_controls_selection(conversation_id, Some(&mode_id), &[])
-                    .await;
+            Ok(snapshot) => {
+                let effective_mode = snapshot
+                    .current_mode
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|m| !m.is_empty())
+                    .unwrap_or(mode_id.as_str());
+                self.persist_session_controls_selection_strict(
+                    conversation_id,
+                    Some(effective_mode),
+                    &[],
+                )
+                .await?;
                 Ok(())
             }
             Err(
@@ -176,9 +186,37 @@ impl ConversationSessionService {
             )
             .await
         {
-            Ok(_) => {
-                self.remember_session_controls_selection(conversation_id, None, &overrides)
-                    .await;
+            Ok(snapshot) => {
+                if overrides[0].key == "mode" {
+                    let effective_mode = snapshot
+                        .current_mode
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|m| !m.is_empty())
+                        .unwrap_or(overrides[0].value.as_str());
+                    self.persist_session_controls_selection_strict(
+                        conversation_id,
+                        Some(effective_mode),
+                        &[],
+                    )
+                    .await?;
+                } else {
+                    let effective_value = snapshot
+                        .config_options
+                        .iter()
+                        .find(|opt| opt.key == overrides[0].key)
+                        .and_then(|opt| opt.value.as_ref())
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .unwrap_or(overrides[0].value.as_str());
+                    let settled = [AgentSessionConfigOverride {
+                        key: overrides[0].key.clone(),
+                        value: effective_value.to_string(),
+                    }];
+                    self.persist_session_controls_selection_strict(conversation_id, None, &settled)
+                        .await?;
+                }
                 Ok(())
             }
             Err(
@@ -254,8 +292,8 @@ impl ConversationSessionService {
                 resolved
             }
         };
-        self.remember_session_controls_selection(conversation_id, mode, config_overrides)
-            .await;
+        self.persist_session_controls_selection_strict(conversation_id, mode, config_overrides)
+            .await?;
         let bindings =
             ConversationAgentBindingRecord::list_for_conversation(pool, conversation_id).await?;
         let mut controls = self
@@ -358,10 +396,27 @@ impl ConversationSessionService {
         controls
     }
 
+    /// Durably persist an explicit user mode/config selection onto the
+    /// conversation's active binding, failing loudly if the binding write fails.
+    pub(super) async fn persist_session_controls_selection_strict(
+        &self,
+        conversation_id: Uuid,
+        mode: Option<&str>,
+        config_overrides: &[AgentSessionConfigOverride],
+    ) -> Result<(), ConversationServiceError> {
+        persist_confirmed_session_controls_strict(
+            &self.ctx.deployment.db().pool,
+            conversation_id,
+            mode,
+            config_overrides,
+        )
+        .await
+        .map_err(ConversationServiceError::from)
+    }
+
     /// Record the conversation's effective session-control selection on its binding so
     /// a later `session/resume` (or the first `session/new` of a new conversation)
-    /// can replay it. Best-effort: failing to remember a selection must not fail
-    /// the turn or the control change that already succeeded.
+    /// can replay it. Best-effort for background callers where the turn already succeeded.
     pub(super) async fn remember_session_controls_selection(
         &self,
         conversation_id: Uuid,
@@ -849,6 +904,24 @@ impl ConversationSessionService {
             &repos,
             &working_dir,
         );
+        if active_binding_any_agent.as_ref().is_some_and(|binding| {
+            binding.resume_allowed
+                && !binding.working_dir.is_empty()
+                && binding.working_dir != working_dir
+        }) && conversation_has_recorded_turns(pool, conversation_id).await?
+        {
+            // Pending cross-workspace handoff boundary: keep `sessions.active_agent_binding_id`
+            // pointing at the previous workspace's native generation until `prepare_turn_continuation`
+            // runs on the next prompt (enabling Stage C resume or portable handoff).
+            return Ok(self
+                .synthesized_offline_controls_snapshot(
+                    pool,
+                    &bindings,
+                    &agent_id,
+                    Some(launch_instance_id),
+                )
+                .await);
+        }
         let launch_settings = self
             .ctx
             .host
@@ -1177,17 +1250,16 @@ pub async fn remember_creation_session_controls(
     persist_confirmed_session_controls(pool, conversation_id, mode, &config_overrides).await;
 }
 
-/// Persist a confirmed mode / config selection so the next `session/resume`
-/// can replay it before the agent defaults reach the UI (ADR-0071 §4).
-///
-/// Best-effort. A missing binding or a rejected last-used upsert must not fail
-/// the control change that already succeeded.
-pub(super) async fn persist_confirmed_session_controls(
+/// Persist a confirmed mode / config selection onto the conversation's active
+/// binding, returning any SQLite error on the conversation-scoped binding write.
+/// Global per-agent `agent_session_defaults` (only used as initial default for
+/// brand-new conversations) stays best-effort.
+pub(super) async fn persist_confirmed_session_controls_strict(
     pool: &SqlitePool,
     conversation_id: Uuid,
     mode: Option<&str>,
     config_overrides: &[AgentSessionConfigOverride],
-) {
+) -> Result<(), sqlx::Error> {
     let config_selection_json = (!config_overrides.is_empty())
         .then(|| {
             serde_json::to_string(
@@ -1205,32 +1277,19 @@ pub(super) async fn persist_confirmed_session_controls(
         })
         .flatten();
     if mode.is_none() && config_selection_json.is_none() {
-        return;
+        return Ok(());
     }
     // Live sessions are not given a binding until import or fork. Without a row,
     // the update below matches nothing and a cold resume replays only the agent
     // default (Antigravity: Default + Gemini 3.8 Flash).
-    if let Err(error) = ensure_conversation_binding_for_controls(pool, conversation_id).await {
-        tracing::warn!(
-            %conversation_id,
-            %error,
-            "failed to open a binding for the confirmed session controls"
-        );
-    }
-    if let Err(error) = ConversationAgentBindingRecord::update_session_controls_selection(
+    ensure_conversation_binding_for_controls(pool, conversation_id).await?;
+    ConversationAgentBindingRecord::update_session_controls_selection(
         pool,
         conversation_id,
         mode,
         config_selection_json.as_deref(),
     )
-    .await
-    {
-        tracing::warn!(
-            %conversation_id,
-            %error,
-            "failed to remember the conversation's session-control selection"
-        );
-    }
+    .await?;
     // Last-used per Agent, same store new sessions already read (CodeG
     // `selector-prefs` per agentType). A rejected upsert must not fail the pick.
     if let Ok(Some(binding)) =
@@ -1268,6 +1327,28 @@ pub(super) async fn persist_confirmed_session_controls(
                 );
             }
         }
+    }
+    Ok(())
+}
+
+/// Best-effort wrapper around `persist_confirmed_session_controls_strict` for
+/// background callers (e.g. turn start or conversation creation metadata) where
+/// failing to remember a selection must not fail an already-accepted action.
+pub(super) async fn persist_confirmed_session_controls(
+    pool: &SqlitePool,
+    conversation_id: Uuid,
+    mode: Option<&str>,
+    config_overrides: &[AgentSessionConfigOverride],
+) {
+    if let Err(error) =
+        persist_confirmed_session_controls_strict(pool, conversation_id, mode, config_overrides)
+            .await
+    {
+        tracing::warn!(
+            %conversation_id,
+            %error,
+            "failed to remember the conversation's session-control selection"
+        );
     }
 }
 

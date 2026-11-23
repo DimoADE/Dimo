@@ -109,9 +109,11 @@ pub enum McpAppType {
     #[serde(rename = "zcode", alias = "z_code")]
     ZCode,
     Omp,
+    #[serde(rename = "muse_code", alias = "muse")]
+    MuseCode,
 }
 
-const ALL_APPS: [McpAppType; 20] = [
+const ALL_APPS: [McpAppType; 21] = [
     McpAppType::ClaudeCode,
     McpAppType::Codex,
     McpAppType::Antigravity,
@@ -131,13 +133,14 @@ const ALL_APPS: [McpAppType; 20] = [
     McpAppType::CommandCode,
     McpAppType::ZCode,
     McpAppType::Omp,
+    McpAppType::MuseCode,
     McpAppType::Pi,
 ];
 
 /// Targets that Dimo exposes for new MCP assignments. OpenClaw and Pi remain
 /// in `ALL_APPS` so legacy/extension entries can be scanned and removed, but
 /// are not offered for new global assignments.
-const ASSIGNABLE_APPS: [McpAppType; 18] = [
+const ASSIGNABLE_APPS: [McpAppType; 19] = [
     McpAppType::ClaudeCode,
     McpAppType::Codex,
     McpAppType::Antigravity,
@@ -156,6 +159,7 @@ const ASSIGNABLE_APPS: [McpAppType; 18] = [
     McpAppType::CommandCode,
     McpAppType::ZCode,
     McpAppType::Omp,
+    McpAppType::MuseCode,
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -3602,6 +3606,154 @@ fn remove_command_code_server(id: &str) -> Result<bool, McpError> {
     remove_json_mcp_server_at(&command_code_mcp_json_path(), id)
 }
 
+fn muse_mcp_json_path() -> PathBuf {
+    configured_dir("XDG_CONFIG_HOME", home_dir_or_default().join(".config"))
+        .join("muse")
+        .join("settings.json")
+}
+
+fn muse_entry_to_canonical(spec: &Value, id: &str) -> Result<Value, McpError> {
+    let source = format!("Muse Code config '{id}'");
+    let obj = spec
+        .as_object()
+        .ok_or_else(|| bad(format!("{source} must be a JSON object")))?;
+    let mut normalized = obj.clone();
+    if !normalized.contains_key("type")
+        && let Some(transport) = obj.get("transport").and_then(Value::as_str)
+    {
+        let mapped = match transport {
+            "stdio" => "stdio",
+            "streamableHttp" | "streamable_http" | "http" => "http",
+            other => other,
+        };
+        normalized.insert("type".to_string(), Value::String(mapped.to_string()));
+    }
+    normalized.remove("transport");
+    canonicalize_spec(&Value::Object(normalized), &source)
+}
+
+fn canonical_to_muse_entry(spec: &Value) -> Result<Value, McpError> {
+    let obj = spec
+        .as_object()
+        .ok_or_else(|| bad("Muse Code MCP write: spec must be a JSON object"))?;
+    let kind = match obj.get("type").and_then(Value::as_str) {
+        Some(kind @ ("stdio" | "http")) => kind,
+        other => {
+            return Err(bad(format!(
+                "Muse Code write: unsupported MCP type '{}'; Muse Code accepts only stdio and http",
+                other.unwrap_or("<missing>")
+            )));
+        }
+    };
+    let stdio = kind == "stdio";
+    let mut out = Map::new();
+    out.insert(
+        "transport".to_string(),
+        Value::String(if stdio { "stdio" } else { "streamableHttp" }.to_string()),
+    );
+    for (key, value) in obj {
+        let keep = match key.as_str() {
+            "command" | "args" | "env" | "cwd" => stdio,
+            "url" | "headers" => !stdio,
+            "enabled" | "disabled" => value.is_boolean(),
+            _ => false,
+        };
+        if keep {
+            out.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(Value::Object(out))
+}
+
+fn read_muse_servers_at(path: &Path) -> Result<BTreeMap<String, Value>, McpError> {
+    let root = read_json_file(path)?;
+    let mut out = BTreeMap::new();
+    let servers = root
+        .get("mcpServers")
+        .and_then(Value::as_object)
+        .or_else(|| root.get("mcp_servers").and_then(Value::as_object));
+    let Some(servers) = servers else {
+        return Ok(out);
+    };
+    for (id, spec) in servers {
+        if let Ok(normalized) = muse_entry_to_canonical(spec, id) {
+            out.insert(id.clone(), normalized);
+        }
+    }
+    Ok(out)
+}
+
+fn read_muse_servers() -> Result<BTreeMap<String, Value>, McpError> {
+    read_muse_servers_at(&muse_mcp_json_path())
+}
+
+fn upsert_muse_server_at(path: &Path, id: &str, spec: &Value) -> Result<(), McpError> {
+    let mut root = read_json_file(path)?;
+    if !root.is_object() {
+        root = json!({});
+    }
+    let entry = canonical_to_muse_entry(spec)?;
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| bad(format!("invalid JSON root in {}", path.display())))?;
+    obj.entry("schema_version".to_string())
+        .or_insert_with(|| json!(1));
+    // Migrate legacy `mcp_servers` entries into `mcpServers` and delete `mcp_servers`,
+    // because Muse disables all MCP servers when both keys coexist.
+    let legacy = obj.remove("mcp_servers");
+    if !obj.get("mcpServers").map(Value::is_object).unwrap_or(false) {
+        obj.insert(
+            "mcpServers".to_string(),
+            legacy
+                .filter(Value::is_object)
+                .unwrap_or_else(|| Value::Object(Map::new())),
+        );
+    } else if let Some(Value::Object(legacy_map)) = legacy
+        && let Some(servers) = obj.get_mut("mcpServers").and_then(Value::as_object_mut)
+    {
+        for (legacy_id, legacy_val) in legacy_map {
+            servers.entry(legacy_id).or_insert(legacy_val);
+        }
+    }
+    obj.get_mut("mcpServers")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| bad(format!("invalid mcpServers in {}", path.display())))?
+        .insert(id.to_string(), entry);
+    write_json_file(path, &root)
+}
+
+fn upsert_muse_server(id: &str, spec: &Value) -> Result<(), McpError> {
+    upsert_muse_server_at(&muse_mcp_json_path(), id, spec)
+}
+
+fn remove_muse_server_at(path: &Path, id: &str) -> Result<bool, McpError> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let mut root = read_json_file(path)?;
+    let Some(obj) = root.as_object_mut() else {
+        return Ok(false);
+    };
+    let mut removed = false;
+    for key in ["mcpServers", "mcp_servers"] {
+        if let Some(servers) = obj.get_mut(key).and_then(Value::as_object_mut)
+            && servers.remove(id).is_some()
+        {
+            removed = true;
+        }
+    }
+    if removed {
+        obj.entry("schema_version".to_string())
+            .or_insert_with(|| json!(1));
+        write_json_file(path, &root)?;
+    }
+    Ok(removed)
+}
+
+fn remove_muse_server(id: &str) -> Result<bool, McpError> {
+    remove_muse_server_at(&muse_mcp_json_path(), id)
+}
+
 /// Read stored MCP servers for agents whose ACP bridge mounts servers exclusively
 /// from `session/new.mcpServers` rather than reading the config file on disk.
 pub fn read_session_forwarded_servers_sync(agent_id: &str) -> BTreeMap<String, Value> {
@@ -3634,6 +3786,7 @@ fn upsert_server_for_app(app: McpAppType, id: &str, spec: &Value) -> Result<(), 
         McpAppType::CommandCode => upsert_command_code_server(id, spec),
         McpAppType::ZCode => upsert_zcode_server(id, spec),
         McpAppType::Omp => upsert_omp_server(id, spec),
+        McpAppType::MuseCode => upsert_muse_server(id, spec),
     }
 }
 
@@ -3659,6 +3812,7 @@ fn remove_server_for_app(app: McpAppType, id: &str) -> Result<bool, McpError> {
         McpAppType::CommandCode => remove_command_code_server(id),
         McpAppType::ZCode => remove_zcode_server(id),
         McpAppType::Omp => remove_omp_server(id),
+        McpAppType::MuseCode => remove_muse_server(id),
     }
 }
 
@@ -3684,6 +3838,7 @@ fn read_servers_for_app(app: McpAppType) -> Result<BTreeMap<String, Value>, McpE
         McpAppType::CommandCode => read_command_code_servers(),
         McpAppType::ZCode => read_zcode_servers(),
         McpAppType::Omp => read_omp_servers(),
+        McpAppType::MuseCode => read_muse_servers(),
     }
 }
 
@@ -4365,6 +4520,7 @@ fn app_can_host_spec(app: McpAppType, spec: &Value) -> bool {
             | McpAppType::Kiro
             | McpAppType::Trae
             | McpAppType::CommandCode
+            | McpAppType::MuseCode
     ) && is_sse)
 }
 
@@ -5715,7 +5871,7 @@ mod tests {
             .into_iter()
             .map(|app| serde_json::to_value(app).expect("serialize app"))
             .collect::<Vec<_>>();
-        assert_eq!(targets.len(), 20);
+        assert_eq!(targets.len(), 21);
         for expected in [
             "claude_code",
             "codex",
@@ -5737,12 +5893,56 @@ mod tests {
             "command_code",
             "zcode",
             "omp",
+            "muse_code",
         ] {
             assert!(targets.contains(&Value::String(expected.to_string())));
         }
-        assert_eq!(ASSIGNABLE_APPS.len(), 18);
+        assert_eq!(ASSIGNABLE_APPS.len(), 19);
         assert!(!ASSIGNABLE_APPS.contains(&McpAppType::OpenClaw));
         assert!(!ASSIGNABLE_APPS.contains(&McpAppType::Pi));
+    }
+
+    #[test]
+    fn muse_code_settings_json_roundtrips_migrates_legacy_and_rejects_sse() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"model":{"name":"muse-1"},"mcp_servers":{"legacy":{"transport":"stdio","command":"node","args":["srv.js"]}}}"#,
+        )
+        .unwrap();
+
+        upsert_muse_server_at(
+            &path,
+            "remote",
+            &json!({"type": "http", "url": "https://example.com/mcp", "headers": {"Authorization": "Bearer tok"}}),
+        )
+        .unwrap();
+
+        let raw = read_json_file(&path).unwrap();
+        assert_eq!(raw["schema_version"], 1);
+        assert_eq!(raw["model"]["name"], "muse-1");
+        assert!(raw.get("mcp_servers").is_none());
+        assert_eq!(raw["mcpServers"]["remote"]["transport"], "streamableHttp");
+        assert_eq!(raw["mcpServers"]["legacy"]["command"], "node");
+
+        let servers = read_muse_servers_at(&path).unwrap();
+        assert_eq!(servers["remote"]["type"], "http");
+        assert_eq!(servers["remote"]["url"], "https://example.com/mcp");
+        assert_eq!(servers["legacy"]["type"], "stdio");
+
+        let err = upsert_muse_server_at(
+            &path,
+            "bad-sse",
+            &json!({"type": "sse", "url": "https://example.com/sse"}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("stdio and http"));
+
+        assert!(remove_muse_server_at(&path, "remote").unwrap());
+        let after_remove = read_muse_servers_at(&path).unwrap();
+        assert!(!after_remove.contains_key("remote"));
+        assert!(after_remove.contains_key("legacy"));
     }
 
     #[test]

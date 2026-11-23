@@ -200,7 +200,9 @@
     #group-left,
     [id^='group-left-']
   )
-  .bg-background,
+  .bg-background:not([data-control-frame]):not(.astryx-text-input):not(
+    .astryx-textarea
+  ):not(.astryx-selector):not(.astryx-multi-selector),
 .dark
   [class*='dockview-theme-ayu']
   .dv-groupview:is(
@@ -281,7 +283,9 @@
     #group-left,
     [id^='group-left-']
   )
-  .bg-background {
+  .bg-background:not([data-control-frame]):not(.astryx-text-input):not(
+    .astryx-textarea
+  ):not(.astryx-selector):not(.astryx-multi-selector) {
   background: var(--surface-topbar) !important;
   border: 0 !important;
   border-radius: 0 !important;

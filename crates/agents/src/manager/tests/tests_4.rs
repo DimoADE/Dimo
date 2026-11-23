@@ -1043,3 +1043,221 @@ fn build_native_engine_launch_env_omits_windows_batch_shims_for_claude_native() 
         );
     }
 }
+
+#[tokio::test]
+async fn native_turn_controls_preserve_explicit_mode_over_yolo_and_reseed_keeps_preferred_controls()
+{
+    let dir = tempfile::tempdir().expect("tempdir");
+    let settings_path = dir.path().join("settings.json");
+    std::fs::write(
+        &settings_path,
+        serde_json::json!({ "permissions": { "defaultMode": "default" } }).to_string(),
+    )
+    .expect("write settings.json");
+
+    let mut env = HashMap::new();
+    env.insert(
+        "CLAUDE_CONFIG_DIR".to_string(),
+        dir.path().to_string_lossy().into_owned(),
+    );
+
+    let (event_tx, _event_rx) = manager_event_channel();
+    let claude_id = AgentId::parse("claude_code").unwrap();
+    let runner = AgentConnectionRunner::new(
+        ManagedAgentConnectionSnapshot {
+            connection_id: AgentConnectionId::new(),
+            agent_id: claude_id.clone(),
+            launch_lock: test_launch_lock(claude_id),
+            workspace_id: uuid::Uuid::nil(),
+            working_dir: dir.path().to_path_buf(),
+            additional_directories: Vec::new(),
+            auto_approve_mode: AgentAutoApproveMode::Yolo,
+            env,
+        },
+        event_tx,
+        None,
+    );
+    let session_id = AgentSessionId::new();
+    let driver = crate::engine::ClaudeNativeDriver::new();
+    let handle = crate::engine::EngineHandle::new(
+        runner.snapshot.connection_id.0,
+        crate::engine::NativeEngineKind::ClaudeNative,
+        uuid::Uuid::nil(),
+        dir.path().to_path_buf(),
+        true,
+        None,
+    );
+
+    runner.preferred_controls.write().await.insert(
+        session_id,
+        crate::SessionControlPreferences {
+            mode: Some("acceptEdits".to_string()),
+            ..Default::default()
+        },
+    );
+
+    // First seed adopts preferred mode (`acceptEdits`) instead of Yolo or settings.json default.
+    runner
+        .seed_native_session_controls(&driver, &handle, session_id)
+        .await;
+    let (_model, _effort, effective_mode) = runner
+        .resolve_native_turn_controls(&driver, session_id, None, &[])
+        .await;
+    assert_eq!(
+        effective_mode.as_deref(),
+        Some("acceptEdits"),
+        "stored explicit session mode must win over connection-level Yolo"
+    );
+
+    // A second seed (simulating reconnect/re-seed) must NOT drain `preferred_controls`
+    // and revert back to settings.json `default`.
+    runner
+        .seed_native_session_controls(&driver, &handle, session_id)
+        .await;
+    let snapshot = runner.session_controls_snapshot(session_id).await;
+    assert_eq!(snapshot.current_mode.as_deref(), Some("acceptEdits"));
+    let (_model, _effort, reseeded_mode) = runner
+        .resolve_native_turn_controls(&driver, session_id, None, &[])
+        .await;
+    assert_eq!(reseeded_mode.as_deref(), Some("acceptEdits"));
+
+    // Persisting connection auto-approve from `Off` must only elevate to `AllowAlways`,
+    // never silently hijacking the connection to `Yolo`.
+    let (event_tx_off, _event_rx_off) = manager_event_channel();
+    let off_runner = dummy_runner_for_agent("claude_code", event_tx_off);
+    assert_eq!(
+        *off_runner.auto_approve_mode.lock().await,
+        AgentAutoApproveMode::Off
+    );
+    off_runner.persist_connection_auto_approve().await;
+    assert_eq!(
+        *off_runner.auto_approve_mode.lock().await,
+        AgentAutoApproveMode::AllowAlways
+    );
+    // Already-Yolo connection must not be downgraded.
+    let (event_tx_yolo, _event_rx_yolo) = manager_event_channel();
+    let yolo_runner = AgentConnectionRunner::new(
+        ManagedAgentConnectionSnapshot {
+            connection_id: AgentConnectionId::new(),
+            agent_id: AgentId::parse("claude_code").unwrap(),
+            launch_lock: test_launch_lock(AgentId::parse("claude_code").unwrap()),
+            workspace_id: uuid::Uuid::nil(),
+            working_dir: dir.path().to_path_buf(),
+            additional_directories: Vec::new(),
+            auto_approve_mode: AgentAutoApproveMode::Yolo,
+            env: HashMap::new(),
+        },
+        event_tx_yolo,
+        None,
+    );
+    yolo_runner.persist_connection_auto_approve().await;
+    assert_eq!(
+        *yolo_runner.auto_approve_mode.lock().await,
+        AgentAutoApproveMode::Yolo
+    );
+}
+
+#[tokio::test]
+async fn acp_drifted_mode_pushes_preserve_confirmed_mode_until_retry_budget_exhausts() {
+    let session_id = AgentSessionId::new();
+    let (event_tx, mut event_rx) = manager_event_channel();
+    let runner = dummy_runner_for_agent("codex", event_tx.clone());
+    let mode_state = SessionModeState::new(
+        "agent-full-access",
+        vec![
+            acp::schema::v1::SessionMode::new("agent", "Approve for me"),
+            acp::schema::v1::SessionMode::new("agent-full-access", "Agent (full access)"),
+        ],
+    );
+    let config_options = vec![
+        AcpSessionConfigOption::select(
+            "mode",
+            "Mode",
+            "agent-full-access",
+            SessionConfigSelectOptions::Ungrouped(vec![
+                SessionConfigSelectOption::new("agent", "Approve for me"),
+                SessionConfigSelectOption::new("agent-full-access", "Agent (full access)"),
+            ]),
+        )
+        .category(SessionConfigOptionCategory::Mode),
+    ];
+    {
+        let mut controls = runner.session_controls.write().await;
+        let entry = controls.entry(session_id).or_default();
+        entry.modes = Some(mode_state);
+        entry.config_options = config_options;
+        entry
+            .asserted_config_values
+            .insert("mode".to_string(), "agent-full-access".to_string());
+    }
+
+    let bridge = AcpClientBridge::new(
+        AgentConnectionId::new(),
+        AgentId::parse("codex").unwrap(),
+        event_tx,
+        Arc::new(RwLock::new(HashMap::from([(
+            session_id,
+            "acp-codex".into(),
+        )]))),
+        runner.session_controls.clone(),
+        Arc::new(Mutex::new(HashMap::new())),
+        Arc::new(Mutex::new(HashMap::new())),
+        Arc::new(Mutex::new(AgentAutoApproveMode::default())),
+        Arc::new(Mutex::new(HashMap::new())),
+        Arc::new(Mutex::new(Instant::now())),
+        Arc::new(Mutex::new(GrokSubagentTracker::default())),
+        Arc::new(Mutex::new(GrokMcpTracker::default())),
+        Arc::new(Mutex::new(None)),
+        PathBuf::from("C:/workspace"),
+        HashMap::new(),
+        runner.clone(),
+    );
+
+    // Drifted pushes within retry budget must NOT overwrite stored state or emit reverted mode.
+    for _ in 0..crate::session_config_guard::MAX_CONFIG_DRIFT_RETRIES {
+        bridge
+            .session_notification(SessionNotification::new(
+                SessionId::new("acp-codex"),
+                SessionUpdate::CurrentModeUpdate(acp::schema::v1::CurrentModeUpdate::new("agent")),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            event_rx.try_recv().is_err(),
+            "drifted CurrentModeUpdate within retry budget must not broadcast reverted mode"
+        );
+        let snap = runner.session_controls_snapshot(session_id).await;
+        assert_eq!(snap.current_mode.as_deref(), Some("agent-full-access"));
+    }
+
+    // One more drifted push exceeds the retry budget -> emits ConfigOptionRejected and accepts forced value.
+    bridge
+        .session_notification(SessionNotification::new(
+            SessionId::new("acp-codex"),
+            SessionUpdate::CurrentModeUpdate(acp::schema::v1::CurrentModeUpdate::new("agent")),
+        ))
+        .await
+        .unwrap();
+
+    let mut saw_rejection = false;
+    while let Ok(envelope) = event_rx.try_recv() {
+        if let AgentEvent::ConfigOptionRejected {
+            config_id,
+            requested_value,
+            actual_value,
+            ..
+        } = envelope.event
+        {
+            assert_eq!(config_id, "mode");
+            assert_eq!(requested_value, "agent-full-access");
+            assert_eq!(actual_value, "agent");
+            saw_rejection = true;
+        }
+    }
+    assert!(
+        saw_rejection,
+        "exhausting drift retry budget must emit ConfigOptionRejected"
+    );
+    let snap = runner.session_controls_snapshot(session_id).await;
+    assert_eq!(snap.current_mode.as_deref(), Some("agent"));
+}

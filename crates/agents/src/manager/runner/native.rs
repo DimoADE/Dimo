@@ -358,7 +358,7 @@ impl AgentConnectionRunner {
                     result_tx,
                 } => {
                     let snapshot = self
-                        .apply_native_mode_change(&*driver, session_id, mode_id)
+                        .apply_native_mode_change(&*driver, &handle, session_id, mode_id)
                         .await;
                     let _ = result_tx.send(Ok(snapshot));
                 }
@@ -369,7 +369,7 @@ impl AgentConnectionRunner {
                     result_tx,
                 } => {
                     let snapshot = self
-                        .apply_native_config_change(&*driver, session_id, key, value)
+                        .apply_native_config_change(&*driver, &handle, session_id, key, value)
                         .await;
                     let _ = result_tx.send(Ok(snapshot));
                 }
@@ -747,7 +747,7 @@ impl AgentConnectionRunner {
                             result_tx,
                         } => {
                             let snapshot = self
-                                .apply_native_mode_change(&*driver, target_sid, mode_id)
+                                .apply_native_mode_change(&*driver, handle, target_sid, mode_id)
                                 .await;
                             let _ = result_tx.send(Ok(snapshot));
                         }
@@ -758,7 +758,7 @@ impl AgentConnectionRunner {
                             result_tx,
                         } => {
                             let snapshot = self
-                                .apply_native_config_change(&*driver, target_sid, key, value)
+                                .apply_native_config_change(&*driver, handle, target_sid, key, value)
                                 .await;
                             let _ = result_tx.send(Ok(snapshot));
                         }

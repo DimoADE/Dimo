@@ -1606,6 +1606,185 @@ async fn require_supervisor_if_space_session(
     Ok(())
 }
 
+async fn record_provisioned_bot_for_caller(
+    pool: &SqlitePool,
+    caller_id: Uuid,
+    nickname: &str,
+    created: &Value,
+    delivery: &collaboration::DeliveryContext,
+) {
+    let identity_member_id = created
+        .get("identity_member_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let conversation_id = created
+        .get("conversation_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let mut avatar = created
+        .get("avatar")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let mut color = created
+        .get("color")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let mut agent_id = created
+        .get("agent_id")
+        .or_else(|| created.get("agent"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let mut explicit_model = created
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    if let Some(ref mid) = identity_member_id
+        && let Ok(Some((db_avatar, db_color, db_agent, db_cfg))) = sqlx::query_as::<
+            _,
+            (
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ),
+        >(
+            "SELECT avatar, color, agent, config_values FROM collaboration_members WHERE id = ?",
+        )
+        .bind(mid)
+        .fetch_optional(pool)
+        .await
+    {
+        if avatar.is_none() {
+            avatar = db_avatar;
+        }
+        if color.is_none() {
+            color = db_color;
+        }
+        if agent_id.is_none() {
+            agent_id = db_agent;
+        }
+        if explicit_model.is_none() {
+            explicit_model = db_cfg
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                .and_then(|val| collaboration::extract_model_and_thinking(&val).0);
+        }
+    }
+
+    let conv_uuid = conversation_id
+        .as_deref()
+        .and_then(|raw| Uuid::parse_str(raw).ok());
+    let resolved = collaboration::resolve_bot_agent_model(
+        pool,
+        agent_id.as_deref(),
+        explicit_model.as_deref(),
+        conv_uuid,
+    )
+    .await;
+
+    collaboration::record_space_turn_provision_bot(
+        caller_id,
+        collaboration::ProvisionedBotEntry {
+            nickname: nickname.trim().to_string(),
+            identity_member_id,
+            conversation_id,
+            agent_id: resolved.agent_id.or(agent_id),
+            model: resolved.model.or(explicit_model),
+            model_label: resolved.model_label,
+            avatar,
+            color,
+            status: "ready".to_string(),
+        },
+    );
+    collaboration::notify_space_turn_streaming(pool, caller_id, delivery).await;
+}
+
+async fn record_provisioned_group_for_caller(
+    pool: &SqlitePool,
+    caller_id: Uuid,
+    space_id: &str,
+    group_name_hint: Option<&str>,
+    delivery: &collaboration::DeliveryContext,
+) {
+    let space_name = match group_name_hint.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(name) => name.to_string(),
+        None => {
+            sqlx::query_scalar::<_, String>("SELECT name FROM collaboration_spaces WHERE id = ?")
+                .bind(space_id)
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        }
+    };
+    if space_name.is_empty() {
+        return;
+    }
+
+    type GroupMemberPreviewRow = (String, String, Option<String>, Option<String>, i64);
+    let rows: Vec<GroupMemberPreviewRow> = sqlx::query_as(
+        r#"SELECT m.id, m.name, m.avatar, m.color, COALESCE(m.is_supervisor, 0)
+           FROM collaboration_thread_members tm
+           JOIN collaboration_members m ON m.id = tm.member_id
+           WHERE tm.thread_id = ? AND tm.status = 'active'
+           ORDER BY tm.joined_at ASC, tm.member_id ASC"#,
+    )
+    .bind(space_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let non_supervisor: Vec<_> = rows
+        .iter()
+        .filter(|(_, _, _, _, is_sup)| *is_sup == 0)
+        .cloned()
+        .collect();
+    let chosen = if !non_supervisor.is_empty() {
+        non_supervisor
+    } else {
+        rows
+    };
+
+    let member_count = chosen.len();
+    let members = chosen
+        .into_iter()
+        .map(|(identity_member_id, nickname, avatar, color, _)| {
+            collaboration::ProvisionedGroupMemberSummary {
+                nickname,
+                identity_member_id: Some(identity_member_id),
+                avatar,
+                color,
+            }
+        })
+        .collect();
+
+    collaboration::record_space_turn_provision_group(
+        caller_id,
+        collaboration::ProvisionedGroupEntry {
+            space_id: space_id.to_string(),
+            name: space_name,
+            members,
+            member_count,
+            status: "ready".to_string(),
+        },
+    );
+    collaboration::notify_space_turn_streaming(pool, caller_id, delivery).await;
+}
+
 async fn manage_bot_tool(
     pool: &SqlitePool,
     caller_id: Uuid,
@@ -1754,6 +1933,7 @@ async fn manage_bot_tool(
                     .await;
                 }
             }
+            record_provisioned_bot_for_caller(pool, caller_id, &nickname, &created, delivery).await;
             if is_manageable_group(&space_id) {
                 let conversation_id = created
                     .get("conversation_id")
@@ -1782,6 +1962,8 @@ async fn manage_bot_tool(
                     Some(member.member_id.clone()),
                 )
                 .await;
+                record_provisioned_group_for_caller(pool, caller_id, &space_id, None, delivery)
+                    .await;
                 let mut joined = created;
                 if let Some(object) = joined.as_object_mut() {
                     object.insert("space_id".into(), json!(space_id));
@@ -1980,7 +2162,7 @@ async fn manage_group_tool(
     caller_id: Uuid,
     arguments: &Value,
     operation_id: Uuid,
-    _delivery: &collaboration::DeliveryContext,
+    delivery: &collaboration::DeliveryContext,
     on_space_changed: &Option<SpaceChangedCallback>,
 ) -> Result<Value, collaboration::CollaborationError> {
     let action = arguments
@@ -2018,6 +2200,14 @@ async fn manage_group_tool(
                 collaboration::create_collaboration_space(pool, caller_id, &name, operation_id)
                     .await?;
             emit_space_changed(pool, on_space_changed, &space.space_id, None).await;
+            record_provisioned_group_for_caller(
+                pool,
+                caller_id,
+                &space.space_id,
+                Some(&space.name),
+                delivery,
+            )
+            .await;
             Ok(serde_json::to_value(space).unwrap_or(json!({})))
         }
         "rename" => {
@@ -2083,6 +2273,14 @@ async fn manage_group_tool(
                 Some(member.member_id.clone()),
             )
             .await;
+            let should_record_group = collaboration::has_space_turn_provision_activity(caller_id)
+                || collaboration::is_caller_workspace_supervisor(pool, caller_id)
+                    .await
+                    .unwrap_or(false);
+            if should_record_group {
+                record_provisioned_group_for_caller(pool, caller_id, &space_id, None, delivery)
+                    .await;
+            }
             collaboration::space_member_tool_value(pool, &member).await
         }
         "remove_bot" => {

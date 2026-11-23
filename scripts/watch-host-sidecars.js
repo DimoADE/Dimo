@@ -159,13 +159,15 @@ function rebuildHostSidecars({
     }
   );
   if (result.status !== 0) {
-    console.warn('Warning: cargo build -p dimo-mcp returned non-zero status.');
+    console.warn(
+      'Warning: cargo build -p dimo-mcp -p dimo-workflow-mcp returned non-zero status.'
+    );
     return false;
   }
   if (stageFn) {
     stageFn(cargoEnv);
   } else {
-    require('./stage-host-sidecars').main(cargoEnv);
+    require('./stage-host-sidecars').main(cargoEnv, ['--mcp-only']);
   }
   return true;
 }

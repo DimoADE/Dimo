@@ -23,8 +23,7 @@ vi.mock('@/features/conversation/conversationApi', () => ({
 }));
 vi.mock('@/lib/hostFs', () => ({ pickHostDirectory }));
 vi.mock('@/lib/desktopShell', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('@/lib/desktopShell')>();
+  const actual = await importOriginal<typeof import('@/lib/desktopShell')>();
   return {
     ...actual,
     getDesktopShell: () => {

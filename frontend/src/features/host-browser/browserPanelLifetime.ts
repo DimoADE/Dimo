@@ -1,4 +1,5 @@
 import { backendCall } from '@/lib/backendTransport';
+import { unregisterElectronBrowserTab } from './electronBrowserSurfaceStore';
 
 export type LiveBrowserSurface = {
   tabId: string;
@@ -35,7 +36,9 @@ export function isLiveDockviewContainer(
     isDisposed?: boolean;
     component?: { isDisposed?: boolean };
   };
-  return internal.isDisposed !== true && internal.component?.isDisposed !== true;
+  return (
+    internal.isDisposed !== true && internal.component?.isDisposed !== true
+  );
 }
 
 type SurfaceQueueState = {
@@ -267,6 +270,7 @@ export function closeBrowserTabOnce(
   tabId: string
 ): Promise<unknown> | null {
   if (!tabId) return null;
+  unregisterElectronBrowserTab(tabId);
   const state = surfaceQueues.get(tabId);
   if (state) {
     state.closed = true;

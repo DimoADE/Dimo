@@ -5,7 +5,7 @@ import {
   useMemo,
   useState,
 } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import {
   BarChart3,
@@ -23,7 +23,8 @@ import { Button } from '@/components/ui/button';
 import { useProject } from '@/contexts/ProjectContext';
 import { useAgentManagement } from '@/features/agent-management';
 import { useProjects } from '@/hooks/useProjects';
-import type { ProjectUsageDailyUsage } from '@/lib/api';
+import { localUsageApi, type ProjectUsageDailyUsage } from '@/lib/api';
+import { backendListen } from '@/lib/backendTransport';
 import { cn } from '@/lib/utils';
 import { PlanUsageDashboard } from '../PlanUsageDashboard';
 import {
@@ -35,6 +36,8 @@ import {
 import { extractFolderBasename } from './usageFormat';
 import {
   getUsageStatisticsQueryOptions,
+  getUsageTargetProjectId,
+  getUsageTargetScope,
   normalizeUsageStatistics,
 } from './usageStatistics';
 import { preferredTokenTotal } from './usageModel';
@@ -44,6 +47,7 @@ import { UsageSessionsPanel } from './UsageSessionsPanel';
 
 export function KanbanUsageDashboard() {
   const { t } = useTranslation(['tasks', 'common']);
+  const queryClient = useQueryClient();
   const { projectId } = useProject();
   const { projects } = useProjects();
   const { state: agentManagement } = useAgentManagement();
@@ -59,6 +63,10 @@ export function KanbanUsageDashboard() {
   const [expandedFolderId, setExpandedFolderId] = useState<string | null>(null);
   const [expandedAgentId, setExpandedAgentId] = useState<string | null>(null);
   const [expandedModelId, setExpandedModelId] = useState<string | null>(null);
+  const [manualRefreshing, setManualRefreshing] = useState(false);
+  const [manualRefreshError, setManualRefreshError] = useState<string | null>(
+    null
+  );
   const targetOptions = useMemo(
     () => [
       { value: 'global', label: t('usageDashboard.global') },
@@ -70,22 +78,74 @@ export function KanbanUsageDashboard() {
     [projects, t]
   );
 
+  const statisticsQueryOptions = useMemo(
+    () => getUsageStatisticsQueryOptions(selectedTarget, dateRange),
+    [dateRange, selectedTarget]
+  );
   const statisticsQuery = useQuery({
-    ...getUsageStatisticsQueryOptions(selectedTarget, dateRange),
+    ...statisticsQueryOptions,
     enabled: activeTab !== 'plan',
   });
+
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void backendListen('usage-statistics-updated', () => {
+      if (!active) return;
+      void queryClient.invalidateQueries({
+        queryKey: ['kanbanUsageStatistics'],
+      });
+    })
+      .then((dispose) => {
+        if (active) unlisten = dispose;
+        else dispose();
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [queryClient]);
+
+  const handleForceRefresh = useCallback(async () => {
+    setManualRefreshing(true);
+    setManualRefreshError(null);
+    try {
+      const fresh = await localUsageApi.getProjectStatistics({
+        scope: getUsageTargetScope(selectedTarget),
+        projectId: getUsageTargetProjectId(selectedTarget),
+        dateRange,
+        forceRefresh: true,
+      });
+      queryClient.setQueryData(statisticsQueryOptions.queryKey, fresh);
+      void queryClient.invalidateQueries({
+        queryKey: ['kanbanUsageStatistics'],
+        refetchType: 'none',
+      });
+    } catch (refreshError) {
+      setManualRefreshError(
+        refreshError instanceof Error
+          ? refreshError.message
+          : String(refreshError)
+      );
+    } finally {
+      setManualRefreshing(false);
+    }
+  }, [dateRange, queryClient, selectedTarget, statisticsQueryOptions.queryKey]);
 
   const statistics = useMemo(
     () => normalizeUsageStatistics(statisticsQuery.data ?? null),
     [statisticsQuery.data]
   );
+  const isFetching = statisticsQuery.isFetching || manualRefreshing;
   const loading = statisticsQuery.isLoading && !statistics;
   const error =
-    statisticsQuery.error instanceof Error
+    manualRefreshError ??
+    (statisticsQuery.error instanceof Error
       ? statisticsQuery.error.message
       : statisticsQuery.error
         ? String(statisticsQuery.error)
-        : null;
+        : null);
 
   useEffect(() => {
     if (!projectId) {
@@ -100,6 +160,7 @@ export function KanbanUsageDashboard() {
 
   useEffect(() => {
     setSessionPage(1);
+    setManualRefreshError(null);
   }, [dateRange, selectedTarget, sessionSortBy]);
 
   const formatDate = useCallback(
@@ -257,7 +318,7 @@ export function KanbanUsageDashboard() {
                 })}
               </span>
             ) : null}
-            {statisticsQuery.isFetching && statistics ? (
+            {isFetching && statistics ? (
               <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
                 <RefreshCw className="h-3 w-3 animate-spin" />
                 {t('usageDashboard.updating')}
@@ -305,8 +366,8 @@ export function KanbanUsageDashboard() {
             <Button
               type="button"
               variant="outline"
-              onClick={() => void statisticsQuery.refetch()}
-              disabled={statisticsQuery.isFetching}
+              onClick={() => void handleForceRefresh()}
+              disabled={isFetching}
               className="h-8 shrink-0 text-xs"
             >
               {t('usageDashboard.refresh')}

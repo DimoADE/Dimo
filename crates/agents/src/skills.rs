@@ -74,6 +74,7 @@ pub fn skills_surface(agent_type: AgentKind) -> AgentSkillsSurface {
     match agent_type {
         AgentKind::ClaudeCode
         | AgentKind::Codex
+        | AgentKind::MuseCode
         | AgentKind::Antigravity
         | AgentKind::Openclaw
         | AgentKind::Opencode
@@ -112,9 +113,10 @@ pub fn skills_surface(agent_type: AgentKind) -> AgentSkillsSurface {
 }
 
 /// Every agent Dimo manages. Order is used for stable scan/display output.
-const ALL_AGENTS: [AgentKind; 20] = [
+const ALL_AGENTS: [AgentKind; 21] = [
     AgentKind::ClaudeCode,
     AgentKind::Codex,
+    AgentKind::MuseCode,
     AgentKind::Antigravity,
     AgentKind::Openclaw,
     AgentKind::Opencode,
@@ -314,6 +316,17 @@ fn skill_dirs(agent: AgentKind, workspace: Option<&Path>) -> Vec<SkillDir> {
             }
             dirs
         }
+        AgentKind::MuseCode => configured_dir(
+            "XDG_CONFIG_HOME",
+            home.as_ref().map(|home| home.join(".config")),
+        )
+        .into_iter()
+        .map(|dir| (dir.join("muse").join("skills"), false))
+        .chain(
+            home.iter()
+                .map(|home| (home.join(".agents").join("skills"), false)),
+        )
+        .collect(),
         AgentKind::Opencode => configured_dir(
             "XDG_CONFIG_HOME",
             home.as_ref().map(|home| home.join(".config")),
@@ -490,6 +503,7 @@ fn skill_dirs(agent: AgentKind, workspace: Option<&Path>) -> Vec<SkillDir> {
         let relatives: &[&str] = match agent {
             AgentKind::ClaudeCode => &[".claude/skills"],
             AgentKind::Codex => &[".codex/skills", ".agents/skills"],
+            AgentKind::MuseCode => &[".agents/skills"],
             AgentKind::Opencode => &[".agents/skills", ".opencode/skills"],
             AgentKind::Antigravity => &[".gemini/skills", ".agents/skills"],
             AgentKind::Openclaw => &["skills"],
@@ -1144,6 +1158,10 @@ fn agent_primary_skill_dir(agent: AgentKind) -> Option<PathBuf> {
                 .map(|home| home.join("skills"))
         }
         AgentKind::Codex => codex_skills_home().map(|c| c.join("skills")),
+        AgentKind::MuseCode => {
+            configured_dir("XDG_CONFIG_HOME", home.map(|home| home.join(".config")))
+                .map(|dir| dir.join("muse").join("skills"))
+        }
         AgentKind::Opencode => {
             configured_dir("XDG_CONFIG_HOME", home.map(|home| home.join(".config")))
                 .map(|dir| dir.join("opencode").join("skills"))

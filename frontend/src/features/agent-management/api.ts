@@ -35,6 +35,7 @@ import type {
   OpenCodeProviderConnectionsView,
   DshPluginSummaryView,
   GrokPluginSummaryView,
+  MusePluginSummaryView,
   PiPluginSummaryView,
   DshProviderDiscoverRequest,
   DshProviderModelView,
@@ -53,15 +54,55 @@ import type {
 import { getUsageProviderService } from '@/features/plugins/providers/hostProviderServices';
 import { backendCall } from '@/lib/backendTransport';
 
+const AGENT_BAR_CACHE_TTL_MS = 5_000;
+let barCache: { data: AgentManagementView[]; expiresAt: number } | null = null;
+let barInFlight: Promise<AgentManagementView[]> | null = null;
+
+function invalidateBarCache(): void {
+  barCache = null;
+  barInFlight = null;
+}
+
 export const agentManagementApi = {
-  bar: (): Promise<AgentManagementView[]> =>
-    backendCall('agent_management_bar'),
+  invalidateBarCache,
+
+  bar: (): Promise<AgentManagementView[]> => {
+    if (barCache && Date.now() < barCache.expiresAt) {
+      return Promise.resolve(barCache.data);
+    }
+    if (barInFlight) {
+      return barInFlight;
+    }
+    const request = backendCall<AgentManagementView[]>('agent_management_bar')
+      .then((data) => {
+        if (barInFlight === request) {
+          barCache = { data, expiresAt: Date.now() + AGENT_BAR_CACHE_TTL_MS };
+          barInFlight = null;
+        }
+        return data;
+      })
+      .catch((error) => {
+        if (barInFlight === request) {
+          barInFlight = null;
+        }
+        throw error;
+      });
+    barInFlight = request;
+    return request;
+  },
 
   discoveryProgress: (): Promise<AgentDiscoveryProgressView> =>
     backendCall('agent_management_discovery_progress'),
 
-  refreshBar: (): Promise<AgentManagementView[]> =>
-    backendCall('agent_management_refresh'),
+  refreshBar: (): Promise<AgentManagementView[]> => {
+    invalidateBarCache();
+    return backendCall<AgentManagementView[]>('agent_management_refresh').then(
+      (data) => {
+        barCache = { data, expiresAt: Date.now() + AGENT_BAR_CACHE_TTL_MS };
+        return data;
+      }
+    );
+  },
 
   detail: (agentId: AgentId): Promise<AgentManagementView> =>
     backendCall('agent_management_detail', { agentId }),
@@ -77,30 +118,45 @@ export const agentManagementApi = {
   refreshRegistry: (): Promise<AgentRegistryView> =>
     backendCall('agent_registry_refresh'),
 
-  addAndInstall: (agentId: AgentId): Promise<AgentOperationReceipt> =>
-    backendCall('agent_registry_add_and_install', { agentId }),
+  addAndInstall: (agentId: AgentId): Promise<AgentOperationReceipt> => {
+    invalidateBarCache();
+    return backendCall('agent_registry_add_and_install', { agentId });
+  },
 
   addUserDefinitionAndInstall: (
     request: UserAgentDefinitionRequest
-  ): Promise<AgentOperationReceipt> =>
-    backendCall('agent_user_definition_add_and_install', { request }),
+  ): Promise<AgentOperationReceipt> => {
+    invalidateBarCache();
+    return backendCall('agent_user_definition_add_and_install', { request });
+  },
 
   userDefinition: (agentId: AgentId): Promise<UserAgentDefinitionView> =>
     backendCall('agent_user_definition_detail', { agentId }),
 
   updateUserDefinition: (
     request: UserAgentDefinitionRequest
-  ): Promise<UserAgentDefinitionView> =>
-    backendCall('agent_user_definition_update', { request }),
+  ): Promise<UserAgentDefinitionView> => {
+    invalidateBarCache();
+    return backendCall('agent_user_definition_update', { request });
+  },
 
   setEnabled: (
     agentId: AgentId,
     enabled: boolean
-  ): Promise<AgentManagementView> =>
-    backendCall('agent_management_set_enabled', { agentId, enabled }),
+  ): Promise<AgentManagementView> => {
+    invalidateBarCache();
+    return backendCall('agent_management_set_enabled', { agentId, enabled });
+  },
 
-  reorder: (agentIds: AgentId[]): Promise<AgentManagementView[]> =>
-    backendCall('agent_management_reorder', { agentIds }),
+  reorder: (agentIds: AgentId[]): Promise<AgentManagementView[]> => {
+    invalidateBarCache();
+    return backendCall<AgentManagementView[]>('agent_management_reorder', {
+      agentIds,
+    }).then((data) => {
+      barCache = { data, expiresAt: Date.now() + AGENT_BAR_CACHE_TTL_MS };
+      return data;
+    });
+  },
 
   preflight: (
     agentId: AgentId,
@@ -433,6 +489,24 @@ export const agentManagementApi = {
 
   removeGrokPlugin: (name: string): Promise<GrokPluginSummaryView> =>
     backendCall('grok_plugin_remove', { name }),
+
+  musePlugins: (): Promise<MusePluginSummaryView> =>
+    backendCall('muse_plugins'),
+
+  installMusePlugin: (spec: string): Promise<MusePluginSummaryView> =>
+    backendCall('muse_plugin_install', { spec }),
+
+  approveMusePlugin: (name: string): Promise<MusePluginSummaryView> =>
+    backendCall('muse_plugin_approve', { name }),
+
+  setMusePluginEnabled: (
+    name: string,
+    enabled: boolean
+  ): Promise<MusePluginSummaryView> =>
+    backendCall('muse_plugin_set_enabled', { name, enabled }),
+
+  removeMusePlugin: (name: string): Promise<MusePluginSummaryView> =>
+    backendCall('muse_plugin_remove', { name }),
 
   piPlugins: (): Promise<PiPluginSummaryView> => backendCall('pi_plugins'),
 

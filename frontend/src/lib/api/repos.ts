@@ -1,5 +1,6 @@
 import type {
   GitBranch,
+  GitWorktreeInfo,
   Repo,
   UpdateRepo,
   SearchMode,
@@ -20,6 +21,12 @@ import { desktopShellCall } from '@/lib/desktopShell';
 
 import { backendCall, invokeAsResult } from './base';
 import type { Result, PullResult } from './base';
+
+export interface GitLogQueryOptions {
+  worktreePath?: string | null;
+  branches?: string[];
+  maxCount?: number;
+}
 
 // Repo APIs
 export const repoApi = {
@@ -51,6 +58,32 @@ export const repoApi = {
 
   getBranches: async (repoId: string): Promise<GitBranch[]> => {
     return backendCall<GitBranch[]>('get_repo_branches', { repoId });
+  },
+
+  listWorktrees: async (repoId: string): Promise<GitWorktreeInfo[]> => {
+    return backendCall<GitWorktreeInfo[]>('get_repo_worktrees', { repoId });
+  },
+
+  getBranchDiffs: async (
+    repoId: string,
+    branch: string,
+    baseBranch?: string | null
+  ): Promise<Diff[]> => {
+    return backendCall<Diff[]>('get_repo_branch_diffs', {
+      repoId,
+      branch,
+      baseBranch: baseBranch ?? null,
+    });
+  },
+
+  getWorktreeDiffs: async (
+    repoId: string,
+    worktreePath?: string | null
+  ): Promise<Diff[]> => {
+    return backendCall<Diff[]>('get_repo_worktree_diffs', {
+      repoId,
+      worktreePath: worktreePath ?? null,
+    });
   },
 
   init: async (data: {
@@ -163,82 +196,192 @@ export const repoApi = {
 
   // ─── Repo-level Git operations ─────────────────────────────────────────────
 
-  getGitStatus: async (repoId: string): Promise<DetailedGitStatus> => {
-    return backendCall<DetailedGitStatus>('get_repo_git_status', { repoId });
+  getGitStatus: async (
+    repoId: string,
+    worktreePath?: string | null
+  ): Promise<DetailedGitStatus> => {
+    return backendCall<DetailedGitStatus>('get_repo_git_status', {
+      repoId,
+      ...(worktreePath ? { worktreePath } : {}),
+    });
   },
 
-  getFileDiffs: async (repoId: string): Promise<GitFileDiffEntry[]> => {
-    return backendCall<GitFileDiffEntry[]>('get_repo_file_diffs', { repoId });
+  getFileDiffs: async (
+    repoId: string,
+    worktreePath?: string | null
+  ): Promise<GitFileDiffEntry[]> => {
+    return backendCall<GitFileDiffEntry[]>('get_repo_file_diffs', {
+      repoId,
+      ...(worktreePath ? { worktreePath } : {}),
+    });
   },
 
-  stageFile: async (repoId: string, filePath: string): Promise<void> => {
-    return backendCall<void>('stage_repo_file', { repoId, filePath });
+  stageFile: async (
+    repoId: string,
+    filePath: string,
+    worktreePath?: string | null
+  ): Promise<void> => {
+    return backendCall<void>('stage_repo_file', {
+      repoId,
+      filePath,
+      ...(worktreePath ? { worktreePath } : {}),
+    });
   },
 
-  unstageFile: async (repoId: string, filePath: string): Promise<void> => {
-    return backendCall<void>('unstage_repo_file', { repoId, filePath });
+  unstageFile: async (
+    repoId: string,
+    filePath: string,
+    worktreePath?: string | null
+  ): Promise<void> => {
+    return backendCall<void>('unstage_repo_file', {
+      repoId,
+      filePath,
+      ...(worktreePath ? { worktreePath } : {}),
+    });
   },
 
-  revertFile: async (repoId: string, filePath: string): Promise<void> => {
-    return backendCall<void>('revert_repo_file', { repoId, filePath });
+  revertFile: async (
+    repoId: string,
+    filePath: string,
+    worktreePath?: string | null
+  ): Promise<void> => {
+    return backendCall<void>('revert_repo_file', {
+      repoId,
+      filePath,
+      ...(worktreePath ? { worktreePath } : {}),
+    });
   },
 
-  stageAll: async (repoId: string): Promise<void> => {
-    return backendCall<void>('stage_repo_all', { repoId });
+  stageAll: async (
+    repoId: string,
+    worktreePath?: string | null
+  ): Promise<void> => {
+    return backendCall<void>('stage_repo_all', {
+      repoId,
+      ...(worktreePath ? { worktreePath } : {}),
+    });
   },
 
-  revertAll: async (repoId: string): Promise<void> => {
-    return backendCall<void>('revert_repo_all', { repoId });
+  revertAll: async (
+    repoId: string,
+    worktreePath?: string | null
+  ): Promise<void> => {
+    return backendCall<void>('revert_repo_all', {
+      repoId,
+      ...(worktreePath ? { worktreePath } : {}),
+    });
   },
 
-  commitChanges: async (repoId: string, message: string): Promise<void> => {
-    return backendCall<void>('commit_repo_changes', { repoId, message });
+  commitChanges: async (
+    repoId: string,
+    message: string,
+    worktreePath?: string | null
+  ): Promise<void> => {
+    return backendCall<void>('commit_repo_changes', {
+      repoId,
+      message,
+      ...(worktreePath ? { worktreePath } : {}),
+    });
   },
 
-  push: async (repoId: string): Promise<void> => {
-    return backendCall<void>('push_repo', { repoId });
+  push: async (repoId: string, worktreePath?: string | null): Promise<void> => {
+    return backendCall<void>('push_repo', {
+      repoId,
+      ...(worktreePath ? { worktreePath } : {}),
+    });
   },
 
-  pull: async (repoId: string): Promise<PullResult> => {
-    return backendCall<PullResult>('pull_repo', { repoId });
+  pull: async (
+    repoId: string,
+    worktreePath?: string | null
+  ): Promise<PullResult> => {
+    return backendCall<PullResult>('pull_repo', {
+      repoId,
+      ...(worktreePath ? { worktreePath } : {}),
+    });
   },
 
-  fetch: async (repoId: string): Promise<void> => {
-    return backendCall<void>('fetch_repo', { repoId });
+  fetch: async (
+    repoId: string,
+    worktreePath?: string | null
+  ): Promise<void> => {
+    return backendCall<void>('fetch_repo', {
+      repoId,
+      ...(worktreePath ? { worktreePath } : {}),
+    });
   },
 
-  getGitLog: async (repoId: string): Promise<GitLogStatus> => {
-    return backendCall<GitLogStatus>('get_repo_git_log', { repoId });
+  getGitLog: async (
+    repoId: string,
+    options?: GitLogQueryOptions
+  ): Promise<GitLogStatus> => {
+    return backendCall<GitLogStatus>('get_repo_git_log', {
+      repoId,
+      ...(options?.worktreePath ? { worktreePath: options.worktreePath } : {}),
+      ...(options?.branches ? { branches: options.branches } : {}),
+      ...(options?.maxCount != null ? { maxCount: options.maxCount } : {}),
+    });
   },
 
   getCommitDetail: async (
     repoId: string,
-    sha: string
+    sha: string,
+    worktreePath?: string | null
   ): Promise<CommitDetail> => {
-    return backendCall<CommitDetail>('get_repo_commit_detail', { repoId, sha });
+    return backendCall<CommitDetail>('get_repo_commit_detail', {
+      repoId,
+      sha,
+      ...(worktreePath ? { worktreePath } : {}),
+    });
   },
 
-  getCommitDiffs: async (repoId: string, sha: string): Promise<Diff[]> => {
-    return backendCall<Diff[]>('get_repo_commit_diffs', { repoId, sha });
+  getCommitDiffs: async (
+    repoId: string,
+    sha: string,
+    worktreePath?: string | null
+  ): Promise<Diff[]> => {
+    return backendCall<Diff[]>('get_repo_commit_diffs', {
+      repoId,
+      sha,
+      ...(worktreePath ? { worktreePath } : {}),
+    });
   },
 
-  checkoutBranch: async (repoId: string, branchName: string): Promise<void> => {
-    return backendCall<void>('checkout_repo_branch', { repoId, branchName });
+  checkoutBranch: async (
+    repoId: string,
+    branchName: string,
+    worktreePath?: string | null
+  ): Promise<void> => {
+    return backendCall<void>('checkout_repo_branch', {
+      repoId,
+      branchName,
+      ...(worktreePath ? { worktreePath } : {}),
+    });
   },
 
   createBranch: async (
     repoId: string,
     branchName: string,
-    fromRef?: string
+    fromRef?: string,
+    worktreePath?: string | null
   ): Promise<void> => {
     return backendCall<void>('create_repo_branch', {
       repoId,
       branchName,
       fromRef: fromRef ?? null,
+      ...(worktreePath ? { worktreePath } : {}),
     });
   },
 
-  deleteBranch: async (repoId: string, branchName: string): Promise<void> => {
-    return backendCall<void>('delete_repo_branch', { repoId, branchName });
+  deleteBranch: async (
+    repoId: string,
+    branchName: string,
+    worktreePath?: string | null
+  ): Promise<void> => {
+    return backendCall<void>('delete_repo_branch', {
+      repoId,
+      branchName,
+      ...(worktreePath ? { worktreePath } : {}),
+    });
   },
 };

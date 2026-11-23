@@ -72,7 +72,9 @@ fn verify_requested_update_constraints(
         .filter(|value| !value.is_empty())
     {
         let expected = version.strip_prefix('v').unwrap_or(version);
-        let actual = resolved_version.strip_prefix('v').unwrap_or(resolved_version);
+        let actual = resolved_version
+            .strip_prefix('v')
+            .unwrap_or(resolved_version);
         if actual != expected {
             return Err(ApplicationError::conflict(format!(
                 "resolved plugin update version {resolved_version} does not match requested version {version}"
@@ -293,9 +295,7 @@ impl ServerApplicationDomains {
                     self.capability_broker.clone(),
                 )
                 .await
-                .map_err(|error| {
-                    ApplicationError::conflict(format!("{}: {error}", error.code()))
-                })?
+                .map_err(|error| ApplicationError::conflict(format!("{}: {error}", error.code())))?
         } else {
             self.plugin_control_plane
                 .import(prepared.package, plugins::ConflictDecision::Replace)
@@ -596,14 +596,9 @@ mod tests {
             )
             .is_ok()
         );
-        let version_err = verify_requested_update_constraints(
-            Some("2.2.0"),
-            None,
-            "2.1.0",
-            "sha256:pkg",
-            None,
-        )
-        .expect_err("version mismatch should fail");
+        let version_err =
+            verify_requested_update_constraints(Some("2.2.0"), None, "2.1.0", "sha256:pkg", None)
+                .expect_err("version mismatch should fail");
         assert!(version_err.to_string().contains("2.2.0"));
 
         let digest_err = verify_requested_update_constraints(

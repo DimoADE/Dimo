@@ -200,7 +200,7 @@
       "implementation": "crates/server/src/host/remote_profiles.rs:list",
       "reaches_core": false,
       "status": "ready",
-      "notes": "File-backed host impl; desktop injects src-tauri/src/plugin_remote_profiles.rs:TauriRemoteProfileHost. No Application Core reference."
+      "notes": "File-backed host impl in crates/server/src/host/remote_profiles.rs (shared by headless server and desktop sidecar). No Application Core reference."
     },
     {
       "name": "remote.profile.upsert",
@@ -210,7 +210,7 @@
       "implementation": "crates/server/src/host/remote_profiles.rs:upsert",
       "reaches_core": false,
       "status": "ready",
-      "notes": "File-backed host impl; desktop injects src-tauri/src/plugin_remote_profiles.rs:TauriRemoteProfileHost. No Application Core reference."
+      "notes": "File-backed host impl in crates/server/src/host/remote_profiles.rs (shared by headless server and desktop sidecar). No Application Core reference."
     },
     {
       "name": "remote.profile.forget",
@@ -220,7 +220,7 @@
       "implementation": "crates/server/src/host/remote_profiles.rs:forget",
       "reaches_core": false,
       "status": "ready",
-      "notes": "File-backed host impl; desktop injects src-tauri/src/plugin_remote_profiles.rs:TauriRemoteProfileHost. No Application Core reference."
+      "notes": "File-backed host impl in crates/server/src/host/remote_profiles.rs (shared by headless server and desktop sidecar). No Application Core reference."
     },
     {
       "name": "remote.connect",
@@ -230,7 +230,7 @@
       "implementation": "crates/server/src/host/remote_profiles.rs:connect",
       "reaches_core": false,
       "status": "ready",
-      "notes": "File-backed host impl; desktop injects src-tauri/src/plugin_remote_profiles.rs:TauriRemoteProfileHost. No Application Core reference."
+      "notes": "File-backed host impl in crates/server/src/host/remote_profiles.rs (shared by headless server and desktop sidecar). No Application Core reference."
     },
     {
       "name": "remote.disconnect",
@@ -240,7 +240,7 @@
       "implementation": "crates/server/src/host/remote_profiles.rs:disconnect",
       "reaches_core": false,
       "status": "ready",
-      "notes": "File-backed host impl; desktop injects src-tauri/src/plugin_remote_profiles.rs:TauriRemoteProfileHost. No Application Core reference."
+      "notes": "File-backed host impl in crates/server/src/host/remote_profiles.rs (shared by headless server and desktop sidecar). No Application Core reference."
     },
     {
       "name": "artifact.preview.open",

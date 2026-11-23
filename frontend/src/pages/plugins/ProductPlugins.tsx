@@ -569,7 +569,9 @@ export function PluginCatalogPage() {
   const openExternalMarketplace = useCallback(async () => {
     if (supports('desktop.tauri')) {
       try {
-        await getDesktopShell().shell.openExternal(OFFICIAL_MARKETPLACE_WEB_URL);
+        await getDesktopShell().shell.openExternal(
+          OFFICIAL_MARKETPLACE_WEB_URL
+        );
         return;
       } catch {
         // Fallback to window.open below
@@ -597,9 +599,14 @@ export function PluginCatalogPage() {
       .window.onDragDropEvent((event) => {
         const payload = event.payload;
         if (payload.type === 'enter') {
+          // Chromium/Electron withholds dropped file paths until `drop`, so
+          // `paths` is empty on `dragenter` even for valid file drags. Show
+          // the highlight overlay when paths are unavailable and keep strict
+          // `.vxp`/`.zip` pre-filtering when eager paths are supplied.
           setDropActive(
-            payload.paths.length === 1 &&
-              isVxpPackagePath(payload.paths[0] ?? '')
+            payload.paths.length === 0 ||
+              (payload.paths.length === 1 &&
+                isVxpPackagePath(payload.paths[0] ?? ''))
           );
           return;
         }

@@ -281,6 +281,66 @@ impl ConversationAgentEventRecorder {
             );
             return Ok(None);
         }
+        if let AgentEvent::ConfigOptionRejected {
+            config_id,
+            actual_value,
+            ..
+        } = &envelope.event
+        {
+            let trimmed = actual_value.trim();
+            if !trimmed.is_empty() {
+                if config_id == "mode" {
+                    if let Err(error) =
+                        ConversationAgentBindingRecord::update_session_controls_selection(
+                            &self.pool,
+                            conversation_id,
+                            Some(trimmed),
+                            None,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            %conversation_id,
+                            %error,
+                            "failed to sync binding mode after ConfigOptionRejected"
+                        );
+                    }
+                } else if let Ok(config_json) =
+                    serde_json::to_string(&serde_json::json!({ config_id: trimmed }))
+                    && let Err(error) =
+                        ConversationAgentBindingRecord::update_session_controls_selection(
+                            &self.pool,
+                            conversation_id,
+                            None,
+                            Some(&config_json),
+                        )
+                        .await
+                {
+                    tracing::warn!(
+                        %conversation_id,
+                        %error,
+                        "failed to sync binding config after ConfigOptionRejected"
+                    );
+                }
+            }
+        }
+        if let AgentEvent::SessionModes {
+            current: Some(current_mode),
+            ..
+        } = &envelope.event
+            && let Err(error) = ConversationAgentBindingRecord::backfill_initial_mode(
+                &self.pool,
+                conversation_id,
+                current_mode,
+            )
+            .await
+        {
+            tracing::warn!(
+                %conversation_id,
+                %error,
+                "failed to backfill initial session mode on conversation binding"
+            );
+        }
         let Some(mut event) = map_agent_event(envelope, turn_id) else {
             return Ok(None);
         };

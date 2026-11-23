@@ -28,8 +28,8 @@ use super::{
     native::{
         apply_native_file_mutations, catalog_cache_dir, codex_device_auth, dsh_configuration,
         grok_plugins, json_document_mutation, model_catalogs, model_provider_import,
-        model_providers, opencode_catalog, opencode_plugins, opencode_providers, pi_configuration,
-        pi_plugins, pi_trust, provider_store_path, read_json_object_or_empty,
+        model_providers, muse_plugins, opencode_catalog, opencode_plugins, opencode_providers,
+        pi_configuration, pi_plugins, pi_trust, provider_store_path, read_json_object_or_empty,
         read_json_object_state, resolve_agent_home,
     },
 };
@@ -815,43 +815,98 @@ pub async fn dispatch_dsh_plugin_remove(
     serialize(view)
 }
 
-pub async fn dispatch_grok_plugins(pool: &SqlitePool) -> Result<Value, ApplicationError> {
-    let agent_id = AgentId::parse("grok").map_err(internal_error)?;
-    let env = env_for(pool, &agent_id).await?;
-    let home = require_home()?;
-    serialize(grok_plugins::list_plugins(&home, &env).await.map_err(bad)?)
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MusePluginEnabledArgs {
+    #[serde(alias = "id")]
+    name: Option<String>,
+    spec: Option<String>,
+    enabled: bool,
 }
 
-pub async fn dispatch_grok_plugin_add(
+pub async fn dispatch_cli_plugin_command(
     pool: &SqlitePool,
+    command: application::DomainCommand,
     args: Value,
 ) -> Result<Value, ApplicationError> {
-    let args: PluginSpecArgs = parse_request(args)?;
-    let spec = args.spec.or(args.name).ok_or_else(|| bad("缺少插件"))?;
-    let agent_id = AgentId::parse("grok").map_err(internal_error)?;
+    use application::DomainCommand;
+    let agent_name = match command {
+        DomainCommand::GrokPlugins
+        | DomainCommand::GrokPluginAdd
+        | DomainCommand::GrokPluginRemove => "grok",
+        DomainCommand::MusePlugins
+        | DomainCommand::MusePluginInstall
+        | DomainCommand::MusePluginApprove
+        | DomainCommand::MusePluginSetEnabled
+        | DomainCommand::MusePluginRemove => "muse_code",
+        _ => return Err(bad("不支持的 CLI 插件命令")),
+    };
+    let agent_id = AgentId::parse(agent_name).map_err(internal_error)?;
     let env = env_for(pool, &agent_id).await?;
     let home = require_home()?;
-    let view = grok_plugins::add_plugin(&home, &env, &spec)
-        .await
-        .map_err(bad)?;
-    invalidate("agent-management-snapshot-invalidated");
-    serialize(view)
-}
-
-pub async fn dispatch_grok_plugin_remove(
-    pool: &SqlitePool,
-    args: Value,
-) -> Result<Value, ApplicationError> {
-    let args: PluginSpecArgs = parse_request(args)?;
-    let spec = args.spec.or(args.name).ok_or_else(|| bad("缺少插件"))?;
-    let agent_id = AgentId::parse("grok").map_err(internal_error)?;
-    let env = env_for(pool, &agent_id).await?;
-    let home = require_home()?;
-    let view = grok_plugins::remove_plugin(&home, &env, &spec)
-        .await
-        .map_err(bad)?;
-    invalidate("agent-management-snapshot-invalidated");
-    serialize(view)
+    match command {
+        DomainCommand::GrokPlugins => {
+            serialize(grok_plugins::list_plugins(&home, &env).await.map_err(bad)?)
+        }
+        DomainCommand::GrokPluginAdd => {
+            let parsed: PluginSpecArgs = parse_request(args)?;
+            let spec = parsed.spec.or(parsed.name).ok_or_else(|| bad("缺少插件"))?;
+            let view = grok_plugins::add_plugin(&home, &env, &spec)
+                .await
+                .map_err(bad)?;
+            invalidate("agent-management-snapshot-invalidated");
+            serialize(view)
+        }
+        DomainCommand::GrokPluginRemove => {
+            let parsed: PluginSpecArgs = parse_request(args)?;
+            let spec = parsed.spec.or(parsed.name).ok_or_else(|| bad("缺少插件"))?;
+            let view = grok_plugins::remove_plugin(&home, &env, &spec)
+                .await
+                .map_err(bad)?;
+            invalidate("agent-management-snapshot-invalidated");
+            serialize(view)
+        }
+        DomainCommand::MusePlugins => {
+            serialize(muse_plugins::list_plugins(&home, &env).await.map_err(bad)?)
+        }
+        DomainCommand::MusePluginInstall => {
+            let parsed: PluginSpecArgs = parse_request(args)?;
+            let spec = parsed.spec.or(parsed.name).ok_or_else(|| bad("缺少插件"))?;
+            let view = muse_plugins::install_plugin(&home, &env, &spec)
+                .await
+                .map_err(bad)?;
+            invalidate("agent-management-snapshot-invalidated");
+            serialize(view)
+        }
+        DomainCommand::MusePluginApprove => {
+            let parsed: PluginSpecArgs = parse_request(args)?;
+            let name = parsed.name.or(parsed.spec).ok_or_else(|| bad("缺少插件"))?;
+            let view = muse_plugins::approve_plugin(&home, &env, &name)
+                .await
+                .map_err(bad)?;
+            invalidate("agent-management-snapshot-invalidated");
+            serialize(view)
+        }
+        DomainCommand::MusePluginSetEnabled => {
+            let parsed: MusePluginEnabledArgs = parse_request(args)?;
+            let name = parsed.name.or(parsed.spec).ok_or_else(|| bad("缺少插件"))?;
+            let view = muse_plugins::set_plugin_enabled(&home, &env, &name, parsed.enabled)
+                .await
+                .map_err(bad)?;
+            invalidate("agent-management-snapshot-invalidated");
+            serialize(view)
+        }
+        DomainCommand::MusePluginRemove => {
+            let parsed: PluginSpecArgs = parse_request(args)?;
+            let name = parsed.name.or(parsed.spec).ok_or_else(|| bad("缺少插件"))?;
+            let view = muse_plugins::remove_plugin(&home, &env, &name)
+                .await
+                .map_err(bad)?;
+            invalidate("agent-management-snapshot-invalidated");
+            serialize(view)
+        }
+        _ => Err(bad("不支持的 CLI 插件命令")),
+    }
 }
 
 pub async fn dispatch_opencode_plugin_list(

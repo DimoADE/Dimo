@@ -15,6 +15,7 @@ import {
   virtualListHeightPx,
   remeasureMountedVirtualRows,
   isConversationExpansionToggle,
+  isVirtualizerJumpActive,
   scrollTopAfterPrepend,
   isConversationNearBottom,
   measureScrollMargin,
@@ -339,11 +340,13 @@ describe('conversation bottom distance', () => {
       },
     };
 
+    expect(isVirtualizerJumpActive(virtualizer)).toBe(true);
     cancelVirtualizerFollowScroll(virtualizer);
 
     expect(canceled).toEqual([7]);
     expect(virtualizer.rafId).toBeNull();
     expect(virtualizer.scrollState).toBeNull();
+    expect(isVirtualizerJumpActive(virtualizer)).toBe(false);
   });
 
   it('offsets virtual rows by the measured scroll margin', () => {
@@ -563,6 +566,20 @@ describe('conversation virtualizer layout coordinates', () => {
     expect(calls).toEqual([9]);
     scheduled.forEach((callback) => callback());
     expect(calls).toEqual([9, 9]);
+  });
+
+  it('cancels the follow-up pass when a newer jump or user wheel interrupts it', () => {
+    const calls: number[] = [];
+    const scheduled: Array<() => void> = [];
+    const cancel = scheduleMeasuredScrollToIndex(
+      (index) => calls.push(index),
+      9,
+      (callback) => scheduled.push(callback)
+    );
+    expect(calls).toEqual([9]);
+    cancel();
+    scheduled.forEach((callback) => callback());
+    expect(calls).toEqual([9]);
   });
 
   it('leaves a gap above a start-aligned user message', () => {

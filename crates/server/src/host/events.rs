@@ -16,7 +16,7 @@ use serde::Serialize;
 use tokio::{sync::broadcast, task::JoinHandle};
 use uuid::Uuid;
 
-pub(crate) const BUS_CAPACITY: usize = 16_384;
+pub(crate) const BUS_CAPACITY: usize = 2_048;
 
 const PATCH_STREAM_PREFIXES: &[&str] = &[
     "file-tree-stream",
@@ -217,6 +217,11 @@ pub const HOST_EVENT_CHANNELS: &[HostEventChannel] = &[
         required_scope: "application.call",
     },
     HostEventChannel {
+        prefix: "host-tunnel-lease-rejected",
+        durability: EventDurability::BestEffort,
+        required_scope: "application.call",
+    },
+    HostEventChannel {
         prefix: "agent-events",
         durability: EventDurability::BestEffort,
         required_scope: "application.call",
@@ -394,15 +399,28 @@ impl HostEventBus {
         self.sequence.load(Ordering::SeqCst)
     }
 
+    pub fn has_subscribers(&self) -> bool {
+        self.tx.receiver_count() > 0 || self.patch_tx.receiver_count() > 0
+    }
+
     pub fn emit(&self, channel: impl Into<String>, payload: impl Serialize) {
+        let channel = channel.into();
+        let descriptor = Self::descriptor(&channel);
+        let durability = descriptor
+            .map(|descriptor| descriptor.durability)
+            .unwrap_or(EventDurability::BestEffort);
+        let is_patch_stream =
+            descriptor.is_some_and(|descriptor| PATCH_STREAM_PREFIXES.contains(&descriptor.prefix));
+        let sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
+        let has_tx_receivers = self.tx.receiver_count() > 0;
+        let has_patch_receivers = is_patch_stream && self.patch_tx.receiver_count() > 0;
+        if durability != EventDurability::Invalidation && !has_tx_receivers && !has_patch_receivers
+        {
+            return;
+        }
         let Ok(payload) = serde_json::to_value(payload) else {
             return;
         };
-        let channel = channel.into();
-        let durability = Self::descriptor(&channel)
-            .map(|descriptor| descriptor.durability)
-            .unwrap_or(EventDurability::BestEffort);
-        let sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
         let event = HostEvent {
             channel: channel.clone(),
             payload,
@@ -422,12 +440,19 @@ impl HostEventBus {
             {
                 last.remove(&evict_key);
             }
-            last.insert(channel.clone(), event.clone());
+            last.insert(channel, event.clone());
         }
-        if Self::is_patch_stream_channel(&channel) {
-            let _ = self.patch_tx.send(event.clone());
+        if has_patch_receivers {
+            if has_tx_receivers {
+                let _ = self.patch_tx.send(event.clone());
+            } else {
+                let _ = self.patch_tx.send(event);
+                return;
+            }
         }
-        let _ = self.tx.send(event);
+        if has_tx_receivers {
+            let _ = self.tx.send(event);
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<HostEvent> {
@@ -456,13 +481,16 @@ impl HostEventBus {
         let Ok(last) = self.last_invalidation.read() else {
             return Vec::new();
         };
-        let prefix = format!("{channel}:");
         let mut events = last
             .values()
             .filter(|event| {
                 event.sequence > after_sequence
                     && (event.channel == channel
-                        || (!exact && event.channel.starts_with(&prefix)))
+                        || (!exact
+                            && event
+                                .channel
+                                .strip_prefix(channel)
+                                .is_some_and(|rest| rest.starts_with(':'))))
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -475,7 +503,9 @@ impl HostEventBus {
             .iter()
             .filter(|candidate| {
                 channel == candidate.prefix
-                    || channel.starts_with(&format!("{}:", candidate.prefix))
+                    || channel
+                        .strip_prefix(candidate.prefix)
+                        .is_some_and(|rest| rest.starts_with(':'))
             })
             .max_by_key(|candidate| candidate.prefix.len())
     }
@@ -570,14 +600,14 @@ impl TerminalBridgeRegistry {
     }
 
     pub fn ensure(&self, bus: Arc<HostEventBus>, session_id: Uuid, output_rx: TerminalOutputRx) {
-        let mut inner = self
-            .inner
-            .lock()
-            .expect("terminal bridge registry poisoned");
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(existing) = inner.get_mut(&session_id) {
-            existing.subscribers = existing.subscribers.saturating_add(1);
-            drop(output_rx);
-            return;
+            if !existing.task.is_finished() {
+                existing.subscribers = existing.subscribers.saturating_add(1);
+                drop(output_rx);
+                return;
+            }
+            inner.remove(&session_id);
         }
         let channel = terminal_output_channel(session_id);
         let exit_channel = terminal_exit_channel(session_id);
@@ -604,10 +634,7 @@ impl TerminalBridgeRegistry {
     }
 
     pub fn release(&self, session_id: Uuid) {
-        let mut inner = self
-            .inner
-            .lock()
-            .expect("terminal bridge registry poisoned");
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         let Some(existing) = inner.get_mut(&session_id) else {
             return;
         };
@@ -619,10 +646,7 @@ impl TerminalBridgeRegistry {
     }
 
     pub fn abort_all(&self) {
-        let mut inner = self
-            .inner
-            .lock()
-            .expect("terminal bridge registry poisoned");
+        let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         for (_, bridge) in inner.drain() {
             bridge.task.abort();
         }

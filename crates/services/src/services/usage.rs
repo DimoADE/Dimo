@@ -223,6 +223,7 @@ pub struct VendorLogRoots {
     pub kimi_sessions: Option<PathBuf>,
     pub qoder_projects: Option<PathBuf>,
     pub codebuddy_projects: Option<PathBuf>,
+    pub muse_sessions: Option<PathBuf>,
 }
 
 impl VendorLogRoots {
@@ -239,6 +240,8 @@ impl VendorLogRoots {
                 .map(|root| root.join("projects")),
             codebuddy_projects: env_or_home("CODEBUDDY_CONFIG_DIR", ".codebuddy")
                 .map(|root| root.join("projects")),
+            muse_sessions: env_or_home("XDG_DATA_HOME", ".local/share")
+                .map(|root| root.join("muse").join("sessions")),
         }
     }
 }
@@ -1197,6 +1200,14 @@ fn parse_claude_session(path: &Path) -> Result<Option<VendorLogUsage>, String> {
         if line.len() > 512_000 {
             continue;
         }
+        if first_timestamp != 0 && !session_id.is_empty() {
+            let needs_summary = summary.is_none() && line.contains("\"summary\"");
+            let maybe_assistant =
+                line.contains("\"assistant\"") && (model.is_empty() || line.contains("\"usage\""));
+            if !needs_summary && !maybe_assistant {
+                continue;
+            }
+        }
 
         let value = match serde_json::from_str::<Value>(&line) {
             Ok(value) => value,
@@ -1408,6 +1419,14 @@ pub fn scan_changed_vendor_logs(
         native_token_usage::parse_codebuddy_session,
         &mut scan,
     );
+    scan_extra_provider(
+        "muse_code",
+        roots.muse_sessions.as_deref(),
+        known,
+        collect_jsonl_tree,
+        native_token_usage::parse_muse_session,
+        &mut scan,
+    );
 
     for provider in &scan.successful_providers {
         let sessions_scanned = scan
@@ -1459,6 +1478,15 @@ fn collect_jsonl_tree(root: Option<&Path>) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
+fn entry_is_dir(entry: &fs::DirEntry, path: &Path) -> bool {
+    match entry.file_type() {
+        Ok(ft) if ft.is_dir() => true,
+        Ok(ft) if ft.is_symlink() => path.is_dir(),
+        Ok(_) => false,
+        Err(_) => path.is_dir(),
+    }
+}
+
 fn walk_jsonl(dir: &Path, files: &mut Vec<PathBuf>) {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -1466,7 +1494,7 @@ fn walk_jsonl(dir: &Path, files: &mut Vec<PathBuf>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        if entry_is_dir(&entry, &path) {
             walk_jsonl(&path, files);
             continue;
         }
@@ -1496,7 +1524,7 @@ fn walk_kimi_wires(dir: &Path, files: &mut Vec<PathBuf>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        if entry_is_dir(&entry, &path) {
             walk_kimi_wires(&path, files);
             continue;
         }
@@ -1565,7 +1593,7 @@ fn collect_claude_files(projects_dir: Option<&Path>) -> Result<Vec<PathBuf>, Str
     let mut files = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_dir() {
+        if !entry_is_dir(&entry, &path) {
             continue;
         }
         collect_claude_project_files(&path, &mut files);
@@ -1606,7 +1634,7 @@ fn collect_grok_session_files(root: &Path, files: &mut Vec<PathBuf>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        if entry_is_dir(&entry, &path) {
             let updates = path.join("updates.jsonl");
             if updates.is_file() {
                 files.push(updates);
@@ -1619,7 +1647,8 @@ fn collect_grok_session_files(root: &Path, files: &mut Vec<PathBuf>) {
 
 fn parse_grok_session(path: &Path) -> Result<Option<VendorLogUsage>, String> {
     let session_dir = path.parent().unwrap_or(path);
-    if grok_session_is_subagent(session_dir) {
+    let summary_json = grok_summary_json(session_dir);
+    if grok_summary_is_subagent(&summary_json) {
         return Ok(None);
     }
 
@@ -1629,13 +1658,13 @@ fn parse_grok_session(path: &Path) -> Result<Option<VendorLogUsage>, String> {
     };
     let reader = BufReader::new(file);
     let mut usage = ProjectUsageTokenCounts::default();
-    let mut model = grok_summary_model(session_dir);
+    let mut model = grok_summary_model(&summary_json);
     let mut first_timestamp = 0_i64;
     let dir_name = session_dir
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
-    let mut session_id = grok_summary_session_id(session_dir)
+    let mut session_id = grok_summary_session_id(&summary_json)
         .or_else(|| uuid_suffix(dir_name))
         .unwrap_or_else(|| dir_name.to_string());
     let mut turns = 0_i64;
@@ -1646,6 +1675,13 @@ fn parse_grok_session(path: &Path) -> Result<Option<VendorLogUsage>, String> {
             Err(_) => continue,
         };
         if line.len() > 512_000 {
+            continue;
+        }
+        if first_timestamp != 0
+            && !session_id.is_empty()
+            && model.is_some()
+            && !line.contains("\"turn_completed\"")
+        {
             continue;
         }
         let value = match serde_json::from_str::<Value>(&line) {
@@ -1768,21 +1804,18 @@ fn parse_grok_session(path: &Path) -> Result<Option<VendorLogUsage>, String> {
         model,
         tokens: usage,
         cost,
-        summary: grok_summary_title(session_dir),
+        summary: grok_summary_title(&summary_json),
         provider: "grok".to_string(),
         turns: (turns > 0).then_some(turns),
     }))
 }
 
-fn grok_session_is_subagent(session_dir: &Path) -> bool {
-    grok_summary_json(session_dir)
-        .get("session_kind")
-        .and_then(Value::as_str)
-        == Some("subagent")
+fn grok_summary_is_subagent(summary: &Value) -> bool {
+    summary.get("session_kind").and_then(Value::as_str) == Some("subagent")
 }
 
-fn grok_summary_session_id(session_dir: &Path) -> Option<String> {
-    grok_summary_json(session_dir)
+fn grok_summary_session_id(summary: &Value) -> Option<String> {
+    summary
         .get("session_id")
         .and_then(Value::as_str)
         .map(str::trim)
@@ -1797,8 +1830,8 @@ fn grok_usage_session_value(session_dir: &Path) -> Option<Value> {
         .and_then(|value| value.get("session").cloned())
 }
 
-fn grok_summary_model(session_dir: &Path) -> Option<String> {
-    grok_summary_json(session_dir)
+fn grok_summary_model(summary: &Value) -> Option<String> {
+    summary
         .get("current_model_id")
         .and_then(Value::as_str)
         .map(str::trim)
@@ -1806,8 +1839,7 @@ fn grok_summary_model(session_dir: &Path) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn grok_summary_title(session_dir: &Path) -> Option<String> {
-    let summary = grok_summary_json(session_dir);
+fn grok_summary_title(summary: &Value) -> Option<String> {
     summary
         .get("generated_title")
         .and_then(Value::as_str)
@@ -1862,7 +1894,7 @@ fn collect_jsonl_files(root: &Path, output: &mut Vec<PathBuf>, seen: &mut HashSe
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        if entry_is_dir(&entry, &path) {
             collect_jsonl_files(&path, output, seen);
             continue;
         }
@@ -1897,6 +1929,16 @@ fn parse_codex_session(path: &Path) -> Result<Option<VendorLogUsage>, String> {
         };
         if line.len() > 512_000 {
             continue;
+        }
+        if first_timestamp != 0 {
+            let needs_parse = line.contains("\"token_count\"")
+                || line.contains("\"session_id\"")
+                || line.contains("\"sessionId\"")
+                || (model.is_none() && line.contains("\"turn_context\""))
+                || (summary.is_none() && line.contains("\"user_message\""));
+            if !needs_parse {
+                continue;
+            }
         }
 
         let value = match serde_json::from_str::<Value>(&line) {

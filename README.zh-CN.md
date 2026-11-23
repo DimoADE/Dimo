@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="./src-tauri/icons/icon.png" alt="Dimo Logo" width="108" height="108" />
+  <img src="./electron/build/icons/icon.png" alt="Dimo Logo" width="108" height="108" />
 
   <h1>Dimo</h1>
 
@@ -10,7 +10,7 @@
   <p><strong>集成多 Agent 开发环境与 Vibe Coding 工具的综合一体化 Agent-Native 开发平台</strong></p>
   <p>
     提供多 Agent 可视化、手机 / 桌面端 / WebUI / Server 多 Host 互联开发、多 Worktree 工程化开发、<br/>
-    三层 Agent 自由协作引擎、跨 Agent 会话迁移、多 Agent 鉴权及配置管理、自由标签 / 无限画布式工作空间等实用能力。<br/>
+    三层 Agent 自由协作与 Pulse 事件驱动自动化引擎、跨 Agent 会话迁移、多 Agent 鉴权及配置管理、自由标签 / 无限画布式工作空间等实用能力。<br/>
     <strong>一切皆插件</strong>的高度解耦与高性能设计，带给你最好的 Vibe Coding 体验。
   </p>
 
@@ -31,8 +31,8 @@
 
 **Dimo** 将多 Agent 开发环境与全套 Vibe Coding 生产力工具融为一体：
 
-- **集成Agent，自由协作**：把主流 Coding Agent都变为可视化，多会话协作或GrokBot式的Team式协作，共享项目上下文、技能与工具生态，在不同 Agent 之间自由迁移迁移，自由协作。
-- **既能直觉创造，也能严谨交付**：自由标签页与无限画布双模式，随你发挥，多 Worktree 并行隔离、实时 Diff 与冲突合并，让高频并发的 Vibe Coding 始终井然有序。
+- **集成 Agent，自由协作**：将 20+ 主流 Coding Agent 统一可视化，支持多会话并行与多角色 AI 团队协作，共享项目上下文、技能与工具生态，在不同 Agent 之间自由迁移与协同推进。
+- **既能直觉创造，也能严谨交付**：自由标签页与无限画布双模式随心切换，配合多 Worktree 并行隔离、实时 Diff 与三栏冲突合并，让高频并发的 Vibe Coding 始终井然有序。
 - **轻量高速，全端在线**：Rust 原生高性能底座配合「一切皆插件」的解耦设计，按需装配不臃肿；桌面、WebUI、远程服务器与手机 / IM 随时随地无缝接管。
 
 ---
@@ -43,12 +43,12 @@
 原生集成 **Claude Code、Codex、OpenCode、Cursor、Antigravity、DeepSeek、Grok** 等 20+ 主流 Coding Agent，采用**独立 Agent 引擎深度适配优先、ACP 生态兼容**策略。将原本黑盒的命令行转化为清晰的思考过程、工具调用、权限审批与改动轨迹，并支持一键扫描导入本机历史会话。
 
 ### 2. 自由标签页 / 无限画布双工作空间
-将数十个实时交互会话窗口与代码编辑器、Git Diff、内置浏览器、终端同屏平铺、自由缩放与连线编组。
+专注开发时使用**自由多栏标签页**高效分屏，也可一键无损切换至**无限画布**——将数十个实时交互会话窗口与代码编辑器、Git Diff、内置浏览器、终端同屏平铺、自由缩放与连线编组。
 
-### 3. 三层 Agent 自由协作引擎
-- **手动委派**：在输入框键入 `&Agent`（如 `&Codex`），即可派生对应Agent子会话并行处理独立任务，子会话也是一等公民。
-- **AI 团队协作空间**：组建 Bot 团队，与GrokBot一样的体验！
-- **可视化工作流与定时自动化**：拖拽编排多节点研发流水线与审批关卡，支持断点调试与定时自动运行。
+### 3. 三层 Agent 自由协作与 Pulse 事件驱动自动化引擎
+- **会话内 `&Agent` 委派**：在输入框键入 `&Agent`（如 `&Codex`），即可派生对应 Agent 子会话并行处理独立任务，子会话独立持久化且可随时接管。
+- **AI 团队协作空间**：组建持久化角色助手团队（架构师、前端、测试、文档），支持一对一私聊与多助手群组房间协作及 `@` 精准调度。
+- **Pulse 事件自动化与可视化工作流**：统一接入 GitHub / Jira / 飞书 Webhook、自定义 SDK 事件与定时 / SLA 触发器，安全驱动隔离会话、持久化助手或双原语 DAG 研发流水线，支持审批关卡与断点调试。
 
 ### 4. 跨 Agent 会话迁移 · 实时纠偏 · 会话分叉
 支持将当前会话上下文无缝**迁移至其他 Agent** 继续推进（例如由擅长架构的 Agent 完成设计后交由擅长编码的 Agent 实现）；生成途中可随时发送补充指令**实时纠偏（Steering）**而无需中断重来，也可从任意节点一键**分叉（Fork）**同时验证多种思路。
@@ -60,7 +60,7 @@
 统一管理各 Agent 的官方账号订阅、API Key 与第三方供应商配置（支持一键导入 CC Switch 配置与接口测速），内置统一模型路由网关，并提供各账号套餐剩余额度、Token 用量与成本统计看板。
 
 ### 7. 手机 / 桌面端 / WebUI / Server 多 Host 互联开发
-支持本地桌面端、远程无头 Server、浏览器 WebUI、一键 SSH 远端接入以及免公网 IP 的端到端加密异地直连；配备原生 **iOS / Android App**，并打通**微信、企业微信、飞书、Telegram、Slack、Discord** 机器人，随时随地查看进度、批复权限、下发新任务。
+支持本地桌面端、远程无头 Server、浏览器 WebUI、一键 SSH 远端接入以及免公网 IP 的端到端加密异地直连；配备原生 **iOS / Android App**，并打通 **Telegram、飞书、企业微信、微信 iLink 与 QQ** 机器人，随时随地查看进度、批复权限、下发新任务。
 
 ### 8. 「一切皆插件」的高度解耦与高性能设计
 基于 Rust 打造轻量高速内核，坚持**一切皆插件**的模块化理念——无论是**内置浏览器**（网页元素点选直传 AI）、**Office 文档创作与预览**、**桌面电脑视觉操控**、**AI 行内代码补全**、**混合语音输入**、**提示词优化**还是**科研技能包**，均可按需即插即用，并可通过开放插件市场与多语言 SDK 自由扩展。
@@ -118,7 +118,7 @@
 | **Agent 支持** | 多个终端各自为战 | 绑定单一内置模型/Agent | **20+ 主流 Agent 可视化统一调度与混编** |
 | **工作空间** | 纯文本滚动窗口 | 固定单窗口布局 | **自由标签页 ↔ 无限画布一键无损切换** |
 | **会话连续性** | 换工具即丢失上下文 | 跑偏需中断重来 | **跨 Agent 会话迁移 + 实时纠偏 + 自由分叉** |
-| **多 Agent 协作** | 手动复制粘贴中转 | 仅限单会话内部调用 | **`&Agent` 随手委派 + AI 群聊空间 + 可视化工作流** |
+| **多 Agent 协作** | 手动复制粘贴中转 | 仅限单会话内部调用 | **`&Agent` 随手委派 + AI 群聊空间 + Pulse 与可视化工作流** |
 | **工程化并行** | 手动切分支，极易冲突 | 单目录串行修改 | **多 Worktree 自动隔离 + Diff 审阅 + 三栏冲突合并** |
 | **鉴权与配置** | 逐个命令行重复配置 | 封闭账号体系 | **订阅 / API / 供应商一站式管理 + 额度用量看板** |
 | **跨端互联** | 依赖 SSH + tmux | 仅限本地桌面 | **手机 / 桌面 / WebUI / Server 多 Host 与主流 IM 互联** |
@@ -130,11 +130,11 @@
 
 ### 1. 下载桌面客户端（推荐）
 
-前往 [Dimo 官方下载页](https://dimo-ai.com/#download) 获取原生安装包（支持自动更新）：
+前往 [Dimo 官方下载页](https://dimo-ai.com/#download) 获取桌面安装包（支持自动更新）：
 
 - **macOS**：Apple Silicon (`aarch64` `.dmg`) · Intel (`x64` `.dmg`)
 - **Windows**：Windows 10 / 11 (`x64` / `arm64` `.exe`)
-- **Linux**：主流发行版 (`x64` / `arm64` `.AppImage`)
+- **Linux**：主流发行版 (`x64` / `arm64` `.AppImage` / `.deb`)
 
 ### 2. 命令行 / Server / WebUI 一键启动
 
@@ -156,13 +156,13 @@ npx dimoai serve    # 开启局域网 / 远程 WebUI 访问
 npx dimoai list     # 查看支持一键安装的 Coding Agent
 ```
 
-也支持 Docker 一键部署：`docker compose up -d`（更多服务端配置见 [无头 Server 部署指南](./docs/deployment/headless-server.md)）。
+也支持 Docker 一键部署：`docker compose up -d`（更多服务端配置见 [无头 Server 部署指南](./docs/guides/headless-server.md)）。
 
 ---
 
 ## 本地开发与文档导航
 
-环境要求：Rust（见 [`rust-toolchain.toml`](./rust-toolchain.toml)）、Node.js `>= 20`、`pnpm 10.x`。
+环境要求：Rust（见 [`rust-toolchain.toml`](./rust-toolchain.toml)）、Node.js `>= 18`、`pnpm 10.x`。
 
 ```bash
 pnpm install      # 安装依赖
@@ -170,7 +170,7 @@ pnpm run dev      # 启动桌面端开发模式
 pnpm run check    # 运行前后端类型与编译检查
 ```
 
-- 架构设计、远程协议与工程文档：[**仓库文档总览 (`docs/README.md`)**](./docs/README.md)
+- 文档总索引与目录导航：[**`docs/INDEX.md`**](./docs/INDEX.md) / [**`docs/README.md`**](./docs/README.md)
 - 插件使用与扩展开发指南：[**插件生态文档 (`docs/plugins/README.md`)**](./docs/plugins/README.md)
 
 ---

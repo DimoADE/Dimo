@@ -48,10 +48,8 @@ import { requestBrowserTabOpen } from './openBrowserTab';
 import { backendCall, backendListen } from '@/lib/backendTransport';
 import { getInvokeErrorMessage } from '@/lib/errors';
 import { cn } from '@/lib/utils';
-import {
-  getDesktopShell,
-  hasElectronDesktopRuntime,
-} from '@/lib/desktopShell';
+import { getDesktopShell, hasElectronDesktopRuntime } from '@/lib/desktopShell';
+import { useCanvasNodeSurfaceInfo } from '@/components/kanban/canvas/CanvasNodeSurfaceContext';
 import { ElectronBrowserWebview } from './ElectronBrowserWebview';
 import { openInSystemBrowser } from '@/hooks/useOpenLink';
 import { writeClipboardViaBridge } from '@/vscode/bridge';
@@ -300,6 +298,7 @@ type BrowserHostEvent = {
   kind?: string;
   tabId?: string;
   sourceTabId?: string;
+  action?: string;
   url?: string;
   origin?: string | null;
   grant?: { level: string } | null;
@@ -398,6 +397,7 @@ export function HostBrowserPanel({
   panelApi?: {
     id?: string;
     isVisible?: boolean;
+    close?: () => void;
     updateParameters: (params: Record<string, unknown>) => void;
     setTitle?: (title: string) => void;
     onDidDimensionsChange?: (cb: () => void) => { dispose: () => void };
@@ -414,6 +414,7 @@ export function HostBrowserPanel({
   containerApi?: DockviewContainerApiLike;
 }) {
   const { t } = useTranslation('panels');
+  const canvasSurfaceInfo = useCanvasNodeSurfaceInfo();
   const overlay = useWorkspaceOverlay();
   const browserPrefs = useBrowserPrefs();
   const browserSettingsRef = useRef(browserPrefs.settings);
@@ -426,6 +427,8 @@ export function HostBrowserPanel({
   const openSeqRef = useRef(0);
   const surfaceHostRef = useRef<BrowserSurfaceHost>(surfaceHost);
   surfaceHostRef.current = surfaceHost;
+  const panelApiRef = useRef(panelApi);
+  panelApiRef.current = panelApi;
   const containerApiRef = useRef(containerApi);
   containerApiRef.current = containerApi;
   const latestOverlayOcclusionRef = useRef<{
@@ -467,6 +470,8 @@ export function HostBrowserPanel({
   const [canGoBack, setCanGoBack] = useState(false);
   const [loading, setLoading] = useState(false);
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
+  const zoomRef = useRef(DEFAULT_ZOOM);
+  zoomRef.current = zoom;
   const [device, setDevice] = useState<BrowserDevice>(DEFAULT_DEVICE);
   const [frozen, setFrozen] = useState<string | null>(null);
   const frozenRef = useRef<string | null>(null);
@@ -738,6 +743,53 @@ export function HostBrowserPanel({
       acceptPickedElement(payload.payload);
       return;
     }
+    if (payload.kind === 'tab.shortcut') {
+      const action = payload.action;
+      if (action === 'find') {
+        setFindOpen(true);
+        setFindToken((token) => token + 1);
+      } else if (action === 'focus-address') {
+        const input = addressFieldRef.current?.querySelector('input');
+        if (input instanceof HTMLInputElement) {
+          input.focus();
+          input.select();
+        }
+      } else if (action === 'reload') {
+        const tabId = tabIdRef.current;
+        if (tabId) {
+          void dispatchRef
+            .current('tab.reload', { tabId })
+            .catch(() => undefined);
+        }
+      } else if (action === 'close-tab') {
+        panelApi?.close?.();
+      } else if (
+        action === 'zoom-in' ||
+        action === 'zoom-out' ||
+        action === 'zoom-reset'
+      ) {
+        const current = zoomRef.current;
+        let next: number = DEFAULT_ZOOM;
+        if (action === 'zoom-in') {
+          next =
+            ZOOM_PRESETS.find((preset) => preset > current + 0.01) ??
+            ZOOM_PRESETS[ZOOM_PRESETS.length - 1];
+        } else if (action === 'zoom-out') {
+          next =
+            [...ZOOM_PRESETS]
+              .reverse()
+              .find((preset) => preset < current - 0.01) ?? ZOOM_PRESETS[0];
+        }
+        setZoom(next);
+        const tabId = tabIdRef.current;
+        if (tabId) {
+          void dispatchRef
+            .current('tab.zoom', { tabId, factor: next })
+            .catch(() => undefined);
+        }
+      }
+      return;
+    }
     if (payload.kind === 'tab.state') {
       if (payload.loading === true) {
         setLoading(true);
@@ -891,15 +943,18 @@ export function HostBrowserPanel({
       const previousTabId = tabIdRef.current;
       setError(null);
       pendingUrlRef.current = url;
+      if (!addressDirtyRef.current) {
+        setAddress(url);
+      }
       setLoading(true);
       freezeGenRef.current += 1;
       lastFreezeRef.current = null;
       updateFrozen(null);
       const label = provisionalTitle(url);
-      if (label) panelApi?.setTitle?.(label);
+      if (label) panelApiRef.current?.setTitle?.(label);
       const icon = faviconFor(url);
       prefetchFavicon(icon);
-      if (icon) panelApi?.updateParameters({ faviconUrl: icon });
+      if (icon) panelApiRef.current?.updateParameters({ faviconUrl: icon });
       try {
         const bounds = await waitForSurfaceBounds();
         if (!mountedRef.current || openSeqRef.current !== openSeq) return;
@@ -912,13 +967,23 @@ export function HostBrowserPanel({
         } catch {
           // keep defaultGrant
         }
+        const createBounds =
+          isElectronSurface && bounds
+            ? {
+                ...bounds,
+                visible: true,
+                width: Math.max(bounds.width, 320),
+                height: Math.max(bounds.height, 240),
+              }
+            : bounds;
         const created = (await dispatch('tab.create', {
           url,
+          openInUi: false,
           grant: initialGrant,
           ...(currentSettings.newTabProfile !== 'default'
             ? { profileId: currentSettings.newTabProfile }
             : {}),
-          ...(bounds ? { bounds } : {}),
+          ...(createBounds ? { bounds: createBounds } : {}),
         })) as BrowserTab;
         if (!mountedRef.current || openSeqRef.current !== openSeq) {
           if (created?.tabId) {
@@ -933,7 +998,7 @@ export function HostBrowserPanel({
         tabIdRef.current = created.tabId;
         setCanGoBack(false);
         setTab(created);
-        panelApi?.updateParameters({
+        panelApiRef.current?.updateParameters({
           requestedUrl: url,
           ...(surfaceHostRef.current === 'dockview'
             ? { nativeTabId: created.tabId }
@@ -978,7 +1043,7 @@ export function HostBrowserPanel({
     [
       dispatch,
       explainSiteRuleError,
-      panelApi,
+      isElectronSurface,
       panelId,
       pluginId,
       stopForSiteRule,
@@ -1388,7 +1453,7 @@ export function HostBrowserPanel({
   }, [dispatch, panelId]);
 
   useEffect(() => {
-    if (openedRequestedUrl.current || tabIdRef.current) return;
+    if (openedRequestedUrl.current || tabIdRef.current) return undefined;
     const key = panelId
       ? browserPanelSurfaceKey(projectKey, panelId, surfaceHost)
       : '';
@@ -1398,70 +1463,92 @@ export function HostBrowserPanel({
       completeBrowserAddress(requestedUrl || remembered?.url || '') ||
       remembered?.url ||
       null;
+    let cancelled = false;
     if (existingId) {
       openedRequestedUrl.current = true;
-      tabIdRef.current = existingId;
-      setTab({
-        tabId: existingId,
-        url: existingUrl || 'about:blank',
-        title: existingUrl
-          ? provisionalTitle(existingUrl) || 'Browser'
-          : 'Browser',
-      });
-      if (existingUrl) setAddress(existingUrl);
+      if (existingUrl && !addressDirtyRef.current) {
+        setAddress(existingUrl);
+      }
       void (async () => {
         try {
           const listed = (await dispatch('tab.list')) as {
             tabs?: BrowserTab[];
           } | null;
-          if (!mountedRef.current || tabIdRef.current !== existingId) return;
+          if (cancelled || !mountedRef.current || tabIdRef.current) return;
+          let restored: BrowserTab = {
+            tabId: existingId,
+            url: existingUrl || 'about:blank',
+            title: existingUrl
+              ? provisionalTitle(existingUrl) || 'Browser'
+              : 'Browser',
+          };
           if (Array.isArray(listed?.tabs)) {
             const found = listed.tabs.find((item) => item.tabId === existingId);
             if (!found) {
               if (key) forgetBrowserSurface(key);
-              tabIdRef.current = null;
               if (existingUrl) void openTab(existingUrl);
               return;
             }
-            setTab(found);
-            if (found.url) setAddress(found.url);
-            if (key) {
-              rememberBrowserSurface(
-                key,
-                {
-                  tabId: existingId,
-                  url: found.url || existingUrl || 'about:blank',
-                },
-                pluginId
-              );
-            }
+            restored = found;
           }
-          await waitForSurfaceBounds();
-          if (!mountedRef.current || tabIdRef.current !== existingId) return;
+          tabIdRef.current = existingId;
           markBrowserTabOpen(existingId);
-          const bounds = measureSurface(
-            hostRef.current,
-            mountedRef.current &&
-              panelVisibleRef.current &&
-              dockVisibleRef.current,
-            occludedRef.current
-          );
-          lastPushedBoundsRef.current = boundsKey(bounds);
-          await enqueueSurfaceBounds(existingId, dispatch, bounds);
+          setTab(restored);
+          if (restored.url) setAddress(restored.url);
+          if (key) {
+            rememberBrowserSurface(
+              key,
+              {
+                tabId: existingId,
+                url: restored.url || existingUrl || 'about:blank',
+              },
+              pluginId
+            );
+          }
+          if (!isElectronSurface) {
+            await waitForSurfaceBounds();
+            if (
+              cancelled ||
+              !mountedRef.current ||
+              tabIdRef.current !== existingId
+            ) {
+              return;
+            }
+            const bounds = measureSurface(
+              hostRef.current,
+              mountedRef.current &&
+                panelVisibleRef.current &&
+                dockVisibleRef.current,
+              occludedRef.current
+            );
+            lastPushedBoundsRef.current = boundsKey(bounds);
+            await enqueueSurfaceBounds(existingId, dispatch, bounds);
+          }
         } catch {
-          if (!mountedRef.current) return;
+          if (cancelled || !mountedRef.current || tabIdRef.current) return;
           if (key) forgetBrowserSurface(key);
-          tabIdRef.current = null;
           if (existingUrl) void openTab(existingUrl);
         }
       })();
-      return;
+      return () => {
+        cancelled = true;
+        if (!tabIdRef.current) {
+          openedRequestedUrl.current = false;
+        }
+      };
     }
-    if (!existingUrl) return;
+    if (!existingUrl) return undefined;
     openedRequestedUrl.current = true;
     void openTab(existingUrl);
+    return () => {
+      cancelled = true;
+      if (!tabIdRef.current) {
+        openedRequestedUrl.current = false;
+      }
+    };
   }, [
     dispatch,
+    isElectronSurface,
     nativeTabId,
     openTab,
     panelId,
@@ -1641,7 +1728,7 @@ export function HostBrowserPanel({
 
   useEffect(() => {
     const tabId = tabIdRef.current;
-    if (!tabId) return undefined;
+    if (!tabId || isElectronSurface) return undefined;
     let stopped = false;
     let timer = 0;
     let attempts = 0;
@@ -1662,7 +1749,7 @@ export function HostBrowserPanel({
       stopped = true;
       window.clearTimeout(timer);
     };
-  }, [loading, refreshChrome, tab?.tabId, tab?.url]);
+  }, [isElectronSurface, loading, refreshChrome, tab?.tabId, tab?.url]);
 
   const revealSurface = () => {
     hideSeqRef.current += 1;
@@ -1695,6 +1782,18 @@ export function HostBrowserPanel({
     device === 'phone' ? Smartphone : device === 'tablet' ? Tablet : Monitor;
 
   const currentUrl = tab?.url || address;
+  const retryUrl = completeBrowserAddress(currentUrl || requestedUrl || '');
+
+  const reloadOrRetry = () => {
+    revealSurface();
+    if (tabIdRef.current) {
+      runTab('tab.reload');
+      return;
+    }
+    if (retryUrl) {
+      goToUrl(retryUrl);
+    }
+  };
 
   const copyRequestInfo = () => {
     let host = '';
@@ -1829,7 +1928,7 @@ export function HostBrowserPanel({
           aria-label={
             loading ? t('browserPanel.stop') : t('browserPanel.reload')
           }
-          disabled={!tab}
+          disabled={!tab && (loading || !retryUrl)}
           onClick={() => {
             if (loading) {
               revealSurface();
@@ -1837,8 +1936,7 @@ export function HostBrowserPanel({
               setLoading(false);
               return;
             }
-            revealSurface();
-            runTab('tab.reload');
+            reloadOrRetry();
           }}
         >
           {loading ? (
@@ -2217,10 +2315,7 @@ export function HostBrowserPanel({
           <button
             type="button"
             className="inline-flex h-7 items-center gap-1.5 rounded-md border border-border px-2.5 text-xs hover:bg-primary/8"
-            onClick={() => {
-              revealSurface();
-              runTab('tab.reload');
-            }}
+            onClick={reloadOrRetry}
           >
             <RotateCw className="h-3.5 w-3.5" />
             {t('browserPanel.reload')}
@@ -2246,7 +2341,10 @@ export function HostBrowserPanel({
               surfaceHost={surfaceHost}
               panelVisible={panelVisible}
               canHibernate={!picking && !tab.grant}
+              surfaceZIndex={canvasSurfaceInfo?.zIndex}
+              backgroundColor="var(--surface-content)"
               onHistoryAvailabilityChange={setCanGoBack}
+              onSurfacePointerDown={() => setSuggestOpen(false)}
             />
           ) : null}
           {!isElectronSurface && frozen ? (

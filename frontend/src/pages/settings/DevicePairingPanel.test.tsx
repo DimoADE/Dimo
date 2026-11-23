@@ -35,6 +35,7 @@ vi.mock('qrcode', () => ({
 
 describe('DevicePairingPanel', () => {
   beforeEach(() => {
+    window.localStorage.removeItem('dimo.pairing.ttlSeconds');
     HTMLElement.prototype.hasPointerCapture = vi.fn(() => false);
     HTMLElement.prototype.setPointerCapture = vi.fn();
     HTMLElement.prototype.scrollIntoView = vi.fn();
@@ -395,5 +396,51 @@ describe('DevicePairingPanel', () => {
     expect(within(pairedList).getByText('Chrome (Web)')).toBeVisible();
     expect(within(pairedList).getByText('Web端')).toBeVisible();
     expect(within(pairedList).getByText('127.0.0.1')).toBeVisible();
+  });
+
+  it('persists the selected 7-day pairing TTL across panel remounts', async () => {
+    const user = userEvent.setup();
+    const createDevicePairing = vi.fn(async () => ({
+      pairing_id: 'pair-persist',
+      pairing_token: 'K7M2NPQX',
+      connection_code: 'K7M2NPQX',
+      expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      requested_scopes: ['conversation.read'],
+      invitation: 'dimo-pairing:{"pairing_token":"K7M2NPQX"}',
+      reachability: [{ origin: 'http://192.168.1.20:17891', kind: 'lan' }],
+    }));
+    const transport: BackendTransport = {
+      environment: 'desktop',
+      call: vi.fn(),
+      createDevicePairing,
+    };
+
+    const first = render(
+      <DevicePairingPanel
+        transport={transport}
+        hostUrls={['http://192.168.1.20:17891']}
+      />
+    );
+    await user.click(screen.getByRole('button', { name: '生成连接码' }));
+    await user.click(screen.getByRole('combobox', { name: '有效期' }));
+    await user.click(screen.getByRole('option', { name: '7 天' }));
+    first.unmount();
+
+    createDevicePairing.mockClear();
+    render(
+      <DevicePairingPanel
+        transport={transport}
+        hostUrls={['http://192.168.1.20:17891']}
+      />
+    );
+    await user.click(screen.getByRole('button', { name: '生成连接码' }));
+
+    expect(createDevicePairing).toHaveBeenCalledWith({
+      preset: 'workstation',
+      ttl_seconds: 604800,
+    });
+    expect(screen.getByRole('combobox', { name: '有效期' })).toHaveTextContent(
+      '7 天'
+    );
   });
 });

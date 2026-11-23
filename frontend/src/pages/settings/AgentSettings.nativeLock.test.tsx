@@ -99,8 +99,7 @@ vi.mock('./PluginsSettings', () => ({
 }));
 
 vi.mock('@/lib/desktopShell', async (importOriginal) => {
-  const original =
-    await importOriginal<typeof import('@/lib/desktopShell')>();
+  const original = await importOriginal<typeof import('@/lib/desktopShell')>();
   return {
     ...original,
     getDesktopShell: () => {

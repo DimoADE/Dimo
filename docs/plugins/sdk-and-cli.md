@@ -1,103 +1,62 @@
-# Plugin SDK and CLI Contract
+# Dimo Plugin SDK 与 CLI 参考
 
-## 1. SDK 产品组成
+本文是 Dimo Plugin 公共 SDK（JS/TS、Python、Rust）、Worker / App 通信协议与 CLI 命令的规范参考（对应 Dimo `v0.5.2`）。
 
-当前公共 SDK 与 Host 一起版本化发布：
+> 23 类贡献点、155 个 `host-api` 操作与 32 个 `host.call` 能力域的完整实时矩阵见 [`contract-bindings.md`](contract-bindings.md)；包布局与清单规范见 [`package-v4.md`](package-v4.md)。
 
-| Package                      | 用途                                                                                       |
-| ---------------------------- | ------------------------------------------------------------------------------------------ |
-| `@dimoai/plugin-sdk`          | v2 宿主内 / 联邦模块插件入口（`defineDimoPlugin`、`ctx.ui.*`、`ctx.hooks.*`、`ctx.services.*`、`ctx.host.*`） |
-| `@dimoai/plugin-sdk/worker`   | Worker lifecycle、handler 注册与 Capability Broker client                                  |
-| `@dimoai/plugin-sdk/app`      | 独立 HTML Surface App bridge（`definePluginApp`）与 surface lifecycle                      |
-| `@dimoai/plugin-sdk/testing`  | `createPluginTestHarness`、`createWorkerHarness`、`createGenerationHarness`、`createAppHarness` |
-| `@dimoai/plugin-sdk/protocol` | wire DTO、JSON value、分片重组（`frame.chunk`）与 context 类型                             |
-| `@dimoai/plugin-cli`          | build、validate、test、linked install、dev 与确定性 pack                                   |
+## 1. JavaScript / TypeScript SDK（`@dimoai/plugin-sdk` v2.0.0）
 
-SDK 不导出 Tauri command、Axum route、SQLite schema、Host 文件路径或内部 Rust enum。Full Trust
-Worker 仍可直接使用 Node 标准库；Broker client 用于结构化 Host/Runtime/Artifact/App lifecycle API。
+`@dimoai/plugin-sdk` 要求 Node `>=20`，提供 **11 个导出子路径**（定义见 [`packages/plugin-sdk/package.json`](../../packages/plugin-sdk/package.json)）：
 
-## 2. Worker authoring interface
+| 导出子路径 | 核心 API 与用途 |
+| --- | --- |
+| `@dimoai/plugin-sdk` (`.`) | 统一入口，导出 `defineDimoPlugin`（`protocol: "2.0"` 插件定义）并汇总导出全部子模块。 |
+| `@dimoai/plugin-sdk/worker` | `definePluginWorker((registrar, env) => ...)`、`activatePluginWorker`、Worker 生命周期与 `HostCapabilityBroker` 调用客户端。 |
+| `@dimoai/plugin-sdk/app` | `definePluginApp(({ root, bridge, signal }) => ...)`，用于 `protocol: "1.0"` 独立 HTML Surface App。 |
+| `@dimoai/plugin-sdk/registry` | 与 React `useSyncExternalStore` 兼容的响应式贡献注册表（`Registry`、`slotRegistry`、`commandRegistry`、`panelRegistry`、`kanbanViewRegistry`、`settingsPageRegistry`、`themeRegistry` 等）。 |
+| `@dimoai/plugin-sdk/services` | Cordis 风格 IoC 服务容器（`ServiceContainer`、`EffectScope`、`createServiceKey`、`WaterfallInterceptor`），支持属主卸载自动回收与洋葱拦截器。 |
+| `@dimoai/plugin-sdk/context` | `PluginContext` 命名空间上下文构造与传输绑定（`ctx.ui.*`、`ctx.hooks.*`、`ctx.services.*`、`ctx.host.*`、`setDefaultHostCallTransport`、`setDefaultWorkerInvokeTransport`）。 |
+| `@dimoai/plugin-sdk/hooks` | 面向宿主内 React 组件的注册表 Hooks（`useRegistry`、`bindExternalStoreHook` 等），复用宿主 React 单例。 |
+| `@dimoai/plugin-sdk/volatile` | 细粒度响应式配置引用（`Volatile<T>`、`MutableVolatile<T>`、`get()` / `select()` / `subscribe()`），在 `config.json` 变更时原地更新而无需重启 Worker。 |
+| `@dimoai/plugin-sdk/testing` | 离线测试 Harness：`createPluginTestHarness`、`createWorkerHarness`、`createGenerationHarness`、`createAppHarness`。 |
+| `@dimoai/plugin-sdk/protocol` | Wire DTO、`DIMO_PLUGIN_PROTOCOL_VERSION`（`"1.1"`）、`JsonValue`、`frame.chunk` 分片重组与错误信封类型。 |
+| `@dimoai/plugin-sdk/stdio` | `runStdioPluginWorker`，驱动 Node Worker 的 stdio JSON-RPC 2.0 主循环。 |
 
-最小 Worker：
+SDK 不导出宿主内部路由、Electron IPC、SQLite schema 或内部 Rust 枚举。Full Trust Worker 可以直接使用 Node 标准库，并通过 `environment.host.call` / `ctx.host.*` 调用结构化宿主能力。
+
+### 1.1 Worker 入口（`@dimoai/plugin-sdk/worker` + `./stdio`）
 
 ```ts
 import { definePluginWorker } from '@dimoai/plugin-sdk/worker';
+import { runStdioPluginWorker } from '@dimoai/plugin-sdk/stdio';
 
-export default definePluginWorker((registrar, environment) => {
-  registrar.handle('create-document', (input) =>
-    environment.host.call('runtime.execute', 'run', input)
-  );
+const definition = definePluginWorker((registrar, env) => {
+  registrar.handle('hello', async (input, callEnv) => {
+    callEnv.log.info('hello invoked', { input });
+    const count = (await callEnv.host.call<number>('storage.kv', 'get', { key: 'count' })) ?? 0;
+    await callEnv.host.call('storage.kv', 'put', { key: 'count', value: count + 1 });
+    return { ok: true, count: count + 1 };
+  });
 
-  registrar.handle('office-preview', (input) =>
-    environment.host.call('artifact.preview', 'open', input)
-  );
+  registrar.onDispose(() => {
+    // 释放句柄；持久化状态应在正常请求中事务提交
+  });
 });
+
+export default definition;
+
+// 独立进程入口
+await runStdioPluginWorker(definition);
 ```
 
-### 2.1 Registration 规则
+- **Handler ID 正则**：`^[a-z][A-Za-z0-9]*(?:[.-][a-z][A-Za-z0-9]*)*$`，且必须与 `plugin.json` 中的声明一致。
+- **冻结规则**：`setup` 阶段只做注册，完成后注册表冻结；重复注册、未声明 handler 或缺失必填 handler 会使候选激活代失败。
+- **`environment` 字段**：`context`（`pluginId`、`pluginVersion`、`generation`、`packageClass`、`grantedCapabilities`）、`host.call(capability, operation, input?)`、`signal`（`AbortSignal`）、`log.debug/info/warn/error(message, fields?)`。
+- **`onDispose`**：卸载或切代时按反序执行并带 deadline；持久状态必须在正常请求期间提交，不得依赖 `onDispose` 写盘。
 
-- handler ID 必须对应 manifest 中同 kind declaration；
-- setup 阶段只注册 handler，不执行外部副作用；
-- setup 完成后 registration set 冻结；
-- duplicate、undeclared 或 required handler missing 使 candidate activation 失败；
-- handler 的输入/输出同时在 Host 和 Worker 按生成 schema 校验；
-- registration 不自动启动 Runtime；旧 generation handle 发布新 generation 后变 stale，继续调用返回稳定错误。
+### 1.2 App 入口（`protocol: "2.0"` 与 `protocol: "1.0"`）
 
-### 2.2 Lifecycle
-
-```ts
-export interface PluginLifecycle {
-  onStart?(context: StartContext): Promise<void>;
-  onActivate?(context: ActivationContext): Promise<void>;
-  onDeactivate?(context: DeactivationContext): Promise<void>;
-  onDispose?(reason: DisposeReason): Promise<void>;
-}
-```
-
-每个 callback 都收到 `AbortSignal` 和 deadline。`onDispose` 是资源清理机会，不是 correctness
-前置条件；Host 在 deadline 后强制撤销 token、关闭 transport 和终止进程。Plugin 不能依靠
-dispose 写入唯一状态，持久状态应在正常操作中事务提交。
-
-### 2.3 Host API clients（`HostCapabilityBroker` 实现状态）
-
-HostCapabilityBroker（`crates/plugins/src/host_capability_broker.rs`）与 SDK 已实现以下能力，供 Worker（`environment.host.call`）与 `protocol: "2.0"` 插件（`ctx.host.*`）直接调用：
-
-| 能力域 (`capability`) | 操作 (`operation`) | 实现状态与行为 |
-| --- | --- | --- |
-| `storage.kv` | `get` \| `put` \| `set` \| `delete` \| `list` \| `clear` | **SQLite 持久化 KV**：按插件 ID 隔离存储，支持前缀列举与批量清空 |
-| `storage.settings` | `get` \| `put` \| `set` | 读写插件根 `config.json` 并按 `config.schema` 校验 |
-| `secrets` | `get` \| `put` \| `delete` | **OS Keychain / 加密 Secrets**：按插件 ID 隔离存取敏感凭据 |
-| `files` | `read` \| `write` \| `stat` \| `list` | **基于授权根目录的文件操作**：在授权根目录（workspace / plugin_data）内读写、stat 与列举目录，越界或路径逃逸返回 `files_root_denied` |
-| `network.fetch` | `fetch` | **支持 HTTP/HTTPS 的网络请求**：支持自定义 method、headers、body 与 timeout |
-| `exec` | `run` \| `spawn` \| `kill` \| `status` | **子进程执行与后台进程管理**：支持单次执行（`run`）与长生命周期后台进程/Sidecar 管理（`spawn`、`kill`、`status`） |
-| `runtime.execute` / `runtime.lock` | `run` \| `get` | 按 Runtime lock 启动受管依赖进程并查询锁状态 |
-| `artifact.preview` | `open` | 为只读预览 provider 签发短期 loopback 预览租约 |
-| `conversation.*` | `create` \| `list` \| `read.get` \| `append.enqueueInput` \| `steer` \| `cancel` \| `cancelInput` \| `listInputs` \| `respondPermission` \| `respondQuestion` \| `setMode` \| `setConfigOption` \| `catalog` \| `archive` \| `events.since` | 会话创建、读取、追加输入、在途纠偏与事件流读取（未授权会话返回 `conversation_scope_denied`） |
-| `events` | `subscribe` \| `ack` \| `publish` | 插件事件订阅、游标确认与发布 |
-| `app.notify.toast` | `toast` \| `notify` | 在宿主界面显示 Toast 通知 |
-| `remote.profile` / `provider.presets` / `log.*` / `plugin.self` | `list` \| `save` \| `bind` \| `doctor` 等 | 远程 Host 配置、模型预设管理、结构化日志与插件自检 |
-
-Client method 返回 typed error；unsupported、resource missing、timeout 与 cancellation 不合并成
-普通异常文本。SDK 提供 feature detection 只用于兼容降级，不触发授权弹窗。
-
-### 2.4 Settings、storage 与 migrations
-
-- settings schema 来自 manifest，Worker 读取已验证值；
-- secret 通过 `secrets.get|put|delete` 存储在 OS Keychain / 加密存储中；
-- KV entry 和总空间由 SQLite 持久化并受 Host 配额保护；
-- SQLite 只属于当前 Plugin identity；
-- migration 是编号、append-only、事务执行的静态资源；
-- candidate activation 的 migration 先创建 snapshot，失败时恢复；
-- downgrade/rollback 若无法读取新 schema，必须在 package metadata 中明确阻止或提供 down
-  migration，不能让旧 Worker 直接打开未知数据库。
-
-## 3. App authoring interface（双协议：`2.0` 与 `1.0`）
-
-`entrypoints.app` 支持两种协议：
-
-### 3.1 `protocol: "2.0"` — 宿主内 / 联邦模块 App（`{ "entry": "app/main.js", "protocol": "2.0" }`）
-
-适用于同树 React UI 槽位、命令、面板、Turn Hook、InternalMessageCapture 与 Cordis 风格 IoC 服务。在 `app/main.js` 中使用 `defineDimoPlugin((ctx) => ...)`，并统一使用命名空间 API（`ctx.ui.*`、`ctx.hooks.*`、`ctx.services.*`、`ctx.host.*`；顶层扁平方法仅为向后兼容保留）：
+**`protocol: "2.0"`（Module Federation / 宿主内 App，`app/main.js`）**：
 
 ```ts
 import { defineDimoPlugin } from '@dimoai/plugin-sdk';
@@ -108,19 +67,13 @@ export default defineDimoPlugin((ctx) => {
     title: 'Refresh Dashboard',
     async handler() {
       await ctx.host.storage.kv.set('lastRefreshAt', Date.now());
-      await ctx.host.ui.notify({
-        title: 'Dashboard',
-        message: 'Refreshed!',
-        variant: 'info',
-      });
+      await ctx.host.ui.notify({ title: 'Dashboard', message: 'Refreshed', variant: 'info' });
     },
   });
 });
 ```
 
-### 3.2 `protocol: "1.0"` — 独立 HTML Surface App（`{ "root": "dist/app", "document": "index.html", "protocol": "1.0" }`）
-
-适用于独立 HTML Surface（如 `plugin.detail.panel` 与 `artifact.editor` 可编辑文件 Tab），使用 `definePluginApp(({ root, bridge, signal }) => ...)` 建立 bridge：
+**`protocol: "1.0"`（独立 HTML Surface App，`dist/app/index.html`）**：
 
 ```ts
 import { definePluginApp } from '@dimoai/plugin-sdk/app';
@@ -128,9 +81,7 @@ import { definePluginApp } from '@dimoai/plugin-sdk/app';
 export default definePluginApp(({ bridge, root, signal }) => {
   const button = document.createElement('button');
   button.textContent = 'Refresh';
-  button.addEventListener('click', () => {
-    void bridge.invoke('dashboard.refresh', {});
-  });
+  button.addEventListener('click', () => void bridge.invoke('dashboard.refresh', {}));
   root.replaceChildren(button);
   bridge.ready();
 
@@ -140,302 +91,148 @@ export default definePluginApp(({ bridge, root, signal }) => {
 });
 ```
 
-`protocol: "1.0"` App interface 提供：
+`bridge` 提供 `pluginId`、`generation`、`invoke(handler, input?)`、`hostCall?(capability, operation, input?)`、`subscribe(channel, listener)`、`ready()` 以及（在 `artifact.editor` 槽位下）`artifact.name`、`artifact.readText()`、`artifact.writeText(content, expectedRevision)`。
 
-- `bridge.pluginId` 与 `bridge.generation`；
-- generation-bound Worker RPC（`bridge.invoke`）与 1-hop Host RPC（`bridge.hostCall`）；
-- `bridge.artifact`（在 `artifact.editor` 槽位下读写文本与校验 revision）；
-- allowlisted realtime signal subscription；
-- `ready()` 握手；
-- DOM root 与 abort/dispose。
+### 1.3 结构化宿主能力（`host.call`）
 
-## 4. Worker ↔ Host protocol
+Worker 通过 `env.host.call<T>(capability, operation, input?)`、`protocol: "2.0"` App 通过 `ctx.host.*` 访问 `HostCapabilityBroker`。主要能力域包括：
 
-### 4.1 Transport
+- **数据与配置**：`storage.kv`（按插件 ID 隔离的 SQLite KV）、`storage.settings`（按 `config.schema` 校验读写根 `config.json`）、`secrets`（OS Keychain / 加密存储）、`blob`（大文件流式读写，单文件上限 4 GiB，单块 512 KiB）。
+- **文件、网络与进程**：`files`（受控目录读写与列举，越界返回 `files_root_denied`）、`network.fetch`、`exec`（`run` / `spawn` / `kill` / `status`）、`runtime.lock` / `runtime.execute`。
+- **产品领域能力**：`conversation.*`（创建、入队、纠偏、取消、审批/提问应答与事件流，作用域外返回 `conversation_scope_denied`）、`collaboration.*`、`browser.*`、`artifact.preview` / `artifact.readText` / `artifact.writeText`、`remote.profile.*` / `remote.connect` / `remote.disconnect`、`provider.presets.*`。
+- **事件与诊断**：`events`（`subscribe` / `ack` / `publish`）、`app.notify.toast`、`log.*`、`plugin.self.doctor`。
 
-- 每个 Worker 一个 stdio framed JSON-RPC 2.0 connection；
-- 默认单帧上限 `32 MiB`（可通过 `entrypoints.worker.maxFrameMiB` 配置 `1..128 MiB`），逻辑消息上限 `64 MiB`；超出单帧上限的消息自动通过 `frame.chunk` 分片传输与重组。自造的分片格式会被拒绝，且不会因此卸载 Worker；
-- 视频等更大的二进制走 `blob.*`（单文件 4 GiB，每次 512 KiB），不进 JSON 消息；
-- 总并发、日志和二进制 payload 仍有硬限制；
-- request 有 ID、deadline、generation、invocation context；
-- cancellation 使用显式 notification；
-- Worker stderr 只进入 scoped diagnostic log，不作为 protocol；
-- secret value 不出现在 trace、error data 或 replayable event。
+逐操作清单与实现状态以 [`contract-bindings.md`](contract-bindings.md) 为准。
 
-### 4.2 Handshake
+## 2. Python Worker SDK（`sdk/python/`，`dimo-plugin@2.0.0`）
 
-```text
-Host → initialize {
-  protocolRange,
-  hostVersion,
-  pluginIdentity,
-  packageVersion,
-  packageDigest,
-  generationId,
-  declaredContributions,
-  trust: "full",
-  features,
-  limits
-}
+要求 Python `>=3.11`（宿主托管解释器为 CPython 3.12）：
 
-Worker → initialized {
-  protocolVersion,
-  sdkVersion,
-  registrations,
-  requestedFeatures
-}
+```python
+from dimo_plugin import define_plugin_worker, run_stdio_plugin_worker
 
-Host → activate
-Worker → ready
+def setup(registrar, env):
+    def hello(input, call_env):
+        call_env.log.info("hello", {"input": input})
+        return {"ok": True}
+
+    registrar.handle("hello", hello)
+
+if __name__ == "__main__":
+    run_stdio_plugin_worker(define_plugin_worker(setup))
 ```
 
-Host 核对 identity/digest/registrations 后才发布 generation。`trust: "full"` 是 package execution
-contract，不是 capability token。
+- 异步主循环使用 `run_stdio_plugin_worker_async`；`env.host.call(capability, operation, input=None)` 为 `async` 方法。
+- `env.context` 提供 `plugin_id`、`plugin_version`、`generation`、`package_class`。
+- 测试工具导出 `create_worker_harness`、`create_generation_harness` 与 `MemoryHostClient`。
 
-### 4.3 Error envelope
+## 3. Rust Worker SDK（`crates/plugin-sdk/`，`dimo-plugin-sdk@2.0.0`）
 
-```ts
-interface PluginProtocolError {
-  code: string;
-  message: string;
-  retryable: boolean;
-  operationId?: string;
-  contributionId?: string;
-  diagnosticId?: string;
-  details?: JsonValue;
-}
-```
+Rust Edition 2024，MSRV `1.85`，基于 Tokio current-thread 驱动 stdio JSON-RPC：
 
-`message` 适合日志而非直接显示秘密/堆栈。Host 根据 stable code 生成本地化用户文案和恢复
-动作。未知 error code 映射为通用失败并保留原 code。
+```rust
+use dimo_plugin_sdk::{
+    define_plugin_worker, run_stdio_plugin_worker_blocking, PluginSdkError,
+};
+use serde_json::json;
 
-## 5. App ↔ Host bridge
-
-App surface 在 mount 时收到一次性 bootstrap：surface token、plugin/generation identity、
-protocol range、theme/locale 和允许的方法列表。随后使用 `postMessage`/MessagePort 通信：
-
-- 消息校验 origin、source window、token、sequence 与 schema；
-- App 不能选择目标 plugin/generation；
-- unmount、navigation away、disable、generation switch 立即撤销 token；
-- RPC 由 Host 转发到同 generation Worker；
-- realtime 只作失效通知，持久状态通过 RPC/settings 重新读取；
-- binary/artifact 使用短期 capability URL。
-
-### 5.1 可编辑文件 Tab
-
-UTF-8 文本格式的插件编辑器声明：
-
-```json
-{
-  "integrations": [
-    {
-      "id": "diagram-files",
-      "kind": "file.opener",
-      "extensions": ["drawio"],
-      "editorSurface": "diagram-editor"
-    },
-    {
-      "id": "diagram-editor",
-      "kind": "app.surface",
-      "slot": "artifact.editor",
-      "appEntrypoint": "app",
-      "handler": "surface.createSession"
+fn main() {
+    let definition = define_plugin_worker(|registrar, _env| {
+        registrar.handle_sync("hello", |input, _env| Ok(json!({ "received": input })));
+        registrar.on_dispose(|| async { Ok(()) });
+    });
+    if let Err(error) = run_stdio_plugin_worker_blocking(definition) {
+        eprintln!("{error}");
     }
-  ]
 }
 ```
 
-App 只使用 SDK bridge：
+- `PluginRegistrar`：`handle(id, async_fn)`、`handle_sync(id, fn)`、`on_dispose(async_fn)`（反序执行）。
+- `WorkerEnv`：`context()`、`replace_context()`、`host`（`HostClient`）、`call(capability, operation, input)`、`log.debug/info/warn/error`、`is_cancelled()` / `cancel()`。
+- 主循环：`run_stdio_plugin_worker`（async）与 `run_stdio_plugin_worker_blocking`（同步 `main`）。
+- 测试工具：`create_worker_harness`、`create_generation_harness`、`MemoryHost`。
 
-```ts
-const document = await bridge.artifact?.readText();
-const saved = await bridge.artifact?.writeText(xml, document.revision);
+## 4. Worker 协议 `1.1` 与 App 桥接
+
+- **传输**：每个 Worker 持有一条 stdio JSON-RPC 2.0 连接，默认单帧上限 `32 MiB`（可在 `entrypoints.worker.maxFrameMiB` 配置 `1..128`），逻辑消息上限 `64 MiB`，超单帧自动经 `frame.chunk` 分片重组；大体积二进制走 `blob.*`。Worker stderr 进入插件诊断日志，不参与协议解析。
+- **握手**：`Host → initialize`（携带 `protocolRange`、`hostVersion`、`pluginIdentity`、`packageDigest`、`generationId`、`declaredContributions`、`trust: "full"`、`features`、`limits`）→ `Worker → initialized` → `Host → activate` → `Worker → ready`。
+- **错误信封**：`{ code, message, retryable, operationId?, contributionId?, diagnosticId?, details? }`，宿主按稳定 `code` 生成本地化文案与恢复指引。
+- **App Bridge**：`protocol: "1.0"` surface 挂载时接收一次性 bootstrap（surface token、plugin/generation identity、theme/locale、允许的方法列表），通过 `postMessage` / `MessagePort` 与宿主通信；卸载、禁用或切代时立即撤销 token。
+
+## 5. CLI 参考（`dimo-plugin` 与 `dimo plugin`）
+
+Dimo 提供两套互补的 CLI 入口，均通过 `~/.dimo/pluginrc` 与标准 Remote Protocol v1（`POST /api/v1/call/*`）对接本机或远程 Dimo Host：
+
+### 5.1 `@dimoai/plugin-cli`（`dimo-plugin` v2.0.0）— 作者构建与调试工具链
+
+| 命令 | 说明 |
+| --- | --- |
+| `dimo-plugin init [dir] [--publisher id] [--template <name>]` | 初始化 Package v4 脚手架并执行首次构建（默认模板 `full`）。 |
+| `dimo-plugin validate [dir] [--json]` | 离线全量校验清单、README `summary`、内容索引、图标白名单、路径安全与依赖（单次遍历报告全部违规）。 |
+| `dimo-plugin build [dir]` | 编译 Worker / App 产物至 `dist/` 并生成 `.dimo-plugin/package.lock.json`。 |
+| `dimo-plugin test [dir] [--host]` | 运行离线测试；加 `--host` 时针对运行中的 Host 验证安装、启用、贡献出现、禁用撤下、Skill 重载与卸载全链路。 |
+| `dimo-plugin pack [dir] [--output file.vxp]` | 校验并打包确定性 `.vxp` 归档，打印 `sha256:` 摘要。 |
+| `dimo-plugin run server [--http://127.0.0.1:17891] [--token <token>]` | 绑定目标 Host 并写入 `~/.dimo/pluginrc`。 |
+| `dimo-plugin run dev [dir]` / `dimo-plugin dev [dir]` | 构建、链接并持续监听源码变动；Worker 变更时切候选激活代，Module Federation remote 走 Vite HMR。 |
+| `dimo-plugin run build [dir]` / `dimo-plugin run test [dir] [--host]` | 在绑定 Host 上下文中执行构建或测试。 |
+| `dimo-plugin install --link [dir]` | 构建并将目录登记为 linked development 插件。 |
+| `dimo-plugin reload [id\|dir]` | 重新检视链接目录并触发候选激活代切换。 |
+| `dimo-plugin uninstall [dir] [--delete-data]` | 从 Host 卸载该插件（默认保留用户数据，不删除开发源码目录）。 |
+| `dimo-plugin doctor [dir]` | 查询 Host 上的安装状态、激活代、Runtime 探测、已发布贡献、Agent 绑定与最近崩溃。 |
+| `dimo-plugin toolchain` | 输出本机 Host 版本、CLI、contract、JS / Python / Rust SDK 路径与全部可用模板名。 |
+
+`init --template` 支持全部 16 个模板：`skill`、`mcp`、`file-tab`、`editor-tab`、`full`、`ts-worker`、`node-worker`、`python-worker`、`rust-worker`、`host-service`、`hooks`、`host-chrome`、`provider-import`、`provider-catalog`、`panel`、`kanban-view`。
+
+### 5.2 `dimo plugin`（`npx-cli`）— 统一用户与开发者入口
+
+```bash
+# 开发者工作流
+dimo plugin run server --http://127.0.0.1:17891 --token <token>
+dimo plugin add --dev .                  # 仅链接目录并立即返回（不启动 HMR）
+dimo plugin run dev                      # 构建、监听源码变更并驱动热更新 / Vite HMR
+dimo plugin run build
+dimo plugin run test --host
+dimo plugin publish                      # 发布至插件市场
+
+# 用户安装与生命周期管理
+dimo plugin add --web <git-or-url>#<tag> [-y]
+dimo plugin add --profile <file.vxp>
+dimo plugin list
+dimo plugin enable <plugin-id>
+dimo plugin disable <plugin-id>
+dimo plugin update <plugin-id> [--ref <tag>] [--yes]
+dimo plugin remove <plugin-id> [--delete-data]
+dimo plugin gc-runtimes
 ```
 
-Host 校验 opener/surface/generation 绑定，保管文件路径并执行 revision conflict detection。该 seam
-只定义文本读写，不包含任何具体格式的解析、渲染或编辑逻辑。
-
-## 6. CLI
-
-当前 CLI 命令与预期结果（以 `dimo plugin --help` 为准）：
-
-```text
-dimo plugin run server [--http://127.0.0.1:17891] [--token <token>]
-dimo plugin run dev [dir]
-dimo plugin run build [dir]
-dimo plugin run test [dir] [--host]
-dimo-plugin init [dir] [--publisher id] [--template full|panel|kanban-view|…]
-dimo-plugin validate [dir] [--json]
-dimo plugin add --dev [dir]
-dimo-plugin uninstall [dir] [--delete-data]
-dimo plugin pack [dir] [--output file.vxp]
-dimo-plugin doctor [dir]
-```
-
-普通 `.vxp` 产品安装仍由 Dimo UI 或 `dimo plugin add --profile` 完成。开发期 reload 由 `dev` 的
-candidate activation 完成。
-
-### 6.1 `init`
-
-用 `--template full|skill|mcp|hooks|file-tab|editor-tab|host-chrome|panel|kanban-view|…` 选择当前支持的可执行或声明式模板；生成：
-
-- v4 manifest；
-- ESM package scripts 与 SDK major dependency；
-- Worker/App entrypoint 和自包含 App asset build；
-- testing harness；
-- Full Trust execution metadata；
-- 本地开发脚本。
-
-在 Dimo monorepo 外验证尚未发布的 SDK 时，按 Skill 用 locator 输出替换本地 SDK dependency，
-并暂时移除尚未发布的 CLI devDependency；正式发布后使用 manifest `engines.pluginSdk`
-对应的 registry 版本。`.vxp` 不收录 package.json、package-manager lock、源码、测试或 source map，
-因此不会把本机绝对 SDK 路径写入发布包。
-
-模板不生成 permission 声明；安装或链接插件本身就是 Full Trust 决定。
-
-### 6.2 `validate`
-
-离线完成：
-
-- schema、路径与 identity；
-- contribution 引用图；
-- handler 与 integration 引用完整性；
-- runtime target、版本与 integrity；
-- App document/assets 或 `app/main.js` 入口校验；
-- SDK/artifact metadata；
-- package size、重复文件、symlink escape；
-- marketplace policy lint（可选 profile）。
-
-输出机器可读 JSON 和人类摘要。Warning/Failure 有 stable code，开发 Skill 可据此修复。
-
-### 6.3 `dev` / linked install
-
-`dev` 执行增量 build、validate、candidate activation 和 generation reload。每次 reload 都走
-生产 lifecycle，不允许直接替换当前 Worker module。Candidate 失败保留旧 generation，并
-在 CLI 显示 diagnostic ID。
-
-Linked installation：
-
-- 明确标记开发模式；
-- 每个 candidate 都保持同一 Full Trust 模型；
-- 每次 build 形成新 digest/generation；
-- Host 不删除用户 source directory；
-- symlink 和 package root escape 规则与 snapshot 一致；
-- App reload 仍经过 generation lifecycle 与 `EffectScope` 清理。
-
-### 6.4 `build` / `pack`
-
-Build：
-
-- bundling 固定 target 与 artifact format；
-- SDK runtime imports 标为 Host-provided；
-- 禁止不受支持 native dependency；
-- 生成 source map，但生产包默认不暴露源码路径；
-- 输出 worker/app metadata 与 canonical manifest；
-- 相同输入产生相同 bytes。
-
-`test` 会先 build，再由 CLI 把插件测试与当前 SDK 打包到临时目录，并交给 Node test runner
-执行。非 Worker 插件测试直接读取真实的 `.dimo-plugin/plugin.json` 校验，无需改成静态 fixture 导出。
-
-Pack 验证完整 package、写 lock/SBOM/signature input 并生成 `.vxp`。Install 从不运行包内
-build script。
-
-### 6.5 `doctor`
-
-检查 installed snapshot/digest、Full Trust execution、Worker compatibility、Runtime locks/probes、
-Agent bindings、App surfaces 和最近 crash。修复动作必须明确：重建 projection、重新 probe、
-rollback 或 reinstall。
-
-## 7. Testing package
-
-### 7.1 In-Host Plugin & Worker harness
+## 6. 离线测试 Harness（`@dimoai/plugin-sdk/testing`）
 
 ```ts
-import { createPluginTestHarness, createWorkerHarness } from '@dimoai/plugin-sdk/testing';
+import {
+  createPluginTestHarness,
+  createWorkerHarness,
+  createGenerationHarness,
+} from '@dimoai/plugin-sdk/testing';
 
 const harness = createPluginTestHarness({ pluginId: 'acme.my-plugin' });
 await harness.activate(myPlugin);
 await harness.dispose();
 
-const plugin = await createWorkerHarness(worker, { host: fakeHost });
-const result = await plugin.invoke('office-preview', input);
+const worker = await createWorkerHarness(workerDef, {
+  context: { pluginId: 'acme.my-plugin', pluginVersion: '1.0.0', generation: 1 },
+});
+await worker.invoke('hello', {});
+await worker.dispose();
+
+const gen = await createGenerationHarness(workerDef, { requiredHandlers: ['hello'] });
+await gen.activateCandidate(workerDef);
+await gen.dispose();
 ```
 
-Harness 支持：
+Harness 支持验证 UI 注册与 `dispose()` 零残留、declared/undeclared handler 匹配、Host API 桩调用与断言、候选代切换/回滚以及 `createAppHarness` 消息桥语义。跨平台进程生命周期、Electron WebView 与真实 Agent 投影仍需配合 `dimo plugin run test --host` 进行实机验证。
 
-- UI 槽位、命令、Hook、IoC 服务注册与 `dispose()` 零残留验证；
-- declared/undeclared handler matching；
-- Host API success/error/unsupported；
-- virtual filesystem 与 Artifact identity；
-- fake Runtime/process/readiness；
-- clock、deadline、abort、crash 与 restart；
-- candidate activation、generation switch、drain、rollback；
-- storage migration/snapshot；
-- log/secret redaction assertions。
+## 7. SDK 版本与兼容原则
 
-### 7.2 App harness
-
-在真实 iframe/message bridge 语义下验证：
-
-- surface bootstrap 与 token revoke；
-- theme/locale/reduced motion；
-- RPC schema 和 Worker generation routing；
-- error boundary；
-- 外部资源加载与 network failure；
-- accessibility、keyboard 与 focus handoff；
-- unsupported client capability。
-
-### 7.3 Package contract tests
-
-SDK 提供 assertions：
-
-- 所有 manifest required contributions 有 handler 或 declarative implementation；
-- 使用的结构化 Host API 已由目标 Host feature negotiation 支持；
-- Node filesystem/process/network Full Trust 行为符合插件预期；
-- Runtime argv 满足 declared operation schema；
-- reload/dispose 后无 open handles；
-- package build 可复现。
-
-Fake Host 的 fidelity limits 必须列出。跨平台 process lifecycle、CEF/WebView 和真实 Agent
-projection 仍需要 Dimo integration suite，不能由 fake green 代替。
-
-## 8. Dimo 插件开发指南 Skill 的契约
-
-随 Host 发布的 Skill 是开发路径的一部分，不是营销文档。它必须：
-
-1. 先定位当前 Host 提供的 SDK types、v4 schema、CLI 与 Host API catalog；
-2. 读取目标仓库和适用平台，不猜 SDK 最新版本；
-3. 从用户想要的 contribution 与 Runtime/Host API 需求反推包结构；
-4. 使用 `dimo plugin init/validate/test/build`，不手写生成 metadata；
-5. 为插件编写 contract tests（直接读取真实 `.dimo-plugin/plugin.json` 并覆盖 UI/Worker/App 路径）；
-6. 通过 `add --dev` 和 candidate reload 验证真实 Host；
-7. 明确记录插件使用的 shell、native、filesystem/network 等 Full Trust 行为；
-8. 在完成前运行 `doctor` 与可复现 pack；
-9. 产出 installation、usage、data retention 与 troubleshooting 文档；
-10. 遇到未知 contribution/Host API 时停止猜测并读取本机 schema。
-
-Skill 自身示例必须由 CI 使用当前 SDK 编译和执行，防止指南与实现漂移。
-
-## 9. SDK 治理
-
-- 稳定接口使用 semver；experimental interface 以 `experimental_`/`experimental.*` 明示；
-- 每个 SDK release 发布 changelog、迁移器与 supported Host range；
-- Host 至少保留当前和上一 major 的兼容测试窗口；
-- deprecated interface 在移除前由 CLI/SDK 编译 warning，并给出自动迁移或明确替代；
-- reference plugins 全部从公共 SDK 构建，不允许 import Host internal packages；
-- protocol schema compatibility tests 阻止字段重命名、closed enum 扩展和错误码漂移；
-- Host feature negotiation 优先于版本猜测。
-
-## 10. SDK 完成定义
-
-满足以下证据之前不得宣称“全套 SDK 可用”：
-
-- 新目录从 `init` 到 `pack` 的 clean-room journey 在 CI 通过；
-- Agent-only、App-only、declarative-only 与 full-stack 四种 fixture 均可安装；
-- malformed/path-escape/tampered fixtures 被 package contract tests 拒绝；
-- Office reference plugin 仅使用公共 SDK；
-- SDK Skill 可由 Agent 在空仓库创建并验证一个非 Office 插件；
-- linked reload 的失败、crash、Runtime change 与 rollback 有 E2E 证据；
-- macOS/Windows/Linux 所支持 target 的 Worker/Runtime lifecycle 验收通过；
-- Desktop/Web 的 surface capability negotiation 通过；
-- published schema、types、CLI help 和 docs 版本一致。
+- 稳定接口遵循 SemVer；实验性接口以 `experimental_` / `experimental.*` 明确标注。
+- 插件应优先通过握手阶段的能力协商（`features`）判断宿主支持度，而非硬编码版本猜测。
+- 官方插件全部仅依赖公开 SDK 与清单契约，由 CI 的 `pnpm run plugin:no-privilege` 持续强制门禁。

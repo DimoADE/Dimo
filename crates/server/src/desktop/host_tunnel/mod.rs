@@ -1,20 +1,25 @@
 mod relay;
 
-use std::time::Duration;
+use std::{
+    sync::{Arc, LazyLock, RwLock},
+    time::Duration,
+};
 
 use chrono::Utc;
 use remote_protocol::ReachabilityOrigin;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex as AsyncMutex;
 use utils::tunnel::{
     DEFAULT_TUNNEL_PORT, TunnelEndpoint, extract_relay_token, install_command,
     parse_tunnel_endpoint, probe_origins, scheme_hint_from_input,
 };
 use uuid::Uuid;
 
-pub use self::relay::{stop_quick_tunnel, stop_relay};
 use self::relay::{
-    ensure_quick_tunnel, quick_tunnel_origin, relay_snapshot, set_quick_tunnel_origin, start_relay,
+    ensure_quick_tunnel, quick_tunnel_origin, quick_tunnel_snapshot, relay_snapshot,
+    set_quick_tunnel_origin, start_relay,
 };
+pub use self::relay::{stop_quick_tunnel, stop_relay};
 use super::{error::DesktopError, web_service::DesktopWebServiceContext};
 
 const SETTINGS_SECTION: &str = "host_tunnel";
@@ -26,6 +31,35 @@ const ERR_HEALTH: &str = "Reached the tunnel, but this Host did not answer. Conf
 const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
 const HEALTH_RETRY_ATTEMPTS: u32 = 8;
 const HEALTH_RETRY_DELAY: Duration = Duration::from_millis(400);
+const MAX_ACTIVE_PAIRING_BEACONS: usize = 32;
+const MIN_BEACON_TTL_SECONDS: i64 = 60;
+
+#[derive(Debug, Clone)]
+struct ActivePairingBeacon {
+    topic: String,
+    host_id: String,
+    expires_at_unix: i64,
+}
+
+static HOST_EVENT_BUS: LazyLock<RwLock<Option<Arc<crate::HostEventBus>>>> =
+    LazyLock::new(|| RwLock::new(None));
+
+static ACTIVE_PAIRING_BEACONS: LazyLock<AsyncMutex<Vec<ActivePairingBeacon>>> =
+    LazyLock::new(|| AsyncMutex::new(Vec::new()));
+
+pub fn attach_event_bus(bus: Arc<crate::HostEventBus>) {
+    if let Ok(mut guard) = HOST_EVENT_BUS.write() {
+        *guard = Some(bus);
+    }
+}
+
+fn emit_host_event(event: &str, payload: serde_json::Value) {
+    if let Ok(guard) = HOST_EVENT_BUS.read()
+        && let Some(bus) = guard.as_ref()
+    {
+        bus.emit(event, payload);
+    }
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct HostTunnelStore {
@@ -319,7 +353,7 @@ fn status_from(store: &HostTunnelStore, relay: &RelayState) -> HostTunnelStatus 
     } else {
         None
     };
-    let mut relay_state = relay.status.clone();
+    let relay_state = relay.status.clone();
 
     if let Some(quick_origin) = default_official_quick_origin(store) {
         let lease_port = valid_account_lease(store)
@@ -355,9 +389,6 @@ fn status_from(store: &HostTunnelStore, relay: &RelayState) -> HostTunnelStatus 
         }
         if enabled && active_id.is_none() {
             active_id = Some("auto-quick-tunnel".to_string());
-        }
-        if enabled && relay_state == "idle" {
-            relay_state = "connected".to_string();
         }
     } else if active_id.as_deref() == Some("auto-quick-tunnel") {
         active_id = saved.first().map(|item| item.id.clone());
@@ -520,7 +551,64 @@ async fn post_relay_beacon_topics(
     }
 }
 
-pub async fn publish_pairing_code_beacon(connection_code: &str, host_id: &str) {
+fn build_pairing_beacon_payload(
+    host_id: &str,
+    origin: &str,
+    now_unix: i64,
+    expires_at_unix: i64,
+) -> serde_json::Value {
+    let ttl_seconds = (expires_at_unix - now_unix).max(MIN_BEACON_TTL_SECONDS);
+    serde_json::json!({
+        "v": 2,
+        "host_id": host_id,
+        "origin": origin,
+        "ts": now_unix,
+        "ttl_seconds": ttl_seconds,
+        "expires_at": expires_at_unix,
+    })
+}
+
+async fn register_active_pairing_beacon(topic: String, host_id: String, expires_at_unix: i64) {
+    let now = Utc::now().timestamp();
+    if expires_at_unix <= now {
+        return;
+    }
+    let mut guard = ACTIVE_PAIRING_BEACONS.lock().await;
+    guard.retain(|entry| entry.expires_at_unix > now && entry.topic != topic);
+    guard.push(ActivePairingBeacon {
+        topic,
+        host_id,
+        expires_at_unix,
+    });
+    if guard.len() > MAX_ACTIVE_PAIRING_BEACONS {
+        let excess = guard.len() - MAX_ACTIVE_PAIRING_BEACONS;
+        guard.drain(0..excess);
+    }
+}
+
+pub(super) async fn refresh_active_pairing_beacons(
+    relay_host: &str,
+    relay_port: u16,
+    origin: &str,
+) {
+    let now = Utc::now().timestamp();
+    let active: Vec<ActivePairingBeacon> = {
+        let mut guard = ACTIVE_PAIRING_BEACONS.lock().await;
+        guard.retain(|entry| entry.expires_at_unix > now);
+        guard.clone()
+    };
+    for beacon in active {
+        let payload =
+            build_pairing_beacon_payload(&beacon.host_id, origin, now, beacon.expires_at_unix);
+        post_relay_beacon_topics(relay_host, relay_port, &[beacon.topic.as_str()], &payload).await;
+    }
+}
+
+pub async fn publish_pairing_code_beacon(
+    connection_code: &str,
+    host_id: &str,
+    expires_at_unix: Option<i64>,
+) {
     let clean_code: String = connection_code
         .trim()
         .chars()
@@ -530,6 +618,14 @@ pub async fn publish_pairing_code_beacon(connection_code: &str, host_id: &str) {
     if clean_code.is_empty() || host_id.trim().is_empty() {
         return;
     }
+    let now = Utc::now().timestamp();
+    let effective_expires_at = expires_at_unix
+        .filter(|value| *value > now)
+        .unwrap_or_else(|| now + remote_protocol::PAIRING_TTL_DEFAULT_SECONDS);
+    let code_hash = &sha256_hex(&format!("vibex-pair-code-v1:{clean_code}"))[..32];
+    let topic = format!("vbx-p-{code_hash}");
+    register_active_pairing_beacon(topic.clone(), host_id.to_string(), effective_expires_at).await;
+
     let Ok(store) = load_store().await else {
         return;
     };
@@ -554,14 +650,7 @@ pub async fn publish_pairing_code_beacon(connection_code: &str, host_id: &str) {
     }) else {
         return;
     };
-    let payload = serde_json::json!({
-        "v": 2,
-        "host_id": host_id,
-        "origin": origin,
-        "ts": Utc::now().timestamp(),
-    });
-    let code_hash = &sha256_hex(&format!("vibex-pair-code-v1:{clean_code}"))[..32];
-    let topic = format!("vbx-p-{code_hash}");
+    let payload = build_pairing_beacon_payload(host_id, &origin, now, effective_expires_at);
     post_relay_beacon_topics(&relay_host, relay_port, &[topic.as_str()], &payload).await;
 }
 
@@ -595,8 +684,8 @@ pub async fn sync_relay() {
     }
 }
 
-/// Forgets a lease the relay rejected, unless the frontend already stored a newer one; the
-/// next lease renewal reconnects the relay.
+/// Forgets a lease the relay rejected, unless the frontend already stored a newer one; emits
+/// a host event so the frontend can immediately request a fresh lease and reconnect.
 async fn drop_rejected_account_lease(rejected_token: &str) {
     let Ok(mut store) = load_store().await else {
         return;
@@ -616,6 +705,10 @@ async fn drop_rejected_account_lease(rejected_token: &str) {
     if let Err(error) = save_store(&store).await {
         tracing::warn!(%error, "failed to forget the rejected relay lease");
     }
+    emit_host_event(
+        "host-tunnel-lease-rejected",
+        serde_json::json!({ "ts": Utc::now().timestamp() }),
+    );
 }
 
 async fn promote_pending_if_connected(host: &str, port: u16, token: &str, host_id: &str) {
@@ -832,11 +925,23 @@ async fn persist_checked_origin(
 
 async fn current_status() -> Result<HostTunnelStatus, DesktopError> {
     let store = load_store().await?;
-    let relay = relay_snapshot().await;
+    let relay = match decide_relay_sync_mode(&store) {
+        RelaySyncMode::OfficialQuickTunnel => quick_tunnel_snapshot().await,
+        _ => relay_snapshot().await,
+    };
     Ok(status_from(&store, &relay))
 }
 
-pub async fn get_host_tunnel(ctx: &DesktopWebServiceContext) -> Result<HostTunnelStatus, DesktopError> {
+pub async fn reconnect_active_tunnel() -> Result<HostTunnelStatus, DesktopError> {
+    stop_quick_tunnel().await;
+    stop_relay().await;
+    sync_relay().await;
+    current_status().await
+}
+
+pub async fn get_host_tunnel(
+    ctx: &DesktopWebServiceContext,
+) -> Result<HostTunnelStatus, DesktopError> {
     if should_keep_listening().await {
         let _ = super::web_service::ensure_listening(ctx).await;
     }
@@ -920,7 +1025,9 @@ pub async fn check_existing_host_tunnel(
     persist_checked_origin(endpoint, origin, Some(token)).await
 }
 
-pub async fn select_saved_host_tunnel(id: Option<String>) -> Result<HostTunnelStatus, DesktopError> {
+pub async fn select_saved_host_tunnel(
+    id: Option<String>,
+) -> Result<HostTunnelStatus, DesktopError> {
     let mut store = load_store().await?;
     let target_id = id
         .map(|value| value.trim().to_string())
@@ -947,6 +1054,24 @@ pub async fn select_saved_host_tunnel(id: Option<String>) -> Result<HostTunnelSt
     current_status().await
 }
 
+fn account_lease_changed(
+    prev: Option<&AccountRelayLease>,
+    next: Option<&AccountRelayLease>,
+) -> bool {
+    match (prev, next) {
+        (Some(prev), Some(next)) => {
+            prev.relay_host != next.relay_host
+                || prev.relay_port != next.relay_port
+                || prev.tenant_origin != next.tenant_origin
+                || prev.server_id != next.server_id
+                || prev.lease_token.trim() != next.lease_token.trim()
+                || prev.expires_at != next.expires_at
+        }
+        (Some(_), None) | (None, Some(_)) => true,
+        (None, None) => false,
+    }
+}
+
 pub async fn set_account_relay_lease(
     mut lease: Option<AccountRelayLease>,
 ) -> Result<HostTunnelStatus, DesktopError> {
@@ -954,16 +1079,7 @@ pub async fn set_account_relay_lease(
         migrate_legacy_relay_domain(next);
     }
     let mut store = load_store().await?;
-    let server_changed = match (store.account_lease.as_ref(), lease.as_ref()) {
-        (Some(prev), Some(next)) => {
-            prev.relay_host != next.relay_host
-                || prev.relay_port != next.relay_port
-                || prev.tenant_origin != next.tenant_origin
-                || prev.server_id != next.server_id
-        }
-        (Some(_), None) | (None, Some(_)) => true,
-        (None, None) => false,
-    };
+    let lease_changed = account_lease_changed(store.account_lease.as_ref(), lease.as_ref());
     store.account_lease = lease;
     if valid_account_lease(&store).is_none() {
         set_quick_tunnel_origin(None);
@@ -973,7 +1089,7 @@ pub async fn set_account_relay_lease(
     } else if store.enabled && store.active_id.is_none() {
         store.active_id = Some("auto-quick-tunnel".to_string());
     }
-    if server_changed {
+    if lease_changed {
         set_quick_tunnel_origin(None);
         stop_quick_tunnel().await;
     }
@@ -1048,8 +1164,9 @@ pub async fn remove_saved_host_tunnel(id: String) -> Result<HostTunnelStatus, De
 mod tests {
     use super::{
         AccountRelayLease, ERR_NEED_COMMAND, HostTunnelStore, RelayState, RelaySyncMode,
-        SavedTunnel, decide_relay_sync_mode, merge_host_reachability, migrate_legacy_relay_domain,
-        pending_setup_ready, relay::terminal_lease_rejection, relay_token_for, remember_relay,
+        SavedTunnel, account_lease_changed, build_pairing_beacon_payload, decide_relay_sync_mode,
+        merge_host_reachability, migrate_legacy_relay_domain, pending_setup_ready,
+        relay::terminal_lease_rejection, relay_token_for, remember_relay,
     };
 
     #[test]
@@ -1313,5 +1430,61 @@ mod tests {
                 token: "vbx_tun_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn account_lease_changed_detects_token_and_expiry_renewal() {
+        let base = AccountRelayLease {
+            lease_token: "vbx_rly_v1.payload.sig1".to_string(),
+            expires_at: 2_000_000_000,
+            relay_host: "dimo-ai.com".to_string(),
+            relay_port: 443,
+            tenant_origin: "https://dimo-ai.com/t/my-host".to_string(),
+            host_id: "my-host".to_string(),
+            lease_version: 1,
+            server_id: None,
+            server_name: None,
+        };
+        assert!(!account_lease_changed(Some(&base), Some(&base)));
+        let mut rotated_token = base.clone();
+        rotated_token.lease_token = "vbx_rly_v1.payload.sig2".to_string();
+        assert!(account_lease_changed(Some(&base), Some(&rotated_token)));
+        let mut extended_expiry = base.clone();
+        extended_expiry.expires_at += 86_400;
+        assert!(account_lease_changed(Some(&base), Some(&extended_expiry)));
+    }
+
+    #[test]
+    fn status_from_does_not_fabricate_connected_when_idle() {
+        let store = HostTunnelStore {
+            enabled: true,
+            account_lease: Some(AccountRelayLease {
+                lease_token: "vbx_rly_v1.payload.sig".to_string(),
+                expires_at: chrono::Utc::now().timestamp() + 3600,
+                relay_host: "dimo-ai.com".to_string(),
+                relay_port: 443,
+                tenant_origin: "https://dimo-ai.com/t/my-host".to_string(),
+                host_id: "my-host".to_string(),
+                lease_version: 1,
+                server_id: None,
+                server_name: None,
+            }),
+            ..HostTunnelStore::default()
+        };
+        let status = super::status_from(&store, &RelayState::default());
+        assert_eq!(status.relay_state, "idle");
+    }
+
+    #[test]
+    fn pairing_beacon_payload_includes_ttl_and_expires_at() {
+        let payload = build_pairing_beacon_payload(
+            "host-1",
+            "https://dimo-ai.com/t/host-1",
+            1_700_000_000,
+            1_700_604_800,
+        );
+        assert_eq!(payload["ttl_seconds"], 604_800);
+        assert_eq!(payload["expires_at"], 1_700_604_800);
+        assert_eq!(payload["origin"], "https://dimo-ai.com/t/host-1");
     }
 }

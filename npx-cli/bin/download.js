@@ -191,7 +191,7 @@ function chmodBinaries(root) {
   if (process.platform === "win32") {
     return;
   }
-  for (const name of ["dimo-server", "dimo-mcp"]) {
+  for (const name of ["dimo-server", "dimo-mcp", "dimo-workflow-mcp"]) {
     const binary = path.join(root, name);
     if (fs.existsSync(binary)) {
       fs.chmodSync(binary, 0o755);

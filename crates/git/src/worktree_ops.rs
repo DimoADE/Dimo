@@ -7,8 +7,8 @@ use chrono::{DateTime, Utc};
 use git2::{BranchType, Repository};
 
 use crate::{
-    GitBranch, GitCli, GitService, GitServiceError, WorktreeResetOptions, WorktreeResetOutcome,
-    WorktreeStatus,
+    GitBranch, GitCli, GitService, GitServiceError, GitWorktreeInfo, WorktreeResetOptions,
+    WorktreeResetOutcome, WorktreeStatus,
 };
 
 impl GitService {
@@ -418,6 +418,52 @@ impl GitService {
         });
 
         Ok(branches)
+    }
+
+    /// List the main repository directory and all linked Git worktrees (including external ones).
+    pub fn list_worktrees(
+        &self,
+        repo_path: &Path,
+    ) -> Result<Vec<GitWorktreeInfo>, GitServiceError> {
+        let repo_root = Self::canonicalize_path_for_compare(repo_path);
+        let entries = GitCli::new()
+            .list_worktrees(repo_path)
+            .map_err(GitServiceError::from_cli)?;
+
+        let mut result = Vec::with_capacity(entries.len());
+        for (idx, entry) in entries.into_iter().enumerate() {
+            let canonical = Self::canonicalize_path_for_compare(Path::new(&entry.path));
+            let is_main = canonical == repo_root || idx == 0;
+            result.push(GitWorktreeInfo {
+                path: entry.path,
+                branch: entry.branch,
+                head_sha: entry.head_sha,
+                is_main,
+                is_detached: entry.is_detached,
+                is_bare: entry.is_bare,
+            });
+        }
+
+        // Ensure the main worktree is always first.
+        result.sort_by_key(|item| !item.is_main);
+        Ok(result)
+    }
+
+    /// Validate that `candidate_path` belongs to one of `repo_path`'s registered worktrees.
+    pub fn resolve_registered_worktree_path(
+        &self,
+        repo_path: &Path,
+        candidate_path: &Path,
+    ) -> Result<Option<PathBuf>, GitServiceError> {
+        let target = Self::canonicalize_path_for_compare(candidate_path);
+        let worktrees = self.list_worktrees(repo_path)?;
+        for entry in worktrees {
+            let entry_path = PathBuf::from(&entry.path);
+            if Self::canonicalize_path_for_compare(&entry_path) == target {
+                return Ok(Some(entry_path));
+            }
+        }
+        Ok(None)
     }
 }
 

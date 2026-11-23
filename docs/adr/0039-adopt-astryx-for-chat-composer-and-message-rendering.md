@@ -1,184 +1,44 @@
 ---
 status: accepted
 date: 2026-08-07
-decision-makers:
-  - Dimo maintainers
+decision-makers: Dimo maintainers
 ---
 
-# 采用 Astryx 组件库重构会话输入体系并移除 Lexical WYSIWYG
+# 采用 Astryx 组件体系构建会话输入、消息与工具活动渲染
 
-## Context
+会话输入与消息渲染统一采用 Meta 开源设计系统 Astryx（`@astryxdesign/core`）的 Chat 组件族，取代 Lexical WYSIWYG 与 `react-markdown`，实现“纯文本 + 结构化 Token 徽章”与流式增量渲染的单一前后端模型。
 
-会话输入区（`TaskFollowUpSection` 及其 `follow-up/` 子模块）目前以
-`SessionComposerInput`（`frontend/src/components/tasks/follow-up/`）为核心输入框 ——
-自研 contentEditable div（手写 HTML 渲染 + 结构化 token chip），仅借用
-`frontend/src/components/ui/wysiwyg/` 的 `TypeaheadMenu` 与 typeahead-triggers 工具，
-承担 `@` 提及、`/`、`$`、`#`、`!`、`&` 六种命令、文件引用、图片附件等能力；
-消息渲染用 `react-markdown` 封装（`Markdown.tsx`，含 KaTeX、Mermaid、
-TagReferenceChip、流式 streamdown）；tool call 渲染用自研 `ToolCards`
-（`NormalizedConversation/tools/`）。基于 Lexical 的 `WYSIWYGEditor`
-（`components/ui/wysiwyg.tsx`）另有 9 处使用（只读渲染 5 处：用户消息、
-user_feedback、tool 结果、plan、评论查看；编辑输入 4 处：diff 行内评论、
-评论编辑、重试编辑、审批拒绝原因）。`lexical` 及 `@lexical/*` 共 8 个包是
-主要前端依赖之一。
+## Decision
 
-Astryx（Meta 开源设计系统，`@astryxdesign/core`，MIT，GitHub `facebook/astryx`，当前 0.3.0 Beta）
-提供 150+ 组件与完整 Chat 组件族。经评估，其"纯文本 + 结构化 token"模型与 Dimo
-"发送内容即 markdown 字符串 + 序列化 token"的数据模型天然对齐，替换后草稿持久化、
-发送格式与后端协议均无需变更。
+### 1. 纯文本 + 结构化 Token 输入体系
 
-## 决策
+- 会话主输入框与所有次级编辑场景（diff 行内评论、评论编辑、重试编辑、审批拒绝原因）统一采用 Astryx `ChatComposerInput`（纯文本 + 结构化 `ChatComposerToken` 徽章），草稿持久化、Markdown 发送格式与后端协议保持一致；图片以附件 chip 形式挂载而非富文本内嵌。
+- Composer 触发器遵循 [ADR-0065](0065-composer-at-reference-panel.md)：`@` 负责带 Tab 的统一引用面板（文件、项目、会话、提交、指令），`/`、`$`、`&` 作为独立触发符接入 `SearchSource`；展示侧共用同一套 token 定义通过 `ChatTokenizedText` 或 `Markdown` `inlinePlugins` 渲染。
+- `SessionComposerTopbar`、`ConversationStatusDock`、`ActionBar` 与会话配置选择器作为输入框兄弟组件独立演进。
 
-分阶段采纳 Astryx 重构会话输入体系：
+### 2. 流式 Markdown、消息气泡与工具活动聚合
 
-1. **前置：升级 React 19**（见 [ADR-0040](0040-upgrade-react-19-for-astryx.md)）。
-   `@astryxdesign/core` 的 peerDependencies 为
-   `react >= 19.0.0`、`react-dom >= 19.0.0`、`@stylexjs/stylex ^0.19.0`，不升级
-   React 19 无法安装使用。依赖树与代码模式已核实兼容（ADR-0040），升级为独立
-   前置阶段。
-2. **替换输入体系并一次性移除 Lexical**：`SessionComposerInput` →
-   `ChatComposerInput`；`WYSIWYGEditor` 全部 9 处使用一并替换（只读渲染 5 处
-   → Astryx `Markdown`，编辑输入 4 处 → 纯文本 + token 输入），随后删除
-   `wysiwyg/` 目录与 `lexical`、`@lexical/*` 依赖。4 处编辑场景（评论、重试编辑、
-   审批拒绝原因）接受从所见即所得变为纯文本 + token 徽章（数据模型不变，仍是
-   markdown 字符串）。
-3. **保留输入区周边组件**：`SessionComposerTopbar`（含 `DiffStatsBar`、
-   `CodexGoalIndicator`、`TokenUsageIndicator`、`TodoListButton`、`SessionSelector`）、
-   `ConversationStatusDock`、`ActionBar`、`SessionSettingsSummary` /
-   `SessionConfigOptionSelectors`、`AgentMentionProvider` —— 均为输入框的兄弟组件，
-   不依赖 lexical，原样保留；`AgentMentionProvider` 数据改接 trigger `'&'` 的 `SearchSource`。
-4. **命令重写**：六种命令映射为 `ChatComposerInput` 的 `triggers`：`@` 文件引用、
-   `/` 斜杠命令、`$` 变量/技能、`#` 标签、`!` 插件动作、`&` Agent 提及
-   （每字符一个 `SearchSource` + `onSelect`）；输入与显示共用同一套
-   `ChatComposerToken` 定义，展示侧用 `ChatTokenizedText` 或 `Markdown` 的
-   `inlinePlugins` 渲染。
-5. **消息渲染**：`Markdown.tsx` → Astryx `Markdown`（原生 `isStreaming` 增量解析 +
-   淡入动画，优于现有 streamdown；`inlinePlugins` 承接 `TagReferenceChip` 等；
-   `components` 承接 Tauri 路径转换与图片预览）。KaTeX 与 Mermaid 经
-   `components.code` 自定义接入（自研 `MermaidDiagram` 原样复用），随后移除
-   `react-markdown` / `remark-*` / `rehype-katex` 依赖。
-6. **tool call 渲染**：`ToolCards` → `ChatToolCalls`，`ToolStatus` 映射到
-   `ChatToolCallStatus`（pending/running/complete/error）。消息回合中连续工具调用与思考
-   构成一个活动阶段，由 `TurnActivity` 呈现；仅正文结束阶段，其他非正文内容均参与聚合。
-   命令、读取、修改、搜索、网页、计划、资源与其他活动可混合聚合。
-   仅正在进行的阶段保留最近 2 项活动，工具与思考共同计数，连续思考算一项活动。
-   较早的连续活动合并为一个聚合入口，不按固定条数切组；阶段结束或回合进入终态时，
-   剩余活动也并入同一入口。标题按本组类别计数。
-   运行中、失败与等待交互的调用同样参与聚合。每一行的 `resultDetail` 复用原有专用卡片的详情与 actions，但通过
-   `ToolCallResultDetail` 上下文省略其单调用标题，避免新旧工具行嵌套。
-   工具适配保留结构化参数与结果；编辑按文件呈现完整差异，包含同次调用中的多个替换与补丁块，
-   不将片段位置冒充文件行号。读取详情保留当时返回的内容，以灰底标记实际读取行；
-   仅当前文件仍与该片段逐行吻合时补充前后各三行上下文。终端详情显示完整命令、参数、
-   标准输出、错误输出与 Agent 报告的退出码，其余调用沿用专用组件或结构化字段展示。
-   ACP 初始工具通知与后续更新均保留 Agent 明确报告的状态；状态独立于输出内容，
-   部分输出不代表成功，无输出的终态也必须呈现。旧历史缺少显式状态时沿用结果配对判定。
-   Antigravity 的 `Running view_file` 及 `AbsolutePath`、`StartLine`、`EndLine`
-   参数映射为读取卡片，保留其路径、读取范围与返回内容。
-   `ToolCardShell` 仍服务于消息回合以外的独立调用与审批强制展开场景；
-   `PendingApprovalEntry` 作为审批状态包装器保留。
-   思考参与同阶段聚合，聚合标题不显示思考段数，Hover 不增加底色；展开后使用独立的
-   `ThinkingEntry`，不采用工具组件样式。仅含思考的批次直接使用 `ThinkingEntry`。
-   消息流末尾正在输出的思考默认展开；后续正文、工具调用或回合终态到来后默认收起，
-   用户可再次展开查看。每个回合只有一个过程入口。每产出一份正文，就用这个入口
-   收起该正文之前的全部消息，包括更早的正文。该正文之后的活动留在消息流里，
-   不再另开过程入口。终态回合同样只用这一个过程入口收起最终正文之前的过程正文
-   与所有非正文活动，展开后按阶段顺序展示活动聚合。
-   运行中、失败、待交互、子智能体和图像内容同样参与折叠；没有可折叠内容时不显示过程入口。
-   展开状态按成员保存，阶段结束或分组重组后仍能查看用户已经展开的内容。
-7. **用户消息气泡**：消息流中的用户消息统一由 `ChatMessage(sender="user")` +
-   `ChatMessageBubble` 提供语义、对齐和气泡结构；正文使用基于 Astryx `Markdown`
-   的受限语法渲染器，并以内联插件承接结构化 token。Dimo 仅在主题层覆盖亮色
-   `#F3F3F4` / 黑色前景、暗色 `#242424` / 白色前景、固定 Body 字号与紧凑列表
-   缩进，不再维护平行的手写消息气泡结构。
+- **流式 Markdown**：统一使用 Astryx `Markdown`（原生 `isStreaming` 增量解析、结构化 token `inlinePlugins`、宿主路径与图片预览适配），KaTeX 数学公式与自研 `MermaidDiagram` 通过 `components.code` 自定义接入。
+- **用户消息气泡**：消息流中的用户消息统一使用 `ChatMessage(sender="user")` + `ChatMessageBubble` 搭配受限 Astryx `Markdown` 与 token 内联插件，仅在主题层覆盖明暗配色（亮色 `#F3F3F4`/黑字、暗色 `#242424`/白字）、正文字号与紧凑列表缩进。
+- **活动阶段聚合（`TurnActivity` + `ChatToolCalls`）**：
+  - 回合内连续工具调用（命令、读取、修改、搜索、网页、计划、资源等）与思考块构成活动阶段，仅正文输出结束当前阶段；进行中阶段最多保留最近 2 项活动（连续思考计 1 项），更早活动合并为单一聚合入口，阶段结束或回合终态后全部收拢。
+  - 每个回合至多展示一个过程入口：每产出一份正文，该入口收起其之前的全部过程正文与非正文活动（含运行中、失败、待交互、子智能体与图像）；展开状态按成员持久保存，分组重组不丢失用户已展开的详情。
+  - 消息流末尾正在输出的思考默认展开，后续正文、工具调用或终态到达后默认收起；仅含思考的批次与展开后的思考使用独立 `ThinkingEntry`，不套用工具卡片样式。
+- **结构化工具详情与状态保真**：
+  - `ToolCallResultDetail` 复用各专用详情视图并省略冗余单调用标题：文件编辑呈现同次调用的多处补丁差异（不将片段偏移冒充文件行号）；文件读取保留返回内容与灰底高亮，仅在当前磁盘文件逐行吻合时补充前后 3 行上下文；终端显示完整命令、参数、stdout/stderr 与退出码；Antigravity `view_file` 映射为读取卡片。
+  - 严格保留 Agent 明确报告的工具状态，独立于输出是否存在；无输出终态必须呈现，部分输出不得推断为成功。`ToolCardShell` 保留服务独立调用与审批强制展开场景，`PendingApprovalEntry` 保留承载权限与提问交互包装。
+
+### 3. 依赖与上游补丁边界
+
+- 移除 `lexical` / `@lexical/*`、`wysiwyg/`、`react-markdown` / `remark-*` / `rehype-katex` 与未使用的 `cmdk`；既有 shadcn/Radix 封装（含 `ScrollArea`、`Slot` 等）按需保留。
+- 仓库以 pnpm patch 为 Astryx `ChatToolCalls` 补齐 `label`、`alwaysGroup` 与受控单项展开状态，由单条聚合、混合分类摘要与重组保留展开状态的回归测试约束；升级 Astryx 版本时核对并移除已上游化补丁。
 
 ## Considered Options
 
-- **不替换（维持 Lexical WYSIWYG）**：被否决。用户明确倾向积极替换；Lexical 8 个包
-  维护成本高，Astryx 的 triggers/token/流式 Markdown 更贴合产品模型；`liquid-glass-react`
-  等已声明 `react >= 19`，React 19 升级本身势在必行。
-- **整体换装（含消息气泡、布局、全部表单控件一并替换）**：暂缓。变更面过大，
-  无法单里程碑验证；按依赖关系分阶段推进（见下）。
-- **自研替代（用现有 typeahead + textarea 重写，不引入 Astryx）**：被否决。
-  重复造轮子且失去设计系统一致性；Astryx 的 `ChatComposerInput` 已覆盖
-  contentEditable 富输入、token 插入、IME 组合保护、历史、`onKeyDown` seam 等核心诉求。
+- **维持 Lexical WYSIWYG 与 `react-markdown`**：否决。8 个 Lexical 包维护成本高，所见即所得与“Markdown 原文 + 结构化 Token”数据模型存在语义摩擦。
+- **完全自研富文本与流式 Markdown 引擎**：否决。重复造轮子并增加 IME 组合、token 光标与流式渲染维护负担。
 
 ## Consequences
 
-- **输入体验变化（已确认）**：Lexical 输入框是所见即所得（`**bold**` 即时变粗、
-  代码高亮、图片内嵌预览）；`ChatComposerInput` 是纯文本 + token 徽章，markdown 以
-  字面文本显示，格式化发生在发送后的渲染阶段。现有内嵌图片渲染变为附件 chip 形式
-  （走现有 `onAttachImages` 流程）。该变化已确认覆盖全部编辑场景（评论、重试编辑、
-  审批拒绝原因）。
-- **能力缺口（已确认落点）**：
-  - Astryx `Markdown` 不支持 KaTeX 数学公式与 Mermaid —— 经 `components.code`
-    自定义接入，自研 `MermaidDiagram` 原样复用；
-  - `ChatToolCalls` 无权限审批/提问交互 —— 保留 `PendingApprovalEntry` 状态
-    包装器（含拒绝原因输入），内容层统一走 `ChatToolCalls`；
-  - `ChatComposerInput` 无内嵌图片渲染 —— 走附件 chip。
-- **依赖变化**：移除 `lexical` + `@lexical/*`（8 包）+ `wysiwyg/` 目录；
-  `react-markdown`/`remark-*`/`rehype-*` 在阶段 3 移除；`cmdk` 为残留依赖
-  （全仓库无使用）直接删除；Radix 按需替换，无对应物的 `ScrollArea`/`Slot` 保留。
-- **测试重写量大**：`follow-up/` 40+ UI 测试、`Markdown.test`、`ToolCards.test` 等需
-  重写；纯逻辑 `sessionComposer*.test.ts` 可复用。
-- **Beta 依赖风险**：Astryx 当前 0.3.0 Beta，API 可能变动，锁定版本并跟踪 changelog。
-- **0.3.0 补丁**：上游 `ChatToolCalls` 声明了 `label` 却未使用，且单调用强制走
-  无聚合分支；单调用详情只保存组件本地状态，聚合重组时会丢失。
-  仓库以 pnpm patch 落地 `label`、`alwaysGroup` 与每条调用的受控详情展开状态，
-  由单条聚合、混合分类摘要与重组后详情展开回归测试约束。
-  升级 Astryx 时必须先核对并移除已上游化的部分。
-- **集成方式**：Astryx 为预编译 ESM + 预编译 CSS（`@astryxdesign/core/astryx.css`），
-  无需 PostCSS/Babel 构建插件，`className` 可覆盖样式，不影响 Dimo 现有
-  Tailwind / design tokens 体系。
-
-## 分阶段实施路径
-
-1. **阶段 0**：React 19 升级 + 全量回归（独立前置，见 ADR-0040）。
-2. **阶段 1**：引入 Astryx（安装 + theme provider + CSS），小范围替换非关键组件
-   （`Badge` / `StatusDot` / `Button`）验证集成。
-3. **阶段 2**：替换输入体系并移除 Lexical，拆三个独立可验证子里程碑：
-   - **2a**：替换输入框（`ChatComposerInput` + 6 个 triggers 映射 +
-     `ChatTokenizedText`）。交付标准：输入框不再依赖 `wysiwyg/`。
-   - **2b**：替换只读渲染 5 处（`UserMessage`、`DisplayConversationEntry`
-     user_feedback、`ToolResultView`、`PlanCard`、`ReviewCommentRenderer` 查看模式）
-     → Astryx `Markdown`（含 file-reference/图片适配）。交付标准：只读路径不再
-     import lexical。
-   - **2c**：替换编辑输入 4 处（`CommentWidgetLine`、`ReviewCommentRenderer` 编辑、
-     `RetryEditorInline`、`PendingApprovalEntry` 原因输入）→ 纯文本 + token 输入；
-     随后删除 `wysiwyg/` 目录与 `lexical` 8 包。交付标准：全仓库无 lexical import，
-     相关测试重写完成。
-4. **阶段 3**：替换 `Markdown`（KaTeX/Mermaid 经 `components.code` 自定义接入，
-   移除 `react-markdown`/`remark-*`/`rehype-*`）与 `ChatToolCalls`（落地为
-   `ToolCardShell` 内部引擎替换，`PendingApprovalEntry` 包装器保留）。
-5. **阶段 4**：残留清理 —— `cmdk` 残留直接删除；Radix 封装**保留不替换**（用户决策
-   2026-08-08：11 个 shadcn 封装工作正常且已用 Dimo tokens，替换仅带来视觉变化
-   与适配成本，`ScrollArea`/`Slot` 亦无 Astryx 对应物）。
-
-## 其他可替换/新增组件（后续阶段候选）
-
-- **Chat 族**：`ChatComposer`（容器）、`ChatMessageList` /
-  `ChatMessageMetadata` / `ChatSystemMessage`（其余消息体系）、
-  `ChatLayout` / `ChatLayoutScrollButton`、`ChatSendButton`、`ChatDictationButton`（新增听写）。
-- **内容**：`CodeBlock`（自研 tokenizer + CSS Custom Highlight API，替换现有
-  `CodeBlock` / `CompactCodeBlock`）、`Badge`、`Avatar` / `AvatarGroup`、`StatusDot`、
-  `Spinner` / `ProgressBar` / `Skeleton`、`Button` / `IconButton` / `Kbd`、
-  `Tooltip` / `Popover` / `HoverCard` / `Dialog` / `Toast`、`Citation`、`Token` / `Tokenizer`。
-- **数据输入**：`TextInput` / `TextArea` / `Field` / `Selector` / `MultiSelector` /
-  `SegmentedControl`（替换 `ComposerSelect` / `SessionModeSelector`）、
-  `Typeahead` / `BaseTypeahead`。
-- **Hooks**：`useStreamingText`、`useHotkeys`、`useOverflow` / `useScrollOverflow` /
-  `useMediaQuery` / `useListFocus` / `useInputContainer` / `useLayer` / `usePopover` /
-  `useTooltip` / `useScrollLock` / `useToast`。
-
-## 已确认决策点（2026-08-07 核对定稿）
-
-- 输入体验由所见即所得改为纯文本 + 徽章：**可接受**，且覆盖 `WYSIWYGEditor` 的
-  全部编辑场景（评论、重试编辑、审批拒绝原因）。
-- KaTeX / Mermaid：**自定义接入** Astryx `Markdown` 的 `components.code`，保留功能
-  并移除 react-markdown 生态。
-- 审批/提问交互落点：**保留 `PendingApprovalEntry` 包装器**，内容层统一走
-  `ChatToolCalls`。
-- 阶段 2 范围：**扩围**为输入框 + 全部 9 处 `WYSIWYGEditor` 使用一并替换，一次性
-  移除 lexical；拆 2a/2b/2c 三个子里程碑。
-- 阶段 4 边界：按需替换（有对应物的 Radix 封装）；`ScrollArea`/`Slot` 保留；
-  `cmdk` 残留直接删除。
-- 各阶段映射与验收标准记录于历史实施计划（`2026-08-07-astryx-upgrade`）。
+- 全部编辑与展示场景共享一致的纯文本 + Token 语义，输入状态与后端序列化无额外转换损耗。
+- 依赖预编译 ESM + CSS 的 Astryx，无需额外 PostCSS/Babel 构建插件，但升级需关注 Beta API 变动与 pnpm patch 兼容性。

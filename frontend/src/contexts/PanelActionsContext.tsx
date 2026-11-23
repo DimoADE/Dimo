@@ -159,6 +159,7 @@ import {
 } from '@/utils/terminalZoneRelease';
 import { syncWorkspaceOpenSessionIdsFromDockview } from '@/lib/workspaceSessionTabSlots';
 import { getCanvasWorkspaceController } from '@/components/kanban/canvas/canvasWorkspaceBridge';
+import { autoArrangeDockviewLayout } from '@/utils/dockviewAutoArrange';
 
 const DIFF_PREVIEW_PANEL_ID_PREFIX = 'diff:';
 const MAX_OPEN_DIFF_PREVIEW_PANELS = 5;
@@ -282,6 +283,7 @@ export interface PanelActions {
   toggleSessionList: () => void;
   toggleBotsPanel: () => void;
   openWelcomeTab: () => void;
+  autoArrangeLayout: () => void;
   toggleLeftSidebar: () => void;
   isLeftSidebarVisible: () => boolean;
   toggleRightSidebar: () => void;
@@ -378,6 +380,7 @@ export const NOOP_PANEL_ACTIONS: PanelActions = {
   toggleSessionList: noopPanelAction,
   toggleBotsPanel: noopPanelAction,
   openWelcomeTab: noopPanelAction,
+  autoArrangeLayout: noopPanelAction,
   toggleLeftSidebar: noopPanelAction,
   isLeftSidebarVisible: noopFalsePanelAction,
   toggleRightSidebar: noopPanelAction,
@@ -468,21 +471,45 @@ export function PanelActionsProvider({ children }: { children: ReactNode }) {
       return;
     }
 
+    const computeShellNavSignature = () => {
+      const leftGroups = listLeftShellNavGroups(api.groups).filter(
+        (group) => group.panels.length > 0
+      );
+      const rightGroups = listRightShellNavGroups(api.groups).filter(
+        (group) => group.panels.length > 0
+      );
+      const leftVisible = leftGroups.some((group) => group.api.isVisible);
+      const hasRight = rightGroups.length > 0;
+      const rightVisible = rightGroups.some((group) => group.api.isVisible);
+      return (
+        (leftVisible ? 1 : 0) | (hasRight ? 2 : 0) | (rightVisible ? 4 : 0)
+      );
+    };
+    let lastShellNavSignature = computeShellNavSignature();
+    const bumpShellNavRevisionIfChanged = () => {
+      const nextSignature = computeShellNavSignature();
+      if (nextSignature !== lastShellNavSignature) {
+        lastShellNavSignature = nextSignature;
+        setShellNavRevision((rev) => rev + 1);
+      }
+    };
+
     imagePanelRemovalDisposableRef.current = api.onDidRemovePanel((panel) => {
       releaseImagePreviewSource(panel.id);
       closeRemovedEditorTerminal(panel.id);
       syncWorkspaceOpenSessionIdsFromDockview(api);
-      setShellNavRevision((rev) => rev + 1);
+      bumpShellNavRevisionIfChanged();
     });
     const leftDockLifecycle = createLeftDockPanelLifecycle(api);
     leftDockLifecycleRef.current = leftDockLifecycle;
     const removeGroupDisposable = api.onDidRemoveGroup((group) => {
       clearTerminalShelf(group.id);
       syncWorkspaceOpenSessionIdsFromDockview(api);
-      setShellNavRevision((rev) => rev + 1);
+      bumpShellNavRevisionIfChanged();
     });
 
     let frame = 0;
+    let resetSplitFrame = 0;
     const syncSplit = () => {
       frame = 0;
       applyingLeftSplitRef.current = true;
@@ -490,20 +517,33 @@ export function PanelActionsProvider({ children }: { children: ReactNode }) {
         api,
         leftSplitSnapshotRef.current
       );
-      requestAnimationFrame(() => {
+      if (resetSplitFrame) {
+        cancelAnimationFrame(resetSplitFrame);
+      }
+      resetSplitFrame = requestAnimationFrame(() => {
+        resetSplitFrame = 0;
         applyingLeftSplitRef.current = false;
       });
     };
     const layoutDisposable = api.onDidLayoutChange(() => {
       syncWorkspaceOpenSessionIdsFromDockview(api);
       applyLeftGroupHeaderHiding(api);
-      setShellNavRevision((rev) => rev + 1);
+      bumpShellNavRevisionIfChanged();
       if (applyingLeftSplitRef.current) return;
       if (frame) return;
       frame = requestAnimationFrame(syncSplit);
     });
     layoutDisposableRef.current = {
       dispose: () => {
+        if (frame) {
+          cancelAnimationFrame(frame);
+          frame = 0;
+        }
+        if (resetSplitFrame) {
+          cancelAnimationFrame(resetSplitFrame);
+          resetSplitFrame = 0;
+          applyingLeftSplitRef.current = false;
+        }
         layoutDisposable.dispose();
         removeGroupDisposable.dispose();
         leftDockLifecycle.dispose();
@@ -2081,6 +2121,17 @@ export function PanelActionsProvider({ children }: { children: ReactNode }) {
     finishLeftDockChange();
   }, [finishLeftDockChange]);
 
+  const autoArrangeLayout = useCallback(() => {
+    const canvasController = getCanvasWorkspaceController();
+    if (canvasController?.autoArrange) {
+      canvasController.autoArrange();
+      return;
+    }
+    const dockviewApi = apiRef.current;
+    if (!dockviewApi) return;
+    autoArrangeDockviewLayout(dockviewApi);
+  }, []);
+
   const openWelcomeTab = useCallback(() => {
     const dockviewApi = apiRef.current;
     if (!dockviewApi) return;
@@ -2798,12 +2849,16 @@ export function PanelActionsProvider({ children }: { children: ReactNode }) {
       url?: string | null;
       nativeTabId?: string | null;
     }) => {
-      if (!apiRef.current || !openPluginPanelRef.current) {
+      const canvasController = getCanvasWorkspaceController();
+      if (
+        (!apiRef.current && !canvasController) ||
+        !openPluginPanelRef.current
+      ) {
         pendingBrowserOpensRef.current.push(request);
         return;
       }
       const nativeTabId = request.nativeTabId ?? null;
-      if (nativeTabId) {
+      if (nativeTabId && apiRef.current && !canvasController) {
         const existing = apiRef.current.panels.find((panel) => {
           const params = panel.params as { nativeTabId?: string | null };
           return params?.nativeTabId === nativeTabId;
@@ -2917,6 +2972,7 @@ export function PanelActionsProvider({ children }: { children: ReactNode }) {
       toggleSessionList,
       toggleBotsPanel,
       openWelcomeTab,
+      autoArrangeLayout,
       toggleLeftSidebar,
       isLeftSidebarVisible,
       toggleRightSidebar,
@@ -2974,6 +3030,7 @@ export function PanelActionsProvider({ children }: { children: ReactNode }) {
     toggleSessionList,
     toggleBotsPanel,
     openWelcomeTab,
+    autoArrangeLayout,
     toggleLeftSidebar,
     isLeftSidebarVisible,
     toggleRightSidebar,

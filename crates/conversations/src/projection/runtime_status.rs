@@ -28,10 +28,12 @@ impl ProjectionFold {
             }) {
                 return;
             }
-            let bound = *bound || (*status == agents::conversation::ConversationAgentConnectionStatus::Ready && self.side_rows.iter().any(|row| {
-                matches!(&row.row, ConversationTimelineRow::SessionNotice { notice } if notice.connection_status.as_ref().is_some_and(|previous|
-                    previous.bound && previous.connection_id == record.connection_id))
-            }));
+            let bound = *bound
+                || (*status == agents::conversation::ConversationAgentConnectionStatus::Ready
+                    && self.side_rows.iter().any(|row| {
+                        matches!(&row.row, ConversationTimelineRow::SessionNotice { notice } if notice.connection_status.as_ref().is_some_and(|previous|
+                            previous.bound && previous.connection_id == record.connection_id))
+                    }));
             upsert_stable_notice(
                 &mut self.side_rows,
                 CONNECTION_STATUS_ROW_ID,
@@ -49,6 +51,40 @@ impl ProjectionFold {
                     ..Default::default()
                 },
             );
+        } else if matches!(event, ConversationEvent::AgentBindingReady { .. }) {
+            let existing_is_newer = self.side_rows.iter().any(|row| {
+                row.row_id == CONNECTION_STATUS_ROW_ID && row.revision >= record.sequence
+            });
+            if !existing_is_newer {
+                let existing_connection_id = self.side_rows.iter().find_map(|row| match &row.row {
+                    ConversationTimelineRow::SessionNotice { notice }
+                        if row.row_id == CONNECTION_STATUS_ROW_ID =>
+                    {
+                        notice
+                            .connection_status
+                            .as_ref()
+                            .and_then(|status| status.connection_id.clone())
+                    }
+                    _ => None,
+                });
+                upsert_stable_notice(
+                    &mut self.side_rows,
+                    CONNECTION_STATUS_ROW_ID,
+                    record.sequence,
+                    ConversationSessionNotice {
+                        title: "Agent connection".into(),
+                        severity: "info".into(),
+                        connection_status: Some(ConversationConnectionStatus {
+                            status: agents::conversation::ConversationAgentConnectionStatus::Ready,
+                            bound: true,
+                            connection_id: record.connection_id.clone().or(existing_connection_id),
+                            message: None,
+                            since: record.created_at,
+                        }),
+                        ..Default::default()
+                    },
+                );
+            }
         }
         let activity = match event {
             ConversationEvent::UserTurnCreated { .. } | ConversationEvent::UserTurnQueued => {
@@ -207,5 +243,64 @@ mod tests {
         ]);
         assert_eq!(status.turn_id, b);
         assert_eq!(status.activity.phase, RequestPhase::Submitting);
+    }
+
+    #[test]
+    fn binding_ready_marks_connection_status_ready_and_bound() {
+        use agents::conversation::{AcpCapabilitySnapshot, ConversationAgentConnectionStatus};
+
+        let conversation = Uuid::new_v4();
+        let connection_id = Some("conn-1".to_string());
+        let mut connecting = diagnostic_record(
+            conversation,
+            1,
+            &ConversationEvent::AgentConnectionStatusChanged {
+                status: ConversationAgentConnectionStatus::Connecting,
+                message: None,
+                bound: false,
+            },
+        );
+        connecting.connection_id = connection_id.clone();
+
+        let mut binding_ready = diagnostic_record(
+            conversation,
+            2,
+            &ConversationEvent::AgentBindingReady {
+                acp_session_id: "acp-1".into(),
+                capabilities: AcpCapabilitySnapshot::default(),
+            },
+        );
+        binding_ready.connection_id = connection_id.clone();
+
+        let mut ready_unbound = diagnostic_record(
+            conversation,
+            3,
+            &ConversationEvent::AgentConnectionStatusChanged {
+                status: ConversationAgentConnectionStatus::Ready,
+                message: None,
+                bound: false,
+            },
+        );
+        ready_unbound.connection_id = connection_id;
+
+        let timeline = ConversationProjector::project_records(
+            conversation,
+            &[connecting, binding_ready, ready_unbound],
+        )
+        .unwrap();
+        let connection = timeline
+            .rows
+            .into_iter()
+            .find_map(|row| match row.row {
+                ConversationTimelineRow::SessionNotice { notice }
+                    if row.row_id == CONNECTION_STATUS_ROW_ID =>
+                {
+                    notice.connection_status
+                }
+                _ => None,
+            })
+            .expect("connection status row");
+        assert_eq!(connection.status, ConversationAgentConnectionStatus::Ready);
+        assert!(connection.bound);
     }
 }

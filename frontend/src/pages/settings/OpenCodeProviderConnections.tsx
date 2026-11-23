@@ -44,7 +44,9 @@ import {
 } from '@/features/agent-management';
 import {
   ModelRouterEntry,
+  nextUniqueOpenCodeProviderId,
   openCodeConnectRequest,
+  resolveRouterProviderName,
   type RouterProvision,
 } from '@/features/model-router';
 import { ProviderPresetIcon } from '@/features/provider-presets/ProviderPresetIcon';
@@ -681,9 +683,21 @@ export function OpenCodeProviderConnections({
   const busy = saving || disconnecting !== null || toggling !== null;
 
   const applyModelRouter = async (provision: RouterProvision) => {
+    const existingProviders = view?.providers ?? [];
+    const providerName = resolveRouterProviderName(
+      provision,
+      existingProviders.map((provider) => provider.name)
+    );
+    const providerId = nextUniqueOpenCodeProviderId(
+      providerName,
+      existingProviders.map((provider) => provider.provider_id)
+    );
     setView(
       await agentManagementApi.connectOpenCodeProvider(
-        openCodeConnectRequest(provision),
+        openCodeConnectRequest(provision, true, {
+          providerId,
+          name: providerName,
+        }),
         agentId
       )
     );

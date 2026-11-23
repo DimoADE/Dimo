@@ -93,7 +93,9 @@ describe('DesktopToastWindow mouse pass-through coordination', () => {
     fireEvent.click(replyButton!);
 
     const input = await waitFor(() => {
-      const el = card.querySelector<HTMLInputElement>('.vu-desktop-toast-input');
+      const el = card.querySelector<HTMLInputElement>(
+        '.vu-desktop-toast-input'
+      );
       expect(el).not.toBeNull();
       return el!;
     });

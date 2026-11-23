@@ -654,11 +654,18 @@ async fn legacy_capability_snapshot_does_not_render_unknown_event_notice() {
         .expect("project legacy capability snapshot");
 
     assert!(
+        timeline.rows.iter().all(|row| {
+            !matches!(row.row, ConversationTimelineRow::SessionNotice { .. })
+                || row.row_id == crate::projection::runtime_status::CONNECTION_STATUS_ROW_ID
+        }),
+        "same-version legacy capabilities should remain readable"
+    );
+    assert!(
         timeline
             .rows
             .iter()
-            .all(|row| !matches!(row.row, ConversationTimelineRow::SessionNotice { .. })),
-        "same-version legacy capabilities should remain readable"
+            .any(|row| row.row_id == crate::projection::runtime_status::CONNECTION_STATUS_ROW_ID),
+        "legacy agent_binding_ready should project connection status"
     );
 }
 

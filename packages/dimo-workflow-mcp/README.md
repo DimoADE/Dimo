@@ -1,63 +1,47 @@
----
-summary: Create, inspect, debug, and safely revise Dimo DAG Workflows from Agent conversations and editable file tabs.
----
+# `dimo-workflow-mcp` (Workflow MCP Server Bundle)
 
-# Dimo Workflow Creator
+Host-family Node.js MCP server bundle (`dist/mcp/workflow-control.mjs`) that adapts Agent workflow tool calls onto a running **Dimo Host** (`electron/` Desktop with `dimo-server --desktop`, or standalone `dimo-server`).
 
-Workflow Creator adds three connected capabilities:
+> Looking for the official Dimo v4 plugin package (which provides the `dimo-workflow-creator` Skill and the `*.dimo-workflow.json` Workflow Studio editor)? See [`plugins/workflow-creator/`](../../plugins/workflow-creator/).
 
-- the `dimo-workflow-creator` Skill for designing valid DAGs;
-- a dedicated MCP server for validation, publication, Run inspection, checkpoints, node conversations, and derived debug Runs;
-- a visual editor for `*.dimo-workflow.json` files in Dimo tabs.
+## Architecture
 
-The Workflow source file remains the authoring source of truth. Saving uses an artifact revision and refuses stale overwrites. Publishing creates an immutable version; existing Automation references do not move until explicitly updated.
+- **Host-family launcher (`crates/dimo-workflow-mcp`)**: Embeds `packages/dimo-workflow-mcp/dist/mcp/workflow-control.mjs` and multiplexes stdio JSON-RPC (`2026-07-28` + backward-compatible MCP revisions) between the Agent and this Node controller.
+- **Native + Delegated Tool Surface**:
+  - `crates/dimo-workflow-mcp` natively handles the Dual-Primitive `workflow_graph_patch` tool (`session` vs `bot` steps, `bounded_loop`, `wait_for_event`, `group_stage`, `user_gate`, `outbox_action`, and presets).
+  - `dist/mcp/workflow-control.mjs` proxies workflow authoring, publication, run inspection, checkpointed reruns, pause/resume, and approval tools (`workflow_source_read`, `workflow_source_write`, `workflow_validate`, `workflow_publish`, `workflow_catalog`, `workflow_run_inspect`, `workflow_start`, `workflow_debug_source`, `workflow_debug_from_step`, `workflow_pause_run`, `workflow_resume_run`, `workflow_cancel_run`, `workflow_pause_step`, `workflow_continue_step`, `workflow_accept_candidate`, `workflow_review_step`, `workflow_decide_approval`) to the running Dimo Host.
+- **Runtime & Auth**: Requires a running Dimo Host. The Host launches `dimo-workflow-mcp` with its managed Node.js runtime and injects an ephemeral loopback bearer token; no token is persisted inside this package. Traffic stays on loopback between the MCP process and Dimo Host.
 
-## Requirements
+## Debugging & Revision Semantics
 
-Dimo Desktop must be running. The Host starts a loopback-only `dimo-server` command gateway, launches the MCP with its managed Node.js runtime, and injects a per-app-lifetime bearer token. The token is never stored in this package or `config.json`.
+- `*.dimo-workflow.json` is the authoring source of truth; saves require the expected artifact revision and reject stale overwrites.
+- Publishing creates an immutable `WorkflowDefinition` version; existing Automations stay pinned to their selected version until explicitly updated.
+- Pausing a node or DAG stops active Turns without marking the Run failed; continuing appends a new immutable Turn in the same node Conversation.
+- Source debug runs (`workflow_debug_source`) execute against an unpublished durable snapshot without creating catalog versions; derived debug runs (`workflow_debug_from_step`) reuse checkpoint-verified completed ancestors.
 
-The Skill and MCP are bound to all compatible installed Agents on first enable. Change the selection from this plugin’s settings or Settings → MCP. Later enable/disable cycles preserve an existing selection.
+## Development & Verification
 
-## Debugging model
+```bash
+pnpm install
+pnpm build        # Rebuild dist/mcp/workflow-control.mjs via dimo-plugin build
+pnpm test         # Run package test suite
+pnpm test:plugin  # Run node --test test/plugin.test.mjs
+pnpm test:mcp     # Run node --test test-mcp/mcp-server.test.mjs
+```
 
-A node Conversation may contain multiple immutable Turns. Stopping a node pauses only its active Turn; continuing creates a new Turn in the same Conversation. Pausing the DAG stops every active Turn without marking the Run failed. A source test uses an unpublished durable debug snapshot, so it never creates a catalog version or retargets an Automation. A derived debug Run reuses unchanged completed ancestors and reruns the selected node alone or with its transitive downstream.
+### Live Host Testing
 
-## Offline and data flow
+With Dimo Desktop or `dimo-server` running and the `dimo.workflow-creator` plugin enabled:
 
-The editor itself is local and requires no network. Agent Steps may use network access according to the selected Agent and project policy. MCP traffic stays on a random loopback port between the managed MCP process and Dimo.
+```bash
+pnpm test:live status <run-id>
+pnpm test:live debug-source <workspace-id> <step-id>
+```
+
+Set `DIMO_WORKSPACE_ROOT` when resolving project-relative `*.dimo-workflow.json` paths against a specific workspace directory.
 
 ## Troubleshooting
 
-- If MCP tools report that Dimo is unavailable, keep Desktop open and re-enable the plugin.
-- A save conflict means the source changed outside the tab; reload, reconcile, and save again.
-- A Workflow Automation is pinned to one published version. Publish and apply a new version to move that Automation.
-
-## Development
-
-This package lives in the Dimo monorepo as the Host-family Workflow MCP
-(`dimo-workflow-mcp`). It was migrated from the standalone
-`~/Projects/vibe-workflow-creator` project. The Host sibling binary in
-`crates/dimo-workflow-mcp` launches the bundled `dist/mcp/workflow-control.mjs`
-with Node. The checked-in `vendor/` archives pin the Dimo Plugin SDK and CLI
-used for reproducible local builds; product code imports only SDK entrypoints
-and the official MCP v2 packages.
-
-```sh
-pnpm install
-pnpm test
-pnpm test:mcp
-pnpm build
-pnpm exec dimo-plugin validate .
-pnpm exec dimo-plugin pack . --output dimo-workflow-creator-1.0.0.vxp
-```
-
-For a live Host verification, enable this plugin in Dimo first so Dimo adds
-its managed MCP entry to Codex. Then run `pnpm test:live status <run-id>` or
-`pnpm test:live debug-source <workspace-id> <step-id>`. Set
-`DIMO_WORKSPACE_ROOT` when the MCP should resolve project-relative Workflow
-sources against another workspace.
-
-## Third-party notices
-
-This package uses the Dimo Plugin SDK, the official Model Context Protocol TypeScript SDK v2,
-and the Host-managed Node.js runtime.
+- **Dimo Host unavailable**: Ensure Dimo Desktop or `dimo-server` is running, then start a new Agent session so the Host injects a fresh MCP binding and bearer token.
+- **Save conflict**: The `*.dimo-workflow.json` file changed outside the current revision; re-read with `workflow_source_read`, reconcile changes, and write with the latest revision.
+- **Automation still running an older version**: Automations pin an exact published version; call `workflow_publish` and update the Automation target version.

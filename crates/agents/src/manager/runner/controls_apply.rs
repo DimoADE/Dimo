@@ -424,6 +424,8 @@ impl AgentConnectionRunner {
             if let Some(rejection) =
                 config_option_rejection(&updated, &selection.config_id, requested)
             {
+                self.drop_asserted_config(session_id, &rejection.config_id)
+                    .await;
                 self.emit_config_option_rejection(session_id, rejection);
             }
         }
@@ -592,11 +594,13 @@ impl AgentConnectionRunner {
         let mut controls = self.session_controls.write().await;
         if let Some(stored) = controls.get_mut(&session_id) {
             stored.asserted_config_values.remove(config_id);
+            stored.drift_retry_counts.remove(config_id);
         }
     }
 
-    /// Keep values that actually settled, so one later agent push back to its
-    /// default is sent again. Values the agent rejected are not guarded.
+    /// Keep values that actually settled, so later unsolicited agent pushes
+    /// back to defaults are suppressed and re-asserted within retry budget.
+    /// Values the agent rejected are not guarded.
     pub(in crate::manager) async fn record_confirmed_controls(
         &self,
         session_id: AgentSessionId,
@@ -617,9 +621,11 @@ impl AgentConnectionRunner {
             return;
         };
         let settled = agent_session_config_options_from_acp(stored.config_options.clone());
-        stored
-            .asserted_config_values
-            .extend(asserted_from_preferred(&preferred, &settled));
+        let confirmed = asserted_from_preferred(&preferred, &settled);
+        for key in confirmed.keys() {
+            stored.drift_retry_counts.remove(key);
+        }
+        stored.asserted_config_values.extend(confirmed);
     }
 
     pub(in crate::manager) fn spawn_reassert_config_drift(

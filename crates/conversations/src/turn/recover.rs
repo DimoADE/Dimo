@@ -1159,6 +1159,85 @@ impl ConversationSessionService {
         Ok(())
     }
 
+    /// Prepare a session for moving to another workspace. Rejects while a turn or
+    /// background Agent task is active, drops any live Agent connection, and clears
+    /// unprompted pre-bound ACP state so the session opens cleanly in the new root.
+    pub async fn prepare_workspace_switch(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<(), ConversationServiceError> {
+        let preparation = crate::continuation::preparation_lock(conversation_id);
+        let _preparation_guard = preparation.lock().await;
+        self.interrupt_orphaned_turn(conversation_id).await?;
+
+        let pool = &self.ctx.deployment.db().pool;
+        if let Some(conversation) = ConversationRecord::find_by_id(pool, conversation_id).await?
+            && let Some(active_turn_id) = conversation.active_turn_id
+            && let Some(active_turn) =
+                ConversationTurnRecord::find_by_id(pool, active_turn_id).await?
+            && is_in_flight_turn_status(&active_turn.status)
+        {
+            return Err(ConversationServiceError::Conflict(
+                "Cannot switch workspace while a turn is running".into(),
+            ));
+        }
+        if self
+            .runtime_snapshot(conversation_id)
+            .await
+            .active_turn_id
+            .is_some()
+        {
+            return Err(ConversationServiceError::Conflict(
+                "Cannot switch workspace while a turn is running".into(),
+            ));
+        }
+        if let Ok(controls) = self
+            .ctx
+            .agent_runtime
+            .session_controls_snapshot(agents::AgentSessionId(conversation_id))
+            .await
+            && controls
+                .async_tasks
+                .iter()
+                .any(|task| !agents::async_tasks::async_task_state_is_terminal(&task.state))
+        {
+            return Err(ConversationServiceError::Conflict(
+                "Stop background Agent tasks before switching workspace".into(),
+            ));
+        }
+
+        self.release_agent_session_for_switch(conversation_id)
+            .await?;
+
+        let has_turns = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM conversation_turns WHERE conversation_id = ?)",
+        )
+        .bind(conversation_id)
+        .fetch_one(pool)
+        .await?;
+
+        if !has_turns {
+            ConversationAgentBindingRecord::invalidate_active(
+                pool,
+                conversation_id,
+                "workspace_switch",
+            )
+            .await?;
+            sqlx::query(
+                r#"UPDATE sessions
+                   SET external_session_id = NULL,
+                       active_agent_binding_id = NULL,
+                       binding_revision = binding_revision + 1,
+                       updated_at = datetime('now', 'subsec')
+                   WHERE id = ?"#,
+            )
+            .bind(conversation_id)
+            .execute(pool)
+            .await?;
+        }
+        Ok(())
+    }
+
     /// Rebind abandons this native generation; keeping its ID is evidence only.
     pub(super) async fn detach_agent_session(
         &self,

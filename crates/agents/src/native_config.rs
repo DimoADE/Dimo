@@ -343,6 +343,13 @@ impl NativeConfigProvider {
                 }
             }
             finalize_special_native_shape(document, &patch)?;
+            if agent_id.as_str() == "muse_code"
+                && binding.binding_id == "settings"
+                && let Some(root) = document.as_object_mut()
+            {
+                root.entry("schema_version".to_string())
+                    .or_insert_with(|| Value::Number(Number::from(1)));
+            }
             let bytes = if binding.format == NativeConfigFormat::Dotenv {
                 serialize_dotenv_preserving(original.as_deref(), binding, document, &patch)?
             } else {
@@ -395,14 +402,22 @@ impl NativeConfigProvider {
             return Err(NativeConfigSaveError::FileConflict { path });
         }
 
-        let replacement = patch.content.into_bytes();
+        let mut replacement = patch.content.into_bytes();
         if replacement.len() > 1024 * 1024 {
             return Err(NativeConfigError::Invalid(
                 "native configuration file exceeds the 1 MiB editor limit".to_string(),
             )
             .into());
         }
-        parse_document(binding, Some(&replacement))?;
+        let mut parsed = parse_document(binding, Some(&replacement))?;
+        if agent_id.as_str() == "muse_code"
+            && binding.binding_id == "settings"
+            && let Some(root) = parsed.as_object_mut()
+            && !root.contains_key("schema_version")
+        {
+            root.insert("schema_version".to_string(), Value::Number(Number::from(1)));
+            replacement = serialize_document(binding, &parsed)?;
+        }
         if let Err(error) = self
             .filesystem
             .apply_many_atomic(&[NativeFileMutation {

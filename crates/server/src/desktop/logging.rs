@@ -10,7 +10,7 @@ use std::{
     path::Path,
     sync::{
         Arc, Mutex, OnceLock, RwLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -209,8 +209,52 @@ type ReloadFn = Box<dyn Fn(EnvFilter) -> Result<(), String> + Send + Sync>;
 struct LogHub {
     seq: AtomicU64,
     buffer: Mutex<RingBuffer>,
+    live_tail_active: AtomicBool,
     bus: RwLock<Option<Arc<crate::HostEventBus>>>,
     reload: RwLock<Option<ReloadFn>>,
+}
+
+impl LogHub {
+    fn new() -> Self {
+        Self {
+            seq: AtomicU64::new(0),
+            buffer: Mutex::new(RingBuffer::new()),
+            live_tail_active: AtomicBool::new(false),
+            bus: RwLock::new(None),
+            reload: RwLock::new(None),
+        }
+    }
+
+    fn attach_bus(&self, bus: Arc<crate::HostEventBus>) {
+        *self.bus.write().unwrap_or_else(|e| e.into_inner()) = Some(bus);
+    }
+
+    fn record_and_emit(&self, record: LogRecord) {
+        let emit_record = {
+            let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+            if self.live_tail_active.load(Ordering::Acquire) {
+                buffer.push(record.clone());
+                Some(record)
+            } else {
+                buffer.push(record);
+                None
+            }
+        };
+        if let Some(record) = emit_record {
+            let bus = self.bus.read().unwrap_or_else(|e| e.into_inner()).clone();
+            if let Some(bus) = bus
+                && bus.has_subscribers()
+            {
+                bus.emit(LOG_APPENDED_EVENT, &record);
+            }
+        }
+    }
+
+    fn recent_logs(&self, limit: usize) -> Vec<LogRecord> {
+        let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        self.live_tail_active.store(true, Ordering::Release);
+        buffer.recent(limit)
+    }
 }
 
 static LOG_HUB: OnceLock<Arc<LogHub>> = OnceLock::new();
@@ -220,19 +264,11 @@ fn log_hub() -> Option<&'static Arc<LogHub>> {
 }
 
 fn ensure_hub() -> &'static Arc<LogHub> {
-    LOG_HUB.get_or_init(|| {
-        Arc::new(LogHub {
-            seq: AtomicU64::new(0),
-            buffer: Mutex::new(RingBuffer::new()),
-            bus: RwLock::new(None),
-            reload: RwLock::new(None),
-        })
-    })
+    LOG_HUB.get_or_init(|| Arc::new(LogHub::new()))
 }
 
 pub fn attach_event_bus(bus: Arc<crate::HostEventBus>) {
-    let hub = ensure_hub();
-    *hub.bus.write().unwrap_or_else(|e| e.into_inner()) = Some(bus);
+    ensure_hub().attach_bus(bus);
 }
 
 pub fn apply_live_settings(settings: &LogSettings) {
@@ -248,10 +284,9 @@ pub fn apply_live_settings(settings: &LogSettings) {
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
+        && let Err(error) = reload_fn(filter)
     {
-        if let Err(error) = reload_fn(filter) {
-            eprintln!("[logging] failed to reload tracing filter: {error}");
-        }
+        eprintln!("[logging] failed to reload tracing filter: {error}");
     }
 }
 
@@ -259,10 +294,7 @@ pub fn recent_logs(limit: usize) -> Vec<LogRecord> {
     let Some(hub) = log_hub() else {
         return Vec::new();
     };
-    hub.buffer
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .recent(limit)
+    hub.recent_logs(limit)
 }
 
 thread_local! {
@@ -364,18 +396,7 @@ impl<S: Subscriber> Layer<S> for BufferEmitLayer {
             message: visitor.message.unwrap_or_default(),
             fields: visitor.fields,
         };
-        hub.buffer
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(record.clone());
-        let bus = hub
-            .bus
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        if let Some(bus) = bus {
-            bus.emit(LOG_APPENDED_EVENT, &record);
-        }
+        hub.record_and_emit(record);
     }
 }
 
@@ -512,5 +533,31 @@ mod tests {
         assert_eq!(recent.len(), 5);
         assert_eq!(recent.first().unwrap().seq, total - 5);
         assert_eq!(recent.last().unwrap().seq, total - 1);
+    }
+
+    #[test]
+    fn live_tail_emit_stays_silent_until_recent_logs_is_requested() {
+        let hub = LogHub::new();
+        let bus = Arc::new(crate::HostEventBus::new());
+        let mut rx = bus.subscribe();
+        hub.attach_bus(bus);
+
+        hub.record_and_emit(sample_record(1, "before-viewer"));
+        assert!(
+            rx.try_recv().is_err(),
+            "general HostEventBus subscribers must not receive log bursts before a log viewer opens"
+        );
+
+        let recent = hub.recent_logs(10);
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].seq, 1);
+
+        hub.record_and_emit(sample_record(2, "after-viewer"));
+        let event = rx
+            .try_recv()
+            .expect("live tail emits logs://appended once recent_logs activates the viewer");
+        assert_eq!(event.channel, LOG_APPENDED_EVENT);
+        assert_eq!(event.payload["seq"], 2);
+        assert_eq!(event.payload["message"], "after-viewer");
     }
 }

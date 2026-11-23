@@ -120,6 +120,7 @@ pub struct HeadlessServer {
     pool: SqlitePool,
     data_dir: PathBuf,
     runtime: ServerRuntime<SqliteConversationRepository>,
+    pty: local_deployment::pty::PtyService,
     issued_token: Option<ServerToken>,
     _agent_runtime: Arc<AgentRuntime>,
     plugin_control_plane: Arc<PluginControlPlane>,
@@ -138,6 +139,7 @@ pub struct HeadlessServer {
     cli_inbox_task: Option<JoinHandle<()>>,
     web_service_autostart_task: Option<JoinHandle<()>>,
     settings_watcher: Option<crate::desktop::settings_watcher::SettingsWatcherHandle>,
+    plugin_dev_server: Option<crate::desktop::plugin_dev_server::PluginDevServerHandle>,
     desktop_mode: bool,
     shutdown_notify: Arc<Notify>,
 }
@@ -582,7 +584,7 @@ impl HeadlessServer {
                 runtime_root: config.data_dir.join("plugins/runtimes"),
                 worker_runtime: worker_runtime.clone(),
                 adapter: if config.desktop_mode {
-                    application::AdapterCapabilities::desktop_host()
+                    application::AdapterCapabilities::desktop_electron_host()
                 } else {
                     application::AdapterCapabilities::server_http()
                 },
@@ -595,6 +597,7 @@ impl HeadlessServer {
             config.allow_loopback_outbox_for_tests,
         );
         crate::desktop::logging::attach_event_bus(host.events.clone());
+        crate::desktop::host_tunnel::attach_event_bus(host.events.clone());
         product_mcp_commands
             .attach_commands(host.commands.clone())
             .await;
@@ -657,10 +660,27 @@ impl HeadlessServer {
         let mut cli_inbox_task = None;
         let mut web_service_autostart_task = None;
         let mut settings_watcher = None;
+        let mut plugin_dev_server = None;
         let desktop_state = if config.desktop_mode {
             if let Err(error) = crate::start_loopback_preview_proxy(preview_proxy.clone()).await {
                 tracing::warn!(%error, "loopback preview proxy could not start");
             }
+            let dev_handle = crate::desktop::plugin_dev_server::start(
+                crate::desktop::plugin_dev_server::PluginDevServerConfig {
+                    plugins: plugin_control_plane.clone(),
+                    pool: pool.clone(),
+                    broker: capability_broker.clone(),
+                    worker_runtime: worker_runtime.clone(),
+                    runtime_root: config.data_dir.join("plugins/runtimes"),
+                    candidate_root: config.data_dir.join("plugins/dev-candidates"),
+                    connection_path: Some(config.data_dir.join("plugin-dev.json")),
+                    events: host.events.clone(),
+                },
+            )
+            .await
+            .map_err(|error| ServerBootstrapError::Desktop(error.to_string()))?;
+            let plugin_dev = dev_handle.connection().clone();
+            plugin_dev_server = Some(dev_handle);
             let search_pool = pool.clone();
             backfill_task = Some(tokio::spawn(async move {
                 match conversations::backfill_missing(&search_pool).await {
@@ -694,9 +714,7 @@ impl HeadlessServer {
                     });
                 })),
             );
-            let desktop_token = config
-                .desktop_token
-                .unwrap_or_else(crate::issue_host_token);
+            let desktop_token = config.desktop_token.unwrap_or_else(crate::issue_host_token);
             let remote_desktop = Arc::new(
                 crate::desktop::remote_desktop::RemoteDesktopRegistry::new()
                     .map_err(|error| ServerBootstrapError::Desktop(error.to_string()))?,
@@ -730,16 +748,18 @@ impl HeadlessServer {
                 web_service,
                 remote_desktop,
                 browser_bridge,
+                plugin_dev,
                 events: host.events.clone(),
             })
         } else {
             None
         };
+        let pty = deployment.pty().clone();
         let mut runtime = ServerRuntime::from_host(
             config.server,
             Arc::new(crate::SqliteServerAuth::new(pool.clone())),
             host,
-            deployment.pty().clone(),
+            pty.clone(),
         );
         if let Some(desktop) = desktop_state {
             runtime = runtime.with_desktop(desktop);
@@ -749,6 +769,7 @@ impl HeadlessServer {
             pool,
             data_dir: config.data_dir,
             runtime,
+            pty,
             issued_token: provisioned.issued_token,
             _agent_runtime: agent_runtime,
             plugin_control_plane,
@@ -767,6 +788,7 @@ impl HeadlessServer {
             cli_inbox_task,
             web_service_autostart_task,
             settings_watcher,
+            plugin_dev_server,
             desktop_mode: config.desktop_mode,
             shutdown_notify,
         })
@@ -844,9 +866,15 @@ impl HeadlessServer {
             let _ = tokio::task::spawn_blocking(move || watcher.stop()).await;
         }
 
-        // 2. Abort & await ALL background tasks so no writers race with WAL checkpoint.
-        let background_tasks = [
+        // 2. Abort & await ALL background tasks concurrently under a single bounded timeout
+        //    so no writers race with WAL checkpoint and shutdown stays well inside the 5s budget.
+        let plugin_dev_task = self.plugin_dev_server.take().and_then(|mut handle| {
+            handle.cleanup_connection_file();
+            handle.take_task()
+        });
+        let background_tasks: Vec<JoinHandle<()>> = [
             automation_task,
+            plugin_dev_task,
             self.agent_event_task.take(),
             self.workflow_dispatch_task.take(),
             self.terminal_task.take(),
@@ -856,11 +884,18 @@ impl HeadlessServer {
             self.developer_link_task.take(),
             self.cli_inbox_task.take(),
             self.web_service_autostart_task.take(),
-        ];
-        for task in background_tasks.into_iter().flatten() {
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        for task in &background_tasks {
             task.abort();
-            let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
         }
+        let _ = tokio::time::timeout(
+            Duration::from_millis(1500),
+            futures::future::join_all(background_tasks),
+        )
+        .await;
 
         // 3. Stop desktop web service (HTTP listeners, relay, quick tunnel).
         if self.desktop_mode {
@@ -870,14 +905,23 @@ impl HeadlessServer {
         // 4. Shut down PluginControlPlane workers, host services, and plugin child processes.
         shutdown_plugin_control_plane(&self.plugin_control_plane, &self.capability_broker).await;
 
-        // 5. Terminate agent child processes, release terminals, and clean up owned companions.
+        // 5. Terminate instance-owned agent child processes and PTY sessions.
+        //    Only tear down process-global registries (agent terminal registry,
+        //    desktop companions) in desktop mode so parallel in-process test
+        //    servers do not kill sibling instances' shared resources.
+        self._agent_runtime.kill_all_processes_on_exit();
+        let _ = tokio::time::timeout(Duration::from_secs(1), async {
+            if self.desktop_mode {
+                tokio::join!(
+                    agents::terminal::agent_terminal_registry().release_all(),
+                    self.pty.close_all(),
+                );
+            } else {
+                self.pty.close_all().await;
+            }
+        })
+        .await;
         if self.desktop_mode {
-            self._agent_runtime.kill_all_processes_on_exit();
-            let _ = tokio::time::timeout(
-                Duration::from_secs(1),
-                agents::terminal::agent_terminal_registry().release_all(),
-            )
-            .await;
             crate::desktop::kill_companion_processes_on_exit();
         }
 
@@ -896,7 +940,8 @@ impl HeadlessServer {
             .is_file();
         if self.desktop_mode || has_pending_restore {
             let _ = tokio::time::timeout(Duration::from_secs(2), self.pool.close()).await;
-            if has_pending_restore && self.pool.is_closed()
+            if has_pending_restore
+                && self.pool.is_closed()
                 && let Err(error) = crate::desktop::backup::apply_pending_backup_restore_async(
                     self.data_dir.clone(),
                 )
@@ -916,43 +961,46 @@ async fn shutdown_plugin_control_plane(
     plugin_control_plane: &PluginControlPlane,
     capability_broker: &plugins::HostCapabilityBroker,
 ) {
-    let catalog = match tokio::time::timeout(
-        Duration::from_secs(2),
-        plugin_control_plane.catalog(),
+    let catalog =
+        match tokio::time::timeout(Duration::from_secs(1), plugin_control_plane.catalog()).await {
+            Ok(Ok(catalog)) => catalog,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "could not read plugin catalog during shutdown");
+                return;
+            }
+            Err(_) => {
+                tracing::warn!("timed out reading plugin catalog during shutdown");
+                return;
+            }
+        };
+
+    let plugin_ids: Vec<String> = catalog
+        .into_iter()
+        .map(|plugin| plugin.id().to_string())
+        .collect();
+    if plugin_ids.is_empty() {
+        return;
+    }
+
+    let shutdown_futures = plugin_ids.into_iter().map(|plugin_id| async move {
+        capability_broker.kill_plugin_processes(&plugin_id).await;
+        let _ = plugin_control_plane.deactivate_worker(&plugin_id).await;
+    });
+    if tokio::time::timeout(
+        Duration::from_millis(1500),
+        futures::future::join_all(shutdown_futures),
     )
     .await
+    .is_err()
     {
-        Ok(Ok(catalog)) => catalog,
-        Ok(Err(error)) => {
-            tracing::warn!(%error, "could not read plugin catalog during shutdown");
-            return;
-        }
-        Err(_) => {
-            tracing::warn!("timed out reading plugin catalog during shutdown");
-            return;
-        }
-    };
-
-    for plugin in catalog {
-        capability_broker.kill_plugin_processes(plugin.id()).await;
-        if let Err(error) = tokio::time::timeout(
-            Duration::from_secs(2),
-            plugin_control_plane.deactivate_worker(plugin.id()),
-        )
-        .await
-        {
-            tracing::warn!(
-                plugin_id = %plugin.id(),
-                %error,
-                "timed out deactivating plugin worker during shutdown"
-            );
-        }
+        tracing::warn!("timed out shutting down plugin workers during shutdown");
     }
 }
 
 impl Drop for HeadlessServer {
     fn drop(&mut self) {
         self.settings_watcher.take();
+        self.plugin_dev_server.take();
         for task in [
             self.workflow_dispatch_task.take(),
             self.terminal_task.take(),

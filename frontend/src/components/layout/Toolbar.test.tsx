@@ -10,6 +10,11 @@ import {
   setKanbanBoardStyle,
 } from '@/lib/kanbanBoardStyle';
 import { resetKanbanCanvasListVisible } from '@/lib/kanbanCanvasListVisible';
+import {
+  getWorkspaceStageStyle,
+  resetWorkspaceStageStyle,
+  setWorkspaceStageStyle,
+} from '@/lib/workspaceStageStyle';
 import { useLayoutStore } from '@/stores/useLayoutStore';
 import {
   KanbanLayoutToggles,
@@ -23,6 +28,7 @@ const panelActionMocks = vi.hoisted(() => ({
   openNewTerminal: vi.fn(),
   isPanelOpen: () => false,
   openWelcomeTab: vi.fn(),
+  autoArrangeLayout: vi.fn(),
   toggleLeftSidebar: vi.fn(),
   isLeftSidebarVisible: vi.fn(() => true),
   toggleRightSidebar: vi.fn(),
@@ -140,13 +146,16 @@ describe('KanbanLayoutToggles', () => {
 describe('WorkspaceLayoutToggles', () => {
   beforeEach(() => {
     useLayoutStore.getState().resetLayout();
+    resetWorkspaceStageStyle();
     panelActionMocks.openWelcomeTab.mockReset();
+    panelActionMocks.autoArrangeLayout.mockReset();
     panelActionMocks.toggleRightSidebar.mockReset();
     panelActionMocks.hasRightSidebarPanels.mockReturnValue(false);
     panelActionMocks.isRightSidebarVisible.mockReturnValue(true);
   });
 
-  it('removes legacy workspace toggle buttons and renders only New Tab icon button and Reset Layout by default', async () => {
+  it('renders a single-click stage style switcher and Auto-arrange layout button instead of New Tab and Reset Layout', async () => {
+    setWorkspaceStageStyle('tabs');
     const user = userEvent.setup();
     render(
       <TooltipProvider>
@@ -169,18 +178,34 @@ describe('WorkspaceLayoutToggles', () => {
     expect(
       screen.queryByTestId('toolbar-toggle-right-sidebar')
     ).not.toBeInTheDocument();
-
-    const newTabButton = screen.getByTestId('toolbar-new-tab-button');
-    expect(newTabButton).toBeInTheDocument();
     expect(
-      screen.getByRole('button', { name: '重置布局' })
-    ).toBeInTheDocument();
+      screen.queryByTestId('toolbar-new-tab-button')
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: '重置布局' })
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('radiogroup')).not.toBeInTheDocument();
 
-    await user.click(newTabButton);
-    expect(panelActionMocks.openWelcomeTab).toHaveBeenCalledTimes(1);
+    const stageToggle = screen.getByTestId('toolbar-stage-style-toggle');
+    expect(stageToggle).toHaveTextContent('自由标签');
+    expect(stageToggle.querySelector('svg')).not.toBeNull();
+
+    await user.click(stageToggle);
+    expect(getWorkspaceStageStyle()).toBe('canvas');
+    expect(stageToggle).toHaveTextContent('无限画布');
+
+    await user.click(stageToggle);
+    expect(getWorkspaceStageStyle()).toBe('tabs');
+    expect(stageToggle).toHaveTextContent('自由标签');
+
+    const autoArrangeButton = screen.getByRole('button', {
+      name: '自动整理布局',
+    });
+    await user.click(autoArrangeButton);
+    expect(panelActionMocks.autoArrangeLayout).toHaveBeenCalledTimes(1);
   });
 
-  it('renders right sidebar toggle next to New Tab button when Zone A has panels on the right side', async () => {
+  it('renders right sidebar toggle next to the stage switcher when Zone A has panels on the right side', async () => {
     const user = userEvent.setup();
     panelActionMocks.hasRightSidebarPanels.mockReturnValue(true);
     panelActionMocks.isRightSidebarVisible.mockReturnValue(true);
@@ -367,5 +392,26 @@ describe('Toolbar chrome layout', () => {
     expect(source).toContain('<Icon icon={tab.icon}');
     expect(source).not.toContain('workspace-tab-switcher');
     expect(source).not.toContain('workspace-tab-button');
+  });
+
+  it('places the centered no-drag WorkspaceTabSwitcher after the drag-region row in DOM order for Electron app-region hit-testing', () => {
+    const source = readFileSync(resolve(__dirname, './Toolbar.tsx'), 'utf8');
+    const topbarStart = source.indexOf('workspace-topbar window-chrome');
+    expect(topbarStart).toBeGreaterThan(-1);
+    const topbarSlice = source.slice(topbarStart);
+    const dragRowIndex = topbarSlice.indexOf(
+      'className="relative z-10 flex h-9 items-center gap-0.5"'
+    );
+    const switcherIndex = topbarSlice.indexOf('<WorkspaceTabSwitcher />');
+    const lastDragRegionIndex = topbarSlice.lastIndexOf(
+      'data-window-drag-region'
+    );
+
+    expect(dragRowIndex).toBeGreaterThan(-1);
+    expect(switcherIndex).toBeGreaterThan(dragRowIndex);
+    expect(switcherIndex).toBeGreaterThan(lastDragRegionIndex);
+    expect(topbarSlice).toMatch(
+      /<div className="contents" data-no-drag>\s*<Slot name="toolbar\.actions" \/>\s*<\/div>/
+    );
   });
 });

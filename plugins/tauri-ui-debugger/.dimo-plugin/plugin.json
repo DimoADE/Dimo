@@ -5,7 +5,7 @@
   "id": "dimo.tauri-ui-debugger",
   "publisher": "dimo",
   "version": "0.1.0",
-  "name": "TauriUI调试器",
+  "name": "UI 调试器",
   "description": "开发模式下点选界面元素，把源码位置、组件链和关键样式作为 token 插入会话输入框。",
   "readme": "README.md",
   "engines": {
@@ -79,7 +79,7 @@
     {
       "id": "select-element",
       "kind": "app.command",
-      "label": "TauriUI调试器：选择界面元素"
+      "label": "UI 调试器：选择界面元素"
     }
   ],
   "interface": {

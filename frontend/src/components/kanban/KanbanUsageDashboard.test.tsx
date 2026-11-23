@@ -942,4 +942,60 @@ describe('KanbanUsageDashboard', () => {
     expect(progressBars[1]).toHaveAttribute('aria-valuenow', '72');
     expect(progressBars[2]).toHaveAttribute('aria-valuenow', '92');
   });
+
+  it('passes forceRefresh: true when the Refresh button is clicked', async () => {
+    const emptyStats = {
+      scope: 'project' as const,
+      project_id: 'project-1',
+      project_name: 'Dimo',
+      total_sessions: 0,
+      total_tokens: {
+        protocol: null,
+        vendor_log: null,
+        sources_disagree: false,
+      },
+      estimated_cost: null,
+      sessions: [],
+      daily_usage: [],
+      weekly_comparison: {
+        current_week: { sessions: 0, cost: null, tokens: null },
+        last_week: { sessions: 0, cost: null, tokens: null },
+        trends: { sessions: 0, cost: 0, tokens: 0 },
+      },
+      by_model: [],
+      by_folder: [],
+      by_agent: [],
+      provider_status: [],
+      unattributed_vendor_sessions: 0,
+      last_updated: Date.now(),
+      pricing_notice: null,
+    };
+    vi.mocked(localUsageApi.getProjectStatistics).mockResolvedValue(emptyStats);
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <KanbanUsageDashboard />
+      </QueryClientProvider>
+    );
+
+    await screen.findByRole('region', { name: '用量摘要' });
+    vi.mocked(localUsageApi.getProjectStatistics).mockClear();
+
+    const refreshButton = screen.getByRole('button', { name: '刷新' });
+    fireEvent.click(refreshButton);
+
+    await vi.waitFor(() => {
+      expect(localUsageApi.getProjectStatistics).toHaveBeenCalledWith({
+        scope: 'project',
+        projectId: 'project-1',
+        dateRange: '7d',
+        forceRefresh: true,
+      });
+      expect(refreshButton).not.toBeDisabled();
+    });
+  });
 });

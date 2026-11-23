@@ -1,6 +1,7 @@
 import {
   createContext,
   useContext,
+  useEffect,
   useReducer,
   useMemo,
   useCallback,
@@ -60,10 +61,12 @@ function encodeBase64(str: string): string {
   return btoa(binString);
 }
 
+const sharedTextDecoder = new TextDecoder();
+
 function decodeBase64(base64: string): string {
   const binString = atob(base64);
   const bytes = Uint8Array.from(binString, (c) => c.codePointAt(0)!);
-  return new TextDecoder().decode(bytes);
+  return sharedTextDecoder.decode(bytes);
 }
 
 function terminalReducer(
@@ -231,6 +234,45 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
     Map<string, { onData: (data: string) => void; onExit?: () => void }>
   >(new Map());
 
+  const mountedRef = useRef(true);
+  const connectionGenerationRef = useRef<Map<string, number>>(new Map());
+  const nextConnectionGenerationRef = useRef(0);
+
+  const bumpConnectionGeneration = useCallback((tabId: string): number => {
+    const next = nextConnectionGenerationRef.current + 1;
+    nextConnectionGenerationRef.current = next;
+    connectionGenerationRef.current.set(tabId, next);
+    return next;
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    const connectionGenerations = connectionGenerationRef.current;
+    const terminalInstances = terminalInstancesRef.current;
+    const terminalConnections = terminalConnectionsRef.current;
+    const connectionCallbacks = connectionCallbacksRef.current;
+    return () => {
+      mountedRef.current = false;
+      connectionGenerations.clear();
+      terminalInstances.forEach((instance) => {
+        try {
+          instance.terminal.dispose();
+        } catch {
+          // Ignore disposal errors during unmount
+        }
+      });
+      terminalInstances.clear();
+      terminalConnections.forEach((conn) => {
+        conn.unlisten();
+        void backendCall('close_terminal', {
+          sessionId: conn.sessionId,
+        }).catch(() => undefined);
+      });
+      terminalConnections.clear();
+      connectionCallbacks.clear();
+    };
+  }, []);
+
   const getTabsForWorkspace = useCallback(
     (workspaceId: string): TerminalTab[] => {
       return state.tabsByWorkspace[workspaceId] || [];
@@ -252,24 +294,28 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
     dispatch({ type: 'CREATE_TAB', workspaceId, cwd });
   }, []);
 
-  const closeTerminalConnection = useCallback(async (tabId: string) => {
-    const conn = terminalConnectionsRef.current.get(tabId);
-    if (conn) {
-      // Unsubscribe from Tauri event listener
-      conn.unlisten();
-      // Close the PTY session on the backend
-      try {
-        await backendCall('close_terminal', { sessionId: conn.sessionId });
-      } catch (err) {
-        console.error(
-          `Failed to close terminal session ${conn.sessionId}:`,
-          err
-        );
-      }
+  const closeTerminalConnection = useCallback(
+    async (tabId: string) => {
+      bumpConnectionGeneration(tabId);
+      const conn = terminalConnectionsRef.current.get(tabId);
       terminalConnectionsRef.current.delete(tabId);
-    }
-    connectionCallbacksRef.current.delete(tabId);
-  }, []);
+      connectionCallbacksRef.current.delete(tabId);
+      if (conn) {
+        // Unsubscribe from Tauri event listener
+        conn.unlisten();
+        // Close the PTY session on the backend
+        try {
+          await backendCall('close_terminal', { sessionId: conn.sessionId });
+        } catch (err) {
+          console.error(
+            `Failed to close terminal session ${conn.sessionId}:`,
+            err
+          );
+        }
+      }
+    },
+    [bumpConnectionGeneration]
+  );
 
   const closeTab = useCallback(
     (workspaceId: string, tabId: string) => {
@@ -340,9 +386,15 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
       onData: (data: string) => void,
       onExit?: () => void
     ) => {
+      const generation = bumpConnectionGeneration(tabId);
+      const isCurrentGeneration = () =>
+        mountedRef.current &&
+        connectionGenerationRef.current.get(tabId) === generation;
+
       // Close existing connection if any
       const existing = terminalConnectionsRef.current.get(tabId);
       if (existing) {
+        terminalConnectionsRef.current.delete(tabId);
         existing.unlisten();
         try {
           await backendCall('close_terminal', {
@@ -351,6 +403,10 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
         } catch {
           // Ignore errors closing old session
         }
+      }
+
+      if (!isCurrentGeneration()) {
+        return { send: () => {}, resize: () => {} };
       }
 
       // Store callbacks in ref so they can be updated without recreating connection
@@ -378,6 +434,11 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
         }
       );
 
+      if (!isCurrentGeneration()) {
+        unlistenOutput();
+        return { send: () => {}, resize: () => {} };
+      }
+
       let unlistenExit: () => void;
       try {
         unlistenExit = await backendListen<unknown>(
@@ -392,6 +453,12 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
         throw err;
       }
 
+      if (!isCurrentGeneration()) {
+        unlistenExit();
+        unlistenOutput();
+        return { send: () => {}, resize: () => {} };
+      }
+
       let sessionId: string;
       try {
         sessionId = await backendCall<string>('create_terminal', {
@@ -404,6 +471,13 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
         unlistenExit();
         unlistenOutput();
         throw err;
+      }
+
+      if (!isCurrentGeneration()) {
+        unlistenExit();
+        unlistenOutput();
+        void backendCall('close_terminal', { sessionId }).catch(() => {});
+        return { send: () => {}, resize: () => {} };
       }
 
       const writeQueue = createWriteQueue(async (data) => {
@@ -442,7 +516,7 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
 
       return { send, resize };
     },
-    []
+    [bumpConnectionGeneration]
   );
 
   const getTerminalConnection = useCallback(

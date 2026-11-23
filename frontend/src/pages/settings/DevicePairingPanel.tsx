@@ -136,9 +136,19 @@ export function DevicePairingPanel({
     null
   );
   const [revokingId, setRevokingId] = useState<string | null>(null);
-  const [ttlSeconds, setTtlSeconds] = useState<PairingTtlSeconds>(
-    DEFAULT_PAIRING_TTL_SECONDS
-  );
+  const [ttlSeconds, setTtlSeconds] = useState<PairingTtlSeconds>(() => {
+    try {
+      const saved = Number(
+        window.localStorage.getItem('dimo.pairing.ttlSeconds')
+      );
+      if (PAIRING_TTL_SECONDS.includes(saved as PairingTtlSeconds)) {
+        return saved as PairingTtlSeconds;
+      }
+    } catch {
+      // Ignore storage failures in restricted environments.
+    }
+    return DEFAULT_PAIRING_TTL_SECONDS;
+  });
   const [issuedAt, setIssuedAt] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [devicesExpanded, setDevicesExpanded] = useState(true);
@@ -638,6 +648,14 @@ export function DevicePairingPanel({
                             const next = Number(value) as PairingTtlSeconds;
                             setTtlSeconds(next);
                             if (PAIRING_TTL_SECONDS.includes(next)) {
+                              try {
+                                window.localStorage.setItem(
+                                  'dimo.pairing.ttlSeconds',
+                                  String(next)
+                                );
+                              } catch {
+                                // Ignore storage failures in restricted environments.
+                              }
                               void createPairing(next);
                             }
                           }}

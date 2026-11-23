@@ -393,6 +393,7 @@ pub fn native_engine_extra_dirs(agent_id: &str) -> &'static [&'static str] {
     match AgentKind::from_lenient(agent_id) {
         Some(AgentKind::ClaudeCode) => &[".local/bin", ".claude/local"],
         Some(AgentKind::Codex) => &[".local/bin", "AppData/Local/Programs/OpenAI/Codex/bin"],
+        Some(AgentKind::MuseCode) => &[".local/bin", "AppData/Local/Programs/muse"],
         _ => &[],
     }
 }
@@ -401,6 +402,7 @@ fn native_engine_executable_name(agent_id: &str) -> Option<&'static str> {
     match AgentKind::from_lenient(agent_id)? {
         AgentKind::ClaudeCode => Some("claude"),
         AgentKind::Codex => Some("codex"),
+        AgentKind::MuseCode => Some("muse"),
         _ => None,
     }
 }
@@ -504,6 +506,11 @@ fn resolve_cli_in_home_dirs(
                     .join("Codex")
                     .join("bin");
                 if let Some(found) = resolve_cli_in_dir(&base, "codex") {
+                    return Some(found);
+                }
+            } else if cmd.eq_ignore_ascii_case("muse") {
+                let base = local_app_data.join("Programs").join("muse");
+                if let Some(found) = resolve_cli_in_dir(&base, "muse") {
                     return Some(found);
                 }
             }
@@ -753,6 +760,7 @@ impl BuiltInProfileCatalog {
             profiles: vec![
                 claude_code_profile(),
                 codex_profile(),
+                muse_code_profile(),
                 pi_profile(),
                 opencode_profile(),
                 grok_profile(),

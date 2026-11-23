@@ -63,15 +63,17 @@ pub enum AgentKind {
     #[ts(rename = "zcode")]
     ZCode,
     Omp,
+    MuseCode,
     QaMock,
 }
 
 impl AgentKind {
     /// Every variant, in Agent Bar / picker order. `QaMock` stays last because
     /// it is a test identity, not a product Agent.
-    pub const ALL: [AgentKind; 21] = [
+    pub const ALL: [AgentKind; 22] = [
         AgentKind::ClaudeCode,
         AgentKind::Codex,
+        AgentKind::MuseCode,
         AgentKind::Pi,
         AgentKind::Opencode,
         AgentKind::Grok,
@@ -123,6 +125,7 @@ impl AgentKind {
             AgentKind::CommandCode => "command_code",
             AgentKind::ZCode => "zcode",
             AgentKind::Omp => "omp",
+            AgentKind::MuseCode => "muse_code",
             AgentKind::QaMock => "qa_mock",
         }
     }
@@ -166,6 +169,7 @@ impl AgentKind {
             // the same wire id.
             "zcode" => AgentKind::ZCode,
             "omp" | "ohmypi" => AgentKind::Omp,
+            "musecode" | "muse" => AgentKind::MuseCode,
             "qamock" => AgentKind::QaMock,
             _ => return None,
         };
@@ -227,6 +231,7 @@ mod tests {
         let expected = [
             (AgentKind::ClaudeCode, "claude_code"),
             (AgentKind::Codex, "codex"),
+            (AgentKind::MuseCode, "muse_code"),
             (AgentKind::Pi, "pi"),
             (AgentKind::Opencode, "opencode"),
             (AgentKind::Grok, "grok"),
@@ -322,6 +327,11 @@ mod tests {
             ("OMP", AgentKind::Omp),
             ("omp", AgentKind::Omp),
             ("oh-my-pi", AgentKind::Omp),
+            ("MUSE_CODE", AgentKind::MuseCode),
+            ("MuseCode", AgentKind::MuseCode),
+            ("muse-code", AgentKind::MuseCode),
+            ("muse_code", AgentKind::MuseCode),
+            ("muse", AgentKind::MuseCode),
             ("QA_MOCK", AgentKind::QaMock),
             ("QaMock", AgentKind::QaMock),
             ("qa_mock", AgentKind::QaMock),

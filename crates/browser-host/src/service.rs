@@ -906,7 +906,10 @@ pub async fn dispatch(
                 .get("grant")
                 .and_then(Value::as_str)
                 .and_then(|value| serde_json::from_value(Value::String(value.to_string())).ok());
-            let open_in_ui = !bounds.visible || bounds.width < 32.0 || bounds.height < 32.0;
+            let open_in_ui = input
+                .get("openInUi")
+                .and_then(Value::as_bool)
+                .unwrap_or(!bounds.visible || bounds.width < 32.0 || bounds.height < 32.0);
             let wait_for_load = input
                 .get("waitForLoad")
                 .and_then(Value::as_bool)
@@ -3324,6 +3327,44 @@ mod tests {
         assert_eq!(
             *native.events.lock().unwrap(),
             vec!["bounds:false", "close:start", "close:end"]
+        );
+    }
+
+    #[tokio::test]
+    async fn tab_create_with_open_in_ui_false_skips_tab_open_notification() {
+        let native = Arc::new(RecordingNative {
+            bounds: Mutex::new(Vec::new()),
+            events: Mutex::new(Vec::new()),
+        });
+        let service = BrowserService::new(native.clone(), true);
+
+        let created = dispatch(
+            &service,
+            "dimo.browser",
+            "tab.create",
+            json!({
+                "url": "https://example.test/",
+                "openInUi": false,
+                "bounds": {
+                    "x": 0.0,
+                    "y": 0.0,
+                    "width": 1.0,
+                    "height": 1.0,
+                    "scale": 1.0,
+                    "visible": false
+                }
+            }),
+        )
+        .await
+        .expect("tab.create should succeed");
+
+        assert!(created["tabId"].as_str().is_some());
+        let emitted = native.events.lock().expect("events");
+        assert!(
+            emitted
+                .iter()
+                .all(|event| event.get("kind").and_then(Value::as_str) != Some("tab.open")),
+            "UI-initiated tab.create with openInUi=false must not emit tab.open: {emitted:?}"
         );
     }
 }

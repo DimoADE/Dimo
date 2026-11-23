@@ -716,25 +716,38 @@ export function WorkflowStudioDockPanel(props?: WorkflowStudioDockPanelProps) {
 
   useEffect(() => {
     let cancelled = false;
+    let inFlight = false;
     const timer = window.setInterval(() => {
-      if (bindingSourceRef.current) return;
+      if (
+        bindingSourceRef.current ||
+        inFlight ||
+        (typeof document !== 'undefined' && document.hidden)
+      ) {
+        return;
+      }
       const path = sourcePathRef.current;
-      void readWorkflowSourceDocument(sourceApi, path).then((existing) => {
-        if (cancelled || !existing) return;
-        if (bindingSourceRef.current || sourcePathRef.current !== path) return;
-        if (existing.revision === sourceRevisionRef.current) return;
-        if (dirtyRef.current) return;
-        applyingRemoteRef.current = true;
-        const hydrated = toStudioWorkflowDefinition(existing.definition);
-        setDefinition(hydrated);
-        setSavedDefinition(hydrated);
-        setUndoStack([]);
-        setRedoStack([]);
-        sourceRevisionRef.current = existing.revision;
-        window.setTimeout(() => {
-          applyingRemoteRef.current = false;
-        }, 0);
-      });
+      inFlight = true;
+      void readWorkflowSourceDocument(sourceApi, path)
+        .then((existing) => {
+          if (cancelled || !existing) return;
+          if (bindingSourceRef.current || sourcePathRef.current !== path)
+            return;
+          if (existing.revision === sourceRevisionRef.current) return;
+          if (dirtyRef.current) return;
+          applyingRemoteRef.current = true;
+          const hydrated = toStudioWorkflowDefinition(existing.definition);
+          setDefinition(hydrated);
+          setSavedDefinition(hydrated);
+          setUndoStack([]);
+          setRedoStack([]);
+          sourceRevisionRef.current = existing.revision;
+          window.setTimeout(() => {
+            applyingRemoteRef.current = false;
+          }, 0);
+        })
+        .finally(() => {
+          inFlight = false;
+        });
     }, 2000);
     return () => {
       cancelled = true;

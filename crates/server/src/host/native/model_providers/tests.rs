@@ -3276,3 +3276,345 @@ async fn keyless_lan_providers_omit_empty_api_key_in_native_configs() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn multiple_providers_sharing_gateway_url_coexist_without_overwriting() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let store_path = temp.path().join("data/providers.json");
+    let environment = HashMap::new();
+    let shared_url = "https://model.dimo-ai.com/v1";
+
+    // Single-enable agent (Codex): different groups and numbered duplicates coexist.
+    let codex = AgentId::parse("codex").unwrap();
+    for (name, key, model) in [
+        ("Dimo-GPT", "sk-gpt-1", "gpt-5"),
+        ("Dimo-Claude", "sk-claude-1", "claude-sonnet-4-5"),
+        ("Dimo-GPT_1", "sk-gpt-2", "gpt-5-mini"),
+    ] {
+        save(
+            &store_path,
+            &home,
+            &environment,
+            AgentModelProviderSaveRequest {
+                id: None,
+                name: name.to_string(),
+                agent_id: codex.clone(),
+                api_url: shared_url.to_string(),
+                api_key: Some(key.to_string()),
+                model: model.to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let codex_view = list_with_native(&store_path, codex.clone(), Some(&home.join(".codex")))
+        .await
+        .unwrap();
+    assert_eq!(codex_view.providers.len(), 3);
+    let gpt_1 = codex_view
+        .providers
+        .iter()
+        .find(|p| p.name == "Dimo-GPT_1")
+        .unwrap();
+    assert_eq!(gpt_1.api_key, "sk-gpt-2");
+
+    // Multi-enable agent (OpenClaw): enabling two same-URL groups writes two distinct keys.
+    let openclaw = AgentId::parse("openclaw").unwrap();
+    let oc_a_view = save(
+        &store_path,
+        &home,
+        &environment,
+        AgentModelProviderSaveRequest {
+            id: None,
+            name: "Dimo-GPT".to_string(),
+            agent_id: openclaw.clone(),
+            api_url: shared_url.to_string(),
+            api_key: Some("sk-oc-gpt".to_string()),
+            model: r#"{"id":"gpt-5","models":["gpt-5"]}"#.to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let oc_a_id = oc_a_view
+        .providers
+        .iter()
+        .find(|p| p.name == "Dimo-GPT")
+        .unwrap()
+        .id
+        .clone();
+    let oc_b_view = save(
+        &store_path,
+        &home,
+        &environment,
+        AgentModelProviderSaveRequest {
+            id: None,
+            name: "Dimo-GPT_1".to_string(),
+            agent_id: openclaw.clone(),
+            api_url: shared_url.to_string(),
+            api_key: Some("sk-oc-gpt-1".to_string()),
+            model: r#"{"id":"gpt-5-mini","models":["gpt-5-mini"]}"#.to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let oc_b_id = oc_b_view
+        .providers
+        .iter()
+        .find(|p| p.name == "Dimo-GPT_1")
+        .unwrap()
+        .id
+        .clone();
+    assert_ne!(oc_a_id, oc_b_id);
+
+    let after_enable_a = bind_with_mode(
+        &store_path,
+        &home,
+        &environment,
+        openclaw.clone(),
+        Some(oc_a_id.clone()),
+        Some(true),
+    )
+    .await
+    .unwrap();
+    assert!(
+        after_enable_a
+            .providers
+            .iter()
+            .find(|p| p.id == oc_a_id)
+            .unwrap()
+            .bound
+    );
+    assert!(
+        !after_enable_a
+            .providers
+            .iter()
+            .find(|p| p.id == oc_b_id)
+            .unwrap()
+            .bound
+    );
+
+    let after_enable_b = bind_with_mode(
+        &store_path,
+        &home,
+        &environment,
+        openclaw.clone(),
+        Some(oc_b_id.clone()),
+        Some(true),
+    )
+    .await
+    .unwrap();
+    assert!(after_enable_b.providers.iter().all(|p| p.bound));
+
+    let after_disable_b = bind_with_mode(
+        &store_path,
+        &home,
+        &environment,
+        openclaw.clone(),
+        Some(oc_b_id.clone()),
+        Some(false),
+    )
+    .await
+    .unwrap();
+    assert!(
+        after_disable_b
+            .providers
+            .iter()
+            .find(|p| p.id == oc_a_id)
+            .unwrap()
+            .bound
+    );
+    assert!(
+        !after_disable_b
+            .providers
+            .iter()
+            .find(|p| p.id == oc_b_id)
+            .unwrap()
+            .bound
+    );
+}
+
+#[tokio::test]
+async fn muse_code_provider_bind_projects_settings_and_auth_and_unbind_restores_oauth() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let xdg_config = temp.path().join("xdg");
+    let muse_home = xdg_config.join("muse");
+    let store_path = temp.path().join("data/providers.json");
+    tokio::fs::create_dir_all(&muse_home).await.unwrap();
+
+    let original_settings = r#"{"schema_version":1,"model":"muse-default"}"#;
+    let original_auth = r#"{"schema_version":1,"providers":{"meta":{"mechanism":"oauth","access_token":"oauth-tok"}}}"#;
+    tokio::fs::write(muse_home.join("settings.json"), original_settings)
+        .await
+        .unwrap();
+    tokio::fs::write(muse_home.join("auth.json"), original_auth)
+        .await
+        .unwrap();
+
+    let environment = HashMap::from([(
+        "XDG_CONFIG_HOME".to_string(),
+        xdg_config.to_string_lossy().to_string(),
+    )]);
+    let agent_id = AgentId::parse("muse_code").unwrap();
+
+    let created = save(
+        &store_path,
+        &home,
+        &environment,
+        AgentModelProviderSaveRequest {
+            id: None,
+            name: "Muse Gateway".to_string(),
+            agent_id: agent_id.clone(),
+            api_url: "https://gateway.muse.example/v1".to_string(),
+            api_key: Some("sk-muse-gateway".to_string()),
+            model: "muse-pro".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let provider_id = created.providers[0].id.clone();
+
+    let bound_view = bind(
+        &store_path,
+        &home,
+        &environment,
+        agent_id.clone(),
+        Some(provider_id.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        bound_view.bound_provider_id.as_deref(),
+        Some(provider_id.as_str())
+    );
+
+    let settings: serde_json::Value = serde_json::from_slice(
+        &tokio::fs::read(muse_home.join("settings.json"))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(settings["schema_version"], 1);
+    assert_eq!(
+        settings["endpoint_transport"]["base_url"],
+        "https://gateway.muse.example/v1"
+    );
+    assert_eq!(settings["endpoint_transport"]["auth"], "bearer");
+    assert_eq!(settings["model"], "muse-pro");
+
+    let auth: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(muse_home.join("auth.json")).await.unwrap())
+            .unwrap();
+    assert_eq!(auth["schema_version"], 1);
+    assert_eq!(auth["providers"]["meta"]["api_key"], "sk-muse-gateway");
+
+    let (probe_url, probe_key) = resolve_probe_target(
+        &store_path,
+        &home,
+        &environment,
+        &agent_id,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(probe_url, "https://gateway.muse.example/v1");
+    assert_eq!(probe_key, "sk-muse-gateway");
+
+    // Unbinding must restore both original settings.json and OAuth auth.json losslessly.
+    let unbound = bind(&store_path, &home, &environment, agent_id.clone(), None)
+        .await
+        .unwrap();
+    assert!(unbound.bound_provider_id.is_none());
+    assert_eq!(
+        tokio::fs::read_to_string(muse_home.join("settings.json"))
+            .await
+            .unwrap(),
+        original_settings
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(muse_home.join("auth.json"))
+            .await
+            .unwrap(),
+        original_auth
+    );
+
+    // A keyless local proxy writes endpoint_transport.auth = "none" without clobbering auth.json.
+    let local_saved = save(
+        &store_path,
+        &home,
+        &environment,
+        AgentModelProviderSaveRequest {
+            id: None,
+            name: "Local Muse Shim".to_string(),
+            agent_id: agent_id.clone(),
+            api_url: "http://127.0.0.1:4310".to_string(),
+            api_key: Some(String::new()),
+            model: String::new(),
+        },
+    )
+    .await
+    .unwrap();
+    let local_id = local_saved
+        .providers
+        .iter()
+        .find(|item| item.name == "Local Muse Shim")
+        .unwrap()
+        .id
+        .clone();
+    bind(&store_path, &home, &environment, agent_id, Some(local_id))
+        .await
+        .unwrap();
+    let local_settings: serde_json::Value = serde_json::from_slice(
+        &tokio::fs::read(muse_home.join("settings.json"))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(local_settings["schema_version"], 1);
+    assert_eq!(
+        local_settings["endpoint_transport"]["base_url"],
+        "http://127.0.0.1:4310"
+    );
+    assert_eq!(local_settings["endpoint_transport"]["auth"], "none");
+    assert!(local_settings.get("model").is_none());
+    assert_eq!(
+        tokio::fs::read_to_string(muse_home.join("auth.json"))
+            .await
+            .unwrap(),
+        original_auth
+    );
+}
+
+#[tokio::test]
+async fn muse_code_live_native_config_is_detected_and_adopted() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let muse_home = home.join(".config").join("muse");
+    let store_path = temp.path().join("data/providers.json");
+    tokio::fs::create_dir_all(&muse_home).await.unwrap();
+    tokio::fs::write(
+        muse_home.join("settings.json"),
+        r#"{"schema_version":1,"endpoint_transport":{"base_url":"https://custom.muse.example","auth":"bearer"},"model":"muse-custom"}"#,
+    )
+    .await
+    .unwrap();
+    tokio::fs::write(
+        muse_home.join("auth.json"),
+        r#"{"schema_version":1,"providers":{"meta":{"api_key":"sk-native-muse"}}}"#,
+    )
+    .await
+    .unwrap();
+
+    let agent_id = AgentId::parse("muse_code").unwrap();
+    let view = list_with_native(&store_path, agent_id, Some(&muse_home))
+        .await
+        .unwrap();
+    assert_eq!(view.providers.len(), 1);
+    assert_eq!(view.providers[0].api_url, "https://custom.muse.example");
+    assert_eq!(view.providers[0].model, "muse-custom");
+    assert!(view.providers[0].credential_present);
+    assert!(view.providers[0].bound);
+}

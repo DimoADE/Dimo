@@ -18,6 +18,8 @@ pub enum NativeEngineKind {
     ClaudeNative,
     /// Rust JSON-RPC 2.0 client -> `codex app-server`.
     CodexNative,
+    /// Rust MSP JSON-RPC 2.0 client -> `muse serve`.
+    MuseNative,
 }
 
 impl NativeEngineKind {
@@ -25,6 +27,7 @@ impl NativeEngineKind {
         match self {
             Self::ClaudeNative => "claude-native",
             Self::CodexNative => "codex-native",
+            Self::MuseNative => "muse-native",
         }
     }
 
@@ -32,6 +35,7 @@ impl NativeEngineKind {
         match self {
             Self::ClaudeNative => AgentKind::ClaudeCode,
             Self::CodexNative => AgentKind::Codex,
+            Self::MuseNative => AgentKind::MuseCode,
         }
     }
 
@@ -49,7 +53,7 @@ pub enum EngineRuntimePreference {
     /// all other agents.
     #[default]
     NativeFirst,
-    /// Force the ACP adapter path even for Claude Code and Codex.
+    /// Force the ACP adapter path even for flagship native engines.
     AcpOnly,
 }
 
@@ -88,6 +92,16 @@ impl NativeEngineDescriptor {
                 supports_native_steer: true,
                 supports_native_revert: true,
                 supports_native_fork: true,
+                supports_rate_limit_push: true,
+                supports_prompt_cache_ttl: false,
+            },
+            NativeEngineKind::MuseNative => Self {
+                kind,
+                engine_id: kind.engine_id().to_string(),
+                agent_kind: AgentKind::MuseCode,
+                supports_native_steer: true,
+                supports_native_revert: false,
+                supports_native_fork: false,
                 supports_rate_limit_push: true,
                 supports_prompt_cache_ttl: false,
             },
@@ -143,6 +157,7 @@ pub fn resolve_native_engine_kind_with_env(
         "codex" | "codex_native" | "openai_codex" | "codex_cli" => {
             Some(NativeEngineKind::CodexNative)
         }
+        "muse_code" | "musecode" | "muse" | "muse_native" => Some(NativeEngineKind::MuseNative),
         _ => None,
     }
 }
@@ -195,6 +210,22 @@ mod tests {
             ),
             Some(NativeEngineKind::CodexNative)
         );
+        assert_eq!(
+            resolve_native_engine_kind_with_env(
+                "muse_code",
+                EngineRuntimePreference::NativeFirst,
+                None
+            ),
+            Some(NativeEngineKind::MuseNative)
+        );
+        assert_eq!(
+            resolve_native_engine_kind_with_env(
+                "builtin:muse",
+                EngineRuntimePreference::NativeFirst,
+                None
+            ),
+            Some(NativeEngineKind::MuseNative)
+        );
 
         for acp_agent in [
             "opencode",
@@ -242,6 +273,14 @@ mod tests {
             ),
             Some(NativeEngineKind::ClaudeNative)
         );
+        assert_eq!(
+            resolve_native_engine_kind_with_env(
+                "muse_code",
+                EngineRuntimePreference::NativeFirst,
+                Some("acp")
+            ),
+            None
+        );
     }
 
     #[test]
@@ -263,5 +302,14 @@ mod tests {
         assert!(codex.supports_native_fork);
         assert!(codex.supports_rate_limit_push);
         assert!(!codex.supports_prompt_cache_ttl);
+
+        let muse = NativeEngineKind::MuseNative.descriptor();
+        assert_eq!(muse.engine_id, "muse-native");
+        assert_eq!(muse.agent_kind, AgentKind::MuseCode);
+        assert!(muse.supports_native_steer);
+        assert!(!muse.supports_native_revert);
+        assert!(!muse.supports_native_fork);
+        assert!(muse.supports_rate_limit_push);
+        assert!(!muse.supports_prompt_cache_ttl);
     }
 }

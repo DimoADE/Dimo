@@ -8,7 +8,7 @@ product
 
 **Dimo** is an **All-in-One Agent-Native Development Platform** uniting a visual multi-agent development environment and a Vibe Coding toolkit on a high-performance, highly decoupled Rust core where **everything is a plugin**.
 
-Developers use Dimo to visualize and orchestrate **20+ Coding Agents** (Claude Code, Codex, OpenCode, Cursor, Antigravity, DeepSeek, Grok, Cline, Kimi Code, CodeBuddy, Qoder, TRAE CLI, and the open ACP ecosystem) across free split-tab and Infinite Canvas workspaces, isolated Git worktrees, 3-tier agent collaboration flows, cross-agent session handoffs, and connected Mobile / Desktop / WebUI / Server hosts.
+Developers use Dimo to visualize and orchestrate **20+ Coding Agents** (Claude Code, Codex, OpenCode, Cursor, Antigravity, DeepSeek, Grok, Cline, Kimi Code, CodeBuddy, Qoder, TRAE CLI, and the open ACP ecosystem) across free split-tab and Infinite Canvas workspaces, isolated Git worktrees, 3-tier agent collaboration flows, Pulse event-driven automations, cross-agent session handoffs, and connected Mobile / Desktop / WebUI / Server hosts.
 
 ## Users
 
@@ -22,7 +22,7 @@ Success means a developer gets the best possible Vibe Coding experience—direct
 
 1. **Visualize and unify heterogeneous agents** — run 20+ coding agents in one transparent environment (**dedicated native Agent engine adapters first, ACP compatibility second**) with unified management of official subscriptions, API keys, provider presets, model routing, and live usage/quota visibility.
 2. **Fluid dual workspaces** — switch losslessly between **Free Split Tabs** for deep focus and an **Infinite Spatial Canvas** where dozens of live agent windows, editors, diffs, terminals, and browsers work side by side.
-3. **Collaborate and migrate freely across agents** — combine `&Agent` delegation, persistent AI team collaboration rooms, and visual workflows with seamless **cross-agent session migration**, in-flight **Live Steering**, and non-destructive **Session Forking**.
+3. **Collaborate, automate, and migrate freely across agents** — combine `&Agent` delegation, persistent AI team collaboration rooms, Pulse event-driven triggers, and visual Dual-Primitive DAG workflows with seamless **cross-agent session migration**, in-flight **Live Steering**, and non-destructive **Session Forking**.
 4. **Multi-Worktree engineering & Multi-Host connectivity** — isolate parallel agent work in Git worktrees with built-in diff/merge review, while keeping Desktop, WebUI, headless Server, SSH, encrypted peer links, native Mobile apps, and chat bots connected in real time.
 5. **Everything is a Plugin** — keep the core fast and lightweight while delivering Vibe Coding tools (Browser, Office, Computer Use, Code Completion, Voice Input, Research Skills, and community extensions) as modular, on-demand plugins.
 
@@ -30,7 +30,7 @@ Success means a developer gets the best possible Vibe Coding experience—direct
 
 Calm, inspectable, and precise.
 
-Dimo feels like a high-craft engineering cockpit (aligned with macOS Tahoe Liquid-Glass chrome over opaque, high-contrast content surfaces documented in `DESIGN.md`). Polish serves scanability, state honesty, and low cognitive friction across multi-hour sessions. Copy is direct, concrete, and free of hype.
+Dimo feels like a high-craft engineering cockpit (aligned with macOS Tahoe two-layer opaque chrome and high-contrast content surfaces documented in [`DESIGN.md`](DESIGN.md)). Polish serves scanability, state honesty, and low cognitive friction across multi-hour sessions. Copy is direct, concrete, and free of hype.
 
 ## Anti-references
 

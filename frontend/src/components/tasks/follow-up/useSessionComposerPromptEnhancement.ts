@@ -24,7 +24,9 @@ export function useSessionComposerPromptEnhancement({
   draftPrompt: string;
   sessionId: string | null | undefined;
   workspaceId: string | null | undefined;
-  contextMessages: PromptEnhancementContextMessage[];
+  contextMessages:
+    | PromptEnhancementContextMessage[]
+    | (() => PromptEnhancementContextMessage[]);
   applyEnhancedPrompt: (prompt: string) => void;
   setFollowUpError: (message: string | null) => void;
 }) {
@@ -88,12 +90,16 @@ export function useSessionComposerPromptEnhancement({
     setFollowUpErrorRef.current(null);
 
     try {
+      const resolvedContextMessages =
+        typeof contextMessagesRef.current === 'function'
+          ? contextMessagesRef.current()
+          : contextMessagesRef.current;
       const result = await configApi.enhancePrompt(
         buildPromptEnhancementRequest({
           draftPrompt: currentDraftPrompt,
           sessionId,
           workspaceId,
-          contextMessages: contextMessagesRef.current,
+          contextMessages: resolvedContextMessages,
         })
       );
       const prompt = normalizeEnhancedPrompt({

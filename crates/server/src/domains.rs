@@ -137,140 +137,115 @@ impl ServerApplicationDomains {
         } else {
             None
         };
+        self.dispatch_command(principal, command, args).await
+    }
+
+    fn dispatch_command<'a>(
+        &'a self,
+        principal: &'a Principal,
+        command: DomainCommand,
+        args: Value,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Value, ApplicationError>> + Send + 'a>,
+    > {
         match command {
-            DomainCommand::PluginActionCatalog => self.plugin_catalog().await,
-            DomainCommand::PluginControlCatalog => self.plugin_control_catalog().await,
-            DomainCommand::OfficialProductMcpState => self.official_product_mcp_state().await,
-            DomainCommand::CollaborationCall => self.collaboration_call(args).await,
-            DomainCommand::PluginMcpStatus => self.plugin_mcp_status().await,
-            DomainCommand::PluginMcpEnsureRunning => self.plugin_mcp_ensure_running().await,
-            DomainCommand::PluginProductDetail => self.plugin_product_detail(args).await,
-            DomainCommand::PluginSaveConfig => self.plugin_save_config(args).await,
-            DomainCommand::PluginContributionCatalog => self.plugin_contribution_catalog().await,
-            DomainCommand::ProviderCatalogList => self.provider_catalog_list(args).await,
-            DomainCommand::PluginResolveFileOpener => self.plugin_resolve_file_opener(args).await,
-            DomainCommand::PluginOpenFilePreview => self.plugin_open_file_preview(args).await,
-            DomainCommand::PluginCloseFilePreview => self.plugin_close_file_preview(args).await,
-            DomainCommand::PluginRenewFilePreview => self.plugin_renew_file_preview(args).await,
-            DomainCommand::PluginControlSetEnabled => self.plugin_control_set_enabled(args).await,
-            DomainCommand::PluginControlGrantPermissions => {
-                self.plugin_control_grant_permissions(args).await
+            DomainCommand::PluginActionCatalog
+            | DomainCommand::PluginControlCatalog
+            | DomainCommand::OfficialProductMcpState
+            | DomainCommand::CollaborationCall
+            | DomainCommand::PluginMcpStatus
+            | DomainCommand::PluginMcpEnsureRunning
+            | DomainCommand::PluginProductDetail
+            | DomainCommand::PluginSaveConfig
+            | DomainCommand::PluginContributionCatalog
+            | DomainCommand::ProviderCatalogList
+            | DomainCommand::PluginResolveFileOpener
+            | DomainCommand::PluginOpenFilePreview
+            | DomainCommand::PluginCloseFilePreview
+            | DomainCommand::PluginRenewFilePreview
+            | DomainCommand::PluginControlSetEnabled
+            | DomainCommand::PluginControlGrantPermissions
+            | DomainCommand::PluginControlInstallRuntime
+            | DomainCommand::PluginControlImport
+            | DomainCommand::PluginControlImportCli
+            | DomainCommand::PluginResolveProviderBind
+            | DomainCommand::PluginMarketplaceCatalog
+            | DomainCommand::PluginMarketplaceListing
+            | DomainCommand::PluginMarketplaceInstall
+            | DomainCommand::PluginCheckUpdates
+            | DomainCommand::PluginControlLogs
+            | DomainCommand::PluginControlDiagnostics
+            | DomainCommand::PluginControlUninstall
+            | DomainCommand::PluginControlGcRuntimes
+            | DomainCommand::PluginSurfaceOpen
+            | DomainCommand::PluginSurfaceInvoke
+            | DomainCommand::PluginSurfaceRevoke
+            | DomainCommand::PluginHostCall
+            | DomainCommand::PluginInvokeContribution
+            | DomainCommand::PluginCommandInvoke => {
+                self.dispatch_plugin_command(principal, command, args)
             }
-            DomainCommand::PluginControlInstallRuntime => {
-                self.plugin_control_install_runtime(args).await
+            DomainCommand::ProjectList
+            | DomainCommand::ProjectRepositories
+            | DomainCommand::RepoBranches
+            | DomainCommand::AgentManagementBar
+            | DomainCommand::AgentCapabilityCatalog
+            | DomainCommand::AgentCapabilityCatalogFresh
+            | DomainCommand::AgentRefreshCapabilityCatalog
+            | DomainCommand::AgentSkillsList
+            | DomainCommand::UserSystemInfo
+            | DomainCommand::ArtifactList
+            | DomainCommand::ArtifactOpenPreview
+            | DomainCommand::ArtifactClosePreview
+            | DomainCommand::AutomationList
+            | DomainCommand::AutomationEngineStatus
+            | DomainCommand::AutomationCreate
+            | DomainCommand::AutomationCreateWorkflow
+            | DomainCommand::AutomationUpdate
+            | DomainCommand::AutomationSetEnabled
+            | DomainCommand::AutomationDelete
+            | DomainCommand::AutomationRunNow
+            | DomainCommand::AutomationCancelRun
+            | DomainCommand::AutomationRuns
+            | DomainCommand::AutomationPreviewNextRuns
+            | DomainCommand::AutomationTemplates
+            | DomainCommand::AutomationUnseenFailures
+            | DomainCommand::AutomationMarkSeen
+            | DomainCommand::AutomationExportSpec
+            | DomainCommand::AutomationImportSpec
+            | DomainCommand::DelegationCancel => self.dispatch_core_command(command, args),
+            DomainCommand::ConversationDetail
+            | DomainCommand::ConversationEventsSince
+            | DomainCommand::ConversationRowsSince
+            | DomainCommand::ConversationEnsureSessionControls
+            | DomainCommand::ConversationTouch
+            | DomainCommand::ConversationTimelinePage
+            | DomainCommand::ConversationTimelineImage
+            | DomainCommand::ConversationRebindSession
+            | DomainCommand::ConversationPreviewEngineHandoff
+            | DomainCommand::ConversationConfirmEngineHandoff
+            | DomainCommand::ConversationGoalControl
+            | DomainCommand::ConversationStopAsyncTask
+            | DomainCommand::ConversationTruncateToTurn
+            | DomainCommand::ConversationSearch
+            | DomainCommand::ConversationExportMarkdown
+            | DomainCommand::ConversationExportHtml
+            | DomainCommand::ConversationExport
+            | DomainCommand::ConversationClose
+            | DomainCommand::ConversationCheckpointPreview
+            | DomainCommand::ConversationProjects
+            | DomainCommand::ConversationWorkspaceTree
+            | DomainCommand::ConversationWorkspaceFile
+            | DomainCommand::ConversationWorkspaceDiff
+            | DomainCommand::ConversationImport
+            | DomainCommand::ConversationFork
+            | DomainCommand::ConversationCheckRollbackSafety
+            | DomainCommand::ConversationRateLimitUpdateAutoResume
+            | DomainCommand::ConversationRateLimitCancelWait
+            | DomainCommand::ConversationSideChatSend
+            | DomainCommand::ConversationSideChatAbort => {
+                self.dispatch_conversation_command(principal, command, args)
             }
-            DomainCommand::PluginControlImport => self.plugin_control_import(args).await,
-            DomainCommand::PluginControlImportCli => self.plugin_control_import_cli(args).await,
-            DomainCommand::PluginResolveProviderBind => {
-                self.plugin_resolve_provider_bind(args).await
-            }
-            DomainCommand::PluginMarketplaceCatalog => self.plugin_marketplace_catalog(args).await,
-            DomainCommand::PluginMarketplaceListing => self.plugin_marketplace_listing(args).await,
-            DomainCommand::PluginMarketplaceInstall => self.plugin_marketplace_install(args).await,
-            DomainCommand::PluginCheckUpdates => {
-                self.check_plugin_updates(
-                    args.get("cached").and_then(Value::as_bool).unwrap_or(false),
-                )
-                .await
-            }
-            DomainCommand::PluginControlLogs => self.plugin_control_logs(args).await,
-            DomainCommand::PluginControlDiagnostics => self.plugin_control_diagnostics(args).await,
-            DomainCommand::PluginControlUninstall => self.plugin_control_uninstall(args).await,
-            DomainCommand::PluginControlGcRuntimes => self.plugin_control_gc_runtimes(args).await,
-            DomainCommand::PluginSurfaceOpen => self.plugin_surface_open(args).await,
-            DomainCommand::PluginSurfaceInvoke => self.plugin_surface_invoke(args).await,
-            DomainCommand::PluginSurfaceRevoke => self.plugin_surface_revoke(args).await,
-            DomainCommand::PluginHostCall => self.plugin_host_call(principal, args).await,
-            DomainCommand::PluginInvokeContribution => self.plugin_invoke_contribution(args).await,
-            DomainCommand::PluginCommandInvoke => self.plugin_command_invoke(principal, args).await,
-            DomainCommand::ProjectList => self.project_list().await,
-            DomainCommand::ProjectRepositories => self.project_repositories(args).await,
-            DomainCommand::RepoBranches => self.repo_branches(args).await,
-            DomainCommand::AgentManagementBar => self.agent_management_bar().await,
-            DomainCommand::AgentCapabilityCatalog => self.agent_capability_catalog(args).await,
-            DomainCommand::AgentCapabilityCatalogFresh => {
-                self.agent_capability_catalog_fresh(args).await
-            }
-            DomainCommand::AgentRefreshCapabilityCatalog => {
-                self.agent_refresh_capability_catalog(args).await
-            }
-            DomainCommand::AgentSkillsList => self.agent_skills(args).await,
-            DomainCommand::UserSystemInfo => self.user_system_info().await,
-            DomainCommand::ArtifactList => self.artifact_list(args).await,
-            DomainCommand::ArtifactOpenPreview => self.open_preview(args).await,
-            DomainCommand::ArtifactClosePreview => self.close_preview(args).await,
-            DomainCommand::AutomationList => self.automation_list().await,
-            DomainCommand::AutomationEngineStatus => {
-                Ok(json!({ "active": self.automation_ownership.current() }))
-            }
-            DomainCommand::AutomationCreate => self.automation_create(args).await,
-            DomainCommand::AutomationCreateWorkflow => self.automation_create_workflow(args).await,
-            DomainCommand::AutomationUpdate => self.automation_update(args).await,
-            DomainCommand::AutomationSetEnabled => self.automation_set_enabled(args).await,
-            DomainCommand::AutomationDelete => self.automation_delete(args).await,
-            DomainCommand::AutomationRunNow => self.automation_run_now(args).await,
-            DomainCommand::AutomationCancelRun => self.automation_cancel_run(args).await,
-            DomainCommand::AutomationRuns => self.automation_runs(args).await,
-            DomainCommand::AutomationPreviewNextRuns => self.automation_preview(args),
-            DomainCommand::AutomationTemplates => self.automation_templates(),
-            DomainCommand::AutomationUnseenFailures => self.automation_unseen_failures().await,
-            DomainCommand::AutomationMarkSeen => self.automation_mark_seen().await,
-            DomainCommand::AutomationExportSpec => self.automation_export_spec(args).await,
-            DomainCommand::AutomationImportSpec => self.automation_import_spec(args).await,
-            DomainCommand::DelegationCancel => self.delegation_cancel(args).await,
-            DomainCommand::ConversationDetail => self.conversation_detail(args).await,
-            DomainCommand::ConversationEventsSince => self.conversation_events_since(args).await,
-            DomainCommand::ConversationRowsSince => self.conversation_rows_since(args).await,
-            DomainCommand::ConversationEnsureSessionControls => {
-                self.conversation_ensure_session_controls(args).await
-            }
-            DomainCommand::ConversationTouch => self.conversation_touch(args).await,
-            DomainCommand::ConversationTimelinePage => self.conversation_timeline_page(args).await,
-            DomainCommand::ConversationTimelineImage => {
-                self.conversation_timeline_image(args).await
-            }
-            DomainCommand::ConversationRebindSession => {
-                self.conversation_rebind_session(args).await
-            }
-            DomainCommand::ConversationPreviewEngineHandoff => {
-                self.conversation_preview_engine_handoff(args).await
-            }
-            DomainCommand::ConversationConfirmEngineHandoff => {
-                self.conversation_confirm_engine_handoff(args).await
-            }
-            DomainCommand::ConversationGoalControl => self.conversation_goal_control(args).await,
-            DomainCommand::ConversationStopAsyncTask => {
-                self.conversation_stop_async_task(args).await
-            }
-            DomainCommand::ConversationTruncateToTurn => {
-                self.conversation_truncate_to_turn(args).await
-            }
-            DomainCommand::ConversationSearch => self.conversation_search_host(args).await,
-            DomainCommand::ConversationExportMarkdown => {
-                self.conversation_export_text(args, false).await
-            }
-            DomainCommand::ConversationExportHtml => {
-                self.conversation_export_text(args, true).await
-            }
-            DomainCommand::ConversationExport => {
-                self.conversation_export_bundle(principal, args).await
-            }
-            DomainCommand::ConversationClose => self.conversation_close_host(args).await,
-            DomainCommand::ConversationCheckpointPreview => {
-                self.conversation_checkpoint_preview(args).await
-            }
-            DomainCommand::ConversationProjects => self.conversation_projects().await,
-            DomainCommand::ConversationWorkspaceTree => {
-                self.conversation_workspace_tree(args).await
-            }
-            DomainCommand::ConversationWorkspaceFile => {
-                self.conversation_workspace_file(args).await
-            }
-            DomainCommand::ConversationWorkspaceDiff => {
-                self.conversation_workspace_diff(args).await
-            }
-            DomainCommand::ConversationImport => self.conversation_import_host(args).await,
-            DomainCommand::ConversationFork => self.conversation_fork_host(args).await,
             DomainCommand::WorkspaceContinueConflicts
             | DomainCommand::WorkspaceConflictFile
             | DomainCommand::WorkspaceWriteConflictResolution
@@ -280,13 +255,8 @@ impl ServerApplicationDomains {
             | DomainCommand::WorkspaceCreateFromPr
             | DomainCommand::WorkspaceRunSetupScript
             | DomainCommand::WorkspaceRunCleanupScript
-            | DomainCommand::WorkspaceRunArchiveScript => {
-                Box::pin(self.product_command(command, args)).await
-            }
-            DomainCommand::AgentScanLocalHistory => {
-                Box::pin(self.surface_command(command, args)).await
-            }
-            DomainCommand::WorkspaceCreate
+            | DomainCommand::WorkspaceRunArchiveScript
+            | DomainCommand::WorkspaceCreate
             | DomainCommand::WorkspaceUpdate
             | DomainCommand::WorkspaceDelete
             | DomainCommand::WorkspaceInitializationStatus
@@ -350,7 +320,7 @@ impl ServerApplicationDomains {
             | DomainCommand::FrontendPreferencesUpdate
             | DomainCommand::ProjectWorktreeSettingsGet
             | DomainCommand::ProjectWorktreeSettingsUpdate
-            | DomainCommand::ReadBinaryAsset => Box::pin(self.product_command(command, args)).await,
+            | DomainCommand::ReadBinaryAsset => Box::pin(self.product_command(command, args)),
             DomainCommand::SubscribeDiffStream
             | DomainCommand::SubscribeConversationStream
             | DomainCommand::SubscribeExecutionProcessesStream
@@ -360,9 +330,10 @@ impl ServerApplicationDomains {
             | DomainCommand::SubscribeScratchStream
             | DomainCommand::SubscribeLogStream
             | DomainCommand::SubscribeSlashCommandsStream => {
-                Box::pin(self.subscribe_stream(command, args)).await
+                Box::pin(self.subscribe_stream(command, args))
             }
-            DomainCommand::AgentConnect
+            DomainCommand::AgentScanLocalHistory
+            | DomainCommand::AgentConnect
             | DomainCommand::AgentPrepareSession
             | DomainCommand::AgentNewSession
             | DomainCommand::AgentResumeSession
@@ -463,6 +434,11 @@ impl ServerApplicationDomains {
             | DomainCommand::GrokPlugins
             | DomainCommand::GrokPluginAdd
             | DomainCommand::GrokPluginRemove
+            | DomainCommand::MusePlugins
+            | DomainCommand::MusePluginInstall
+            | DomainCommand::MusePluginApprove
+            | DomainCommand::MusePluginSetEnabled
+            | DomainCommand::MusePluginRemove
             | DomainCommand::PiPlugins
             | DomainCommand::PiPluginAdd
             | DomainCommand::PiPluginRemove
@@ -484,53 +460,259 @@ impl ServerApplicationDomains {
             | DomainCommand::OpenCodeProviderDisconnect
             | DomainCommand::OpenCodeProviderImport
             | DomainCommand::OpenCodeProviderSetEnabled => {
-                Box::pin(self.surface_command(command, args)).await
+                Box::pin(self.surface_command(command, args))
             }
-            DomainCommand::DbHealthReport => crate::host::db_health::db_health_report(self).await,
-            DomainCommand::DbOptimize => crate::host::db_health::db_optimize(self).await,
+            DomainCommand::DbHealthReport => {
+                Box::pin(crate::host::db_health::db_health_report(self))
+            }
+            DomainCommand::DbOptimize => Box::pin(crate::host::db_health::db_optimize(self)),
             DomainCommand::TriggerEventFolding => {
-                crate::host::db_health::trigger_event_folding(self).await
+                Box::pin(crate::host::db_health::trigger_event_folding(self))
             }
             DomainCommand::ProviderInstancesList => {
-                crate::host::provider_instances::list(self, args).await
+                Box::pin(crate::host::provider_instances::list(self, args))
             }
             DomainCommand::ProviderInstanceCreate => {
-                crate::host::provider_instances::create(self, args).await
+                Box::pin(crate::host::provider_instances::create(self, args))
             }
             DomainCommand::ProviderInstanceUpdate => {
-                crate::host::provider_instances::update(self, args).await
+                Box::pin(crate::host::provider_instances::update(self, args))
             }
             DomainCommand::ProviderInstanceSetDefault => {
-                crate::host::provider_instances::set_default(self, args).await
+                Box::pin(crate::host::provider_instances::set_default(self, args))
             }
             DomainCommand::ProviderInstanceDelete => {
-                crate::host::provider_instances::delete(self, args).await
+                Box::pin(crate::host::provider_instances::delete(self, args))
             }
             DomainCommand::ProviderInstanceTestConnection => {
-                crate::host::provider_instances::test_connection(self, args).await
-            }
-            DomainCommand::ConversationCheckRollbackSafety => {
-                crate::host::rewind_and_recovery::check_rollback_safety(self, args).await
-            }
-            DomainCommand::ConversationRateLimitUpdateAutoResume => {
-                crate::host::rewind_and_recovery::update_rate_limit_auto_resume(self, args).await
-            }
-            DomainCommand::ConversationRateLimitCancelWait => {
-                crate::host::rewind_and_recovery::cancel_rate_limit_wait(self, args).await
-            }
-            DomainCommand::ConversationSideChatSend => {
-                Box::pin(crate::host::side_chat::send(self, args)).await
-            }
-            DomainCommand::ConversationSideChatAbort => {
-                crate::host::side_chat::abort(self, args).await
+                Box::pin(crate::host::provider_instances::test_connection(self, args))
             }
             other if crate::pulse_runtime::is_pulse_domain_command(other) => {
-                Box::pin(self.execute_pulse_command(principal, other, args)).await
+                Box::pin(self.execute_pulse_command(principal, other, args))
             }
             other if crate::host::catalog::handles(other) => {
-                Box::pin(crate::host::catalog::dispatch(self, other, args)).await
+                Box::pin(crate::host::catalog::dispatch(self, other, args))
             }
-            other => Box::pin(self.host_ops(other, args)).await,
+            other => Box::pin(self.host_ops(other, args)),
+        }
+    }
+
+    fn dispatch_plugin_command<'a>(
+        &'a self,
+        principal: &'a Principal,
+        command: DomainCommand,
+        args: Value,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Value, ApplicationError>> + Send + 'a>,
+    > {
+        match command {
+            DomainCommand::PluginActionCatalog => Box::pin(self.plugin_catalog()),
+            DomainCommand::PluginControlCatalog => Box::pin(self.plugin_control_catalog()),
+            DomainCommand::OfficialProductMcpState => Box::pin(self.official_product_mcp_state()),
+            DomainCommand::CollaborationCall => Box::pin(self.collaboration_call(args)),
+            DomainCommand::PluginMcpStatus => Box::pin(self.plugin_mcp_status()),
+            DomainCommand::PluginMcpEnsureRunning => Box::pin(self.plugin_mcp_ensure_running()),
+            DomainCommand::PluginProductDetail => Box::pin(self.plugin_product_detail(args)),
+            DomainCommand::PluginSaveConfig => Box::pin(self.plugin_save_config(args)),
+            DomainCommand::PluginContributionCatalog => {
+                Box::pin(self.plugin_contribution_catalog())
+            }
+            DomainCommand::ProviderCatalogList => Box::pin(self.provider_catalog_list(args)),
+            DomainCommand::PluginResolveFileOpener => {
+                Box::pin(self.plugin_resolve_file_opener(args))
+            }
+            DomainCommand::PluginOpenFilePreview => Box::pin(self.plugin_open_file_preview(args)),
+            DomainCommand::PluginCloseFilePreview => Box::pin(self.plugin_close_file_preview(args)),
+            DomainCommand::PluginRenewFilePreview => Box::pin(self.plugin_renew_file_preview(args)),
+            DomainCommand::PluginControlSetEnabled => {
+                Box::pin(self.plugin_control_set_enabled(args))
+            }
+            DomainCommand::PluginControlGrantPermissions => {
+                Box::pin(self.plugin_control_grant_permissions(args))
+            }
+            DomainCommand::PluginControlInstallRuntime => {
+                Box::pin(self.plugin_control_install_runtime(args))
+            }
+            DomainCommand::PluginControlImport => Box::pin(self.plugin_control_import(args)),
+            DomainCommand::PluginControlImportCli => Box::pin(self.plugin_control_import_cli(args)),
+            DomainCommand::PluginResolveProviderBind => {
+                Box::pin(self.plugin_resolve_provider_bind(args))
+            }
+            DomainCommand::PluginMarketplaceCatalog => {
+                Box::pin(self.plugin_marketplace_catalog(args))
+            }
+            DomainCommand::PluginMarketplaceListing => {
+                Box::pin(self.plugin_marketplace_listing(args))
+            }
+            DomainCommand::PluginMarketplaceInstall => {
+                Box::pin(self.plugin_marketplace_install(args))
+            }
+            DomainCommand::PluginCheckUpdates => {
+                let cached = args.get("cached").and_then(Value::as_bool).unwrap_or(false);
+                Box::pin(self.check_plugin_updates(cached))
+            }
+            DomainCommand::PluginControlLogs => Box::pin(self.plugin_control_logs(args)),
+            DomainCommand::PluginControlDiagnostics => {
+                Box::pin(self.plugin_control_diagnostics(args))
+            }
+            DomainCommand::PluginControlUninstall => Box::pin(self.plugin_control_uninstall(args)),
+            DomainCommand::PluginControlGcRuntimes => {
+                Box::pin(self.plugin_control_gc_runtimes(args))
+            }
+            DomainCommand::PluginSurfaceOpen => Box::pin(self.plugin_surface_open(args)),
+            DomainCommand::PluginSurfaceInvoke => Box::pin(self.plugin_surface_invoke(args)),
+            DomainCommand::PluginSurfaceRevoke => Box::pin(self.plugin_surface_revoke(args)),
+            DomainCommand::PluginHostCall => Box::pin(self.plugin_host_call(principal, args)),
+            DomainCommand::PluginInvokeContribution => {
+                Box::pin(self.plugin_invoke_contribution(args))
+            }
+            DomainCommand::PluginCommandInvoke => {
+                Box::pin(self.plugin_command_invoke(principal, args))
+            }
+            _ => unreachable!("non-plugin command routed to dispatch_plugin_command"),
+        }
+    }
+
+    fn dispatch_core_command<'a>(
+        &'a self,
+        command: DomainCommand,
+        args: Value,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Value, ApplicationError>> + Send + 'a>,
+    > {
+        match command {
+            DomainCommand::ProjectList => Box::pin(self.project_list()),
+            DomainCommand::ProjectRepositories => Box::pin(self.project_repositories(args)),
+            DomainCommand::RepoBranches => Box::pin(self.repo_branches(args)),
+            DomainCommand::AgentManagementBar => Box::pin(self.agent_management_bar()),
+            DomainCommand::AgentCapabilityCatalog => Box::pin(self.agent_capability_catalog(args)),
+            DomainCommand::AgentCapabilityCatalogFresh => {
+                Box::pin(self.agent_capability_catalog_fresh(args))
+            }
+            DomainCommand::AgentRefreshCapabilityCatalog => {
+                Box::pin(self.agent_refresh_capability_catalog(args))
+            }
+            DomainCommand::AgentSkillsList => Box::pin(self.agent_skills(args)),
+            DomainCommand::UserSystemInfo => Box::pin(self.user_system_info()),
+            DomainCommand::ArtifactList => Box::pin(self.artifact_list(args)),
+            DomainCommand::ArtifactOpenPreview => Box::pin(self.open_preview(args)),
+            DomainCommand::ArtifactClosePreview => Box::pin(self.close_preview(args)),
+            DomainCommand::AutomationList => Box::pin(self.automation_list()),
+            DomainCommand::AutomationEngineStatus => {
+                let active = self.automation_ownership.current();
+                Box::pin(async move { Ok(json!({ "active": active })) })
+            }
+            DomainCommand::AutomationCreate => Box::pin(self.automation_create(args)),
+            DomainCommand::AutomationCreateWorkflow => {
+                Box::pin(self.automation_create_workflow(args))
+            }
+            DomainCommand::AutomationUpdate => Box::pin(self.automation_update(args)),
+            DomainCommand::AutomationSetEnabled => Box::pin(self.automation_set_enabled(args)),
+            DomainCommand::AutomationDelete => Box::pin(self.automation_delete(args)),
+            DomainCommand::AutomationRunNow => Box::pin(self.automation_run_now(args)),
+            DomainCommand::AutomationCancelRun => Box::pin(self.automation_cancel_run(args)),
+            DomainCommand::AutomationRuns => Box::pin(self.automation_runs(args)),
+            DomainCommand::AutomationPreviewNextRuns => {
+                let result = self.automation_preview(args);
+                Box::pin(async move { result })
+            }
+            DomainCommand::AutomationTemplates => {
+                let result = self.automation_templates();
+                Box::pin(async move { result })
+            }
+            DomainCommand::AutomationUnseenFailures => Box::pin(self.automation_unseen_failures()),
+            DomainCommand::AutomationMarkSeen => Box::pin(self.automation_mark_seen()),
+            DomainCommand::AutomationExportSpec => Box::pin(self.automation_export_spec(args)),
+            DomainCommand::AutomationImportSpec => Box::pin(self.automation_import_spec(args)),
+            DomainCommand::DelegationCancel => Box::pin(self.delegation_cancel(args)),
+            _ => unreachable!("non-core command routed to dispatch_core_command"),
+        }
+    }
+
+    fn dispatch_conversation_command<'a>(
+        &'a self,
+        principal: &'a Principal,
+        command: DomainCommand,
+        args: Value,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Value, ApplicationError>> + Send + 'a>,
+    > {
+        match command {
+            DomainCommand::ConversationDetail => Box::pin(self.conversation_detail(args)),
+            DomainCommand::ConversationEventsSince => {
+                Box::pin(self.conversation_events_since(args))
+            }
+            DomainCommand::ConversationRowsSince => Box::pin(self.conversation_rows_since(args)),
+            DomainCommand::ConversationEnsureSessionControls => {
+                Box::pin(self.conversation_ensure_session_controls(args))
+            }
+            DomainCommand::ConversationTouch => Box::pin(self.conversation_touch(args)),
+            DomainCommand::ConversationTimelinePage => {
+                Box::pin(self.conversation_timeline_page(args))
+            }
+            DomainCommand::ConversationTimelineImage => {
+                Box::pin(self.conversation_timeline_image(args))
+            }
+            DomainCommand::ConversationRebindSession => {
+                Box::pin(self.conversation_rebind_session(args))
+            }
+            DomainCommand::ConversationPreviewEngineHandoff => {
+                Box::pin(self.conversation_preview_engine_handoff(args))
+            }
+            DomainCommand::ConversationConfirmEngineHandoff => {
+                Box::pin(self.conversation_confirm_engine_handoff(args))
+            }
+            DomainCommand::ConversationGoalControl => {
+                Box::pin(self.conversation_goal_control(args))
+            }
+            DomainCommand::ConversationStopAsyncTask => {
+                Box::pin(self.conversation_stop_async_task(args))
+            }
+            DomainCommand::ConversationTruncateToTurn => {
+                Box::pin(self.conversation_truncate_to_turn(args))
+            }
+            DomainCommand::ConversationSearch => Box::pin(self.conversation_search_host(args)),
+            DomainCommand::ConversationExportMarkdown => {
+                Box::pin(self.conversation_export_text(args, false))
+            }
+            DomainCommand::ConversationExportHtml => {
+                Box::pin(self.conversation_export_text(args, true))
+            }
+            DomainCommand::ConversationExport => {
+                Box::pin(self.conversation_export_bundle(principal, args))
+            }
+            DomainCommand::ConversationClose => Box::pin(self.conversation_close_host(args)),
+            DomainCommand::ConversationCheckpointPreview => {
+                Box::pin(self.conversation_checkpoint_preview(args))
+            }
+            DomainCommand::ConversationProjects => Box::pin(self.conversation_projects()),
+            DomainCommand::ConversationWorkspaceTree => {
+                Box::pin(self.conversation_workspace_tree(args))
+            }
+            DomainCommand::ConversationWorkspaceFile => {
+                Box::pin(self.conversation_workspace_file(args))
+            }
+            DomainCommand::ConversationWorkspaceDiff => {
+                Box::pin(self.conversation_workspace_diff(args))
+            }
+            DomainCommand::ConversationImport => Box::pin(self.conversation_import_host(args)),
+            DomainCommand::ConversationFork => Box::pin(self.conversation_fork_host(args)),
+            DomainCommand::ConversationCheckRollbackSafety => Box::pin(
+                crate::host::rewind_and_recovery::check_rollback_safety(self, args),
+            ),
+            DomainCommand::ConversationRateLimitUpdateAutoResume => Box::pin(
+                crate::host::rewind_and_recovery::update_rate_limit_auto_resume(self, args),
+            ),
+            DomainCommand::ConversationRateLimitCancelWait => Box::pin(
+                crate::host::rewind_and_recovery::cancel_rate_limit_wait(self, args),
+            ),
+            DomainCommand::ConversationSideChatSend => {
+                Box::pin(crate::host::side_chat::send(self, args))
+            }
+            DomainCommand::ConversationSideChatAbort => {
+                Box::pin(crate::host::side_chat::abort(self, args))
+            }
+            _ => unreachable!("non-conversation command routed to dispatch_conversation_command"),
         }
     }
 

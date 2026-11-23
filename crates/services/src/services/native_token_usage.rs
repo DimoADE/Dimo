@@ -436,6 +436,151 @@ fn stamp(timestamp: i64) -> i64 {
         .as_millis() as i64
 }
 
+pub(super) fn parse_muse_session(path: &Path) -> Result<Option<VendorLogUsage>, String> {
+    if path.file_name().and_then(|name| name.to_str()) != Some("session.jsonl") {
+        return Ok(None);
+    }
+    let mut session_id = path
+        .parent()
+        .and_then(|dir| dir.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let mut model = String::new();
+    let mut usage = ProjectUsageTokenCounts::default();
+    let mut turns = 0_i64;
+    let mut first_timestamp = 0_i64;
+    let mut seen_run_ids = std::collections::HashSet::<String>::new();
+
+    for value in read_json_lines(path)? {
+        if let Some(ts_us) = value.get("recorded_at").and_then(Value::as_i64)
+            && ts_us > 0
+            && first_timestamp == 0
+        {
+            first_timestamp = ts_us / 1_000;
+        }
+        if let Some(id) = value
+            .get("stream")
+            .and_then(|s| s.get("id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            session_id = id.to_string();
+        }
+        if value.get("record_type").and_then(Value::as_str) == Some("header")
+            && let Some(id) = value
+                .get("session_id")
+                .or_else(|| value.get("payload").and_then(|p| p.get("session_id")))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        {
+            session_id = id.to_string();
+        }
+        if value.get("record_type").and_then(Value::as_str) != Some("event") {
+            continue;
+        }
+        if value.get("payload_type").and_then(Value::as_str) != Some("runtime.session") {
+            continue;
+        }
+        let Some(payload) = value.get("payload") else {
+            continue;
+        };
+        if let Some(id) = payload
+            .get("session_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            && session_id.is_empty()
+        {
+            session_id = id.to_string();
+        }
+        let Some(event) = payload.get("event") else {
+            continue;
+        };
+        let kind = event
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !matches!(kind, "model_completed" | "automated_review_completed") {
+            continue;
+        }
+        let dedupe_key = payload
+            .get("source_run_record_id")
+            .or_else(|| value.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if let Some(key) = dedupe_key
+            && !seen_run_ids.insert(key)
+        {
+            continue;
+        }
+        let model_id = event
+            .get("model")
+            .and_then(|m| {
+                m.as_str()
+                    .or_else(|| m.get("model_id").and_then(Value::as_str))
+                    .or_else(|| m.get("modelId").and_then(Value::as_str))
+            })
+            .or_else(|| event.get("model_id").and_then(Value::as_str))
+            .or_else(|| payload.get("model").and_then(Value::as_str));
+        remember_model(&mut model, model_id);
+        let Some(parsed) = muse_usage(event.get("usage").or_else(|| event.get("token_usage")))
+        else {
+            continue;
+        };
+        turns += 1;
+        add_counts(&mut usage, &parsed);
+    }
+
+    if !has_counts(&usage) {
+        return Ok(None);
+    }
+    Ok(Some(VendorLogUsage {
+        external_session_id: session_id,
+        timestamp: stamp(first_timestamp),
+        model,
+        tokens: finish_counts(usage),
+        cost: None,
+        summary: None,
+        provider: "muse_code".to_string(),
+        turns: Some(turns),
+    }))
+}
+
+fn muse_usage(raw: Option<&Value>) -> Option<ProjectUsageTokenCounts> {
+    let obj = raw?.as_object()?;
+    let read_i64 = |keys: &[&str]| -> i64 {
+        keys.iter()
+            .find_map(|key| obj.get(*key).and_then(Value::as_i64))
+            .unwrap_or(0)
+            .max(0)
+    };
+    let raw_input = read_i64(&["input_tokens", "inputTokens", "prompt_tokens"]);
+    let output = read_i64(&["output_tokens", "outputTokens", "completion_tokens"]);
+    let raw_cache_read = read_i64(&[
+        "cache_read_tokens",
+        "cacheReadTokens",
+        "cached_input_tokens",
+        "cached_tokens",
+        "cache_read_input_tokens",
+    ]);
+    let raw_cache_write = read_i64(&[
+        "cache_write_tokens",
+        "cacheWriteTokens",
+        "cache_creation_input_tokens",
+    ]);
+    // Muse reports cache_read and cache_write as subsets of input_tokens; clamp defensively.
+    let cache_read = raw_cache_read.min(raw_input);
+    let cache_write = raw_cache_write.min(raw_input.saturating_sub(cache_read));
+    let uncached_input = raw_input.saturating_sub(cache_read.saturating_add(cache_write));
+    if uncached_input == 0 && output == 0 && cache_read == 0 && cache_write == 0 {
+        return None;
+    }
+    Some(counts(uncached_input, output, cache_write, cache_read))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,5 +630,30 @@ mod tests {
         assert_eq!(usage.input_tokens, Some(20));
         assert_eq!(usage.cache_read_tokens, Some(80));
         assert_eq!(usage.total_tokens, Some(105));
+    }
+
+    #[test]
+    fn muse_session_jsonl_dedupes_runs_and_splits_cache_from_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("muse-sess-42");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let file = session_dir.join("session.jsonl");
+        let lines = [
+            r#"{"schema_version":1,"id":"r1","recorded_at":1750000000123000,"record_type":"event","payload_type":"runtime.session","stream":{"kind":"session","id":"stream-sess-42"},"payload":{"source_run_record_id":"run-1","event":{"kind":"model_completed","model":{"model_id":"muse-2"},"usage":{"input_tokens":1000,"output_tokens":200,"cache_read_tokens":700,"cache_write_tokens":100}}}}"#,
+            r#"{"schema_version":1,"id":"r2","recorded_at":1750000001000000,"record_type":"event","payload_type":"runtime.session","stream":{"kind":"session","id":"stream-sess-42"},"payload":{"source_run_record_id":"run-1","event":{"kind":"model_completed","model":"muse-2","usage":{"input_tokens":1000,"output_tokens":200,"cache_read_tokens":700,"cache_write_tokens":100}}}}"#,
+            r#"{"schema_version":1,"id":"r3","recorded_at":1750000002000000,"record_type":"event","payload_type":"runtime.session","stream":{"kind":"session","id":"stream-sess-42"},"payload":{"event":{"kind":"automated_review_completed","model":"muse-2","usage":{"input_tokens":500,"output_tokens":50,"cached_tokens":100,"cache_write_tokens":0}}}}"#,
+        ];
+        std::fs::write(&file, lines.join("\n")).unwrap();
+        let parsed = parse_muse_session(&file).unwrap().expect("parsed usage");
+        assert_eq!(parsed.provider, "muse_code");
+        assert_eq!(parsed.external_session_id, "stream-sess-42");
+        assert_eq!(parsed.model, "muse-2");
+        assert_eq!(parsed.timestamp, 1_750_000_000_123);
+        assert_eq!(parsed.turns, Some(2));
+        assert_eq!(parsed.tokens.input_tokens, Some(600));
+        assert_eq!(parsed.tokens.output_tokens, Some(250));
+        assert_eq!(parsed.tokens.cache_read_tokens, Some(800));
+        assert_eq!(parsed.tokens.cache_write_tokens, Some(100));
+        assert_eq!(parsed.tokens.total_tokens, Some(1750));
     }
 }

@@ -1832,7 +1832,55 @@ html.dark {
   height: 12px !important;
 }
 
-.legacy-design .git-mode-selector.astryx-selector {
+.legacy-design .astryx-multi-selector[data-variant='input'] {
+  border-width: 1px !important;
+  border-style: solid !important;
+  border-color: var(--color-border-emphasized, var(--border-strong)) !important;
+  border-radius: var(
+    --_field-radius,
+    var(--radius-element, var(--radius))
+  ) !important;
+  background-color: var(
+    --color-background-surface,
+    var(--surface-content)
+  ) !important;
+  box-sizing: border-box !important;
+  transition:
+    border-color 125ms ease,
+    box-shadow 125ms ease !important;
+  outline: none !important;
+}
+
+.legacy-design
+  .astryx-multi-selector[data-variant='input']:hover:not(:focus-within):not(
+    [aria-disabled='true']
+  ):not(:has(:disabled)) {
+  box-shadow: inset 0 0 0 2px
+    color-mix(
+      in srgb,
+      var(--color-border-emphasized, var(--border-strong)) 30%,
+      transparent
+    ) !important;
+}
+
+.legacy-design .astryx-multi-selector[data-variant='input']:focus-within {
+  border-color: var(--color-accent, hsl(var(--primary))) !important;
+  box-shadow: inset 0 0 0 2px
+    var(--color-accent-muted, hsl(var(--primary) / 0.12)) !important;
+}
+
+.legacy-design .astryx-multi-selector button {
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  outline: none !important;
+}
+
+.legacy-design .git-mode-selector.astryx-selector,
+.legacy-design .git-branch-selector.astryx-selector {
   height: 24px !important;
   min-height: 24px !important;
   padding-block: 0 !important;
@@ -1843,13 +1891,15 @@ html.dark {
   font-weight: 400 !important;
 }
 
-.legacy-design .git-mode-selector.astryx-selector button {
+.legacy-design .git-mode-selector.astryx-selector button,
+.legacy-design .git-branch-selector.astryx-selector button {
   font-size: 11px !important;
   line-height: 1 !important;
   font-weight: 400 !important;
 }
 
-.legacy-design .git-mode-selector.astryx-selector .astryx-icon {
+.legacy-design .git-mode-selector.astryx-selector .astryx-icon,
+.legacy-design .git-branch-selector.astryx-selector .astryx-icon {
   width: 12px !important;
   height: 12px !important;
 }
@@ -1955,6 +2005,14 @@ html.dark {
   border: 0;
   border-top: 1px solid hsl(var(--border) / 0.6);
   background: transparent;
+}
+
+.legacy-design
+  [popover]:has([role='listbox'])
+  [role='separator'][aria-labelledby] {
+  border-top: 0;
+  margin-inline: 0;
+  padding-inline: 4px;
 }
 
 .legacy-design
@@ -4365,6 +4423,7 @@ html.dark {
   }
 
   @media (prefers-reduced-motion: reduce) {
+    .composer-option-flow,
     .composer-fast-model-flow {
       animation: none;
       background-position: 50% 50%;
@@ -4397,6 +4456,15 @@ html.dark {
       animation: none;
       color: hsl(var(--live-indigo));
     }
+  }
+  html[data-gpu-mode='software'] .composer-option-flow,
+  html[data-gpu-mode='software'] .composer-fast-model-flow {
+    animation: none;
+    background-position: 50% 50%;
+  }
+  html[data-gpu-mode='software'] .browser-share-grant-control-icon {
+    animation: none;
+    color: hsl(var(--live-indigo));
   }
 
   .tahoe-glass {
@@ -7344,7 +7412,6 @@ html.dark {
     position: relative;
     display: flex;
     width: 100%;
-    max-width: 26rem;
     max-height: min(520px, 65vh);
     flex-direction: column;
     overflow: hidden;
@@ -7352,9 +7419,18 @@ html.dark {
     border-radius: var(--radius-container, var(--radius));
     background: var(--surface-dialog);
     color: var(--text-primary);
-    box-shadow: var(--shadow-popover);
+    box-shadow: var(--shadow-card);
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
+  }
+
+  .agent-question-card--collapsed {
+    max-height: none;
+  }
+
+  .agent-question-collapsed-bar:focus-visible {
+    outline: 2px solid var(--text-primary);
+    outline-offset: -2px;
   }
 
   @keyframes agent-question-fade-up {
@@ -7389,7 +7465,7 @@ html.dark {
   .agent-question-card-content {
     min-height: 0;
     overflow-y: auto;
-    padding: 16px 16px 12px;
+    padding: 16px 16px 10px;
   }
 
   .agent-question-card-prompt {
@@ -7403,26 +7479,27 @@ html.dark {
   .agent-question-options {
     display: flex;
     flex-direction: column;
-    gap: 7px;
+    gap: 4px;
   }
 
   .agent-question-option {
     display: flex;
-    min-height: 42px;
+    min-height: 34px;
     align-items: center;
-    gap: 10px;
-    border: 1px solid var(--border-subtle);
+    gap: 9px;
+    border: 1px solid transparent;
     border-radius: var(--radius);
-    background: var(--surface-card-strong);
-    padding: 9px 11px;
-    color: var(--text-primary);
+    background: transparent;
+    padding: 7px 10px;
+    color: var(--text-muted);
     cursor: pointer;
     transition:
       border-color 160ms ease-out,
-      background-color 160ms ease-out;
+      background-color 160ms ease-out,
+      color 160ms ease-out;
   }
 
-  .agent-question-option:hover {
+  .agent-question-option:not(.agent-question-option--readonly):hover {
     border-color: var(--border-strong);
     background: var(--surface-control-hover);
   }
@@ -7430,17 +7507,48 @@ html.dark {
   .agent-question-option.is-selected {
     border-color: var(--text-primary);
     background: var(--surface-control-hover);
+    color: var(--text-primary);
   }
 
   .agent-question-option.is-answered {
-    border-color: hsl(var(--success) / 0.55);
-    background: hsl(var(--success) / 0.14);
+    border-color: hsl(var(--success) / 0.34);
+    background: hsl(var(--success) / 0.1);
+    color: var(--text-primary);
   }
 
-  .agent-question-option:has(input:focus-visible),
-  .agent-question-option-row:has(input:focus-visible) {
+  .agent-question-option:has(input:focus-visible) {
     outline: 2px solid var(--text-primary);
-    outline-offset: 2px;
+    outline-offset: -2px;
+  }
+
+  .agent-question-option-row:has(
+    input[type='radio']:focus-visible,
+    input[type='checkbox']:focus-visible
+  ) {
+    box-shadow: inset 0 0 0 1.5px var(--border-strong);
+  }
+
+  .agent-question-custom-row {
+    background: transparent;
+  }
+
+  .agent-question-custom-row--solo,
+  .agent-question-custom-row:focus-within,
+  .agent-question-custom-row:has(input:not(:placeholder-shown)) {
+    background: color-mix(
+      in srgb,
+      var(--text-strong) 5%,
+      var(--surface-dialog)
+    );
+  }
+
+  .agent-question-custom-field,
+  .agent-question-custom-field:focus,
+  .agent-question-custom-field:focus-visible {
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    outline: none;
   }
 
   .agent-question-option:has(input:disabled) {
@@ -7464,21 +7572,22 @@ html.dark {
 
   .agent-question-option-indicator {
     position: relative;
-    display: grid;
+    display: inline-flex;
     width: 16px;
     height: 16px;
     flex: none;
-    place-items: center;
-    border: 1px solid var(--text-muted);
+    align-items: center;
+    justify-content: center;
+    border: 1.5px solid var(--border-strong);
     border-radius: 999px;
-    background: var(--surface-card-strong);
-    color: var(--surface-card-strong);
+    background: transparent;
+    color: var(--surface-dialog);
   }
 
   .agent-question-option
     input[type='checkbox']
     + .agent-question-option-indicator {
-    border-radius: var(--radius);
+    border-radius: var(--radius-inner);
   }
 
   .agent-question-option input:checked + .agent-question-option-indicator {
@@ -7486,21 +7595,23 @@ html.dark {
     background: var(--text-primary);
   }
 
-  .agent-question-option
-    input[type='radio']:checked
-    + .agent-question-option-indicator::after {
-    width: 6px;
-    height: 6px;
-    border-radius: 999px;
-    background: var(--surface-card-strong);
-    content: '';
-  }
-
   .agent-question-option.is-answered
     input:checked
     + .agent-question-option-indicator {
-    border-color: hsl(var(--success));
-    background: hsl(var(--success));
+    border-color: var(--status-success-text);
+    background: var(--status-success-text);
+    color: var(--surface-dialog);
+  }
+
+  .agent-question-option-radio-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 999px;
+    background: var(--surface-dialog);
+  }
+
+  .agent-question-option-check {
+    color: var(--status-success-text);
   }
 
   .agent-question-option-copy {
@@ -7520,6 +7631,11 @@ html.dark {
     line-height: 1.35;
   }
 
+  .agent-question-option--readonly:not(.is-answered)
+    .agent-question-option-label {
+    font-weight: 400;
+  }
+
   .agent-question-option-description {
     color: var(--text-muted);
     font-size: 11.5px;
@@ -7534,6 +7650,16 @@ html.dark {
     letter-spacing: 0.02em;
   }
 
+  .agent-question-custom-readonly {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    border: 1px solid hsl(var(--success) / 0.34);
+    border-radius: var(--radius);
+    background: hsl(var(--success) / 0.1);
+  }
+
   .agent-question-custom-input {
     width: 100%;
     height: 38px;
@@ -7545,6 +7671,19 @@ html.dark {
     font-size: 12px;
   }
 
+  .agent-question-custom-input--readonly {
+    height: auto;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    padding: 0;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 500;
+    box-shadow: none;
+    outline: none;
+  }
+
   .agent-question-custom-input::placeholder {
     color: var(--text-muted);
   }
@@ -7554,14 +7693,17 @@ html.dark {
     outline-offset: 2px;
   }
 
+  .agent-question-custom-input--readonly:focus-visible {
+    outline: none;
+  }
+
   .agent-question-card-actions {
     display: flex;
     flex: none;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 10px 14px;
-    border-top: 1px solid var(--border-subtle);
+    padding: 6px 16px 14px;
   }
 
   .agent-question-action {
@@ -7573,10 +7715,21 @@ html.dark {
   }
 
   .agent-question-decline {
-    color: var(--text-muted);
+    border: 0;
+    background: color-mix(
+      in srgb,
+      var(--text-strong) 9%,
+      var(--surface-dialog)
+    );
+    color: var(--text-primary);
   }
 
   .agent-question-decline:hover:not(:disabled) {
+    background: color-mix(
+      in srgb,
+      var(--text-strong) 14%,
+      var(--surface-dialog)
+    );
     color: var(--text-primary);
   }
 
@@ -7593,37 +7746,41 @@ html.dark {
   .agent-question-detail {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 10px;
   }
 
   .agent-question-detail-pager {
-    display: flex;
+    display: inline-flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 8px;
+    gap: 6px;
+    align-self: flex-start;
   }
 
   .agent-question-detail-pager-btn {
     display: inline-flex;
-    width: 28px;
-    height: 28px;
+    width: 24px;
+    height: 24px;
     flex: none;
     align-items: center;
     justify-content: center;
     border: 1px solid var(--border-subtle);
-    border-radius: var(--radius);
+    border-radius: var(--radius-inner);
     background: var(--surface-raised-control);
     color: var(--text-primary);
     cursor: pointer;
+    transition:
+      background-color 140ms ease-out,
+      border-color 140ms ease-out;
   }
 
   .agent-question-detail-pager-btn:hover:not(:disabled) {
+    border-color: var(--border-strong);
     background: var(--surface-raised-control-hover);
   }
 
   .agent-question-detail-pager-btn:disabled {
     cursor: default;
-    opacity: 0.4;
+    opacity: 0.35;
   }
 
   .agent-question-detail-pager-btn:focus-visible {
@@ -7631,12 +7788,156 @@ html.dark {
     outline-offset: 2px;
   }
 
-  .ask-question-kind-tag {
+  .ask-question-tool-card {
+    width: 100%;
+    padding: 14px 16px;
+    border-color: var(--border-subtle);
+    background: var(--surface-card-strong);
+    transition: border-color 150ms ease-out;
+  }
+
+  .ask-question-tool-card:hover,
+  .ask-question-tool-card[data-expanded='true'] {
+    border-color: var(--border-strong);
+  }
+
+  .ask-question-tool-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    min-width: 0;
+  }
+
+  .ask-question-tool-badges {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    gap: 6px;
+    padding-top: 1px;
+  }
+
+  .ask-question-status-pill {
     display: inline-flex;
     height: 20px;
     flex: none;
     align-items: center;
+    gap: 5px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 1;
+    white-space: nowrap;
+  }
+
+  .ask-question-status-pill.is-answered {
+    padding: 0 8px 0 3px;
+    background: hsl(var(--success) / 0.14);
+    color: var(--status-success-text);
+  }
+
+  .ask-question-status-dot {
+    display: inline-flex;
+    width: 14px;
+    height: 14px;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    background: var(--status-success-text);
+    color: var(--surface-dialog);
+  }
+
+  .ask-question-status-pill.is-declined {
     padding: 0 8px;
+    border: 1px solid var(--border-subtle);
+    background: var(--surface-control);
+    color: var(--text-muted);
+  }
+
+  .ask-question-summary {
+    margin-top: 10px;
+  }
+
+  .ask-question-summary-chips {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .ask-question-summary-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 10px;
+    border-radius: var(--radius);
+    background: var(--surface-control);
+  }
+
+  .ask-question-summary-row {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    line-height: 1.35;
+  }
+
+  .ask-question-summary-index {
+    display: inline-flex;
+    width: 16px;
+    height: 16px;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    background: var(--surface-card-strong);
+    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 600;
+  }
+
+  .ask-question-summary-question {
+    min-width: 0;
+    flex: 1 1 auto;
+    overflow: hidden;
+    color: var(--text-secondary);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .ask-question-summary-answers {
+    display: inline-flex;
+    min-width: 0;
+    max-width: 55%;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 4px;
+  }
+
+  .ask-question-answer-chip {
+    display: inline-flex;
+    max-width: 100%;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border: 1px solid hsl(var(--success) / 0.28);
+    border-radius: var(--radius-inner);
+    background: hsl(var(--success) / 0.1);
+    color: var(--status-success-text);
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.35;
+  }
+
+  .ask-question-details-toggle {
+    display: inline-flex;
+    height: 20px;
+    flex: none;
+    align-items: center;
+    gap: 3px;
+    padding: 0 8px 0 6px;
     border: 1px solid var(--border-subtle);
     border-radius: 999px;
     background: var(--surface-control);
@@ -7644,10 +7945,29 @@ html.dark {
     font-size: 11px;
     font-weight: 500;
     line-height: 1;
+    white-space: nowrap;
+    cursor: pointer;
+    transition:
+      border-color 140ms ease-out,
+      background-color 140ms ease-out,
+      color 140ms ease-out;
+  }
+
+  .ask-question-details-toggle:hover {
+    border-color: var(--border-strong);
+    background: var(--surface-control-hover);
+    color: var(--text-primary);
+  }
+
+  .ask-question-details-toggle:focus-visible {
+    outline: 2px solid var(--text-primary);
+    outline-offset: 2px;
   }
 
   .ask-question-tool-card .agent-question-detail {
     margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border-subtle);
     max-height: min(24rem, 50vh);
     overflow-y: auto;
   }
@@ -7655,10 +7975,11 @@ html.dark {
   .ask-question-tool-title {
     display: block;
     min-width: 0;
-    max-width: min(28rem, 100%);
+    max-width: 100%;
     overflow: hidden;
+    font-size: 13.5px;
     font-weight: 500;
-    line-height: 1.35;
+    line-height: 1.4;
     white-space: nowrap;
   }
 
@@ -7691,7 +8012,8 @@ html.dark {
     .composer-shell,
     .conversation-status-dock,
     .agent-question-card,
-    .agent-question-option {
+    .agent-question-option,
+    .ask-question-tool-card {
       transition: none;
     }
   }
@@ -8071,32 +8393,70 @@ html.dark {
     }
   }
 
-  /* Unified Composer Cockpit: Upward-extending tray tucked behind the composer's intact top radius */
+  /* Unified Composer Cockpit: slightly wider outer card that wraps the rounded
+     composer body, hosting the collapsible top tab dock and bottom context bar. */
+  .composer-cockpit-frame {
+    --composer-cockpit-inset: 6px;
+    --composer-cockpit-border: 1px;
+    --composer-cockpit-radius: calc(
+      var(--radius-composer, var(--radius-container, var(--radius))) +
+        var(--composer-cockpit-inset)
+    );
+    position: relative;
+    z-index: 1;
+    overflow: visible;
+  }
+
+  .composer-cockpit-frame:has(
+    .composer-cockpit-dock,
+    .composer-cockpit-footer
+  ) {
+    margin-inline: calc(-1 * var(--composer-cockpit-inset));
+    border: var(--composer-cockpit-border) solid var(--border-strong);
+    border-radius: var(--composer-cockpit-radius);
+    background: color-mix(in srgb, var(--text-strong) 5%, var(--surface-card));
+    box-shadow: var(--shadow-control);
+  }
+
+  .composer-cockpit-core {
+    position: relative;
+  }
+
+  .composer-cockpit-frame:has(.composer-cockpit-dock, .composer-cockpit-footer)
+    .composer-cockpit-core {
+    padding-inline: var(--composer-cockpit-inset);
+  }
+
+  .composer-cockpit-frame:has(.composer-cockpit-footer):not(
+      :has(.composer-cockpit-dock)
+    )
+    .composer-cockpit-core {
+    padding-top: var(--composer-cockpit-inset);
+  }
+
+  .composer-cockpit-frame:has(.composer-cockpit-dock):not(
+      :has(.composer-cockpit-footer)
+    )
+    .composer-cockpit-core {
+    padding-bottom: var(--composer-cockpit-inset);
+  }
+
   .composer-cockpit-dock {
     position: relative;
     z-index: 1;
     overflow: hidden;
-    margin-bottom: calc(
-      -1 * var(--radius-composer, var(--radius-container, var(--radius)))
-    );
-    padding-bottom: var(
-      --radius-composer,
-      var(--radius-container, var(--radius))
-    );
-    border: 1px solid var(--border-strong);
-    border-bottom: 0;
-    border-radius: var(
-        --radius-composer,
-        var(--radius-container, var(--radius))
+    border-radius: calc(
+        var(--composer-cockpit-radius) - var(--composer-cockpit-border)
       )
-      var(--radius-composer, var(--radius-container, var(--radius))) 0 0;
-    background: color-mix(in srgb, var(--text-strong) 6%, var(--surface-card));
-    box-shadow: var(--shadow-control);
+      calc(var(--composer-cockpit-radius) - var(--composer-cockpit-border)) 0 0;
+    background: transparent;
     animation: composer-fade-in 140ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
 
   .composer-cockpit-dock:has(.composer-cockpit-panel) {
-    background: color-mix(in srgb, var(--text-strong) 3%, var(--surface-card));
+    margin-bottom: var(--composer-cockpit-inset);
+    border-bottom: 1px solid var(--border-subtle);
+    background: color-mix(in srgb, var(--text-strong) 2%, var(--surface-card));
   }
 
   .composer-cockpit-tabbar {
@@ -8104,13 +8464,13 @@ html.dark {
     align-items: center;
     justify-content: space-between;
     gap: 6px;
-    padding: 6px 12px;
+    padding: 6px 14px;
     background: transparent;
   }
 
   .composer-cockpit-dock:has(.composer-cockpit-panel) .composer-cockpit-tabbar {
     border-bottom: 1px solid var(--border-subtle);
-    background: color-mix(in srgb, var(--text-strong) 6%, var(--surface-card));
+    background: color-mix(in srgb, var(--text-strong) 5%, var(--surface-card));
   }
 
   .composer-cockpit-tabs {
@@ -8372,12 +8732,93 @@ html.dark {
     color: var(--text-strong);
   }
 
+  .composer-cockpit-footer {
+    display: flex;
+    min-height: 32px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 6px 16px 7px;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.25;
+  }
+
+  .composer-cockpit-footer-left {
+    display: inline-flex;
+    min-width: 0;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+  }
+
+  .composer-cockpit-footer-right {
+    display: inline-flex;
+    min-width: 0;
+    flex: 0 1 auto;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .composer-cockpit-footer-item {
+    display: inline-flex;
+    min-width: 0;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+  }
+
+  .composer-cockpit-footer-branch {
+    max-width: 14rem;
+  }
+
+  .composer-cockpit-footer-trigger {
+    display: inline-flex;
+    min-width: 0;
+    max-width: 12rem;
+    align-items: center;
+    gap: 5px;
+    margin: -3px -6px;
+    padding: 3px 6px;
+    border: 0;
+    border-radius: var(--radius-inner);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    white-space: nowrap;
+    cursor: pointer;
+    transition:
+      background-color 140ms ease-out,
+      color 140ms ease-out;
+  }
+
+  .composer-cockpit-footer-trigger:hover:not(:disabled),
+  .composer-cockpit-footer-trigger[data-state='open'] {
+    background: var(--surface-control-hover);
+    color: var(--text-primary);
+  }
+
+  .composer-cockpit-footer-trigger:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
+  .composer-cockpit-footer-directory {
+    max-width: 15rem;
+  }
+
+  .composer-cockpit-footer-trigger:focus-visible {
+    outline: 2px solid hsl(var(--primary) / 0.45);
+    outline-offset: 1px;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .conversation-status-dock,
     .composer-status-action-slot,
     .composer-status-disclosure > svg,
     .composer-cockpit-dock,
-    .composer-cockpit-dot.is-live {
+    .composer-cockpit-dot.is-live,
+    .composer-cockpit-footer-trigger {
       transition: none;
       animation: none;
     }
@@ -9187,17 +9628,23 @@ html.dark {
     transform: none !important;
   }
 
-  html:not(.host-windows) :where(.legacy-design) .project-rail-liquid-glass {
+  html:not(.host-windows):not(.host-linux)
+    :where(.legacy-design)
+    .project-rail-liquid-glass {
     transform: translate(-50%, -50%) !important;
     transition: none !important;
   }
 
-  html:not(.host-windows) :where(.legacy-design) .settings-action-bar__glass {
+  html:not(.host-windows):not(.host-linux)
+    :where(.legacy-design)
+    .settings-action-bar__glass {
     transform: translate(-50%, -50%) !important;
     transition: none !important;
   }
 
-  html:not(.host-windows) :where(.legacy-design) .branch-info-liquid-glass {
+  html:not(.host-windows):not(.host-linux)
+    :where(.legacy-design)
+    .branch-info-liquid-glass {
     transform: translate(-50%, -50%) !important;
     transition: none !important;
   }
@@ -10424,6 +10871,10 @@ html.electron-desktop.host-windows .window-chrome {
   padding-right: 6.5rem;
 }
 
+html.electron-desktop[data-host-platform='linux'] .window-chrome {
+  padding-right: 6.5rem;
+}
+
 /* Electron Chromium uses native CSS app-region dragging on frameless titlebars. */
 [data-window-drag-region] img,
 .dimo-window-drag img {
@@ -10444,9 +10895,17 @@ html.electron-desktop
     select,
     textarea,
     label,
+    summary,
+    [contenteditable='true'],
     [role='button'],
+    [role='link'],
     [role='menuitem'],
     [role='combobox'],
+    [role='checkbox'],
+    [role='textbox'],
+    [role='searchbox'],
+    [role='slider'],
+    [role='spinbutton'],
     [role='tab'],
     [role='radio'],
     [role='switch'],
@@ -10456,7 +10915,27 @@ html.electron-desktop
 html.electron-desktop [data-no-drag],
 html.electron-desktop [data-no-drag] *,
 html.electron-desktop .desktop-window-controls,
-html.electron-desktop .desktop-window-controls * {
+html.electron-desktop .desktop-window-controls *,
+html.electron-desktop
+  [data-floating-layer]:not([data-state='closed']):not([hidden]),
+html.electron-desktop
+  [data-floating-layer]:not([data-state='closed']):not([hidden])
+  *,
+html.electron-desktop [role='dialog'][aria-modal='true']:not([hidden]),
+html.electron-desktop [role='dialog'][aria-modal='true']:not([hidden]) *,
+html.electron-desktop .dialog-backdrop,
+html.electron-desktop .collaboration-settings-modal-overlay,
+html.electron-desktop .collaboration-settings-modal-overlay *,
+html.electron-desktop [data-radix-popper-content-wrapper],
+html.electron-desktop [data-radix-popper-content-wrapper] *,
+html.electron-desktop .astryx-select-menu,
+html.electron-desktop .astryx-select-menu *,
+html.electron-desktop .product-context-menu,
+html.electron-desktop .product-context-menu *,
+html.electron-desktop [data-basic-guide-callout],
+html.electron-desktop [data-basic-guide-callout] *,
+html.electron-desktop [data-basic-guide-panel],
+html.electron-desktop [data-basic-guide-panel] * {
   -webkit-app-region: no-drag;
 }
 
@@ -10470,9 +10949,135 @@ html.host-windows
   .dv-tabs-and-actions-container,
 html.host-windows :where(.legacy-design) .settings-titlebar,
 html.host-windows :where(.legacy-design) .settings-sidebar,
-html.host-windows :where(.legacy-design) .vu-toast-surface {
+html.host-windows :where(.legacy-design) .branch-info-liquid-glass .glass__warp,
+html.host-windows
+  :where(.legacy-design)
+  .project-rail-liquid-glass
+  .glass__warp,
+html.host-windows
+  :where(.legacy-design)
+  .settings-action-bar__glass
+  .glass__warp,
+html.host-windows
+  :where(.legacy-design)
+  .project-rail-liquid-glass[data-host-chrome='solid'],
+html.host-windows :where(.legacy-design) .kanban-usage-card--pink,
+html.host-windows :where(.legacy-design) .kanban-usage-card--blue,
+html.host-windows :where(.legacy-design) .kanban-usage-card--green,
+html.host-windows :where(.legacy-design) .kanban-usage-card--red,
+html.host-windows :where(.legacy-design) .dialog-backdrop,
+html.host-windows :where(.legacy-design) .collaboration-thread-overlay,
+html.host-windows :where(.legacy-design) .vu-toast-surface,
+html.host-linux :where(.legacy-design) .tahoe-glass,
+html.host-linux :where(.legacy-design) .tahoe-popover,
+html.host-linux :where(.legacy-design) .workspace-topbar,
+html.host-linux :where(.legacy-design) .workspace-chrome,
+html.host-linux
+  :where(.legacy-design)
+  [class*='dockview-theme-ayu']
+  .dv-tabs-and-actions-container,
+html.host-linux :where(.legacy-design) .settings-titlebar,
+html.host-linux :where(.legacy-design) .settings-sidebar,
+html.host-linux :where(.legacy-design) .branch-info-liquid-glass .glass__warp,
+html.host-linux :where(.legacy-design) .project-rail-liquid-glass .glass__warp,
+html.host-linux :where(.legacy-design) .settings-action-bar__glass .glass__warp,
+html.host-linux
+  :where(.legacy-design)
+  .project-rail-liquid-glass[data-host-chrome='solid'],
+html.host-linux :where(.legacy-design) .kanban-usage-card--pink,
+html.host-linux :where(.legacy-design) .kanban-usage-card--blue,
+html.host-linux :where(.legacy-design) .kanban-usage-card--green,
+html.host-linux :where(.legacy-design) .kanban-usage-card--red,
+html.host-linux :where(.legacy-design) .dialog-backdrop,
+html.host-linux :where(.legacy-design) .collaboration-thread-overlay,
+html.host-linux :where(.legacy-design) .vu-toast-surface,
+html[data-gpu-mode='software'] :where(.legacy-design) .tahoe-glass,
+html[data-gpu-mode='software'] :where(.legacy-design) .tahoe-popover,
+html[data-gpu-mode='software'] :where(.legacy-design) .workspace-topbar,
+html[data-gpu-mode='software'] :where(.legacy-design) .workspace-chrome,
+html[data-gpu-mode='software']
+  :where(.legacy-design)
+  [class*='dockview-theme-ayu']
+  .dv-tabs-and-actions-container,
+html[data-gpu-mode='software'] :where(.legacy-design) .settings-titlebar,
+html[data-gpu-mode='software'] :where(.legacy-design) .settings-sidebar,
+html[data-gpu-mode='software']
+  :where(.legacy-design)
+  .branch-info-liquid-glass
+  .glass__warp,
+html[data-gpu-mode='software']
+  :where(.legacy-design)
+  .project-rail-liquid-glass
+  .glass__warp,
+html[data-gpu-mode='software']
+  :where(.legacy-design)
+  .settings-action-bar__glass
+  .glass__warp,
+html[data-gpu-mode='software']
+  :where(.legacy-design)
+  .project-rail-liquid-glass[data-host-chrome='solid'],
+html[data-gpu-mode='software'] :where(.legacy-design) .kanban-usage-card--pink,
+html[data-gpu-mode='software'] :where(.legacy-design) .kanban-usage-card--blue,
+html[data-gpu-mode='software'] :where(.legacy-design) .kanban-usage-card--green,
+html[data-gpu-mode='software'] :where(.legacy-design) .kanban-usage-card--red,
+html[data-gpu-mode='software'] :where(.legacy-design) .dialog-backdrop,
+html[data-gpu-mode='software']
+  :where(.legacy-design)
+  .collaboration-thread-overlay,
+html[data-gpu-mode='software'] :where(.legacy-design) .vu-toast-surface {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
+}
+
+html.host-windows :where(.legacy-design) .branch-info-liquid-glass .glass__warp,
+html.host-windows
+  :where(.legacy-design)
+  .project-rail-liquid-glass
+  .glass__warp,
+html.host-windows
+  :where(.legacy-design)
+  .settings-action-bar__glass
+  .glass__warp,
+html.host-linux :where(.legacy-design) .branch-info-liquid-glass .glass__warp,
+html.host-linux :where(.legacy-design) .project-rail-liquid-glass .glass__warp,
+html.host-linux :where(.legacy-design) .settings-action-bar__glass .glass__warp,
+html[data-gpu-mode='software']
+  :where(.legacy-design)
+  .branch-info-liquid-glass
+  .glass__warp,
+html[data-gpu-mode='software']
+  :where(.legacy-design)
+  .project-rail-liquid-glass
+  .glass__warp,
+html[data-gpu-mode='software']
+  :where(.legacy-design)
+  .settings-action-bar__glass
+  .glass__warp {
+  filter: none !important;
+}
+
+html[data-gpu-mode='software'] .project-rail-inline-stage {
+  --project-rail-glass: var(--surface-shell);
+}
+
+html[data-gpu-mode='software'].dark .project-rail-inline-stage,
+html[data-gpu-mode='software'] .dark .project-rail-inline-stage {
+  --project-rail-glass: var(--surface-glass-solid);
+}
+
+html.host-windows :where(.legacy-design) .branch-info-liquid-glass .glass,
+html.host-windows :where(.legacy-design) .settings-action-bar__glass .glass,
+html.host-linux :where(.legacy-design) .branch-info-liquid-glass .glass,
+html.host-linux :where(.legacy-design) .settings-action-bar__glass .glass,
+html[data-gpu-mode='software']
+  :where(.legacy-design)
+  .branch-info-liquid-glass
+  .glass,
+html[data-gpu-mode='software']
+  :where(.legacy-design)
+  .settings-action-bar__glass
+  .glass {
+  background: var(--surface-dialog) !important;
 }
 
 @media (prefers-reduced-transparency: reduce) {
@@ -10496,10 +11101,21 @@ html.host-windows :where(.legacy-design) .vu-toast-surface {
   :where(.legacy-design) .branch-info-liquid-glass .glass__warp,
   :where(.legacy-design) .project-rail-liquid-glass .glass__warp,
   :where(.legacy-design) .settings-action-bar__glass .glass__warp,
+  :where(.legacy-design) .kanban-usage-card--pink,
+  :where(.legacy-design) .kanban-usage-card--blue,
+  :where(.legacy-design) .kanban-usage-card--green,
+  :where(.legacy-design) .kanban-usage-card--red,
   :where(.legacy-design) .dialog-backdrop,
+  :where(.legacy-design) .collaboration-thread-overlay,
   :where(.legacy-design) .vu-toast-surface {
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
+  }
+
+  :where(.legacy-design) .branch-info-liquid-glass .glass__warp,
+  :where(.legacy-design) .project-rail-liquid-glass .glass__warp,
+  :where(.legacy-design) .settings-action-bar__glass .glass__warp {
+    filter: none !important;
   }
 
   :where(.legacy-design) .branch-info-liquid-glass .glass {

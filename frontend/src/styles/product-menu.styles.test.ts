@@ -189,30 +189,43 @@ describe('product option menus', () => {
     );
   });
 
-  it('tucks the composer cockpit dock behind the intact rounded composer body', () => {
+  it('encloses the composer body, top cockpit dock, and bottom footer inside a wider outer frame', () => {
+    const frame = declarationsFor('.composer-cockpit-frame');
+    const activeFrame = declarationsFor(
+      '.composer-cockpit-frame:has(.composer-cockpit-dock, .composer-cockpit-footer)'
+    );
+    const activeCore = declarationsFor(
+      '.composer-cockpit-frame:has(.composer-cockpit-dock, .composer-cockpit-footer) .composer-cockpit-core'
+    );
     const dock = declarationsFor('.composer-cockpit-dock');
     const tabbar = declarationsFor('.composer-cockpit-tabbar');
     const panel = declarationsFor('.composer-cockpit-panel');
     const childrenList = declarationsFor('.composer-cockpit-children-list');
+    const footer = declarationsFor('.composer-cockpit-footer');
 
+    expect(frame['--composer-cockpit-inset']?.value).toBe('6px');
+    expect(frame.overflow?.value).toBe('visible');
+    expect(activeFrame['margin-inline']?.value).toBe(
+      'calc(-1 * var(--composer-cockpit-inset))'
+    );
+    expect(activeFrame['border-radius']?.value).toBe(
+      'var(--composer-cockpit-radius)'
+    );
+    expect(activeFrame.background?.value).toBe(
+      'color-mix(in srgb, var(--text-strong) 5%, var(--surface-card))'
+    );
+    expect(activeCore['padding-inline']?.value).toBe(
+      'var(--composer-cockpit-inset)'
+    );
     expect(dock.position?.value).toBe('relative');
     expect(Number.parseInt(dock['z-index']?.value ?? '', 10)).toBeLessThan(10);
-    expect(dock['margin-bottom']?.value).toBe(
-      'calc(-1 * var(--radius-composer, var(--radius-container, var(--radius))))'
-    );
-    expect(dock['padding-bottom']?.value).toBe(
-      'var(--radius-composer, var(--radius-container, var(--radius)))'
-    );
-    expect(dock['border-radius']?.value).toBe(
-      'var(--radius-composer, var(--radius-container, var(--radius))) var(--radius-composer, var(--radius-container, var(--radius))) 0 0'
-    );
-    expect(dock.background?.value).toBe(
-      'color-mix(in srgb, var(--text-strong) 6%, var(--surface-card))'
-    );
+    expect(dock.background?.value).toBe('transparent');
     expect(tabbar.background?.value).toBe('transparent');
     expect(panel['max-height']?.value).toBe('176px');
     expect(childrenList['max-height']?.value).toBe('139px');
     expect(childrenList['overflow-y']?.value).toBe('auto');
+    expect(footer.display?.value).toBe('flex');
+    expect(footer['justify-content']?.value).toBe('space-between');
   });
 
   it('restores the composer send button fill over ghost button resets', () => {

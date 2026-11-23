@@ -12,23 +12,21 @@ import { AgentIcon, getAgentName } from '@/components/agents/AgentIcon';
 import { ProductContextMenu } from '@/components/context-menu/ProductContextMenu';
 import { useOptionalUserSystem } from '@/components/ConfigProvider';
 import { confirmCloseWorkspacePanel } from '@/components/panels/previewPanelDirty';
+import { openWorkspaceTerminal } from '@/components/layout/panels/openWorkspaceTerminal';
 import {
   buildWorkspaceTabContextMenu,
   type WorkspaceTabContextMenuKind,
   type WorkspaceTabMenuAgentOption,
   type WorkspaceTabMenuLabels,
 } from '@/components/layout/panels/workspaceTabContextMenu';
+import { toast } from '@/components/ui/toast';
 import { useOptionalPanelActionsContext } from '@/contexts/PanelActionsContext';
 import { useOptionalWorktree } from '@/contexts/WorktreeContext';
 import { isEnabledInstalledAgent } from '@/features/agents/operationalAgent';
 import { useSelectableAgents } from '@/features/agents/useSelectableAgents';
 import { useOptionalCollaborationSpaceStore } from '@/features/collaboration/space/SpaceContext';
 import { findHostBrowserContribution } from '@/features/host-browser/hostBrowserEngine';
-import {
-  contributionMetadata,
-  usePluginHostContributions,
-} from '@/hooks/usePluginHostContributions';
-import { pluginSurfaceId } from '@/lib/hostSurfaceIds';
+import { usePluginHostContributions } from '@/hooks/usePluginHostContributions';
 import { requestCreateAgentSessionInExecutionArea } from '@/lib/requestCreateSession';
 import {
   getDefaultTerminalShell,
@@ -36,17 +34,17 @@ import {
   getTerminalWorkspaceKey,
 } from '@/lib/terminalPreferences';
 import {
-  editorTerminalPanelId,
   isEditorTerminalPanelId,
   tabIdFromEditorTerminalPanelId,
 } from '@/lib/workspaceTerminalTabs';
 import { PANEL_IDS } from '@/stores/useLayoutStore';
-import {
-  generateTerminalTabId,
-  useTerminalStore,
-} from '@/stores/useTerminalStore';
+import { useTerminalStore } from '@/stores/useTerminalStore';
 import { terminalHostPlatform } from '@/utils/platform';
 import { requestPreviewTabRefresh } from '@/utils/previewTabRefresh';
+import {
+  buildCanvasPluginPanelRequest,
+  buildCanvasTerminalPanelRequest,
+} from './canvasPanelRequests';
 import { useSessionCanvasView } from './CanvasViewContext';
 import { runWithCanvasParentNode } from './canvasWorkspaceBridge';
 
@@ -173,7 +171,7 @@ export function useCanvasNodeContextMenu({
       note: t('tabCreation.note', '笔记'),
       review: t('tabCreation.review', '审阅'),
       terminal: t('tabCreation.terminal', '终端'),
-      browser: t('tabCreation.browser', 'Browser'),
+      browser: t('tabCreation.browser', '浏览器'),
       sort: t('tabCreation.sort', '排序'),
       sortByName: t('tabCreation.sortByName', '按名称排序'),
     }),
@@ -185,26 +183,44 @@ export function useCanvasNodeContextMenu({
   const spawnTerminalNode = useCallback(
     (shell?: string, cwd?: string | null) => {
       runWithCanvasParentNode(instanceId, () => {
-        const resolvedShell = shell || defaultShell;
-        const tabId = generateTerminalTabId();
-        const shellInfo = shells.find((item) => item.value === resolvedShell);
-        const title = shellInfo?.label || resolvedShell || labels.terminal;
-        openOrFocusPanelNode?.({
-          id: editorTerminalPanelId(tabId),
-          component: PANEL_IDS.TERMINAL,
-          title,
-          params: {
-            surface: 'editor',
-            tabId,
-            shell: resolvedShell,
-            ...(cwd ? { cwd } : {}),
+        openWorkspaceTerminal({
+          shell,
+          defaultShell,
+          workspaceId: getTerminalWorkspaceKey(
+            workspaceId ?? activeWorktreeId ?? null
+          ),
+          openInEditor: (chosenShell) => {
+            openOrFocusPanelNode?.(
+              buildCanvasTerminalPanelRequest({
+                shell: chosenShell,
+                shells,
+                fallbackTitle: labels.terminal,
+                cwd,
+                parentNodeId: instanceId,
+              })
+            );
           },
-          expanded: true,
-          parentNodeId: instanceId,
+          onExternalError: (error) => {
+            toast.error(t('terminalHeader.openExternalFailed'), {
+              description:
+                error instanceof Error
+                  ? error.message
+                  : t('terminalHeader.confirmWarpInstalled'),
+            });
+          },
         });
       });
     },
-    [defaultShell, instanceId, labels.terminal, openOrFocusPanelNode, shells]
+    [
+      activeWorktreeId,
+      defaultShell,
+      instanceId,
+      labels.terminal,
+      openOrFocusPanelNode,
+      shells,
+      t,
+      workspaceId,
+    ]
   );
 
   const duplicateTerminal = useCallback(() => {
@@ -422,52 +438,27 @@ export function useCanvasNodeContextMenu({
       openBrowser: browser
         ? () =>
             runWithCanvasParentNode(instanceId, () => {
-              const metadata = contributionMetadata(browser);
-              const icon =
-                typeof metadata.icon === 'string' ? metadata.icon : 'globe';
-              const id = `${pluginSurfaceId(browser.pluginId, browser.id)}:${Date.now().toString(36)}`;
-              openOrFocusPanelNode?.({
-                id,
-                component: 'plugin-panel',
-                title: browser.label,
-                params: {
-                  pluginId: browser.pluginId,
-                  contributionId: browser.id,
-                  icon,
-                },
-                expanded: true,
-                parentNodeId: instanceId,
-              });
+              openOrFocusPanelNode?.(
+                buildCanvasPluginPanelRequest(browser, {
+                  forceMultiInstance: true,
+                  fallbackIcon: 'globe',
+                  parentNodeId: instanceId,
+                })
+              );
             })
         : undefined,
-      pluginItems: nonBrowserPlugins.map((item) => {
-        const metadata = contributionMetadata(item);
-        const icon = typeof metadata.icon === 'string' ? metadata.icon : null;
-        return {
-          id: `plugin-${item.pluginId}:${item.id}`,
-          label: item.label,
-          onSelect: () =>
-            runWithCanvasParentNode(instanceId, () => {
-              const baseId = pluginSurfaceId(item.pluginId, item.id);
-              const id =
-                metadata.multiInstance === true
-                  ? `${baseId}:${Date.now().toString(36)}`
-                  : baseId;
-              openOrFocusPanelNode?.({
-                id,
-                component: 'plugin-panel',
-                title: item.label,
-                params: {
-                  pluginId: item.pluginId,
-                  contributionId: item.id,
-                  icon,
-                },
-                expanded: true,
+      pluginItems: nonBrowserPlugins.map((item) => ({
+        id: `plugin-${item.pluginId}:${item.id}`,
+        label: item.label,
+        onSelect: () =>
+          runWithCanvasParentNode(instanceId, () => {
+            openOrFocusPanelNode?.(
+              buildCanvasPluginPanelRequest(item, {
                 parentNodeId: instanceId,
-              });
-            }),
-        };
-      }),
+              })
+            );
+          }),
+      })),
       sortByName: () => {
         sortCanvasNodes?.();
       },

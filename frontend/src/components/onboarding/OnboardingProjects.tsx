@@ -368,46 +368,46 @@ export function OnboardingProjects({
 
     void getDesktopShell()
       .window.onDragDropEvent((event) => {
-          const payload = event.payload;
-          if (payload.type === 'enter' || payload.type === 'over') {
-            setDropActive(true);
-            return;
-          }
-          if (payload.type === 'leave') {
-            setDropActive(false);
-            return;
-          }
-          if (payload.type !== 'drop') return;
-
+        const payload = event.payload;
+        if (payload.type === 'enter' || payload.type === 'over') {
+          setDropActive(true);
+          return;
+        }
+        if (payload.type === 'leave') {
           setDropActive(false);
-          const droppedPaths = payload.paths
-            .map((candidate) => candidate.trim())
-            .filter(Boolean);
-          if (droppedPaths.length === 0) return;
+          return;
+        }
+        if (payload.type !== 'drop') return;
 
-          void (async () => {
-            const results = await Promise.all(
-              droppedPaths.map(async (candidate) => {
-                try {
-                  await fileSystemApi.list(candidate);
-                  return candidate;
-                } catch {
-                  return null;
-                }
-              })
-            );
-            const validPaths = results.filter(
-              (item): item is string => item !== null
-            );
-            if (validPaths.length === 0) {
-              if (mounted.current) {
-                setError(t('app:welcomePage.dropFolderInvalid'));
+        setDropActive(false);
+        const droppedPaths = payload.paths
+          .map((candidate) => candidate.trim())
+          .filter(Boolean);
+        if (droppedPaths.length === 0) return;
+
+        void (async () => {
+          const results = await Promise.all(
+            droppedPaths.map(async (candidate) => {
+              try {
+                await fileSystemApi.list(candidate);
+                return candidate;
+              } catch {
+                return null;
               }
-              return;
+            })
+          );
+          const validPaths = results.filter(
+            (item): item is string => item !== null
+          );
+          if (validPaths.length === 0) {
+            if (mounted.current) {
+              setError(t('app:welcomePage.dropFolderInvalid'));
             }
-            await importDirectoryPaths(validPaths);
-          })();
-        })
+            return;
+          }
+          await importDirectoryPaths(validPaths);
+        })();
+      })
       .then((stopListening) => {
         if (disposed) stopListening();
         else unlisten = stopListening;

@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use super::{
-    adopt_legacy_file, copy_missing_files, existing_official_plugin_roots,
-    load_or_create_host_id, tauri_app_data_file_candidates,
+    adopt_legacy_file, copy_missing_files, existing_official_plugin_roots, load_or_create_host_id,
+    tauri_app_data_file_candidates,
 };
 
 #[test]
@@ -296,9 +296,7 @@ fn dimo_install_candidates_start_with_the_running_bundle_data_dir() {
                     .join("data")
             )
         );
-        assert!(
-            candidates.contains(&PathBuf::from("/Applications/Dimo.app/Contents/MacOS/data"))
-        );
+        assert!(candidates.contains(&PathBuf::from("/Applications/Dimo.app/Contents/MacOS/data")));
     }
     if cfg!(target_os = "linux") {
         assert!(candidates.contains(&PathBuf::from("/opt/Dimo/data")));
@@ -342,8 +340,7 @@ fn superseded_siblings_with_a_database_are_adoption_sources() {
 fn app_update_deletes_only_a_macos_bundle_database() {
     let exe = Path::new("/Applications/Dimo.app/Contents/MacOS/dimo");
     let data = Path::new("/Applications/Dimo.app/Contents/MacOS/data");
-    let aside =
-        Path::new("/Applications/Dimo.app/Contents/MacOS/data.superseded-20261118-120000");
+    let aside = Path::new("/Applications/Dimo.app/Contents/MacOS/data.superseded-20261118-120000");
     let roaming = Path::new("/Users/me/Library/Application Support/app.dimo.dimo");
     assert!(super::app_update_deletes_directory(true, exe, data));
     assert!(super::app_update_deletes_directory(true, exe, aside));
@@ -371,14 +368,16 @@ fn rejects_macos_app_bundle_paths_for_writable_data_dirs() {
     let bundle_exec_dir = root.path().join("Dimo.app").join("Contents").join("MacOS");
     std::fs::create_dir_all(&bundle_exec_dir).unwrap();
     assert!(super::is_inside_macos_app_bundle(&bundle_exec_dir));
-    assert!(super::is_inside_macos_app_bundle(&bundle_exec_dir.join("data")));
+    assert!(super::is_inside_macos_app_bundle(
+        &bundle_exec_dir.join("data")
+    ));
     assert!(super::is_inside_macos_app_bundle_for_os(
         true,
         Path::new("/Applications/Dimo.app/data")
     ));
-    assert!(!super::is_inside_macos_app_bundle(
-        Path::new("/Users/me/Library/Application Support/app.dimo.dimo")
-    ));
+    assert!(!super::is_inside_macos_app_bundle(Path::new(
+        "/Users/me/Library/Application Support/app.dimo.dimo"
+    )));
     assert_eq!(super::install_data_dir_for_exe_dir(&bundle_exec_dir), None);
 
     let bootstrap = root.path().join("config").join("bootstrap.json");
@@ -409,7 +408,10 @@ fn electron_windows_resources_bin_layout_resolves_install_root_and_vibex_sibling
     );
     let scan_dirs = super::packaged_install_scan_dirs_for(&exe);
     assert_eq!(scan_dirs.first(), Some(&install_root));
-    assert_eq!(scan_dirs.get(1), Some(&install_root.join("resources").join("bin")));
+    assert_eq!(
+        scan_dirs.get(1),
+        Some(&install_root.join("resources").join("bin"))
+    );
 
     let dimo_candidates =
         super::dimo_install_data_dir_candidates_for(Some(&exe), None, None, None, None);
@@ -456,10 +458,7 @@ fn electron_macos_resources_bin_layout_resolves_contents_macos_and_vibex_bundle(
 
     let dimo_candidates =
         super::dimo_install_data_dir_candidates_for(Some(&exe), None, None, None, None);
-    assert_eq!(
-        dimo_candidates.first(),
-        Some(&expected_macos.join("data"))
-    );
+    assert_eq!(dimo_candidates.first(), Some(&expected_macos.join("data")));
 
     let vibex_candidates = super::pre_rename_install_data_dir_candidates_for(
         Some(&exe),
@@ -523,4 +522,49 @@ fn electron_linux_resources_bin_layout_resolves_install_root_and_candidates() {
     if cfg!(target_os = "linux") {
         assert!(vibex_candidates.contains(&root.path().join("opt").join("vibex").join("data")));
     }
+}
+
+#[test]
+fn debug_dev_assets_dir_prefers_runtime_workspace_over_stale_compile_time_worktree() {
+    let temp = tempfile::tempdir().unwrap();
+    let main_repo = temp.path().join("main-repo");
+    let stale_worktree = temp.path().join("stale-wt");
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(main_repo.join("crates/utils")).unwrap();
+    std::fs::write(main_repo.join("Cargo.toml"), "[workspace]\n").unwrap();
+    std::fs::write(main_repo.join("crates/utils/Cargo.toml"), "[package]\n").unwrap();
+    std::fs::create_dir_all(stale_worktree.join("crates/utils")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+
+    let exe = main_repo
+        .join("target")
+        .join("debug")
+        .join("dimo-server.exe");
+    let stale_manifest = stale_worktree.join("crates").join("utils");
+
+    // Active cwd inside main_repo wins over stale compile-time manifest dir.
+    assert_eq!(
+        super::resolve_debug_dev_assets_dir(
+            Some(&main_repo.join("frontend")),
+            Some(&exe),
+            &stale_manifest,
+        ),
+        main_repo.join("dev_assets")
+    );
+
+    // When cwd is outside any workspace, target/debug exe location still resolves main_repo.
+    assert_eq!(
+        super::resolve_debug_dev_assets_dir(Some(&outside), Some(&exe), &stale_manifest),
+        main_repo.join("dev_assets")
+    );
+
+    // Fallback to compile-time manifest dir when neither cwd nor exe is inside a workspace.
+    assert_eq!(
+        super::resolve_debug_dev_assets_dir(
+            Some(&outside),
+            Some(&outside.join("dimo-server.exe")),
+            &stale_manifest,
+        ),
+        stale_worktree.join("dev_assets")
+    );
 }

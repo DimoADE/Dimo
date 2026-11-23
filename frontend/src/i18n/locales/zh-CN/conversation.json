@@ -325,6 +325,15 @@
     "showFewerNotices": "收起其余通知",
     "loadingBotSession": "正在加载Bot会话..."
   },
+  "composerContext": {
+    "regionLabel": "工作区与会话状态",
+    "defaultDirectory": "默认目录",
+    "worktree": "Worktree",
+    "branchLabel": "分支：{{branch}}",
+    "permissionLabel": "权限模式：{{mode}}",
+    "switchWorkspaceLabel": "切换工作区：{{workspace}}",
+    "workspaceSwitchFailed": "切换工作区失败"
+  },
   "liveFeedback": {
     "placeholder": "给这一回合纠偏",
     "send": "发送",

@@ -7,13 +7,15 @@ export const FORMAT_LABELS: Record<string, string> = {
   dimo: 'Dimo',
   codex: 'Codex',
   claude_code: 'Claude Code',
+  muse_code: 'Muse Code',
 };
 
-export type PluginEcosystem = 'codex' | 'claude_code' | 'dimo';
+export type PluginEcosystem = 'codex' | 'claude_code' | 'muse_code' | 'dimo';
 
 export const PLUGIN_TABS: Array<{ id: PluginEcosystem; label: string }> = [
   { id: 'codex', label: 'Codex' },
   { id: 'claude_code', label: 'Claude Code' },
+  { id: 'muse_code', label: 'Muse Code' },
   { id: 'dimo', label: 'Dimo' },
 ];
 
@@ -43,6 +45,7 @@ export function initialPluginListPanePercent() {
 export function pluginEcosystem(plugin: PluginControlItem): PluginEcosystem {
   if (plugin.sourceKind === 'codex_native') return 'codex';
   if (plugin.sourceKind === 'claude_code_native') return 'claude_code';
+  if (plugin.sourceKind === 'muse_code_native') return 'muse_code';
   return 'dimo';
 }
 

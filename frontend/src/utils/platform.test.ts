@@ -33,6 +33,7 @@ afterEach(() => {
   document.documentElement.removeAttribute('data-host-platform');
   document.documentElement.classList.remove(
     'host-windows',
+    'host-linux',
     'electron-desktop',
     'desktop-shell'
   );
@@ -63,6 +64,19 @@ describe('getHostPlatform', () => {
     expect(getHostPlatform()).toBe('macos');
     stubPlatform('Linux x86_64');
     expect(getHostPlatform()).toBe('linux');
+  });
+
+  it('prefers authoritative window.dimoDesktop.platform over navigator strings', () => {
+    stubPlatform('MacIntel');
+    window.dimoDesktop = { platform: 'linux' } as Window['dimoDesktop'];
+    expect(getHostPlatform()).toBe('linux');
+
+    window.dimoDesktop = { platform: 'win32' } as Window['dimoDesktop'];
+    expect(getHostPlatform()).toBe('windows');
+
+    stubPlatform('Win32');
+    window.dimoDesktop = { platform: 'darwin' } as Window['dimoDesktop'];
+    expect(getHostPlatform()).toBe('macos');
   });
 });
 
@@ -95,32 +109,42 @@ describe('hostPlatformFromOsType', () => {
 });
 
 describe('usesSolidHostChrome', () => {
-  it('uses solid chrome on Windows even before the host-windows class is applied', () => {
+  it('uses solid chrome on Windows and Linux even before host classes are applied', () => {
     stubPlatform('Win32');
-    document.documentElement.classList.remove('host-windows');
+    document.documentElement.classList.remove('host-windows', 'host-linux');
+    expect(usesSolidHostChrome()).toBe(true);
+
+    stubPlatform('Linux x86_64');
     expect(usesSolidHostChrome()).toBe(true);
   });
 
   it('keeps Liquid Glass on macOS', () => {
     stubPlatform('MacIntel');
-    document.documentElement.classList.remove('host-windows');
+    document.documentElement.classList.remove('host-windows', 'host-linux');
     expect(usesSolidHostChrome()).toBe(false);
   });
 
-  it('honors the host-windows class for tests and CSS fallbacks', () => {
+  it('honors the host-windows and host-linux classes for tests and CSS fallbacks', () => {
     stubPlatform('MacIntel');
     document.documentElement.classList.add('host-windows');
+    expect(usesSolidHostChrome()).toBe(true);
+
+    document.documentElement.classList.remove('host-windows');
+    document.documentElement.classList.add('host-linux');
     expect(usesSolidHostChrome()).toBe(true);
   });
 });
 
 describe('applyHostPlatformToDocument', () => {
-  it('exposes Windows and Linux on html for the Inter UI font override', () => {
+  it('exposes Windows and Linux on html for the Inter UI font override and solid chrome', () => {
     stubPlatform('Win32');
     applyHostPlatformToDocument();
     expect(document.documentElement.dataset.hostPlatform).toBe('windows');
     expect(document.documentElement.classList.contains('host-windows')).toBe(
       true
+    );
+    expect(document.documentElement.classList.contains('host-linux')).toBe(
+      false
     );
 
     stubPlatform('Linux x86_64');
@@ -129,13 +153,19 @@ describe('applyHostPlatformToDocument', () => {
     expect(document.documentElement.classList.contains('host-windows')).toBe(
       false
     );
+    expect(document.documentElement.classList.contains('host-linux')).toBe(
+      true
+    );
   });
 
-  it('does not mark macOS as Windows', () => {
+  it('does not mark macOS as Windows or Linux', () => {
     stubPlatform('MacIntel');
     applyHostPlatformToDocument();
     expect(document.documentElement.dataset.hostPlatform).toBe('macos');
     expect(document.documentElement.classList.contains('host-windows')).toBe(
+      false
+    );
+    expect(document.documentElement.classList.contains('host-linux')).toBe(
       false
     );
   });

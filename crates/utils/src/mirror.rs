@@ -394,4 +394,22 @@ mod tests {
         let url = "https://lf-cdn.trae.com.cn/obj/trae-com-cn/trae-cli/v2/releases/0.209.1/traex-windows-x86_64.exe.gz";
         assert_eq!(download_url_candidates_for_proxy(url, false), vec![url]);
     }
+
+    #[test]
+    fn muse_code_download_candidates_route_through_dimo_facebook_mirror() {
+        let official = "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.25-R9361.1&file=muse-x86-windows.exe";
+        let mirror = "https://mirror.dimo-ai.com/dl/facebook/lookaside/muse/download/?channel=muse&version=1.4.25-R9361.1&file=muse-x86-windows.exe";
+        assert_eq!(
+            download_url_candidates_for_proxy(official, false),
+            vec![mirror, official]
+        );
+        assert_eq!(
+            download_url_candidates_for_proxy(official, true),
+            vec![official, mirror]
+        );
+        assert_eq!(
+            download_url_candidates_for_proxy(mirror, true),
+            vec![official, mirror]
+        );
+    }
 }

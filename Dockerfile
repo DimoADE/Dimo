@@ -11,7 +11,6 @@ COPY ${HOST_FAMILY}/dimo-server /usr/local/bin/dimo-server
 COPY ${HOST_FAMILY}/dimo-mcp /usr/local/bin/dimo-mcp
 COPY ${HOST_FAMILY}/dimo-workflow-mcp /usr/local/bin/dimo-workflow-mcp
 COPY ${HOST_FAMILY}/web /app/web
-COPY ${HOST_FAMILY}/plugins/bundled /app/plugins/bundled
 RUN chmod 755 /usr/local/bin/dimo-server /usr/local/bin/dimo-mcp /usr/local/bin/dimo-workflow-mcp
 ENV DIMO_STATIC_ROOT=/app/web
 ENV DIMO_DATA_DIR=/data

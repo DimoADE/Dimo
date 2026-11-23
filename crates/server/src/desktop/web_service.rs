@@ -6,8 +6,8 @@ use std::{
 
 use axum::Router;
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
 use local_deployment::pty::PtyService;
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
 use uuid::Uuid;
@@ -246,11 +246,45 @@ fn issue_host_token() -> crate::ServerToken {
     ))
 }
 
+fn refresh_runtime_addresses(runtime: &mut WebServiceRuntime) {
+    let listen_addresses = advertised_listen_addresses(runtime.port, runtime.allow_lan);
+    if listen_addresses.is_empty() {
+        return;
+    }
+    let addresses = listen_addresses
+        .iter()
+        .map(|item| item.origin.clone())
+        .collect::<Vec<_>>();
+    if let Some(first) = addresses.first().cloned() {
+        runtime.address = first;
+    }
+    runtime.addresses = addresses;
+    runtime.listen_addresses = listen_addresses;
+}
+
+pub async fn live_lan_origins() -> Vec<remote_protocol::ReachabilityOrigin> {
+    let addresses = {
+        let mut runtime = WEB_SERVICE_RUNTIME.lock().await;
+        if let Some(current) = runtime.as_mut() {
+            refresh_runtime_addresses(current);
+            current.addresses.clone()
+        } else {
+            return Vec::new();
+        }
+    };
+    addresses
+        .into_iter()
+        .filter(|origin| !remote_protocol::is_loopback_origin(origin))
+        .map(remote_protocol::ReachabilityOrigin::lan)
+        .collect()
+}
+
 async fn status_from_runtime(config: WebServiceConfig) -> WebServerStatus {
     let host_id = load_or_create_host_id().await.ok();
     let snapshot = {
-        let runtime = WEB_SERVICE_RUNTIME.lock().await;
-        runtime.as_ref().map(|runtime| {
+        let mut runtime = WEB_SERVICE_RUNTIME.lock().await;
+        runtime.as_mut().map(|runtime| {
+            refresh_runtime_addresses(runtime);
             (
                 runtime.port,
                 runtime.address.clone(),
@@ -340,7 +374,9 @@ pub async fn get_web_server_status() -> Result<WebServerStatus, DesktopError> {
     Ok(status_from_runtime(config).await)
 }
 
-pub async fn start_web_server(ctx: &DesktopWebServiceContext) -> Result<WebServerStatus, DesktopError> {
+pub async fn start_web_server(
+    ctx: &DesktopWebServiceContext,
+) -> Result<WebServerStatus, DesktopError> {
     let mut config = load_config().await?;
     let pool = ctx.pool.clone();
     let store = crate::SqliteTokenHashStore::new(pool.clone());
@@ -683,13 +719,19 @@ pub async fn create_host_device_pairing(
     }
     let host_id = load_or_create_host_id().await?;
     let addresses = {
-        let runtime = WEB_SERVICE_RUNTIME.lock().await;
+        let mut runtime = WEB_SERVICE_RUNTIME.lock().await;
         runtime
-            .as_ref()
-            .map(|current| current.addresses.clone())
+            .as_mut()
+            .map(|current| {
+                refresh_runtime_addresses(current);
+                current.addresses.clone()
+            })
             .unwrap_or_default()
     };
     let reachability = composed_reachability(&addresses).await;
+    let expires_at_unix = chrono::DateTime::parse_from_rfc3339(&challenge.expires_at)
+        .ok()
+        .map(|dt| dt.timestamp());
     let payload = remote_protocol::PairingInvitationPayload::from_challenge(
         host_id,
         preset,
@@ -703,6 +745,7 @@ pub async fn create_host_device_pairing(
         super::host_tunnel::publish_pairing_code_beacon(
             &code_for_beacon,
             &host_id_for_beacon,
+            expires_at_unix,
         )
         .await;
     });
@@ -742,7 +785,9 @@ pub async fn respond_host_connect_request(
     let request_id = request
         .request_id
         .parse::<remote_protocol::PairingId>()
-        .map_err(|error| DesktopError::BadRequest(format!("invalid connect request id: {error}")))?;
+        .map_err(|error| {
+            DesktopError::BadRequest(format!("invalid connect request id: {error}"))
+        })?;
     use crate::ServerAuth;
     let auth = crate::SqliteServerAuth::new(pool.clone());
     auth.respond_connect_request(

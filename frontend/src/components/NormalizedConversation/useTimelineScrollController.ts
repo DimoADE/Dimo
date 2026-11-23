@@ -41,10 +41,7 @@ function estimateVirtualEntrySize(
 ): number {
   if (!entry) return ESTIMATED_CONVERSATION_ROW_HEIGHT;
   if (entry.slice) {
-    if (
-      entry.slice.kind === 'process-fold' ||
-      entry.slice.kind === 'status'
-    ) {
+    if (entry.slice.kind === 'process-fold' || entry.slice.kind === 'status') {
       return 36;
     }
     if (entry.slice.kind === 'block') {
@@ -57,12 +54,15 @@ function estimateVirtualEntrySize(
   const item = visibleTimelineItems[entry.timelineIndex];
   if (!item) return ESTIMATED_CONVERSATION_ROW_HEIGHT;
   if (item.kind === 'side') return 64;
-  return item.item.turn.role === 'user' ? 72 : ESTIMATED_CONVERSATION_ROW_HEIGHT;
+  return item.item.turn.role === 'user'
+    ? 72
+    : ESTIMATED_CONVERSATION_ROW_HEIGHT;
 }
 import {
   CONVERSATION_OPEN_SETTLE_PASSES,
   CONVERSATION_TAIL_RESCUE_PASSES,
   ESTIMATED_CONVERSATION_ROW_HEIGHT,
+  USER_MESSAGE_SCROLL_INSET_PX,
   cancelVirtualizerFollowScroll,
   conversationFollowIntent,
   conversationTailFollowAction,
@@ -70,6 +70,7 @@ import {
   findPreviousUserMessageVirtualIndex,
   findViewportAnchorVirtualIndex,
   isConversationNearBottom,
+  isVirtualizerJumpActive,
   measureScrollMargin,
   measureUnscaledBlockHeight,
   remeasureMountedVirtualRows,
@@ -77,7 +78,6 @@ import {
   scheduleMeasuredScrollToIndex,
   scrollTopAfterPrepend,
   scrollTopToRevealVirtualWindow,
-  startAlignedVirtualOffset,
   virtualListHeightPx,
   type VirtualizedListRef,
 } from '@/components/logs/VirtualizedList';
@@ -165,6 +165,7 @@ export function useTimelineScrollController({
     index: number;
     align: 'start' | 'center' | 'end' | 'auto';
   } | null>(null);
+  const cancelJumpRef = useRef<(() => void) | null>(null);
   const skipNextPrependAdjustRef = useRef(false);
   const [visibleTailSession, setVisibleTailSession] = useState<{
     sessionId: string | null;
@@ -284,6 +285,7 @@ export function useTimelineScrollController({
     getItemKey: (index) => virtualEntries[index]?.key ?? index,
     overscan: OVERSCAN,
     scrollMargin,
+    scrollPaddingStart: USER_MESSAGE_SCROLL_INSET_PX,
     observeElementRect: observeUnscaledElementRect,
     measureElement: measureUnscaledBlockHeight,
     scrollToFn: (offset, options, instance) => {
@@ -301,33 +303,41 @@ export function useTimelineScrollController({
     windowHeight: paintedWindowHeight,
   });
 
+  const cancelPendingJump = useCallback(() => {
+    cancelJumpRef.current?.();
+    cancelJumpRef.current = null;
+    pendingJumpTimelineIndexRef.current = null;
+    cancelVirtualizerFollowScroll(rowVirtualizer);
+  }, [rowVirtualizer]);
+
+  useEffect(() => () => cancelPendingJump(), [cancelPendingJump]);
+
   const jumpToVirtualIndex = useCallback(
     (index: number, align: 'start' | 'center' | 'end' | 'auto' = 'start') => {
       if (index < 0 || index >= virtualEntries.length) return;
+      cancelJumpRef.current?.();
+      cancelJumpRef.current = null;
       let pass = 0;
       const jump = (targetIndex: number) => {
         const currentPass = pass;
         pass += 1;
-        if (align === 'start' && currentPass > 0) {
+        if (currentPass > 0) {
           const list = virtualListRef.current;
           if (list) {
             remeasureMountedVirtualRows(list, rowVirtualizer.resizeItem);
           }
-          const start = rowVirtualizer.measurementsCache[targetIndex]?.start;
-          if (typeof start === 'number') {
-            rowVirtualizer.scrollToOffset(startAlignedVirtualOffset(start), {
-              align: 'start',
-              behavior: 'auto',
-            });
-            return;
-          }
         }
+        // Flush pendingMeasuredCacheIndexes into measurementsCache before
+        // scrollToIndex reads the target offset; staying on scrollToIndex keeps
+        // scrollState.index set so TanStack reconcileScroll converges as newly
+        // mounted rows settle.
+        rowVirtualizer.getTotalSize();
         rowVirtualizer.scrollToIndex(targetIndex, {
           align,
           behavior: 'auto',
         });
       };
-      scheduleMeasuredScrollToIndex(jump, index);
+      cancelJumpRef.current = scheduleMeasuredScrollToIndex(jump, index);
     },
     [rowVirtualizer, virtualEntries.length]
   );
@@ -383,7 +393,7 @@ export function useTimelineScrollController({
   const currentFindMatch = findMatches[safeFindMatchIndex] ?? null;
 
   const detachFromBottom = useCallback(() => {
-    cancelVirtualizerFollowScroll(rowVirtualizer);
+    cancelPendingJump();
     const container = containerRef.current;
     if (container && smoothFollowRef.current) {
       smoothFollowRef.current = false;
@@ -397,7 +407,7 @@ export function useTimelineScrollController({
     if (!isAtBottomRef.current) return;
     isAtBottomRef.current = false;
     onAtBottomChange?.(false);
-  }, [onAtBottomChange, rowVirtualizer, runProgrammaticScroll]);
+  }, [cancelPendingJump, onAtBottomChange, runProgrammaticScroll]);
 
   const handleJumpToVirtualIndex = useCallback(
     (targetIndex: number) => {
@@ -485,14 +495,14 @@ export function useTimelineScrollController({
   }, [findQuery]);
 
   useEffect(() => {
+    cancelPendingJump();
     setFindOpen(false);
     setFindQuery('');
     setFindMatchIndex(0);
     followTailRef.current = true;
     setIsFollowingTail(true);
-    pendingJumpTimelineIndexRef.current = null;
     skipNextPrependAdjustRef.current = false;
-  }, [sessionId]);
+  }, [cancelPendingJump, sessionId]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -572,6 +582,7 @@ export function useTimelineScrollController({
 
   const scrollToBottom = useCallback(
     (behavior: ScrollBehavior) => {
+      cancelPendingJump();
       followTailRef.current = true;
       setIsFollowingTail(true);
       openSettlePassesRef.current = 0;
@@ -579,7 +590,7 @@ export function useTimelineScrollController({
       onAtBottomChange?.(true);
       pinToBottom(behavior);
     },
-    [onAtBottomChange, pinToBottom]
+    [cancelPendingJump, onAtBottomChange, pinToBottom]
   );
 
   const handleScroll = useCallback(
@@ -798,7 +809,8 @@ export function useTimelineScrollController({
     let viewportHeight = container.clientHeight;
     const observer = new ResizeObserver((entries) => {
       updateScrollMargin();
-      const windowResized = win != null && entries.some((e) => e.target === win);
+      const windowResized =
+        win != null && entries.some((e) => e.target === win);
       if (windowResized) {
         remeasureMountedVirtualRows(list, rowVirtualizer.resizeItem);
         const winHeight = win.offsetHeight;
@@ -976,6 +988,16 @@ export function useTimelineScrollController({
   useLayoutEffect(() => {
     const container = containerRef.current;
     if (!container || virtualRows.length === 0) return;
+    const virtualizerScrollOffset = rowVirtualizer.scrollOffset ?? 0;
+    if (
+      !followTailRef.current &&
+      (pendingJumpTimelineIndexRef.current != null ||
+        isVirtualizerJumpActive(rowVirtualizer) ||
+        Math.abs(container.scrollTop - virtualizerScrollOffset) > 1)
+    ) {
+      revealScrollRef.current = null;
+      return;
+    }
     const liveWindowHeight =
       virtualWindowRef.current?.offsetHeight || paintedWindowHeight;
     const next = scrollTopToRevealVirtualWindow({
@@ -1005,6 +1027,7 @@ export function useTimelineScrollController({
     lastScrollHeightRef.current = container.scrollHeight;
   }, [
     paintedWindowHeight,
+    rowVirtualizer,
     runProgrammaticScroll,
     scrollMargin,
     totalSize,
@@ -1139,6 +1162,7 @@ export function useTimelineScrollController({
     findMatches,
     currentFindMatch,
     goToFindMatch,
+    cancelPendingJump,
     detachFromBottom,
     handleJumpToVirtualIndex,
     handleScroll,

@@ -133,7 +133,9 @@ export function PluginImportDialog({
                       {t(
                         importEcosystem === 'codex'
                           ? 'plugins.codexCliDescription'
-                          : 'plugins.claudeCliDescription'
+                          : importEcosystem === 'muse_code'
+                            ? 'plugins.museCliDescription'
+                            : 'plugins.claudeCliDescription'
                       )}
                     </p>
                   </div>
@@ -142,7 +144,11 @@ export function PluginImportDialog({
                   <span>
                     {t('plugins.cliCommandLabel', {
                       ecosystem:
-                        importEcosystem === 'codex' ? 'Codex' : 'Claude Code',
+                        importEcosystem === 'codex'
+                          ? 'Codex'
+                          : importEcosystem === 'muse_code'
+                            ? 'Muse Code'
+                            : 'Claude Code',
                     })}
                   </span>
                   <textarea
@@ -152,11 +158,17 @@ export function PluginImportDialog({
                     placeholder={t(
                       importEcosystem === 'codex'
                         ? 'plugins.codexCliPlaceholder'
-                        : 'plugins.claudeCliPlaceholder'
+                        : importEcosystem === 'muse_code'
+                          ? 'plugins.museCliPlaceholder'
+                          : 'plugins.claudeCliPlaceholder'
                     )}
                     aria-label={t('plugins.cliCommandLabel', {
                       ecosystem:
-                        importEcosystem === 'codex' ? 'Codex' : 'Claude Code',
+                        importEcosystem === 'codex'
+                          ? 'Codex'
+                          : importEcosystem === 'muse_code'
+                            ? 'Muse Code'
+                            : 'Claude Code',
                     })}
                   />
                 </label>

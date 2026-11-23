@@ -60,6 +60,7 @@ export function SessionComposerFrame({
   tabs,
   drawer,
   overlay,
+  footer,
   widthClassName = 'max-w-3xl',
   onFocus,
   onBlur,
@@ -69,6 +70,7 @@ export function SessionComposerFrame({
   tabs?: ReactNode;
   drawer?: ReactNode;
   overlay?: ReactNode;
+  footer?: ReactNode;
   widthClassName?: string;
   onFocus?: FocusEventHandler<HTMLDivElement>;
   onBlur?: FocusEventHandler<HTMLDivElement>;
@@ -87,22 +89,30 @@ export function SessionComposerFrame({
       >
         {status}
         {overlay}
-        {tabs}
-        {drawer}
         <div
-          className="session-composer-anchor relative"
-          data-testid="session-composer-anchor"
+          className="composer-cockpit-frame"
+          data-testid="composer-cockpit-frame"
         >
-          <div
-            className="composer-shell session-composer-body relative z-10 flex flex-col gap-0.5 overflow-visible rounded-[var(--radius-composer,0.75rem)] px-3 py-2"
-            data-testid="session-composer-body"
-            data-typeahead-surface="composer"
-            onClick={handleComposerBodyClick}
-            onFocus={onFocus}
-            onBlur={onBlur}
-          >
-            {children}
+          {tabs}
+          <div className="composer-cockpit-core">
+            {drawer}
+            <div
+              className="session-composer-anchor relative"
+              data-testid="session-composer-anchor"
+            >
+              <div
+                className="composer-shell session-composer-body relative z-10 flex flex-col gap-0.5 overflow-visible rounded-[var(--radius-composer,0.75rem)] px-3 py-2"
+                data-testid="session-composer-body"
+                data-typeahead-surface="composer"
+                onClick={handleComposerBodyClick}
+                onFocus={onFocus}
+                onBlur={onBlur}
+              >
+                {children}
+              </div>
+            </div>
           </div>
+          {footer}
         </div>
       </div>
     </div>

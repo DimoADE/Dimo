@@ -1,6 +1,6 @@
 # `dimoai` — Dimo Host & Control CLI
 
-Official CLI and Host-family launcher for **Dimo** — the **Integrated Agent Development Environment (IADE)** unifying **20 built-in Coding Agents** (Claude Code, Codex, DeepSeek Harness, Google Antigravity, Cursor, OpenCode, Pi, Grok, Cline, OpenClaw, Hermes, CodeBuddy, Kimi Code, Qoder, Kiro CLI, Auggie, TRAE CLI, Command Code, ZCode, OMP) and the **Official ACP Registry** on a single local-first Rust Host.
+Official CLI and Host-family launcher for **Dimo** — the all-in-one **Agent-Native Development Platform & Vibe Coding Toolkit** powered by **dedicated native Agent engines** (Claude Code, Codex, and growing native drivers) with **ACP compatibility fallback** across **20 built-in Coding Agents** (Claude Code, Codex, DeepSeek Harness, Google Antigravity, Cursor, OpenCode, Pi, Grok, Cline, OpenClaw, Hermes, CodeBuddy, Kimi Code, Qoder, Kiro CLI, Auggie, TRAE CLI, Command Code, ZCode, OMP) and the **Official ACP Registry** on a single local-first Rust Host.
 
 - **Website**: [https://dimo-ai.com](https://dimo-ai.com)
 - **Documentation**: [https://dimo-ai.com/docs](https://dimo-ai.com/docs)
@@ -14,7 +14,7 @@ Official CLI and Host-family launcher for **Dimo** — the **Integrated Agent De
 `npx dimoai` downloads and verifies (SHA-256 sidecar + inner `SHA256SUMS`) the matching platform **Dimo Host family** release bundle (`dimo-server`, `dimo-mcp`, `dimo-workflow-mcp`, and the production `web/` workbench), then gives you four workflows from one binary:
 
 1. **Launch `dimo-server` + WebUI** (`17891` default) on loopback or LAN—bringing the full Dual-Stage IDE + Infinite Spatial Canvas workbench to any browser or paired Desktop / iOS / Android client.
-2. **Discover & install Coding Agents** (`list`, `install`) directly into the Host machine's user environment (`npm`, `uv`, or verified binaries).
+2. **Discover & install Coding Agents** (`list`, `install`) directly into the Host machine's user environment (`npm`, `uv`, or verified binaries) for dedicated native engines and ACP compatibility adapters.
 3. **Drive a running Host headlessly** (`conversation`, `workflow`, `project`, `workspace`, `session`, `git`, `file`, `agent`) from scripts, CI, or external orchestrators.
 4. **Develop, link, pack, install, and publish v4 Plugins** (`plugin ...`).
 
@@ -50,7 +50,7 @@ dimo serve
 
 | Variable | Description |
 | :--- | :--- |
-| `DIMO_HOST_FAMILY_TAG` | Pin an exact GitHub Release tag (for example `v0.4.4`). |
+| `DIMO_HOST_FAMILY_TAG` | Pin an exact GitHub Release tag (for example `v0.5.2`). |
 | `DIMO_HOST_FAMILY_DIR` | Use a pre-extracted local Host-family directory instead of downloading. |
 | `DIMO_DATA_DIR` | Override the Dimo SQLite / transcript / plugin state directory. |
 | `DIMO_SERVER_LISTEN` | Bind address and port (default `127.0.0.1:17891`). |
@@ -60,10 +60,10 @@ dimo serve
 
 ## 2. Manage Coding Agents on This Machine
 
-Install Agent runtimes and ACP adapters into your user environment without starting the HTTP server:
+Install native Coding Agent CLIs and ACP compatibility adapters into your user environment without starting the HTTP server:
 
 ```bash
-# List all 20 built-in agents and cached ACP Registry entries
+# List all 20 built-in agents (Dedicated Engines + ACP fallback) and cached ACP Registry entries
 npx dimoai list
 
 # Refresh from the upstream Official ACP Registry first

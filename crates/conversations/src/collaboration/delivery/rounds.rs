@@ -55,11 +55,71 @@ fn space_turn_tool_started_at(conversation_id: Uuid) -> Option<DateTime<Utc>> {
     map.get(&conversation_id).copied()
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProvisionedBotEntry {
+    pub nickname: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_member_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProvisionedGroupMemberSummary {
+    pub nickname: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_member_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProvisionedGroupEntry {
+    pub space_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub members: Vec<ProvisionedGroupMemberSummary>,
+    pub member_count: usize,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SpaceTurnProvisionActivity {
+    #[serde(default)]
+    pub bots: Vec<ProvisionedBotEntry>,
+    #[serde(default)]
+    pub groups: Vec<ProvisionedGroupEntry>,
+}
+
+impl SpaceTurnProvisionActivity {
+    pub fn is_empty(&self) -> bool {
+        self.bots.is_empty() && self.groups.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpaceTurnStreamingStep {
     pub step_index: u32,
     pub text: String,
     pub updated_at: String,
+    pub provision_activity: Option<SpaceTurnProvisionActivity>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -70,6 +130,7 @@ struct SpaceTurnStreamingState {
     flushing_step_index: u32,
     flushing_text: String,
     flushing_updated_at: String,
+    provision_activity: SpaceTurnProvisionActivity,
 }
 
 static ACTIVE_STREAMING_STEPS: OnceLock<Mutex<HashMap<Uuid, SpaceTurnStreamingState>>> =
@@ -84,6 +145,61 @@ pub fn reset_space_turn_streaming_step(conversation_id: Uuid) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     map.remove(&conversation_id);
+}
+
+pub fn record_space_turn_provision_bot(conversation_id: Uuid, bot: ProvisionedBotEntry) {
+    let mut map = active_streaming_steps()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = map.entry(conversation_id).or_default();
+    if let Some(existing) = entry.provision_activity.bots.iter_mut().find(|item| {
+        (item.identity_member_id.is_some() && item.identity_member_id == bot.identity_member_id)
+            || item.nickname.eq_ignore_ascii_case(&bot.nickname)
+    }) {
+        *existing = bot;
+    } else {
+        entry.provision_activity.bots.push(bot);
+    }
+    entry.updated_at = now_stamp();
+}
+
+pub fn record_space_turn_provision_group(conversation_id: Uuid, group: ProvisionedGroupEntry) {
+    let mut map = active_streaming_steps()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = map.entry(conversation_id).or_default();
+    if let Some(existing) = entry
+        .provision_activity
+        .groups
+        .iter_mut()
+        .find(|item| item.space_id == group.space_id)
+    {
+        *existing = group;
+    } else {
+        entry.provision_activity.groups.push(group);
+    }
+    entry.updated_at = now_stamp();
+}
+
+pub fn has_space_turn_provision_activity(conversation_id: Uuid) -> bool {
+    let map = active_streaming_steps()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    map.get(&conversation_id)
+        .is_some_and(|entry| !entry.provision_activity.is_empty())
+}
+
+pub(crate) fn take_space_turn_provision_activity(
+    conversation_id: Uuid,
+) -> Option<SpaceTurnProvisionActivity> {
+    let mut map = active_streaming_steps()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let entry = map.get_mut(&conversation_id)?;
+    if entry.provision_activity.is_empty() {
+        return None;
+    }
+    Some(std::mem::take(&mut entry.provision_activity))
 }
 
 pub fn append_space_turn_streaming_text(
@@ -135,12 +251,15 @@ pub fn space_turn_streaming_step(conversation_id: Uuid) -> Option<SpaceTurnStrea
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let entry = map.get(&conversation_id)?;
+    let provision =
+        (!entry.provision_activity.is_empty()).then(|| entry.provision_activity.clone());
     let clean_text = strip_stray_pass_tokens(&entry.text);
     if !clean_text.is_empty() && !is_pass_token(clean_text) {
         return Some(SpaceTurnStreamingStep {
             step_index: entry.step_index,
             text: clean_text.to_string(),
             updated_at: entry.updated_at.clone(),
+            provision_activity: provision,
         });
     }
     let clean_flushing = strip_stray_pass_tokens(&entry.flushing_text);
@@ -149,6 +268,19 @@ pub fn space_turn_streaming_step(conversation_id: Uuid) -> Option<SpaceTurnStrea
             step_index: entry.flushing_step_index,
             text: clean_flushing.to_string(),
             updated_at: entry.flushing_updated_at.clone(),
+            provision_activity: provision,
+        });
+    }
+    if provision.is_some() {
+        return Some(SpaceTurnStreamingStep {
+            step_index: entry.step_index,
+            text: String::new(),
+            updated_at: if entry.updated_at.is_empty() {
+                now_stamp()
+            } else {
+                entry.updated_at.clone()
+            },
+            provision_activity: provision,
         });
     }
     None
@@ -1565,6 +1697,7 @@ pub async fn finalize_space_turn_deliveries(
     delivery: &DeliveryContext,
 ) -> Result<Vec<CollaborationSpaceChangedEvent>, CollaborationError> {
     clear_space_turn_tool_started(conversation_id);
+    let provision_activity = take_space_turn_provision_activity(conversation_id);
     let rows = open_space_turn_deliveries(pool, conversation_id).await?;
     let trimmed = turn_assistant_text.trim();
     let mut events = Vec::new();
@@ -1575,8 +1708,12 @@ pub async fn finalize_space_turn_deliveries(
                 let nickname = finalize_nickname(pool, &space_id, conversation_id).await;
                 let body = strip_own_nickname_prefix(trimmed, &nickname);
                 let passed = body.is_empty() || is_pass_token(&body) || is_polite_ack_only(&body);
-                if !passed
-                    && !member_posted_recent_content_equals(
+                let mut extra_envelope = serde_json::Map::new();
+                if let Some(ref activity) = provision_activity {
+                    extra_envelope.insert("provisionActivity".to_string(), json!(activity));
+                }
+                let posted_same = if !passed {
+                    member_posted_recent_content_equals(
                         pool,
                         &space_id,
                         conversation_id,
@@ -1584,7 +1721,10 @@ pub async fn finalize_space_turn_deliveries(
                         &nickname,
                     )
                     .await?
-                {
+                } else {
+                    false
+                };
+                if !passed && !posted_same {
                     let to = if is_bot_space(&space_id) {
                         vec![ENVELOPE_USER_ACTOR.to_string()]
                     } else {
@@ -1610,7 +1750,7 @@ pub async fn finalize_space_turn_deliveries(
                         )
                         .as_bytes(),
                     );
-                    if let Err(error) = post_to_space_inner(
+                    if let Err(error) = post_to_space_inner_with_extra(
                         pool,
                         PostToSpace {
                             caller_id: Some(conversation_id),
@@ -1623,6 +1763,7 @@ pub async fn finalize_space_turn_deliveries(
                         },
                         delivery,
                         false,
+                        extra_envelope,
                     )
                     .await
                     {
@@ -1632,6 +1773,42 @@ pub async fn finalize_space_turn_deliveries(
                             %space_id,
                             "direct session turn post_to_space failed"
                         );
+                    }
+                } else if let Some(ref activity) = provision_activity {
+                    let attached = attach_provision_activity_to_latest_agent_message(
+                        pool,
+                        &space_id,
+                        conversation_id,
+                        0,
+                        activity,
+                    )
+                    .await
+                    .unwrap_or(false);
+                    if !attached {
+                        let op_id = Uuid::new_v5(
+                            &Uuid::NAMESPACE_OID,
+                            format!(
+                                "direct-finalize-provision:{}:{}:{}",
+                                conversation_id, direct_ctx.turn_id, space_id
+                            )
+                            .as_bytes(),
+                        );
+                        let _ = post_to_space_inner_with_extra(
+                            pool,
+                            PostToSpace {
+                                caller_id: Some(conversation_id),
+                                space_id: space_id.clone(),
+                                content: String::new(),
+                                summary: None,
+                                to: vec![ENVELOPE_USER_ACTOR.to_string()],
+                                in_reply_to: None,
+                                operation_id: op_id,
+                            },
+                            delivery,
+                            false,
+                            extra_envelope,
+                        )
+                        .await;
                     }
                 }
                 reset_space_turn_streaming_step(conversation_id);
@@ -1744,6 +1921,11 @@ pub async fn finalize_space_turn_deliveries(
             );
         }
 
+        let mut extra_envelope = serde_json::Map::new();
+        if let Some(ref activity) = provision_activity {
+            extra_envelope.insert("provisionActivity".to_string(), json!(activity));
+        }
+
         let mut fallback_posted = false;
         if !passed && !posted_same_body {
             let prefix = if is_bot_space(&space_id) {
@@ -1771,7 +1953,7 @@ pub async fn finalize_space_turn_deliveries(
                 &trigger_message_id,
             )
             .await?;
-            match post_to_space_inner(
+            match post_to_space_inner_with_extra(
                 pool,
                 PostToSpace {
                     caller_id: Some(conversation_id),
@@ -1784,6 +1966,7 @@ pub async fn finalize_space_turn_deliveries(
                 },
                 delivery,
                 false,
+                extra_envelope,
             )
             .await
             {
@@ -1797,6 +1980,50 @@ pub async fn finalize_space_turn_deliveries(
                         %space_id,
                         "fallback post_to_space on turn completion failed; marking receipt passed"
                     );
+                }
+            }
+        } else if let Some(ref activity) = provision_activity {
+            let attached = if already_posted || posted_same_body {
+                attach_provision_activity_to_latest_agent_message(
+                    pool,
+                    &space_id,
+                    conversation_id,
+                    earliest_seq,
+                    activity,
+                )
+                .await
+                .unwrap_or(false)
+            } else {
+                false
+            };
+            if !attached {
+                let op_id = Uuid::new_v5(
+                    &Uuid::NAMESPACE_OID,
+                    format!(
+                        "finalize-provision:{}:{}:{}",
+                        conversation_id, trigger_message_id, space_id
+                    )
+                    .as_bytes(),
+                );
+                if post_to_space_inner_with_extra(
+                    pool,
+                    PostToSpace {
+                        caller_id: Some(conversation_id),
+                        space_id: space_id.clone(),
+                        content: String::new(),
+                        summary: None,
+                        to: vec![ENVELOPE_USER_ACTOR.to_string()],
+                        in_reply_to: Some(trigger_message_id.clone()),
+                        operation_id: op_id,
+                    },
+                    delivery,
+                    false,
+                    extra_envelope,
+                )
+                .await
+                .is_ok()
+                {
+                    fallback_posted = true;
                 }
             }
         }

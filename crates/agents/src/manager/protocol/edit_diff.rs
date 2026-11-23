@@ -3,8 +3,7 @@ use std::path::{Component, Path, PathBuf};
 use agent_client_protocol::schema::v1::{
     ToolCall, ToolCallContent, ToolCallLocation, ToolCallStatus, ToolCallUpdate, ToolKind,
 };
-use workspace_utils::diff::create_unified_diff;
-use workspace_utils::process::new_hidden_tokio_command;
+use workspace_utils::{diff::create_unified_diff, process::new_hidden_tokio_command};
 
 use super::*;
 
@@ -118,8 +117,7 @@ impl AcpClientBridge {
             return None;
         }
 
-        let raw_path =
-            extract_tool_path(tool_call.raw_input.as_ref(), &tool_call.locations)?;
+        let raw_path = extract_tool_path(tool_call.raw_input.as_ref(), &tool_call.locations)?;
         let disk_path = resolve_disk_path(&self.working_dir, &raw_path);
         let canonical_key = resolve_canonical_key(&disk_path).await;
         let current_snapshot = read_file_snapshot(&disk_path).await;
@@ -614,19 +612,9 @@ pub(in crate::manager) fn build_unified_diff_from_snapshots(
         }
         (FileSnapshot::Text(old_text), FileSnapshot::Text(new_text)) => {
             if old_text.is_empty() && !new_text.is_empty() {
-                format_whole_file_diff(
-                    Some(&display_path),
-                    Some(&display_path),
-                    new_text,
-                    true,
-                )?
+                format_whole_file_diff(Some(&display_path), Some(&display_path), new_text, true)?
             } else if !old_text.is_empty() && new_text.is_empty() {
-                format_whole_file_diff(
-                    Some(&display_path),
-                    Some(&display_path),
-                    old_text,
-                    false,
-                )?
+                format_whole_file_diff(Some(&display_path), Some(&display_path), old_text, false)?
             } else {
                 create_unified_diff(&display_path, old_text, new_text)
             }
@@ -750,8 +738,13 @@ fn serialize_enriched_input(
     // preview budget, fall back to a minimal object so the JSON never breaks.
     let probe = {
         let mut copy = base_obj.clone();
-        copy.insert("unified_diff".to_string(), serde_json::Value::String(String::new()));
-        serde_json::to_string(&copy).map(|s| s.len()).unwrap_or(usize::MAX)
+        copy.insert(
+            "unified_diff".to_string(),
+            serde_json::Value::String(String::new()),
+        );
+        serde_json::to_string(&copy)
+            .map(|s| s.len())
+            .unwrap_or(usize::MAX)
     };
     if probe > budget_bytes {
         base_obj.clear();
@@ -891,7 +884,9 @@ mod tests {
     fn serialize_enriched_input_truncates_large_diffs_with_exact_counts() {
         let mut big = String::from("--- a/big.ts\n+++ b/big.ts\n@@ -1,0 +1,800 @@\n");
         for i in 0..800 {
-            big.push_str(&format!("+const line_{i} = 'payload_value_for_diff_budget';\n"));
+            big.push_str(&format!(
+                "+const line_{i} = 'payload_value_for_diff_budget';\n"
+            ));
         }
         let serialized = serialize_enriched_input(
             Some(&json!({ "file_path": "big.ts" })),

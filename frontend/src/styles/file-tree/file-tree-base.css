@@ -405,6 +405,8 @@
   backdrop-filter: blur(6px);
 }
 
+html.host-windows .workspace-search-header,
+html[data-gpu-mode='software'] .workspace-search-header,
 .app.reduced-transparency .workspace-search-header {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
@@ -606,14 +608,33 @@
 .file-tree-skeleton-row {
   height: 8px;
   border-radius: 999px;
-  background: linear-gradient(
-    110deg,
-    var(--surface-control) 8%,
-    var(--surface-control-hover) 18%,
-    var(--surface-control) 33%
-  );
-  background-size: 200% 100%;
-  animation: shimmer 1.4s ease-in-out infinite;
+  background: var(--surface-control-hover);
+  animation: file-tree-skeleton-pulse 1.4s ease-in-out infinite;
+  will-change: opacity;
+}
+
+@keyframes file-tree-skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 0.92;
+  }
+}
+
+html[data-gpu-mode='software'] .file-tree-skeleton-row {
+  animation: none;
+  opacity: 0.65;
+  will-change: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .file-tree-skeleton-row {
+    animation: none;
+    opacity: 0.65;
+    will-change: auto;
+  }
 }
 
 .file-tree-row {

@@ -14,7 +14,10 @@ export default defineConfig([
     dts: false,
   },
   {
-    entry: { 'preload/index': 'src/preload/index.ts' },
+    entry: {
+      'preload/index': 'src/preload/index.ts',
+      'preload/webviewGuest': 'src/preload/webviewGuest.ts',
+    },
     outDir: 'dist',
     format: ['cjs'],
     platform: 'node',

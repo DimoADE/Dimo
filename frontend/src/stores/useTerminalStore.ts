@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { createJSONStorage, persist } from 'zustand/middleware';
 import {
   nextWorkspaceTerminalTitle,
   type TerminalSurface,
@@ -82,6 +82,58 @@ export function generateTerminalTabId(): string {
   return `term-${Date.now()}-${tabCounter}`;
 }
 
+function updateSessionInWorkspaces(
+  sessionsByWorkspace: Record<string, TerminalSession[]>,
+  tabId: string,
+  updater: (session: TerminalSession) => TerminalSession | null
+): Record<string, TerminalSession[]> | null {
+  for (const [wsId, sessions] of Object.entries(sessionsByWorkspace)) {
+    const idx = sessions.findIndex((session) => session.tabId === tabId);
+    if (idx === -1) continue;
+    const nextSession = updater(sessions[idx]);
+    if (!nextSession || nextSession === sessions[idx]) {
+      return null;
+    }
+    const nextSessions = sessions.slice();
+    nextSessions[idx] = nextSession;
+    return {
+      ...sessionsByWorkspace,
+      [wsId]: nextSessions,
+    };
+  }
+  return null;
+}
+
+const dedupedTerminalStorage = {
+  lastWrittenByKey: new Map<string, string>(),
+  getItem: (name: string): string | null => {
+    try {
+      return window.localStorage.getItem(name);
+    } catch {
+      return null;
+    }
+  },
+  setItem: (name: string, value: string): void => {
+    if (dedupedTerminalStorage.lastWrittenByKey.get(name) === value) {
+      return;
+    }
+    dedupedTerminalStorage.lastWrittenByKey.set(name, value);
+    try {
+      window.localStorage.setItem(name, value);
+    } catch {
+      // Ignore quota/storage errors.
+    }
+  },
+  removeItem: (name: string): void => {
+    dedupedTerminalStorage.lastWrittenByKey.delete(name);
+    try {
+      window.localStorage.removeItem(name);
+    } catch {
+      // Ignore storage errors.
+    }
+  },
+};
+
 export const useTerminalStore = create<TerminalState>()(
   persist(
     (set, get) => ({
@@ -127,16 +179,15 @@ export const useTerminalStore = create<TerminalState>()(
       },
 
       setSessionId: (tabId, sessionId) => {
-        const state = get();
-        const updated: Record<string, TerminalSession[]> = {};
-        for (const [wsId, sessions] of Object.entries(
-          state.sessionsByWorkspace
-        )) {
-          updated[wsId] = sessions.map((session) =>
-            session.tabId === tabId ? { ...session, sessionId } : session
-          );
+        const updated = updateSessionInWorkspaces(
+          get().sessionsByWorkspace,
+          tabId,
+          (session) =>
+            session.sessionId === sessionId ? null : { ...session, sessionId }
+        );
+        if (updated) {
+          set({ sessionsByWorkspace: updated });
         }
-        set({ sessionsByWorkspace: updated });
       },
 
       removeSession: (workspaceId, tabId) => {
@@ -171,51 +222,50 @@ export const useTerminalStore = create<TerminalState>()(
       },
 
       setActiveTab: (workspaceId, tabId) => {
-        set((state) => ({
-          activeTabByWorkspace: {
-            ...state.activeTabByWorkspace,
-            [workspaceId]: tabId,
-          },
-        }));
+        set((state) => {
+          if (state.activeTabByWorkspace[workspaceId] === tabId) {
+            return state;
+          }
+          return {
+            activeTabByWorkspace: {
+              ...state.activeTabByWorkspace,
+              [workspaceId]: tabId,
+            },
+          };
+        });
       },
 
       updateTitle: (tabId, title) => {
-        const state = get();
-        const updated: Record<string, TerminalSession[]> = {};
-        for (const [wsId, sessions] of Object.entries(
-          state.sessionsByWorkspace
-        )) {
-          updated[wsId] = sessions.map((session) =>
-            session.tabId === tabId ? { ...session, title } : session
-          );
+        const updated = updateSessionInWorkspaces(
+          get().sessionsByWorkspace,
+          tabId,
+          (session) => (session.title === title ? null : { ...session, title })
+        );
+        if (updated) {
+          set({ sessionsByWorkspace: updated });
         }
-        set({ sessionsByWorkspace: updated });
       },
 
       setBusy: (tabId, busy) => {
-        const state = get();
-        const updated: Record<string, TerminalSession[]> = {};
-        for (const [wsId, sessions] of Object.entries(
-          state.sessionsByWorkspace
-        )) {
-          updated[wsId] = sessions.map((session) =>
-            session.tabId === tabId ? { ...session, busy } : session
-          );
+        const updated = updateSessionInWorkspaces(
+          get().sessionsByWorkspace,
+          tabId,
+          (session) => (session.busy === busy ? null : { ...session, busy })
+        );
+        if (updated) {
+          set({ sessionsByWorkspace: updated });
         }
-        set({ sessionsByWorkspace: updated });
       },
 
       setCwd: (tabId, cwd) => {
-        const state = get();
-        const updated: Record<string, TerminalSession[]> = {};
-        for (const [wsId, sessions] of Object.entries(
-          state.sessionsByWorkspace
-        )) {
-          updated[wsId] = sessions.map((session) =>
-            session.tabId === tabId ? { ...session, cwd } : session
-          );
+        const updated = updateSessionInWorkspaces(
+          get().sessionsByWorkspace,
+          tabId,
+          (session) => (session.cwd === cwd ? null : { ...session, cwd })
+        );
+        if (updated) {
+          set({ sessionsByWorkspace: updated });
         }
-        set({ sessionsByWorkspace: updated });
       },
 
       clearWorkspace: (workspaceId) => {
@@ -237,6 +287,7 @@ export const useTerminalStore = create<TerminalState>()(
     {
       name: 'dimo-terminal-sessions',
       version: 3,
+      storage: createJSONStorage(() => dedupedTerminalStorage),
       migrate: (persistedState) => {
         const state = (persistedState ?? {}) as Partial<TerminalState>;
         const sessionsByWorkspace = Object.fromEntries(
@@ -250,7 +301,11 @@ export const useTerminalStore = create<TerminalState>()(
                     session.source !== 'acp' &&
                     session.source !== 'codex'
                 )
-                .map((session) => ({ ...session, sessionId: null })),
+                .map((session) => ({
+                  ...session,
+                  sessionId: null,
+                  busy: false,
+                })),
             ]
           )
         );
@@ -286,7 +341,11 @@ export const useTerminalStore = create<TerminalState>()(
                     session.source !== 'acp' &&
                     session.source !== 'codex'
                 )
-                .map((session) => ({ ...session, sessionId: null })),
+                .map((session) => ({
+                  ...session,
+                  sessionId: null,
+                  busy: false,
+                })),
             ]
           )
         ),

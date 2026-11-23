@@ -9,9 +9,8 @@ decision-makers:
 
 iOS 是第二个 Mobile companion，使用原生 Swift 与 SwiftUI，最低 iOS 17，首发经
 TestFlight 内测。它与 Android 共享版本化 Remote Protocol schema、稳定 ID 与跨平台协议验收，
-不共享 UI、导航和平台生命周期代码。落实 [ADR-0041](0041-native-kotlin-compose-android-companion.md)
-对后续 iOS 客户端的约定，并取代 ADR-0033 中“iOS 不属于 P1”的范围边界；P1 的
-Android 交付门槛不变。
+不共享 UI、导航和平台生命周期代码，遵循 [ADR-0041](0041-native-kotlin-compose-android-companion.md)
+对原生移动端客户端的约定。
 
 ## Consequences
 
@@ -25,7 +24,7 @@ Android 交付门槛不变。
 - 设备凭据存入 Keychain；iOS 专属 UI 状态不得进入 Remote Protocol，也不得要求 Server 提供
   专属端点。
 - 后台完成通知所需的摘要沿用 `notification.summary`；协议目前不连接 APNs，推送通道需另立 ADR。
-- 功能范围与 Android P1 对等，客户端连接与事件契约见 [Companion 与远程客户端文档](../companion/README.md)。
+- 功能范围与 Android P1 对等，客户端连接与事件契约见 [Companion 与远程客户端文档](../guides/companion-apps.md)。
 
 ## Considered Options
 

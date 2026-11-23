@@ -938,6 +938,27 @@ pub struct PiPluginSummaryView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export)]
+pub struct MusePluginView {
+    pub id: String,
+    pub name: String,
+    pub version: Option<String>,
+    pub status: String,
+    pub enabled: bool,
+    pub approved: bool,
+    pub path: Option<String>,
+    pub source: Option<String>,
+    pub marketplace: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MusePluginSummaryView {
+    pub home: String,
+    pub plugins: Vec<MusePluginView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct AgentModelProviderSaveRequest {
     pub id: Option<String>,
     pub name: String,
@@ -1103,6 +1124,7 @@ pub enum AgentSettingsFeature {
     DshPlugins,
     GrokPlugins,
     PiPlugins,
+    MusePlugins,
     NativeMcp,
     NativeSkills,
 }

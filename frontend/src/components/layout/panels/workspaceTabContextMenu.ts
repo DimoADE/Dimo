@@ -138,6 +138,30 @@ function withoutLayoutActions(
   return pruned;
 }
 
+function appendPluginCreationItems(
+  items: ProductContextMenuItem[],
+  labels: WorkspaceTabMenuLabels,
+  actions: WorkspaceTabMenuActions
+): void {
+  if (actions.openBrowser && labels.browser) {
+    items.push({
+      id: 'new-browser',
+      label: labels.browser,
+      onSelect: actions.openBrowser,
+    });
+  }
+
+  if (actions.pluginItems?.length) {
+    for (const item of actions.pluginItems) {
+      items.push({
+        id: item.id,
+        label: item.label,
+        onSelect: item.onSelect,
+      });
+    }
+  }
+}
+
 export function buildWorkspaceTabContextMenu(
   labels: WorkspaceTabMenuLabels,
   actions: WorkspaceTabMenuActions
@@ -278,11 +302,12 @@ export function buildWorkspaceTabContextMenu(
           onSelect: actions.openReview,
         }
       );
+      appendPluginCreationItems(items, labels, actions);
       return finish(items);
     }
 
     if (resolvedKind === 'terminal') {
-      return finish([
+      const items: ProductContextMenuItem[] = [
         basicHeader,
         {
           id: 'refresh',
@@ -305,11 +330,13 @@ export function buildWorkspaceTabContextMenu(
           label: labels.note,
           onSelect: actions.openNote,
         },
-      ]);
+      ];
+      appendPluginCreationItems(items, labels, actions);
+      return finish(items);
     }
 
     // resolvedKind === 'space'
-    return finish([
+    const items: ProductContextMenuItem[] = [
       basicHeader,
       {
         id: 'space-details',
@@ -342,7 +369,9 @@ export function buildWorkspaceTabContextMenu(
         label: labels.review,
         onSelect: actions.openReview,
       },
-    ]);
+    ];
+    appendPluginCreationItems(items, labels, actions);
+    return finish(items);
   }
 
   // Default tab menu
@@ -377,24 +406,7 @@ export function buildWorkspaceTabContextMenu(
   }
 
   newItems.push(terminalSubmenu);
-
-  if (actions.openBrowser && labels.browser) {
-    newItems.push({
-      id: 'new-browser',
-      label: labels.browser,
-      onSelect: actions.openBrowser,
-    });
-  }
-
-  if (actions.pluginItems?.length) {
-    for (const item of actions.pluginItems) {
-      newItems.push({
-        id: item.id,
-        label: item.label,
-        onSelect: item.onSelect,
-      });
-    }
-  }
+  appendPluginCreationItems(newItems, labels, actions);
 
   return finish([
     {

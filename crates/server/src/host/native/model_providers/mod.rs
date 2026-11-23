@@ -18,6 +18,7 @@ mod gemini;
 mod grok;
 mod hermes;
 mod kimi;
+mod muse;
 mod openclaw;
 mod ops;
 mod pi;
@@ -44,6 +45,7 @@ use kimi::*;
 pub use kimi::{
     has_synthetic_gate, kimi_credential_is_synthetic, prepare_kimi_dimo_configuration_cleanup,
 };
+use muse::*;
 use openclaw::*;
 use ops::*;
 pub use ops::{apply_import, preview_import, resolve_probe_api_key_from, resolve_probe_target};
@@ -69,6 +71,7 @@ struct ProviderNativeHomes {
     pub(super) trae: PathBuf,
     pub(super) command_code: PathBuf,
     pub(super) zcode: PathBuf,
+    pub(super) muse: PathBuf,
     pub(super) omp: PathBuf,
 }
 
@@ -95,6 +98,7 @@ impl ProviderNativeHomes {
                 ".commandcode",
             ),
             zcode: resolve_native_home(home, environment, "ZCODE_HOME", ".zcode"),
+            muse: resolve_muse_home(home, environment),
             omp: omp_provider_home(home, environment),
         }
     }
@@ -115,6 +119,7 @@ impl ProviderNativeHomes {
             "trae" => &self.trae,
             "command_code" => &self.command_code,
             "zcode" => &self.zcode,
+            "muse_code" => &self.muse,
             _ if is_antigravity(agent_id) => &self.gemini,
             _ => &self.codex,
         }
@@ -255,11 +260,14 @@ pub async fn save(
         .map(str::to_string)
         .or_else(|| {
             let api_url = request.api_url.trim();
+            let name = request.name.trim();
             store
                 .providers
                 .iter()
                 .find(|provider| {
-                    provider.agent_id == request.agent_id && provider.api_url == api_url
+                    provider.agent_id == request.agent_id
+                        && provider.api_url == api_url
+                        && provider.name.trim() == name
                 })
                 .map(|provider| provider.id.clone())
         })
@@ -310,8 +318,12 @@ pub async fn save(
         }
     };
     if bound {
+        let allow_url_fallback =
+            unique_provider_url(&store, &request.agent_id, &store.providers[index].api_url);
         let rollback = capture_projection(&homes, &request.agent_id).await?;
-        if let Err(error) = apply_provider(&homes, &store.providers[index]).await {
+        if let Err(error) =
+            apply_provider_with_fallback(&homes, &store.providers[index], allow_url_fallback).await
+        {
             restore_projection(&homes, &request.agent_id, &rollback).await?;
             return Err(error);
         }
@@ -370,8 +382,9 @@ pub async fn bind_with_mode(
             .cloned()
             .ok_or_else(|| super::NativeError::from("找不到可绑定的 Model Provider"))?;
         if supports_multi_enable(&agent_id) && enabled == Some(false) {
+            let allow_url_fallback = unique_provider_url(&store, &agent_id, &provider.api_url);
             let disable_result = match agent_id.as_str() {
-                "omp" => agents::omp_providers::set_enabled(
+                "omp" => agents::omp_providers::set_enabled_with_url_fallback(
                     &homes.omp,
                     &provider.id,
                     &provider.name,
@@ -379,6 +392,7 @@ pub async fn bind_with_mode(
                     &provider.api_key,
                     &provider.model,
                     false,
+                    allow_url_fallback,
                 )
                 .await
                 .map_err(super::NativeError::from),
@@ -458,7 +472,10 @@ pub async fn bind_with_mode(
                 // Persist the recovery point before touching any Agent-owned file.
                 write_store(store_path, &store).await?;
             }
-            if let Err(error) = apply_provider(&homes, &provider).await {
+            let allow_url_fallback = unique_provider_url(&store, &agent_id, &provider.api_url);
+            if let Err(error) =
+                apply_provider_with_fallback(&homes, &provider, allow_url_fallback).await
+            {
                 restore_projection(&homes, &agent_id, &rollback).await?;
                 if inserted_backup {
                     store.projection_backups.remove(agent_id.as_str());
@@ -662,10 +679,22 @@ fn project_with_omp_native(
 ) -> AgentModelProvidersView {
     let mut view = project(store, agent_id);
     let mut active_matched: Option<String> = None;
+    let url_counts: HashMap<String, usize> =
+        view.providers
+            .iter()
+            .fold(HashMap::new(), |mut counts, provider| {
+                if !provider.api_url.is_empty() {
+                    *counts.entry(provider.api_url.clone()).or_insert(0) += 1;
+                }
+                counts
+            });
     for provider in &mut view.providers {
+        let slug = agents::omp_providers::provider_slug(&provider.name);
+        let unique_url = url_counts.get(&provider.api_url).copied().unwrap_or(0) == 1;
         let matched = native.drafts.iter().find(|draft| {
             draft.id == provider.id
-                || (!draft.api_url.is_empty() && draft.api_url == provider.api_url)
+                || (!slug.is_empty() && draft.id == slug)
+                || (unique_url && !draft.api_url.is_empty() && draft.api_url == provider.api_url)
         });
         let enabled = matched.is_some_and(|draft| draft.enabled);
         provider.bound = enabled;
@@ -705,6 +734,7 @@ async fn live_native_drafts(
         "cline" => native_cline_draft(native_home).await?,
         "openclaw" => native_openclaw_drafts(native_home).await?,
         "omp" => omp_import_drafts(native_home).await?,
+        "muse_code" => native_muse_draft(native_home).await?.into_iter().collect(),
         _ if is_antigravity(agent_id) => native_gemini_draft(native_home, agent_id)
             .await?
             .into_iter()
@@ -779,6 +809,11 @@ async fn native_import_drafts(
                 drafts.push(draft);
             }
         }
+        "muse_code" => {
+            if let Some(draft) = native_muse_draft(&homes.muse).await? {
+                drafts.push(draft);
+            }
+        }
         "pi" => drafts.extend(native_pi_drafts(&homes.pi).await?),
         "omp" => drafts.extend(omp_import_drafts(&homes.omp).await?),
         _ if is_antigravity(agent_id) => {
@@ -830,9 +865,31 @@ async fn omp_import_drafts(home: &Path) -> Result<Vec<ImportDraft>, String> {
         .collect())
 }
 
+fn unique_provider_url(store: &ProviderStore, agent_id: &AgentId, api_url: &str) -> bool {
+    let trimmed = api_url.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    store
+        .providers
+        .iter()
+        .filter(|provider| provider.agent_id == *agent_id && provider.api_url.trim() == trimmed)
+        .count()
+        <= 1
+}
+
+#[cfg(test)]
 async fn apply_provider(
     homes: &ProviderNativeHomes,
     provider: &StoredProvider,
+) -> Result<(), super::NativeError> {
+    apply_provider_with_fallback(homes, provider, true).await
+}
+
+async fn apply_provider_with_fallback(
+    homes: &ProviderNativeHomes,
+    provider: &StoredProvider,
+    allow_url_fallback: bool,
 ) -> Result<(), super::NativeError> {
     match provider.agent_id.as_str() {
         "claude_code" => apply_claude(&homes.claude, provider).await,
@@ -841,16 +898,17 @@ async fn apply_provider(
         "grok" => apply_grok(&homes.grok, provider).await,
         "kimi_code" => apply_kimi(&homes.kimi, provider).await,
         "hermes" => apply_hermes(&homes.hermes, provider).await,
-        "openclaw" => apply_openclaw(&homes.openclaw, provider).await,
+        "openclaw" => apply_openclaw(&homes.openclaw, provider, allow_url_fallback).await,
         "cline" => apply_cline(&homes.cline, provider).await,
         "pi" => apply_pi(&homes.pi, provider).await,
-        "omp" => agents::omp_providers::apply(
+        "omp" => agents::omp_providers::apply_with_url_fallback(
             &homes.omp,
             &provider.id,
             &provider.name,
             &provider.api_url,
             &provider.api_key,
             &provider.model,
+            allow_url_fallback,
         )
         .await
         .map_err(super::NativeError::from),
@@ -860,6 +918,7 @@ async fn apply_provider(
         "trae" => apply_trae(&homes.trae, provider).await,
         "command_code" => apply_command_code(&homes.command_code, provider).await,
         "zcode" => apply_zcode(&homes.zcode, provider).await,
+        "muse_code" => apply_muse(&homes.muse, provider).await,
         _ if is_antigravity(&provider.agent_id) => apply_antigravity(&homes.gemini, provider).await,
         _ => validate_agent(&provider.agent_id),
     }

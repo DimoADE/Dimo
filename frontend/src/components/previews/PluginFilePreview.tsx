@@ -52,9 +52,8 @@ export function PluginFilePreview({ filePath }: { filePath: string }) {
           if (leasedUrl && /^https?:\/\//i.test(leasedUrl)) {
             resolvedPreviewUrl = leasedUrl;
           } else {
-            const origin = (
-              configuredBackendTransport as { origin?: string }
-            ).origin;
+            const origin = (configuredBackendTransport as { origin?: string })
+              .origin;
             if (origin) {
               resolvedPreviewUrl = `${origin.replace(/\/+$/, '')}${resolvedPreviewUrl}`;
             }

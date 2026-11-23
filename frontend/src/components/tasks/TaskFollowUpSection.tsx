@@ -11,18 +11,16 @@ import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
 import type { AgentKind } from 'shared/types';
 import { useBranchStatus } from '@/hooks';
-import { useAttemptRepo } from '@/hooks/useAttemptRepo';
 import { useAttemptExecution } from '@/hooks/useAttemptExecution';
 import { cn } from '@/lib/utils';
 import {
   useReviewOptional,
   type ReviewComment,
 } from '@/contexts/ReviewProvider';
-import { useEntries } from '@/contexts/EntriesContext';
+import { useEntriesMeta } from '@/contexts/EntriesContext';
 import { useConversationStatus } from '@/contexts/ConversationStatusContext';
 import { useHotkeysContext } from 'react-hotkeys-hook';
 import { useUserSystem } from '@/components/ConfigProvider';
-import { useAttemptBranch } from '@/hooks/useAttemptBranch';
 import { FollowUpConflictSection } from '@/components/tasks/follow-up/FollowUpConflictSection';
 import { useRetryUi } from '@/contexts/RetryUiContext';
 import { useActiveExecutorProfile } from '@/contexts/ActiveExecutorProfileContext';
@@ -54,6 +52,9 @@ import {
   ComposerTabDock,
   splitConversationStatusNotices,
 } from './follow-up/ComposerTabDock';
+import { ComposerContextFooter } from './follow-up/ComposerContextFooter';
+import { useComposerWorkspaceContext } from './follow-up/useComposerWorkspaceContext';
+import { useComposerWorkspaceSwitcher } from './follow-up/useComposerWorkspaceSwitcher';
 import { ActionBar } from './follow-up/ActionBar';
 import { useComposerEngineHandoff } from './follow-up/ComposerEngineHandoffControl';
 import type { SessionProviderInstanceConfig } from './follow-up/SessionSettingsSummary';
@@ -99,7 +100,6 @@ import {
   canSendFollowUp as getCanSendFollowUp,
   canTypeFollowUp as getCanTypeFollowUp,
   getBeforeSendCleanup,
-  hasPendingToolApproval,
   isComposerExecutionActive,
   restoreComposerAttachmentsAfterSendFailure,
 } from './follow-up/sessionComposerSubmit';
@@ -131,15 +131,10 @@ import {
   useSessionComposerPendingControls,
   useSessionComposerProfileSelection,
 } from './follow-up/useSessionComposerLocalState';
-import {
-  codexGoalEntriesFromConversation,
-  codexGoalStateFromSessionGoal,
-  deriveCodexGoalState,
-} from '@/lib/codexGoalState';
+import { codexGoalStateFromSessionGoal } from '@/lib/codexGoalState';
 import { requestConversationScrollToGoal } from '@/lib/conversationScroll';
 import { configuredBackendTransport } from '@/lib/backendTransport';
 import { createPluginControlApi } from '@/lib/api/plugins';
-import { deriveWorkspaceRootPath } from '@/components/panels/workspaceRootPath';
 import { useConversationAvailableCommands } from '@/features/conversation/useConversationAvailableCommands';
 import { conversationThreadMaxWidthClass } from '@/components/NormalizedConversation/ConversationTimeline';
 import { useLayoutStore } from '@/stores/useLayoutStore';
@@ -243,7 +238,6 @@ export function TaskFollowUpSection({
   const { profiles, config } = useUserSystem();
 
   const {
-    entries,
     sessionModes,
     sessionConfigOptions,
     conversationTurnInFlight,
@@ -251,7 +245,10 @@ export function TaskFollowUpSection({
     conversationSteeringTarget,
     conversationDeliveryChannel,
     userMessageHistory,
-  } = useEntries();
+    hasPendingApproval,
+    fallbackCodexGoalState,
+    getEntries,
+  } = useEntriesMeta();
 
   const {
     isAttemptRunning,
@@ -268,22 +265,25 @@ export function TaskFollowUpSection({
 
   const { data: branchStatus, refetch: refetchBranchStatus } =
     useBranchStatus(workspaceIdValue);
-  const { repos, selectedRepoId } = useAttemptRepo(workspaceIdValue);
-  const composerWorkspacePath = useMemo(
-    () =>
-      deriveWorkspaceRootPath(workspace, repos) ??
-      repos.find((repo) => repo.id === selectedRepoId)?.path ??
-      repos[0]?.path ??
-      undefined,
-    [repos, selectedRepoId, workspace]
-  );
+  const composerWorkspace = useComposerWorkspaceContext({
+    workspace,
+    workspaceId: workspaceIdValue,
+  });
+  const {
+    repos,
+    selectedRepoId,
+    isWorktreeWorkspace,
+    composerProjectName,
+    composerWorkspacePath,
+    attemptBranch,
+    refetchAttemptBranch,
+    composerBranchName,
+  } = composerWorkspace;
 
   const repoWithConflicts = useMemo(
     () => getComposerRepoWithConflicts(branchStatus),
     [branchStatus]
   );
-  const { branch: attemptBranch, refetch: refetchAttemptBranch } =
-    useAttemptBranch(workspaceIdValue);
   const reviewContext = useReviewOptional();
   const comments = reviewContext?.comments ?? EMPTY_REVIEW_COMMENTS;
   const generateReviewMarkdownFn = reviewContext?.generateReviewMarkdown;
@@ -301,6 +301,21 @@ export function TaskFollowUpSection({
   const isComposerExecutionRunning = isComposerExecutionActive({
     isAttemptRunning,
     isConversationTurnInFlight: conversationTurnInFlight,
+  });
+  const composerWorkspaceSwitcher = useComposerWorkspaceSwitcher({
+    isGitDirectory: composerWorkspace.isGitDirectory,
+    projectId: composerWorkspace.effectiveProjectId,
+    projectName: composerProjectName,
+    session,
+    sessionId,
+    workspace: composerWorkspace.resolvedWorkspace,
+    workspaceId: workspaceIdValue,
+    primaryRepo: composerWorkspace.primaryRepo,
+    primaryRepoBranches: composerWorkspace.primaryRepoBranches,
+    workspaceRepoNames: composerWorkspace.workspaceRepoNames,
+    mainDirectoryBranch: composerWorkspace.mainDirectoryBranch,
+    currentBranchName: composerBranchName,
+    disabled: isComposerExecutionRunning,
   });
   const steeringTarget = useMemo(
     () =>
@@ -395,7 +410,6 @@ export function TaskFollowUpSection({
     attachedImagePaths,
     executorProfileRef,
   } = useSessionComposerLocalState();
-
   const {
     createdSessionProfiles,
     handleSelectSession,
@@ -407,6 +421,7 @@ export function TaskFollowUpSection({
     onSessionCreated,
     executorProfileRef,
   });
+  const draftControls = !sessionModes?.current && !userMessageHistory.length;
   const {
     scratchData,
     scratchExecutorProfile,
@@ -423,6 +438,7 @@ export function TaskFollowUpSection({
     attachedImagePaths,
     executorProfileRef,
     localMessage,
+    preserveSessionControls: draftControls,
   });
   const resolvedSessionExecutor = (session?.agent_id ??
     session?.executor ??
@@ -563,6 +579,7 @@ export function TaskFollowUpSection({
     setAttachedImages,
     setSelectedMode,
     setSelectedConfigValues,
+    allowSessionControlsHydration: draftControls,
     cancelDebouncedSave,
     deleteScratch,
     savedRevision: lastSavedRevision,
@@ -577,7 +594,10 @@ export function TaskFollowUpSection({
     (queuedMessage: QueuedMessage) => {
       beginEditQueue(queuedMessage);
       setLocalMessage(queuedMessage.data.message ?? '');
-      setAttachedImages(queuedMessage.data.images.map(imageAttachmentFromPath));
+      setAttachedImages((prev) => {
+        prev.forEach(revokeComposerImagePreviewUrl);
+        return queuedMessage.data.images.map(imageAttachmentFromPath);
+      });
     },
     [beginEditQueue, setAttachedImages, setLocalMessage]
   );
@@ -787,6 +807,12 @@ export function TaskFollowUpSection({
   // rejects the pick. Clearing them on send races the ACP answer and makes
   // Codex/Grok selectors snap to a reverted current.
   const sentAttachmentsRef = useRef<SessionComposerImageAttachment[]>([]);
+  useEffect(() => {
+    return () => {
+      sentAttachmentsRef.current.forEach(revokeComposerImagePreviewUrl);
+      sentAttachmentsRef.current = [];
+    };
+  }, []);
   const handleAfterSendWithSessionControlCleanup = useCallback(async () => {
     sentAttachmentsRef.current.forEach(revokeComposerImagePreviewUrl);
     sentAttachmentsRef.current = [];
@@ -832,8 +858,12 @@ export function TaskFollowUpSection({
       return null;
     }
 
-    return deriveCodexGoalState(codexGoalEntriesFromConversation(entries));
-  }, [effectiveExecutorProfile?.executor, entries, storedSessionGoal]);
+    return fallbackCodexGoalState;
+  }, [
+    effectiveExecutorProfile?.executor,
+    fallbackCodexGoalState,
+    storedSessionGoal,
+  ]);
   const handleGoalControl = useCallback(
     (action: 'pause' | 'clear') => {
       if (!sessionId) {
@@ -855,13 +885,9 @@ export function TaskFollowUpSection({
     },
     [sessionId]
   );
-  const promptEnhancementContext = useMemo(
-    () => buildPromptEnhancementContext(entries),
-    [entries]
-  );
-  const hasPendingApproval = useMemo(
-    () => hasPendingToolApproval(entries),
-    [entries]
+  const promptEnhancementContext = useCallback(
+    () => buildPromptEnhancementContext(getEntries()),
+    [getEntries]
   );
 
   const {
@@ -1344,7 +1370,7 @@ export function TaskFollowUpSection({
           }
           overlay={
             pendingPermissions.length > 0 || visibleAgentQuestion ? (
-              <div className="space-y-2">
+              <div className="mb-2 space-y-2">
                 <PermissionRequestStack items={pendingPermissions} />
                 {visibleAgentQuestion ? (
                   <AgentQuestionCard
@@ -1365,6 +1391,22 @@ export function TaskFollowUpSection({
               taskAttemptId={workspaceId}
               taskId={taskId ?? undefined}
               onRemoveImage={handleRemoveImage}
+            />
+          }
+          footer={
+            <ComposerContextFooter
+              useWorktree={isWorktreeWorkspace}
+              projectName={composerProjectName}
+              workspacePath={composerWorkspacePath}
+              branchName={composerBranchName}
+              workspaceSwitcher={composerWorkspaceSwitcher}
+              sessionModes={displaySessionModes}
+              selectedMode={selectedMode}
+              onSelectMode={handleSelectMode}
+              sessionConfigOptions={displaySessionConfigOptions}
+              selectedConfigValues={selectedConfigValues}
+              onSelectConfigOption={handleSelectConfigOption}
+              disabled={!isEditable}
             />
           }
           onFocus={() => {

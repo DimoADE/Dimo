@@ -1,67 +1,40 @@
-# 会话分叉：复制事件到分叉点，而非引用父日志
+---
+status: accepted
+date: 2026-07-04
+decision-makers: Dimo maintainers
+---
 
-子会话的可见历史是父 transcript 的文件副本，按
-[ADR-0082](0082-jsonl-transcript-window.md) 读取。分叉不复制
-`conversation_events`。独立副本语义不变：亲子不共享读取。
+# 会话分叉：复制事件至分叉点并按能力分叉 Agent 上下文
 
-Fork 产生一个**完全独立**的新 Conversation：把父会话的事件日志复制到分叉点（写入新会话自己的 sequence 空间与幂等键域），亲子关系只作为展示元数据保留（`forked_from_conversation_id` + `fork_point_turn`），不参与任何读写路径。父会话存在在途 turn 时拒绝 fork（不复制半成品 turn）。agent 侧上下文按 Session resume 语义接入：支持 `session/load` 的 agent 恢复到分叉点上下文，不支持者以导入语义冷启动并向用户明示。
+会话分叉（Session Fork）创建一个完全独立的新 `Conversation`（作为一等 Dockview 面板），不与父会话共享历史读取路径；在 Agent 支持分叉能力时同步分叉其原生或 ACP 侧上下文。
 
-决定于 2026-07-04 的会话能力对抗性审查。
+## Decision
 
-## 2026-07-06 更新：ACP `session/fork` 实为可用，应作为首选
+### 1. 独立历史副本
 
-原 ADR 的前提"Dimo 无 ACP `session/fork` 线路调用"经复核**不准确**：Dimo 依赖的
-`agent-client-protocol` v0.11.1 **提供** `session/fork`（`ForkSessionRequest`/
-`ForkSessionResponse`，`impl_jsonrpc_request!(... "session/fork")`），只是被 crate
-feature `unstable_session_fork` 门控（当前只启用了 `unstable`）；且 `AgentCapabilities.fork:
-Option<SessionForkCapabilities>` 允许**从 initialize 响应动态探测**某 agent 是否支持，
-可通过 `session_capabilities.fork.is_some()` 门控真实 fork。
+- 分叉在 SQLite 单权威存储（ADR-0091）中将父会话截至分叉点的事件日志完整复制到新会话，写入新会话独立的 sequence 空间与幂等键域；父子会话在读取、截断、投影与导出路径上完全解耦。
+- 亲子关系仅作为导航与展示元数据保存（`ConversationRelation(fork)`，含 `forked_from_conversation_id` 与 `fork_point_turn`），不参与任何历史读取拼接。
+- 产品切点为一条**已完成**的 Assistant 气泡所属的 Dimo Turn（省略切点时默认为尾部最后一个 Assistant，含在途检查）；该 Turn 及其之前的全部事件（含工具调用、权限与计划）完整复制到子会话，父会话保持不变。
+- 若省略切点且最新 Turn 仍在途，或目标 Turn 在途，拒绝分叉（`fork_turn_in_flight`），不复制半成品 Turn。
 
-因此**首选方案修正为**：当 agent 广告了 fork 能力时，发 `ForkSessionRequest`
-让 agent **在服务端真正分叉出保留上下文的新会话 S2**，Dimo 侧再建兄弟 Conversation
-（其可见历史仍按下述"复制事件到分叉点"填充，并绑定到 S2 的 external_session_id）。
-这样 fork 后**继续对话时 agent 保有分叉前上下文**，克服了本 ADR 原方案"agent 冷启动、
-上下文不延续"的核心局限。
+### 2. Agent 上下文连续性
 
-落地要点：(1) Cargo 启用 `unstable_session_fork`；(2) 在 initialize 处理处捕获
-`agent_capabilities.session_capabilities.fork` 并动态更新能力位（承接 P0-2 的诚实化，
-替代静态声明）；(3) manager 增 `fork_session` 发 `ForkSessionRequest`；(4) 事件复制
-（下述）用于 Dimo 侧兄弟会话的可见历史 + 绑定 S2；(5) agent 未广告 fork 时按下述
-导入语义降级并明示。**下方"复制事件到分叉点"仍是 Dimo 侧会话历史的构建方式，不变。**
+- **尾部切点**：当 Agent 在当前引擎或 ACP `initialize` 能力中广告了 fork 能力（如原生引擎分叉或 ACP `session/fork`）时，向 Agent 发起分叉获得独立新会话 `S2`，子会话绑定到 `S2`（下次发送先恢复/加载 `S2`），父会话继续保留原绑定不改挂 `S2`。
+- **历史切点（支持切点命名）**：当 Agent 支持按切点定位历史 Assistant（如 AIR `_meta.jetbrains.air.fork` 或 Claude `messageId` + fingerprint + occurrence）时，携带切点信息发起 Agent 侧分叉。
+- **未命名的非尾部切点**：若目标切点无法被命名定位，直接拒绝创建子会话（`fork_point_unnamed`），禁止发出尾部 `session/fork` 导致 Agent 上下文长于可见历史。
+- **降级记录**：仅在合法创建子会话后 Agent binding 或 `session/fork` 调用失败（或 Agent 未广告 fork 能力进行尾部降级）时，子会话降级为 `history_only` 并在关系元数据中明示，由用户以冷启动方式继续对话。
 
-## 2026-09-06 更新：允许从指定已完成 Turn 切开
+### 3. 面板行为
 
-产品切点是一条**已完成** assistant 气泡所属的 Dimo Turn：新 Conversation 拷贝该 Turn
-及其之前的全部事件（含该轮工具/权限/计划），原 Conversation 不变。在途 Turn 仍拒绝。
-
-Agent 上下文：
-
-- 尾部（最后一条已完成 Turn，或未指定切点）且 Agent 广告了 `session/fork`：发
-  `session/fork`，子 binding 持有 S2，下一次发送 **先 resume 再 load**。
-- 历史切点且能按 AIR `_meta.jetbrains.air.fork` 命名该 assistant（Claude /
-  Codex / DeepSeek）：带着切点发 `session/fork`。
-- 历史切点但不能命名：只拷可见历史，**不**发尾部 `session/fork`（否则 Agent
-  上下文长于可见历史）。连续性为 `history_only`。
-
-新 Conversation 是一等 Dockview 面板；父会话不改挂到 S2。
-
-## 2026-09-09 更新：切点命名、创建前置条件与面板切换
-
-- Claude 历史切点发送 `messageId` + fingerprint + occurrence（claude-agent-acp ≥ 0.75.1）。
-- `tail` 是整段会话最后一个 assistant（含在途）。省略切点且最新 Turn 在途时拒绝（`fork_turn_in_flight`）。
-- 未命名的非尾部切点 **不创建** Conversation（`fork_point_unnamed`）。无 `session/fork` 不 insert。
-- `history_only` 仅在合法 insert 之后 binding/`session/fork` 失败，并写入 relation metadata。
-- 成功后 Kanban `rightSession` 切到 child，parent 不进入 monitor。
+- 分叉成功后，新 `Conversation` 作为一等 Dockview 面板打开，当前视图焦点切换到子会话面板，父会话不被强制关闭或转入后台监控。
 
 ## Considered Options
 
-- **引用父日志（copy-on-write）**：子会话只记 `parent_id + fork_point_sequence`，读取时拼接两段 —— 被否决：现有 `conversation_truncate_to_turn` 会**物理删除**父会话事件，引用语义下会静默破坏子会话完整性，需要级联保护；投影、FTS 索引（P1-2）、导出（P1-3）、批次 C 单投影协议全部要增加拼接分支。省下的存储（共同前缀，多为小文本事件）不值这些复杂度。
-- **新会话 + 把历史文本塞进首条 prompt**：被否决：假 fork —— 上下文不保真（工具调用/权限历史丢失结构）、agent 端没有真实会话状态、token 成本反而更高。
-- **实施时再定**：被否决：两种语义对 DB 迁移与批次 C 的交互面不同，悬而未决会阻塞相邻设计。
+- **引用父日志（Copy-on-Write）**：否决。父会话截断（reset-to-here）会物理删除父事件，引用语义需要复杂的级联保护，并迫使投影、搜索索引与导出路径维护跨会话拼接分支。
+- **冷启动新会话并将历史文本塞入首条 Prompt**：否决。丢失工具调用与权限结构，Agent 侧缺乏真实会话状态，且重复消耗大量 Token。
 
 ## Consequences
 
-- 共同前缀存储两份，可接受；投影快照**不复制**（投影可随时重建）。
-- 复制时必须重写 sequence 与幂等键，禁止跨会话复用原键（否则追加幂等性会误判）。
-- 会话级统计会把共同前缀计两次；用量/成本核算以 CLI 会话文件扫描为准，不受影响。
-- 术语见 CONTEXT.md「Session fork（会话分叉）」；与 reset-to-here（破坏性截断）互为补充而非替代。
+- 共同前缀在 SQLite 中存储两份，但换取了完全独立的读写与截断语义；时间线投影行可随时从子会话事件重建。
+- 复制事件时必须重写 sequence 与幂等键，禁止跨会话复用原幂等键。
+- 会话分叉与破坏性截断（reset-to-here）互为补充，各自保持清晰边界。

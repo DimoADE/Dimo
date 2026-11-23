@@ -185,20 +185,35 @@ describe('AgentQuestionCard', () => {
     }
   });
 
-  it('collapses to a compact reopen pill via top-right X and preserves state when reopened', () => {
+  it('collapses to a full-width title row above the composer and preserves state when expanded', () => {
     render(
       <AgentQuestionCard request={delegatedQuestion()} onRespond={vi.fn()} />
     );
 
+    const expandedCard = screen.getByTestId('agent-question-card');
+    expect(expandedCard).toHaveAttribute('data-expanded', 'true');
+    expect(expandedCard.parentElement).toHaveClass('w-full');
+    expect(expandedCard.parentElement).not.toHaveClass('max-w-[26rem]');
+
     fireEvent.click(screen.getByRole('radio', { name: /Broad refactor/ }));
     fireEvent.click(screen.getByRole('button', { name: '收起智能体提问' }));
 
-    expect(screen.queryByTestId('agent-question-card')).toBeNull();
+    const collapsedCard = screen.getByTestId('agent-question-card');
+    expect(collapsedCard).toHaveAttribute('data-expanded', 'false');
+    expect(collapsedCard.parentElement).toHaveClass('w-full');
+    expect(screen.queryByRole('radio', { name: /Broad refactor/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: '继续' })).toBeNull();
+
     const reopen = screen.getByTestId('agent-question-reopen');
-    expect(reopen).toHaveTextContent('Approach');
+    expect(reopen).toHaveAttribute('aria-expanded', 'false');
+    expect(reopen).toHaveTextContent('Choose how to continue');
+    expect(reopen).toHaveTextContent('1 / 2');
 
     fireEvent.click(reopen);
-    expect(screen.getByTestId('agent-question-card')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-question-card')).toHaveAttribute(
+      'data-expanded',
+      'true'
+    );
     expect(screen.getByRole('radio', { name: /Broad refactor/ })).toBeChecked();
   });
 
@@ -258,7 +273,7 @@ describe('AgentQuestionCard', () => {
       '2 / 2'
     );
 
-    const decline = screen.getByRole('button', { name: '拒绝回答' });
+    const decline = screen.getByRole('button', { name: '跳过' });
     expect(decline).toHaveClass('agent-question-decline');
     fireEvent.click(decline);
 
@@ -344,7 +359,7 @@ describe('AgentQuestionCard', () => {
         <AgentQuestionCard request={claudeRequest()} onRespond={onRespond} />
       );
 
-      fireEvent.click(screen.getByRole('button', { name: '拒绝回答' }));
+      fireEvent.click(screen.getByRole('button', { name: '跳过' }));
 
       expect(onRespond).toHaveBeenCalledWith('claude-question', {
         action: 'decline',
@@ -458,7 +473,7 @@ describe('AgentQuestionCard', () => {
     );
 
     fireEvent.click(screen.getByRole('button', { name: '跳过' }));
-    fireEvent.click(screen.getByRole('button', { name: '拒绝回答' }));
+    fireEvent.click(screen.getByRole('button', { name: '跳过' }));
 
     await vi.waitFor(() => {
       expect(onDismiss).toHaveBeenCalledWith('question-set-1');

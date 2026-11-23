@@ -28,6 +28,7 @@ pub const AMBIENT_PROVIDER_CREDENTIAL_ENV_KEYS: &[&str] = &[
     "OPENAI_BASE_URL",
     "CODEX_ACCESS_TOKEN",
     "CODEX_API_KEY",
+    "META_API_KEY",
 ];
 
 pub const LOCAL_INSTANCE_OVERRIDE_ENV_KEYS: &[&str] = &["CLAUDE_CONFIG_DIR", "CODEX_HOME"];
@@ -135,7 +136,7 @@ pub fn scrub_keys_for_agent_launch(
     agent_id: &AgentId,
     explicit_env: &HashMap<String, String>,
 ) -> Vec<&'static str> {
-    if !matches!(agent_id.as_str(), "claude_code" | "codex") {
+    if !matches!(agent_id.as_str(), "claude_code" | "codex" | "muse_code") {
         return Vec::new();
     }
     let mut keys = Vec::new();

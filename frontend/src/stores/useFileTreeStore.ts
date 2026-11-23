@@ -58,6 +58,29 @@ interface FileTreeState {
 }
 
 let nextRevealRequestId = 1;
+const MAX_CACHED_FILE_TREE_ROOTS = 8;
+
+function setBoundedRootRecord<T>(
+  record: Record<string, T>,
+  rootPath: string,
+  value: T
+): Record<string, T> {
+  const next: Record<string, T> = {};
+  for (const key of Object.keys(record)) {
+    if (key !== rootPath) {
+      next[key] = record[key];
+    }
+  }
+  next[rootPath] = value;
+  const keys = Object.keys(next);
+  if (keys.length > MAX_CACHED_FILE_TREE_ROOTS) {
+    const overflow = keys.length - MAX_CACHED_FILE_TREE_ROOTS;
+    for (let i = 0; i < overflow; i += 1) {
+      delete next[keys[i]];
+    }
+  }
+  return next;
+}
 
 function updateExpandedForRoot(
   expandedByRoot: Record<string, Set<string>>,
@@ -70,7 +93,7 @@ function updateExpandedForRoot(
   if (next === previous) {
     return expandedByRoot;
   }
-  return { ...expandedByRoot, [rootPath]: next };
+  return setBoundedRootRecord(expandedByRoot, rootPath, next);
 }
 
 export const useFileTreeStore = create<FileTreeState>()((set, get) => ({
@@ -112,10 +135,11 @@ export const useFileTreeStore = create<FileTreeState>()((set, get) => ({
         return state;
       }
       return {
-        lazyListingByRoot: {
-          ...state.lazyListingByRoot,
-          [rootPath]: next,
-        },
+        lazyListingByRoot: setBoundedRootRecord(
+          state.lazyListingByRoot,
+          rootPath,
+          next
+        ),
       };
     }),
 

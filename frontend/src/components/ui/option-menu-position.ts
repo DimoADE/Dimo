@@ -278,11 +278,52 @@ export function fitOptionMenuElement(popover: HTMLElement): void {
 export function useOptionMenuViewportFit(): void {
   useEffect(() => {
     const positioned = new Set<HTMLElement>();
+    let refitFrame = 0;
+    let viewportListenersAttached = false;
+
+    const refit = () => {
+      for (const popover of positioned) {
+        if (!popover.isConnected) {
+          positioned.delete(popover);
+          continue;
+        }
+        fitOptionMenuElement(popover);
+      }
+      if (positioned.size === 0) {
+        detachViewportListeners();
+      }
+    };
+
+    const scheduleRefit = () => {
+      if (positioned.size === 0 || refitFrame !== 0) return;
+      refitFrame = window.requestAnimationFrame(() => {
+        refitFrame = 0;
+        refit();
+      });
+    };
+
+    const attachViewportListeners = () => {
+      if (viewportListenersAttached) return;
+      viewportListenersAttached = true;
+      window.addEventListener('resize', scheduleRefit, { passive: true });
+      window.addEventListener('scroll', scheduleRefit, {
+        capture: true,
+        passive: true,
+      });
+    };
+
+    const detachViewportListeners = () => {
+      if (!viewportListenersAttached) return;
+      viewportListenersAttached = false;
+      window.removeEventListener('resize', scheduleRefit);
+      window.removeEventListener('scroll', scheduleRefit, true);
+    };
 
     const fit = (popover: HTMLElement) => {
       if (!popover.querySelector('[role="listbox"]')) return;
       fitOptionMenuElement(popover);
       positioned.add(popover);
+      attachViewportListeners();
     };
 
     const onToggle = (event: Event) => {
@@ -301,25 +342,16 @@ export function useOptionMenuViewportFit(): void {
         return;
       }
       positioned.delete(target);
-    };
-
-    const refit = () => {
-      for (const popover of positioned) {
-        if (!popover.isConnected) {
-          positioned.delete(popover);
-          continue;
-        }
-        fit(popover);
+      if (positioned.size === 0) {
+        detachViewportListeners();
       }
     };
 
     document.addEventListener('toggle', onToggle, true);
-    window.addEventListener('resize', refit);
-    window.addEventListener('scroll', refit, true);
     return () => {
+      window.cancelAnimationFrame(refitFrame);
       document.removeEventListener('toggle', onToggle, true);
-      window.removeEventListener('resize', refit);
-      window.removeEventListener('scroll', refit, true);
+      detachViewportListeners();
     };
   }, []);
 }

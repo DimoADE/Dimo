@@ -96,8 +96,7 @@ vi.mock('@/features/model-router', async (importOriginal) => {
 const shellOpenMock = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 
 vi.mock('@/lib/desktopShell', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('@/lib/desktopShell')>();
+  const actual = await importOriginal<typeof import('@/lib/desktopShell')>();
   return {
     ...actual,
     openExternalUrl: shellOpenMock,

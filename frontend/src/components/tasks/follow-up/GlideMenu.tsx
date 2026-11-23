@@ -22,10 +22,14 @@ export function GlideMenu({
   children,
   className,
   highlightClassName,
+  role,
+  ariaLabel,
 }: {
   children: ReactNode;
   className?: string;
   highlightClassName?: string;
+  role?: string;
+  ariaLabel?: string;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [rect, setRect] = useState<HighlightRect>({
@@ -39,7 +43,11 @@ export function GlideMenu({
     if (!container || !(target instanceof HTMLElement)) return;
     const row = target.closest<HTMLElement>('[data-menu-row]');
     if (!row || !container.contains(row)) return;
-    const nextTop = row.offsetTop;
+    const nextTop =
+      row.offsetParent === container
+        ? row.offsetTop
+        : row.getBoundingClientRect().top -
+          container.getBoundingClientRect().top;
     const nextHeight = row.offsetHeight;
     setRect((current) =>
       current.visible &&
@@ -80,6 +88,8 @@ export function GlideMenu({
   return (
     <div
       ref={containerRef}
+      role={role}
+      aria-label={ariaLabel}
       className={cn('relative', className)}
       onMouseMove={handleMouseMove}
       onMouseLeave={hide}

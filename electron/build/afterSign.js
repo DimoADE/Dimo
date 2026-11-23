@@ -20,7 +20,7 @@ exports.default = async function afterSign(context) {
     return;
   }
 
-  const { notarize } = require('@electron/notarize');
+  const { notarize } = await import('@electron/notarize');
   const appName = `${context.packager.appInfo.productFilename}.app`;
   const appPath = path.join(context.appOutDir, appName);
 

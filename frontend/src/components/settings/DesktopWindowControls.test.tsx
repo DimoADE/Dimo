@@ -6,8 +6,7 @@ import { DesktopWindowControls } from './DesktopWindowControls';
 const useTauriClient = vi.hoisted(() => vi.fn(() => true));
 
 vi.mock('@/lib/desktopShell', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('@/lib/desktopShell')>();
+  const actual = await importOriginal<typeof import('@/lib/desktopShell')>();
   return {
     ...actual,
     useTauriClient,
@@ -44,7 +43,9 @@ describe('DesktopWindowControls', () => {
   });
 
   it('renders minimize, maximize, and close on Linux desktop', () => {
-    vi.spyOn(window.navigator, 'platform', 'get').mockReturnValue('Linux x86_64');
+    vi.spyOn(window.navigator, 'platform', 'get').mockReturnValue(
+      'Linux x86_64'
+    );
     render(<DesktopWindowControls />);
 
     expect(screen.getByRole('button', { name: '最小化' })).toBeInTheDocument();

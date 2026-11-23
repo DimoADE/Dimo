@@ -48,6 +48,7 @@ export interface WindowManagerOptions {
   iconPath?: string;
   appUserModelId?: string;
   smokeMode?: boolean;
+  platform?: NodeJS.Platform;
   onWindowClosed?: (label: string, windowStillOpen: boolean) => void;
   onMainWindowLoaded?: () => void;
   onMainWindowClosed?: () => void;
@@ -188,10 +189,26 @@ export function isDevToolsShortcut(
   return input.control && input.shift && !input.alt && !input.meta;
 }
 
+const HIDDEN_SETTINGS_IDLE_DESTROY_MS = 15 * 60_000;
+const RESIZE_NOTIFY_COALESCE_MS = 32;
+
 export class WindowManager {
   private readonly windows = new Map<string, BrowserWindow>();
+  private readonly hiddenIdleTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
   private readonly labelsByWebContents = new WeakMap<WebContents, string>();
+  private readonly auxiliaryWebContents = new Set<WebContents>();
+  private readonly pendingFullscreenHide = new WeakMap<
+    BrowserWindow,
+    () => void
+  >();
+  private readonly prewarmingWindows = new WeakSet<BrowserWindow>();
+  private readonly prewarmedReadyWindows = new WeakSet<BrowserWindow>();
+  private readonly pendingSettingsRoutes = new WeakMap<BrowserWindow, string>();
   private readonly options: WindowManagerOptions;
+  private readonly platform: NodeJS.Platform;
   private appWindowCounter = 1;
   private quitting = false;
   private trayEnabled = false;
@@ -202,6 +219,91 @@ export class WindowManager {
 
   constructor(options: WindowManagerOptions) {
     this.options = options;
+    this.platform = options.platform ?? process.platform;
+  }
+
+  private clearHiddenIdleTimer(label: string): void {
+    const timer = this.hiddenIdleTimers.get(label);
+    if (timer) {
+      clearTimeout(timer);
+      this.hiddenIdleTimers.delete(label);
+    }
+  }
+
+  private scheduleHiddenIdleDestroy(label: string, win: BrowserWindow): void {
+    this.clearHiddenIdleTimer(label);
+    const timer = setTimeout(() => {
+      this.hiddenIdleTimers.delete(label);
+      if (this.windows.get(label) !== win || win.isDestroyed() || win.isVisible()) {
+        return;
+      }
+      win.destroy();
+    }, HIDDEN_SETTINGS_IDLE_DESTROY_MS);
+    timer.unref?.();
+    this.hiddenIdleTimers.set(label, timer);
+  }
+
+  cancelPendingFullscreenHide(win: BrowserWindow): void {
+    const cancel = this.pendingFullscreenHide.get(win);
+    if (cancel) {
+      this.pendingFullscreenHide.delete(win);
+      cancel();
+    }
+  }
+
+  showWindow(win: BrowserWindow): void {
+    if (win.isDestroyed()) {
+      return;
+    }
+    if (this.prewarmingWindows.has(win)) {
+      this.prewarmedReadyWindows.add(win);
+      return;
+    }
+    this.cancelPendingFullscreenHide(win);
+    if (win.isMinimized()) {
+      win.restore();
+    }
+    win.show();
+  }
+
+  focusWindow(win: BrowserWindow): void {
+    if (win.isDestroyed() || this.prewarmingWindows.has(win)) {
+      return;
+    }
+    win.focus();
+  }
+
+  /**
+   * Hides a window safely across platforms. On macOS, calling `win.hide()`
+   * directly on a native fullscreen window strands the user on a black empty
+   * Space, so we exit fullscreen first and hide once `leave-full-screen` fires.
+   */
+  private hideWindowSafely(win: BrowserWindow, onHidden?: () => void): void {
+    if (win.isDestroyed()) {
+      return;
+    }
+    if (this.platform === 'darwin' && win.isFullScreen?.()) {
+      if (this.pendingFullscreenHide.has(win)) {
+        return;
+      }
+      const handleLeaveFullScreen = () => {
+        this.pendingFullscreenHide.delete(win);
+        if (!win.isDestroyed()) {
+          win.hide();
+          onHidden?.();
+        }
+      };
+      this.pendingFullscreenHide.set(win, () => {
+        if (!win.isDestroyed()) {
+          win.removeListener('leave-full-screen', handleLeaveFullScreen);
+        }
+      });
+      win.once('leave-full-screen', handleLeaveFullScreen);
+      win.setFullScreen(false);
+      return;
+    }
+    win.hide();
+    onHidden?.();
   }
 
   setQuitting(quitting: boolean): void {
@@ -233,6 +335,14 @@ export class WindowManager {
 
   registerAuxiliaryWebContents(webContents: WebContents, label: string): void {
     this.labelsByWebContents.set(webContents, label);
+    this.auxiliaryWebContents.add(webContents);
+    webContents.once?.('destroyed', () => {
+      this.auxiliaryWebContents.delete(webContents);
+    });
+  }
+
+  unregisterAuxiliaryWebContents(webContents: WebContents): void {
+    this.auxiliaryWebContents.delete(webContents);
   }
 
   getWindow(label: string): BrowserWindow | undefined {
@@ -297,6 +407,7 @@ export class WindowManager {
 
   showMainWindow(): void {
     const main = this.getMainWindow() ?? this.createMainWindow();
+    this.cancelPendingFullscreenHide(main);
     if (main.isMinimized()) {
       main.restore();
     }
@@ -307,7 +418,7 @@ export class WindowManager {
   hideMainWindow(): void {
     const main = this.getMainWindow();
     if (main && !main.isDestroyed()) {
-      main.hide();
+      this.hideWindowSafely(main);
     }
   }
 
@@ -410,6 +521,7 @@ export class WindowManager {
   createMainWindow(): BrowserWindow {
     const existing = this.getMainWindow();
     if (existing) {
+      this.cancelPendingFullscreenHide(existing);
       if (existing.isMinimized()) {
         existing.restore();
       }
@@ -458,6 +570,7 @@ export class WindowManager {
     const title = hostWindowTitle(profile.name);
     const existing = this.getWindow(label);
     if (existing) {
+      this.cancelPendingFullscreenHide(existing);
       existing.setTitle(title);
       if (existing.isMinimized()) {
         existing.restore();
@@ -495,6 +608,38 @@ export class WindowManager {
     this.closeWindowsByLabels(labels);
   }
 
+  prewarmSettingsWindow(): BrowserWindow | undefined {
+    if (this.quitting || this.options.smokeMode || !this.getMainWindow()) {
+      return undefined;
+    }
+    const existing = this.getWindow('settings');
+    if (existing) {
+      return existing;
+    }
+
+    const win = this.createWindowInternal('settings', {
+      title: 'Settings',
+      width: 1100,
+      height: 800,
+      minWidth: 800,
+      minHeight: 600,
+      routePath: '/settings',
+      hideOnClose: 'always',
+    });
+    this.prewarmingWindows.add(win);
+    win.webContents.once('did-finish-load', () => {
+      if (win.isDestroyed()) {
+        return;
+      }
+      const pendingRoute = this.pendingSettingsRoutes.get(win);
+      if (pendingRoute) {
+        this.pendingSettingsRoutes.delete(win);
+        this.navigateSettingsWindow(win, pendingRoute);
+      }
+    });
+    return win;
+  }
+
   openSettingsWindow(
     callerLabel: string,
     options: OpenSettingsWindowOptions = {}
@@ -517,7 +662,23 @@ export class WindowManager {
 
     const existing = this.getWindow(label);
     if (existing) {
+      const wasPrewarming = this.prewarmingWindows.delete(existing);
+      const isPrewarmedReady = this.prewarmedReadyWindows.has(existing);
+      this.cancelPendingFullscreenHide(existing);
+      this.clearHiddenIdleTimer(label);
       existing.setTitle(title);
+
+      if (wasPrewarming && !isPrewarmedReady) {
+        if (routePath !== '/settings') {
+          this.pendingSettingsRoutes.set(existing, routePath);
+          this.navigateSettingsWindow(existing, routePath);
+        }
+        this.scheduleRevealFallback(existing);
+        return existing;
+      }
+
+      this.prewarmedReadyWindows.delete(existing);
+      this.pendingSettingsRoutes.delete(existing);
       this.navigateSettingsWindow(existing, routePath);
       if (existing.isMinimized()) {
         existing.restore();
@@ -546,6 +707,8 @@ export class WindowManager {
     if (!win) {
       return;
     }
+    this.cancelPendingFullscreenHide(win);
+    this.clearHiddenIdleTimer(label);
     if (win.isMinimized()) {
       win.restore();
     }
@@ -557,6 +720,7 @@ export class WindowManager {
 
   closeWindowsByLabels(labels: readonly string[]): void {
     for (const label of labels) {
+      this.clearHiddenIdleTimer(label);
       const win = this.getWindow(label);
       if (win && !win.isDestroyed()) {
         win.destroy();
@@ -569,17 +733,35 @@ export class WindowManager {
     payload?: unknown,
     excludeWebContentsId?: number
   ): void {
+    const sentWebContentsIds = new Set<number>();
     for (const win of this.windows.values()) {
       if (win.isDestroyed()) {
         continue;
       }
+      const wc = win.webContents;
       if (
         excludeWebContentsId !== undefined &&
-        win.webContents.id === excludeWebContentsId
+        wc.id === excludeWebContentsId
       ) {
         continue;
       }
-      win.webContents.send(IPC_CHANNELS.EVENTS_MESSAGE, { event, payload });
+      sentWebContentsIds.add(wc.id);
+      wc.send(IPC_CHANNELS.EVENTS_MESSAGE, { event, payload });
+    }
+
+    for (const wc of Array.from(this.auxiliaryWebContents)) {
+      if (wc.isDestroyed?.()) {
+        this.auxiliaryWebContents.delete(wc);
+        continue;
+      }
+      if (
+        (excludeWebContentsId !== undefined && wc.id === excludeWebContentsId) ||
+        sentWebContentsIds.has(wc.id)
+      ) {
+        continue;
+      }
+      sentWebContentsIds.add(wc.id);
+      wc.send(IPC_CHANNELS.EVENTS_MESSAGE, { event, payload });
     }
   }
 
@@ -641,16 +823,38 @@ export class WindowManager {
       });
     }
 
-    const notifyResized = () => {
+    let resizeNotifyTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearResizeNotifyTimer = () => {
+      if (resizeNotifyTimer !== null) {
+        clearTimeout(resizeNotifyTimer);
+        resizeNotifyTimer = null;
+      }
+    };
+    const notifyResizedImmediate = () => {
+      clearResizeNotifyTimer();
       if (!win.isDestroyed()) {
         win.webContents.send(IPC_CHANNELS.WINDOW_RESIZED);
       }
     };
-    win.on('resize', notifyResized);
-    win.on('maximize', notifyResized);
-    win.on('unmaximize', notifyResized);
-    win.on('enter-full-screen', notifyResized);
-    win.on('leave-full-screen', notifyResized);
+    const notifyResizedCoalesced = () => {
+      if (resizeNotifyTimer !== null) {
+        return;
+      }
+      resizeNotifyTimer = setTimeout(() => {
+        resizeNotifyTimer = null;
+        if (!win.isDestroyed()) {
+          win.webContents.send(IPC_CHANNELS.WINDOW_RESIZED);
+        }
+      }, RESIZE_NOTIFY_COALESCE_MS);
+    };
+    win.on('resize', notifyResizedCoalesced);
+    win.on('maximize', notifyResizedImmediate);
+    win.on('unmaximize', notifyResizedImmediate);
+    win.on('enter-full-screen', notifyResizedImmediate);
+    win.on('leave-full-screen', notifyResizedImmediate);
+    win.on('show', () => {
+      this.clearHiddenIdleTimer(label);
+    });
 
     if (config.hideOnClose !== 'never') {
       win.on('close', (event) => {
@@ -665,12 +869,18 @@ export class WindowManager {
           (config.hideOnClose === 'when-tray-enabled' && this.trayEnabled)
         ) {
           event.preventDefault();
-          win.hide();
+          this.hideWindowSafely(win, () => {
+            if (config.hideOnClose === 'always') {
+              this.scheduleHiddenIdleDestroy(label, win);
+            }
+          });
         }
       });
     }
 
     win.on('closed', () => {
+      clearResizeNotifyTimer();
+      this.clearHiddenIdleTimer(label);
       if (this.windows.get(label) === win) {
         this.windows.delete(label);
       }

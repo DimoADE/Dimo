@@ -571,12 +571,14 @@ impl HostCollaborationHost {
         let operation_id = required_uuid(input, &["operationId", "operation_id"])?;
         let conversation_id = required_uuid(input, &["conversationId", "conversation_id"])?;
         let nickname = text(input, &["nickname"]);
-        let member = collaboration::host_add_space_member(
+        let during_create = truthy(input, &["duringCreate", "during_create"]);
+        let member = collaboration::host_add_space_member_with_options(
             &self.pool,
             &space_id,
             conversation_id,
             &nickname,
             operation_id,
+            during_create,
         )
         .await
         .map_err(host_error)?;
@@ -1114,6 +1116,10 @@ impl HostCollaborationHost {
                     .filter(|value| !value.is_null())
                 {
                     envelope["crossChatReceivedFrom"] = received;
+                }
+                if let Some(provision) = message.provision_activity.filter(|value| !value.is_null())
+                {
+                    envelope["provisionActivity"] = provision;
                 }
                 let mut item = json!({
                     "id": message.id,
@@ -2637,8 +2643,8 @@ mod tests {
         assert_eq!(join_event.payload["workspaceId"], json!(workspace));
         assert_eq!(join_event.payload["spaceId"], json!(space_id));
         assert_eq!(join_event.payload["memberId"], added_a["member_id"]);
-        assert_eq!(join_event.payload["seq"], json!(3));
-        assert_eq!(join_event.payload["kind"], json!("roster"));
+        assert_eq!(join_event.payload["seq"], json!(5));
+        assert_eq!(join_event.payload["kind"], json!("message"));
         assert_eq!(join_event.payload["generation"], json!(1));
 
         host.call(
@@ -2758,14 +2764,14 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(posted["seq"], 1);
+        assert_eq!(posted["seq"], 2);
         assert_eq!(posted["receipts"][0]["nickname"], "评审B");
 
         let post_event = rx.try_recv().unwrap();
         assert_eq!(post_event.channel, COLLABORATION_SPACE_CHANGED_EVENT);
         assert_eq!(post_event.payload["workspaceId"], json!(workspace));
         assert_eq!(post_event.payload["spaceId"], json!(space_id));
-        assert_eq!(post_event.payload["seq"], json!(7));
+        assert_eq!(post_event.payload["seq"], json!(10));
         assert_eq!(post_event.payload["kind"], json!("turn"));
         assert_eq!(post_event.payload["generation"], json!(1));
         assert!(post_event.payload.get("content").is_none());
@@ -2847,7 +2853,12 @@ mod tests {
             )
             .await
             .unwrap();
-        let messages = listed["messages"].as_array().unwrap();
+        let messages: Vec<&Value> = listed["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["origin"] != json!("system"))
+            .collect();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["id"], json!(first_id));
         assert_eq!(messages[0]["origin"], json!("user"));
@@ -2911,8 +2922,14 @@ mod tests {
             )
             .await
             .unwrap();
+        let listed_posted = listed["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == json!(message_id))
+            .expect("posted message should be listed");
         assert_eq!(
-            listed["messages"][0]["envelope"]["reactions"][0]["emoji"],
+            listed_posted["envelope"]["reactions"][0]["emoji"],
             json!("👍")
         );
         let cleared = host
@@ -3723,7 +3740,7 @@ mod tests {
         assert!(items.iter().all(|item| item["unread_count"] == json!(0)));
         sqlx::query(
             "INSERT INTO collaboration_space_messages (id, space_id, seq, envelope_json, created_at, origin)
-             VALUES (?, ?, 1, ?, '2999-01-01T00:00:00Z', 'agent')",
+             VALUES (?, ?, 2, ?, '2999-01-01T00:00:00Z', 'agent')",
         )
         .bind(Uuid::new_v4().to_string())
         .bind(&a)
@@ -3753,7 +3770,7 @@ mod tests {
         );
         assert_eq!(items[1]["thread_id"], json!(b));
         let read = call(&host, "thread.markRead", json!({ "threadId": a })).await;
-        assert_eq!(read["lastReadSeq"], json!(1));
+        assert_eq!(read["lastReadSeq"], json!(2));
         let listed = call(
             &host,
             "thread.listSidebar",

@@ -23,6 +23,7 @@ export function useSessionComposerDraftScratch({
   attachedImagePaths,
   executorProfile,
   executorProfileRef,
+  preserveSessionControls = true,
 }: {
   scratchId: string | undefined;
   workspaceId: string | null | undefined;
@@ -30,6 +31,7 @@ export function useSessionComposerDraftScratch({
   executorProfile?: ExecutorProfileId | null;
   executorProfileRef?: RefObject<ExecutorProfileId | null>;
   localMessage?: string;
+  preserveSessionControls?: boolean;
 }) {
   const {
     scratch,
@@ -124,7 +126,7 @@ export function useSessionComposerDraftScratch({
         message,
         images,
         executorProfileId,
-        scratchData
+        preserveSessionControls ? scratchData : undefined
       );
       if (!update) return;
 
@@ -145,7 +147,7 @@ export function useSessionComposerDraftScratch({
         console.error('Failed to save follow-up draft', e);
       }
     },
-    [scratchData, updateScratch, workspaceId]
+    [preserveSessionControls, scratchData, updateScratch, workspaceId]
   );
 
   const { debounced: setFollowUpMessage, cancel: cancelDebouncedSave } =

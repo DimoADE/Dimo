@@ -6,6 +6,7 @@ import {
   useEffect,
   useMemo,
   useReducer,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -16,6 +17,7 @@ import { listenToAgentEvents } from './events';
 import {
   emptyAgentWorkbenchState,
   hydrateAgentSnapshot,
+  isWorkbenchStateEvent,
   reduceAgentEvent,
   type AgentWorkbenchState,
 } from './store';
@@ -78,10 +80,14 @@ function useAgentWorkbenchStore(): AgentWorkbench {
   const [loadState, setLoadState] =
     useState<AgentWorkbenchLoadState>('loading');
   const [error, setError] = useState<unknown>(null);
+  const latestSequenceRef = useRef(0);
 
   const refresh = useCallback(async () => {
     const snapshot = await agentsApi.snapshot();
-    dispatch({ type: 'hydrate', snapshot });
+    if (snapshot.sequence >= latestSequenceRef.current) {
+      latestSequenceRef.current = snapshot.sequence;
+      dispatch({ type: 'hydrate', snapshot });
+    }
     setLoadState('ready');
     setError(null);
     return snapshot;
@@ -92,7 +98,12 @@ function useAgentWorkbenchStore(): AgentWorkbench {
     let unlisten: (() => void) | undefined;
 
     listenToAgentEvents((envelope) => {
-      dispatch({ type: 'event', envelope });
+      if (envelope.sequence > latestSequenceRef.current) {
+        latestSequenceRef.current = envelope.sequence;
+      }
+      if (isWorkbenchStateEvent(envelope.event.kind)) {
+        dispatch({ type: 'event', envelope });
+      }
       if (envelope.event.kind === 'config_option_rejected') {
         const rejection = envelope.event;
         toast.warning(

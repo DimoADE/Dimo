@@ -72,6 +72,7 @@ describe('GitCommitBox', () => {
     const inputFrame = textarea.closest('[data-control-frame]');
     expect(inputFrame?.className).toContain('astryx-text-input');
     expect(inputFrame?.className).toContain('rounded-lg');
+    expect(inputFrame?.className).not.toContain('bg-background');
 
     const actionsRow = screen.getByTestId('git-commit-actions-row');
     expect(actionsRow.className).toContain('flex-wrap');
@@ -214,6 +215,29 @@ describe('GitFileRow & GitStagingArea', () => {
     fireEvent.click(changesHeader);
     expect(screen.getByText('App.tsx')).toBeTruthy();
   });
+
+  it('hides staging and discard controls in readOnly mode while keeping file selection working', () => {
+    const onSelectFile = vi.fn();
+    render(
+      <GitStagingArea
+        stagedFiles={[]}
+        unstagedFiles={[sampleFile]}
+        selectedPath={null}
+        viewMode="flat"
+        readOnly
+        onSelectFile={onSelectFile}
+      />
+    );
+
+    expect(screen.queryByRole('button', { name: 'Stage' })).toBeNull();
+    expect(
+      screen.queryByRole('button', { name: 'Discard Changes' })
+    ).toBeNull();
+    expect(screen.getByRole('button', { name: 'Review' })).toBeTruthy();
+
+    fireEvent.click(screen.getByText('App.tsx'));
+    expect(onSelectFile).toHaveBeenCalledWith(sampleFile.path);
+  });
 });
 
 describe('GitLogView', () => {
@@ -225,6 +249,7 @@ describe('GitLogView', () => {
         author: 'Alice',
         timestamp: 1700000000,
         refs: ['HEAD -> main'],
+        parents: [],
       },
     ];
 
@@ -257,6 +282,88 @@ describe('GitLogView', () => {
     expect(screen.queryByText('feat: initial commit')).toBeNull();
     fireEvent.click(toPushHeader);
     expect(screen.getByText('feat: initial commit')).toBeTruthy();
+  });
+
+  it('renders SVG commit graph cells and branch filter in graph mode without section header breaks', () => {
+    const entries: GitLogEntry[] = [
+      {
+        sha: 'merge111',
+        summary: 'Merge branch feat/ui',
+        author: 'Alice',
+        timestamp: 1700000300,
+        refs: ['HEAD -> main'],
+        parents: ['main000', 'feat111'],
+      },
+      {
+        sha: 'feat111',
+        summary: 'feat: add selector',
+        author: 'Bob',
+        timestamp: 1700000200,
+        refs: ['feat/ui'],
+        parents: ['main000'],
+      },
+      {
+        sha: 'main000',
+        summary: 'chore: base commit',
+        author: 'Alice',
+        timestamp: 1700000100,
+        refs: ['origin/main'],
+        parents: [],
+      },
+    ];
+
+    render(
+      <GitLogView
+        entries={entries}
+        total={3}
+        ahead={1}
+        behind={0}
+        upstream="origin/main"
+        branchName="main"
+        viewMode="graph"
+        branches={[
+          {
+            name: 'main',
+            is_current: true,
+            is_remote: false,
+            is_worktree: false,
+            worktree_path: null,
+            last_commit_date: new Date('2026-01-01T00:00:00Z'),
+          },
+          {
+            name: 'origin/main',
+            is_current: false,
+            is_remote: true,
+            is_worktree: false,
+            worktree_path: null,
+            last_commit_date: new Date('2026-01-01T00:00:00Z'),
+          },
+        ]}
+        selectedBranches={['main', 'origin/main']}
+        defaultBranches={['main', 'origin/main']}
+        onSelectedBranchesChange={vi.fn()}
+        loading={false}
+        workspaceId={null}
+        repoId="repo-1"
+      />
+    );
+
+    const branchFilter = screen.getByTestId('git-log-branch-filter');
+    expect(branchFilter).toBeTruthy();
+    expect(branchFilter.textContent).toContain('main');
+    expect(branchFilter.textContent).toContain('+1');
+
+    // Branch filter sits in the same horizontal toolbar row as the search box
+    const searchInput = screen.getByPlaceholderText('搜索提交...');
+    expect(branchFilter.parentElement?.contains(searchInput)).toBe(true);
+
+    const graphCells = screen.getAllByTestId('git-log-graph-cell');
+    expect(graphCells).toHaveLength(3);
+    expect(graphCells[0].className).toContain('relative');
+    const svg = graphCells[0].querySelector('svg');
+    expect(svg?.getAttribute('class')).toContain('absolute');
+    expect(svg?.getAttribute('class')).toContain('inset-0');
+    expect(screen.queryByTestId('git-log-section-header-to-push')).toBeNull();
   });
 
   it('renders Issue and PR empty states with in-panel GitHub CLI setup modal trigger instead of crashing when gh is missing', async () => {

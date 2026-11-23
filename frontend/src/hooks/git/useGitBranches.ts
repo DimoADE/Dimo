@@ -6,6 +6,7 @@ import type { GitBranch, GitRemote } from 'shared/types';
 interface UseGitBranchesOptions {
   workspaceId: string | null;
   repoId: string | null;
+  worktreePath?: string | null;
   enabled?: boolean;
 }
 
@@ -23,6 +24,7 @@ interface UseGitBranchesReturn {
 export function useGitBranches({
   workspaceId,
   repoId,
+  worktreePath = null,
   enabled = true,
 }: UseGitBranchesOptions): UseGitBranchesReturn {
   const [branches, setBranches] = useState<GitBranch[]>([]);
@@ -68,7 +70,9 @@ export function useGitBranches({
       if (!repoId) return;
       setError(null);
       try {
-        if (workspaceId) {
+        if (worktreePath) {
+          await repoApi.checkoutBranch(repoId, name, worktreePath);
+        } else if (workspaceId) {
           await attemptsApi.checkoutBranch(workspaceId, repoId, name);
         } else {
           await repoApi.checkoutBranch(repoId, name);
@@ -79,7 +83,7 @@ export function useGitBranches({
         throw e;
       }
     },
-    [workspaceId, repoId, refresh]
+    [workspaceId, repoId, worktreePath, refresh]
   );
 
   const createBranch = useCallback(
@@ -87,7 +91,9 @@ export function useGitBranches({
       if (!repoId) return;
       setError(null);
       try {
-        if (workspaceId) {
+        if (worktreePath) {
+          await repoApi.createBranch(repoId, name, fromRef, worktreePath);
+        } else if (workspaceId) {
           await attemptsApi.createBranch(workspaceId, repoId, name, fromRef);
         } else {
           await repoApi.createBranch(repoId, name, fromRef);
@@ -98,7 +104,7 @@ export function useGitBranches({
         throw e;
       }
     },
-    [workspaceId, repoId, refresh]
+    [workspaceId, repoId, worktreePath, refresh]
   );
 
   const deleteBranch = useCallback(
@@ -106,7 +112,9 @@ export function useGitBranches({
       if (!repoId) return;
       setError(null);
       try {
-        if (workspaceId) {
+        if (worktreePath) {
+          await repoApi.deleteBranch(repoId, name, worktreePath);
+        } else if (workspaceId) {
           await attemptsApi.deleteBranch(workspaceId, repoId, name);
         } else {
           await repoApi.deleteBranch(repoId, name);
@@ -117,7 +125,7 @@ export function useGitBranches({
         throw e;
       }
     },
-    [workspaceId, repoId, refresh]
+    [workspaceId, repoId, worktreePath, refresh]
   );
 
   return {

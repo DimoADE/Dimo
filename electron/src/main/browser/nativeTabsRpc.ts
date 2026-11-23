@@ -6,6 +6,8 @@ export interface NativeTabsRpcClientOptions {
   getConnection: () => { baseUrl: string; token: string };
   controller: ElectronBrowserController;
   getDownloadsDir?: () => string | undefined;
+  maxConcurrentRpcs?: number;
+  maxQueuedRpcs?: number;
 }
 
 export interface NavigationPolicyResult {
@@ -28,6 +30,8 @@ interface InboundPolicyResponse {
 }
 
 const POLICY_CHECK_TIMEOUT_MS = 1_500;
+const DEFAULT_MAX_CONCURRENT_RPCS = 16;
+const DEFAULT_MAX_QUEUED_RPCS = 256;
 const DEFAULT_POLICY_ALLOW: NavigationPolicyResult = {
   allowed: true,
   preferSystem: false,
@@ -37,12 +41,16 @@ export class NativeTabsRpcClient {
   private readonly getConnection: () => { baseUrl: string; token: string };
   private readonly controller: ElectronBrowserController;
   private readonly getDownloadsDir: () => string | undefined;
+  private readonly maxConcurrentRpcs: number;
+  private readonly maxQueuedRpcs: number;
 
   private socket: WebSocket | null = null;
   private running = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private backoffMs = 250;
-  private readyResolvers: Array<() => void> = [];
+  private readyResolvers: Array<(connected: boolean) => void> = [];
+  private activeRpcs = 0;
+  private rpcQueue: Array<{ req: InboundRpcRequest; socket: WebSocket | null }> = [];
   private nextPolicyId = 1;
   private pendingPolicies = new Map<
     number,
@@ -56,6 +64,14 @@ export class NativeTabsRpcClient {
     this.getConnection = options.getConnection;
     this.controller = options.controller;
     this.getDownloadsDir = options.getDownloadsDir ?? (() => undefined);
+    this.maxConcurrentRpcs = Math.max(
+      1,
+      Math.floor(options.maxConcurrentRpcs ?? DEFAULT_MAX_CONCURRENT_RPCS)
+    );
+    this.maxQueuedRpcs = Math.max(
+      0,
+      Math.floor(options.maxQueuedRpcs ?? DEFAULT_MAX_QUEUED_RPCS)
+    );
   }
 
   start(): void {
@@ -73,7 +89,9 @@ export class NativeTabsRpcClient {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    this.resolveAllReadyWaiters(false);
     this.resolveAllPendingPolicies(DEFAULT_POLICY_ALLOW);
+    this.rpcQueue.length = 0;
     if (this.socket) {
       try {
         this.socket.close();
@@ -102,11 +120,11 @@ export class NativeTabsRpcClient {
           resolve(false);
         }
       }, timeoutMs);
-      const onReady = () => {
+      const onReady = (connected: boolean) => {
         if (!settled) {
           settled = true;
           clearTimeout(timer);
-          resolve(true);
+          resolve(connected);
         }
       };
       this.readyResolvers.push(onReady);
@@ -146,6 +164,13 @@ export class NativeTabsRpcClient {
         resolve(DEFAULT_POLICY_ALLOW);
       }
     });
+  }
+
+  private resolveAllReadyWaiters(connected: boolean): void {
+    const waiters = this.readyResolvers.splice(0, this.readyResolvers.length);
+    for (const resolve of waiters) {
+      resolve(connected);
+    }
   }
 
   private resolveAllPendingPolicies(fallback: NavigationPolicyResult): void {
@@ -196,20 +221,18 @@ export class NativeTabsRpcClient {
           source: 'system',
         },
       });
-      const waiters = this.readyResolvers.splice(0, this.readyResolvers.length);
-      for (const resolve of waiters) {
-        resolve();
-      }
+      this.resolveAllReadyWaiters(true);
     });
 
     ws.addEventListener('message', (event) => {
       const text = typeof event.data === 'string' ? event.data : String(event.data ?? '');
-      void this.handleMessage(text);
+      this.handleMessage(text, ws);
     });
 
     ws.addEventListener('close', () => {
       if (this.socket === ws) {
         this.socket = null;
+        this.rpcQueue.length = 0;
       }
       this.resolveAllPendingPolicies(DEFAULT_POLICY_ALLOW);
       this.scheduleReconnect();
@@ -232,8 +255,8 @@ export class NativeTabsRpcClient {
     }, delay);
   }
 
-  private sendJson(payload: Record<string, unknown>): void {
-    const ws = this.socket;
+  private sendJson(payload: Record<string, unknown>, targetSocket?: WebSocket | null): void {
+    const ws = targetSocket === undefined ? this.socket : targetSocket;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       return;
     }
@@ -244,7 +267,7 @@ export class NativeTabsRpcClient {
     }
   }
 
-  private async handleMessage(raw: string): Promise<void> {
+  private handleMessage(raw: string, sourceSocket: WebSocket | null): void {
     let parsed: unknown;
     try {
       parsed = JSON.parse(raw);
@@ -278,29 +301,82 @@ export class NativeTabsRpcClient {
       return;
     }
 
+    if (this.activeRpcs >= this.maxConcurrentRpcs) {
+      if (this.rpcQueue.length >= this.maxQueuedRpcs) {
+        this.sendJson(
+          {
+            type: 'rpc_response',
+            id: req.id,
+            ok: false,
+            code: 'browser_busy',
+            message: 'Too many concurrent browser RPC requests',
+          },
+          sourceSocket
+        );
+        return;
+      }
+      this.rpcQueue.push({ req, socket: sourceSocket });
+      return;
+    }
+
+    void this.runRpcRequest(req, sourceSocket);
+  }
+
+  private async runRpcRequest(
+    req: InboundRpcRequest,
+    sourceSocket: WebSocket | null
+  ): Promise<void> {
+    this.activeRpcs += 1;
     try {
       const result = await this.controller.handleRpc(
         req.method,
         req.params && typeof req.params === 'object' ? req.params : {}
       );
-      this.sendJson({
-        type: 'rpc_response',
-        id: req.id,
-        ok: true,
-        result: result ?? null,
-      });
+      if (this.socket === sourceSocket) {
+        this.sendJson(
+          {
+            type: 'rpc_response',
+            id: req.id,
+            ok: true,
+            result: result ?? null,
+          },
+          sourceSocket
+        );
+      }
     } catch (error) {
-      const code =
-        error instanceof BrowserRpcError ? error.code : 'browser_native_error';
-      const message =
-        error instanceof Error ? error.message : String(error ?? 'unknown error');
-      this.sendJson({
-        type: 'rpc_response',
-        id: req.id,
-        ok: false,
-        code,
-        message,
-      });
+      if (this.socket === sourceSocket) {
+        const code =
+          error instanceof BrowserRpcError ? error.code : 'browser_native_error';
+        const message =
+          error instanceof Error ? error.message : String(error ?? 'unknown error');
+        this.sendJson(
+          {
+            type: 'rpc_response',
+            id: req.id,
+            ok: false,
+            code,
+            message,
+          },
+          sourceSocket
+        );
+      }
+    } finally {
+      this.activeRpcs -= 1;
+      this.drainRpcQueue();
+    }
+  }
+
+  private drainRpcQueue(): void {
+    while (
+      this.running &&
+      this.activeRpcs < this.maxConcurrentRpcs &&
+      this.rpcQueue.length > 0
+    ) {
+      const next = this.rpcQueue.shift()!;
+      if (next.socket !== this.socket) {
+        continue;
+      }
+      void this.runRpcRequest(next.req, next.socket);
     }
   }
 }

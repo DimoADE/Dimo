@@ -31,8 +31,9 @@ jobs:
     # Desktop installer releases do not contain the npm CLI tarball.
     # Keep them independent from the npm publication lifecycle.
     if: >-
-      github.event.release.prerelease == false &&
-      !startsWith(github.event.release.tag_name, 'desktop-v')
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.release.prerelease == false &&
+      !startsWith(github.event.release.tag_name, 'desktop-v'))
     steps:
       - uses: actions/checkout@v6
         with:
@@ -42,10 +43,8 @@ jobs:
       - name: Setup Node
         uses: ./.github/actions/setup-node
 
-      - name: Upgrade npm for OIDC support
-        run: npm install -g npm@latest
-
       - name: Download release assets
+        id: download
         uses: actions/github-script@v8
         env:
           RELEASE_ID: ${{ inputs.release_id }}
@@ -72,7 +71,14 @@ jobs:
             const tgzAsset = release.data.assets.find(asset => asset.name.endsWith('.tgz'));
 
             if (!tgzAsset) {
-              core.setFailed('No .tgz file found in release assets');
+              if (context.eventName === 'workflow_dispatch') {
+                core.setFailed('No .tgz file found in release assets');
+                return;
+              }
+              core.notice(
+                `Release ${release.data.tag_name} has no npm .tgz asset; skipping npm publish.`
+              );
+              core.setOutput('has-package', 'false');
               return;
             }
 
@@ -93,11 +99,17 @@ jobs:
             console.log(`Downloaded ${tgzAsset.name} to ${filePath}`);
 
             // Set output for next step
+            core.setOutput('has-package', 'true');
             core.setOutput('package-file', filePath);
             core.setOutput('package-name', tgzAsset.name);
 
+      - name: Upgrade npm for OIDC support
+        if: steps.download.outputs.has-package == 'true'
+        run: npm install -g npm@latest
+
       - name: Verify package integrity
         id: verify
+        if: steps.download.outputs.has-package == 'true'
         run: |
           cd npx-cli
 
@@ -112,6 +124,7 @@ jobs:
           echo "package-file=$PACKAGE_FILE" >> $GITHUB_OUTPUT
 
       - name: Publish to npm
+        if: steps.download.outputs.has-package == 'true'
         run: |
           cd npx-cli
 
@@ -124,12 +137,13 @@ jobs:
           echo "✅ Successfully published to npm!"
 
       - name: Update release description
+        if: steps.download.outputs.has-package == 'true'
         uses: actions/github-script@v8
         env:
           RELEASE_ID: ${{ inputs.release_id }}
         with:
           script: |
-            const releaseId = context.payload.release?.id || process.env.RELEASE_ID;;
+            const releaseId = context.payload.release?.id || process.env.RELEASE_ID;
 
             // Fetch the release to get the current body
             const release = await github.rest.repos.getRelease({

@@ -8,12 +8,15 @@ import {
   FileDiff,
   FileText,
   Folder,
+  Globe,
   LayoutGrid,
   Maximize2,
   MessageSquarePlus,
   Minimize2,
   Plus,
+  Puzzle,
   SquareDashed,
+  SquareTerminal,
   Trash2,
 } from 'lucide-react';
 import {
@@ -27,13 +30,33 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { toast } from '@/components/ui/toast';
 import { useTranslation } from 'react-i18next';
 import { AgentIcon, getAgentName } from '@/components/agents/AgentIcon';
+import { useOptionalUserSystem } from '@/components/ConfigProvider';
+import { openWorkspaceTerminal } from '@/components/layout/panels/openWorkspaceTerminal';
+import { contributionIconComponent } from '@/components/plugins/contributionIcon';
+import { useOptionalWorktree } from '@/contexts/WorktreeContext';
 import { useOptionalCollaborationSpaceStore } from '@/features/collaboration/space/SpaceStoreContext';
 import { isEnabledInstalledAgent } from '@/features/agents/operationalAgent';
 import { useSelectableAgents } from '@/features/agents/useSelectableAgents';
+import { findHostBrowserContribution } from '@/features/host-browser/hostBrowserEngine';
+import {
+  contributionMetadata,
+  usePluginHostContributions,
+} from '@/hooks/usePluginHostContributions';
+import {
+  getDefaultTerminalShell,
+  getTerminalShellOptions,
+  getTerminalWorkspaceKey,
+} from '@/lib/terminalPreferences';
 import { cn } from '@/lib/utils';
 import { PANEL_IDS } from '@/stores/useLayoutStore';
+import { terminalHostPlatform } from '@/utils/platform';
+import {
+  buildCanvasPluginPanelRequest,
+  buildCanvasTerminalPanelRequest,
+} from './canvasPanelRequests';
 import type { OpenCanvasPanelRequest } from './canvasWorkspaceBridge';
 
 const DOCK_BUTTON_SHAPE =
@@ -124,7 +147,10 @@ export function SessionCanvasDock({
   onDeleteSelection: () => void;
 }) {
   const { t } = useTranslation(['tasks', 'panels']);
+  const system = useOptionalUserSystem();
+  const worktree = useOptionalWorktree();
   const collaboration = useOptionalCollaborationSpaceStore();
+  const pluginPanels = usePluginHostContributions('app_panel');
   const selectableAgents = useSelectableAgents();
   const [createMenuOpen, setCreateMenuOpen] = useState(false);
 
@@ -134,6 +160,49 @@ export function SessionCanvasDock({
       label: agent.displayName || getAgentName(agent.agentId),
     }));
   }, [selectableAgents]);
+
+  const hostPlatform = terminalHostPlatform(system?.environment?.os_type);
+  const shells = getTerminalShellOptions(hostPlatform);
+  const defaultShell = getDefaultTerminalShell(
+    system?.config,
+    system?.environment?.os_type
+  );
+  const browser = findHostBrowserContribution(pluginPanels);
+  const nonBrowserPlugins = useMemo(
+    () =>
+      pluginPanels.filter(
+        (item) =>
+          !browser ||
+          item.pluginId !== browser.pluginId ||
+          item.id !== browser.id
+      ),
+    [browser, pluginPanels]
+  );
+
+  const openTerminalNode = (shell?: string) => {
+    openWorkspaceTerminal({
+      shell,
+      defaultShell,
+      workspaceId: getTerminalWorkspaceKey(worktree?.activeWorktreeId ?? null),
+      openInEditor: (chosenShell) => {
+        onCreatePanelNode?.(
+          buildCanvasTerminalPanelRequest({
+            shell: chosenShell,
+            shells,
+            fallbackTitle: t('panels:tabCreation.terminal', '终端'),
+          })
+        );
+      },
+      onExternalError: (error) => {
+        toast.error(t('panels:terminalHeader.openExternalFailed'), {
+          description:
+            error instanceof Error
+              ? error.message
+              : t('panels:terminalHeader.confirmWarpInstalled'),
+        });
+      },
+    });
+  };
 
   const isVertical = orientation === 'vertical';
   const resolvedMenuSide = menuSide ?? (isVertical ? 'right' : 'top');
@@ -281,6 +350,66 @@ export function SessionCanvasDock({
             <Activity className="size-4 text-muted-foreground" />
             {t('panels:tabCreation.processes', '执行进程')}
           </DropdownMenuItem>
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault();
+                  openTerminalNode();
+                  setCreateMenuOpen(false);
+                }
+              }}
+              onClick={() => {
+                openTerminalNode();
+                setCreateMenuOpen(false);
+              }}
+            >
+              <SquareTerminal className="size-4 text-muted-foreground" />
+              {t('panels:tabCreation.terminal', '终端')}
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              {shells.map((shell) => (
+                <DropdownMenuItem
+                  key={shell.value}
+                  onSelect={() => openTerminalNode(shell.value)}
+                >
+                  {shell.label}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+          {browser ? (
+            <DropdownMenuItem
+              onSelect={() =>
+                onCreatePanelNode?.(
+                  buildCanvasPluginPanelRequest(browser, {
+                    forceMultiInstance: true,
+                    fallbackIcon: 'globe',
+                  })
+                )
+              }
+            >
+              <Globe className="size-4 text-muted-foreground" />
+              {t('panels:tabCreation.browser', '浏览器')}
+            </DropdownMenuItem>
+          ) : null}
+          {nonBrowserPlugins.map((item) => {
+            const metadata = contributionMetadata(item);
+            const icon =
+              typeof metadata.icon === 'string' ? metadata.icon : null;
+            const Icon = contributionIconComponent(icon, Puzzle);
+            return (
+              <DropdownMenuItem
+                key={`${item.pluginId}:${item.id}`}
+                onSelect={() =>
+                  onCreatePanelNode?.(buildCanvasPluginPanelRequest(item))
+                }
+              >
+                <Icon className="size-4 text-muted-foreground" />
+                {item.label}
+              </DropdownMenuItem>
+            );
+          })}
         </DropdownMenuContent>
       </DropdownMenu>
       <DropdownMenu>

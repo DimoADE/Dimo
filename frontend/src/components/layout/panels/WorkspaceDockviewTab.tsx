@@ -131,12 +131,14 @@ export function WorkspaceTabIcon({
   isBoundSessionTab,
   sessionId,
   sessionMarker,
+  className,
 }: {
   component: string;
   params: WorkspaceTabParams;
   isBoundSessionTab?: boolean;
   sessionId?: string | null;
   sessionMarker?: { bar: string; hue?: string } | null;
+  className?: string;
 }) {
   const faviconUrl = params.faviconUrl?.trim() || null;
   const [failedFaviconUrl, setFailedFaviconUrl] = React.useState<string | null>(
@@ -153,12 +155,16 @@ export function WorkspaceTabIcon({
   if (usableFavicon) {
     return (
       <span
-        className="workspace-tab-icon"
+        className={cn(
+          'workspace-tab-icon inline-flex h-4 w-4 shrink-0 items-center justify-center overflow-hidden',
+          className
+        )}
         data-tab-icon="browser-favicon"
         data-testid="workspace-tab-icon"
       >
         <img
           alt=""
+          className="h-full w-full rounded-sm object-contain"
           data-testid="workspace-tab-favicon"
           draggable={false}
           referrerPolicy="no-referrer"
@@ -186,7 +192,7 @@ export function WorkspaceTabIcon({
       return (
         <FileDiff
           aria-hidden="true"
-          className="workspace-tab-icon"
+          className={cn('workspace-tab-icon h-4 w-4 shrink-0', className)}
           data-tab-icon="diff"
           data-testid="workspace-tab-icon"
         />
@@ -194,7 +200,10 @@ export function WorkspaceTabIcon({
     }
     return (
       <span
-        className="workspace-tab-icon"
+        className={cn(
+          'workspace-tab-icon inline-flex h-4 w-4 shrink-0 items-center justify-center overflow-hidden',
+          className
+        )}
         data-tab-icon="file"
         data-testid="workspace-tab-icon"
       >
@@ -207,7 +216,7 @@ export function WorkspaceTabIcon({
     return (
       <ImageIcon
         aria-hidden="true"
-        className="workspace-tab-icon"
+        className={cn('workspace-tab-icon h-4 w-4 shrink-0', className)}
         data-tab-icon="image"
         data-testid="workspace-tab-icon"
       />
@@ -226,7 +235,7 @@ export function WorkspaceTabIcon({
     return (
       <PluginIcon
         aria-hidden="true"
-        className="workspace-tab-icon"
+        className={cn('workspace-tab-icon h-4 w-4 shrink-0', className)}
         data-tab-icon="plugin"
         data-testid="workspace-tab-icon"
       />
@@ -239,7 +248,7 @@ export function WorkspaceTabIcon({
   return (
     <Icon
       aria-hidden="true"
-      className="workspace-tab-icon"
+      className={cn('workspace-tab-icon h-4 w-4 shrink-0', className)}
       data-tab-icon={iconKind}
       data-testid="workspace-tab-icon"
     />

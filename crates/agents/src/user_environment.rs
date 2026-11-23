@@ -620,7 +620,9 @@ mod tests {
         assert!(npm_install_unsupported_node_engine(
             "npm error code EBADENGINE"
         ));
-        assert!(!npm_install_unsupported_node_engine("npm error code EEXIST"));
+        assert!(!npm_install_unsupported_node_engine(
+            "npm error code EEXIST"
+        ));
     }
 
     #[test]
@@ -971,7 +973,7 @@ mod tests {
                 .iter()
                 .map(|profile| profile.agent_id.as_str())
                 .collect::<Vec<_>>(),
-            ["claude_code", "codex"]
+            ["claude_code", "codex", "muse_code"]
         );
         for profile in profiles {
             let current = current_from_profile(profile);

@@ -1584,10 +1584,63 @@ export function AccountHostConfigSyncBridge(): null {
 
   useEffect(() => {
     if (!accountKey) return;
-    const timer = window.setInterval(() => {
-      void syncCurrentHostRelayLease();
+    let disposed = false;
+    let unlistenLeaseRejected: (() => void) | undefined;
+    let unlistenPowerResumed: (() => void) | undefined;
+
+    const checkFreshnessTimer = window.setInterval(
+      () => {
+        void syncCurrentHostRelayLease({ force: false });
+      },
+      15 * 60 * 1000
+    );
+    const forceRenewTimer = window.setInterval(() => {
+      void syncCurrentHostRelayLease({ force: true });
     }, RELAY_LEASE_RENEW_INTERVAL_MS);
-    return () => window.clearInterval(timer);
+
+    const handleOnline = () => {
+      void syncCurrentHostRelayLease({ force: false });
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        void syncCurrentHostRelayLease({ force: false });
+      }
+    };
+
+    window.addEventListener('online', handleOnline);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    void backendListen<void>('host-tunnel-lease-rejected', () => {
+      if (!disposed) {
+        void syncCurrentHostRelayLease({ force: true });
+      }
+    })
+      .then((stop) => {
+        if (disposed) stop();
+        else unlistenLeaseRejected = stop;
+      })
+      .catch(() => undefined);
+
+    void backendListen<void>('system-power-resumed', () => {
+      if (!disposed) {
+        void syncCurrentHostRelayLease({ force: true });
+      }
+    })
+      .then((stop) => {
+        if (disposed) stop();
+        else unlistenPowerResumed = stop;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(checkFreshnessTimer);
+      window.clearInterval(forceRenewTimer);
+      window.removeEventListener('online', handleOnline);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      unlistenLeaseRejected?.();
+      unlistenPowerResumed?.();
+    };
   }, [accountKey]);
 
   // Listen for frontend preference changes & Agent enablement/reorder events on the current Host.

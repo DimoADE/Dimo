@@ -269,6 +269,15 @@ function findPanelEntry(panelId: string): PanelContribution | undefined {
   return undefined;
 }
 
+panelRegistry.subscribe(() => {
+  if (dynamicPanelWrappers.size === 0) return;
+  for (const panelId of [...dynamicPanelWrappers.keys()]) {
+    if (!findPanelEntry(panelId)) {
+      dynamicPanelWrappers.delete(panelId);
+    }
+  }
+});
+
 function getOrCreateDynamicPanelWrapper(
   panelId: string
 ): React.FC<IDockviewPanelProps> | undefined {

@@ -1,6 +1,9 @@
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('electron', () => ({
   app: {
@@ -13,6 +16,8 @@ vi.mock('electron', () => ({
 import {
   DesktopUpdaterManager,
   ProgressDeltaTracker,
+  detectLinuxPackageType,
+  isAutoUpdateSupportedOnPlatform,
   isUpdateNewer,
   normalizeReleaseNotes,
   type AutoUpdaterLike,
@@ -23,8 +28,19 @@ class FakeAutoUpdater extends EventEmitter implements AutoUpdaterLike {
   autoDownload = true;
   autoInstallOnAppQuit = true;
   allowDowngrade = true;
+  private _channel: string | null = null;
   forceDevUpdateConfig = false;
   updateConfigPath: string | null = null;
+
+  get channel(): string | null {
+    return this._channel;
+  }
+
+  set channel(value: string | null) {
+    this._channel = value;
+    // Mirror electron-updater's AppUpdater.channel setter side effect.
+    this.allowDowngrade = true;
+  }
 
   checkImpl: () => Promise<UpdaterCheckResultLike | null> = async () => null;
   downloadImpl: () => Promise<unknown> = async () => [];
@@ -40,6 +56,14 @@ class FakeAutoUpdater extends EventEmitter implements AutoUpdaterLike {
 }
 
 describe('Electron M5 DesktopUpdaterManager', () => {
+  const tempDirs: string[] = [];
+
+  afterEach(() => {
+    while (tempDirs.length > 0) {
+      fs.rmSync(tempDirs.pop()!, { recursive: true, force: true });
+    }
+  });
+
   it('compares SemVer versions accurately including prereleases', () => {
     expect(isUpdateNewer('0.6.0', '0.5.2')).toBe(true);
     expect(isUpdateNewer('v0.5.3', '0.5.2')).toBe(true);
@@ -93,6 +117,7 @@ describe('Electron M5 DesktopUpdaterManager', () => {
       currentVersion: '0.5.2',
       beforeQuitForUpdate: vi.fn().mockResolvedValue(undefined),
       isPackaged: () => false,
+      platform: 'win32',
       loadAutoUpdater: () => fake,
     });
     expect(await manager.check()).toBeNull();
@@ -128,6 +153,7 @@ describe('Electron M5 DesktopUpdaterManager', () => {
       currentVersion: '0.5.2',
       beforeQuitForUpdate: beforeQuit,
       isPackaged: () => true,
+      platform: 'win32',
       loadAutoUpdater: () => fake,
       relaunchApp,
       exitApp,
@@ -175,6 +201,109 @@ describe('Electron M5 DesktopUpdaterManager', () => {
     expect(relaunchApp).not.toHaveBeenCalled();
   });
 
+  it('keeps allowDowngrade disabled after setting latest-arm64 channel on Windows arm64', async () => {
+    const fake = new FakeAutoUpdater();
+    fake.checkImpl = async () => null;
+    const manager = new DesktopUpdaterManager({
+      currentVersion: '0.5.2',
+      beforeQuitForUpdate: vi.fn().mockResolvedValue(undefined),
+      isPackaged: () => true,
+      platform: 'win32',
+      arch: 'arm64',
+      env: {},
+      loadAutoUpdater: () => fake,
+    });
+
+    await manager.check();
+    expect(fake.channel).toBe('latest-arm64');
+    expect(fake.allowDowngrade).toBe(false);
+  });
+
+  it('resets autoInstallOnAppQuit on macOS when a downloaded or failed update is dismissed/closed', async () => {
+    const fake = new FakeAutoUpdater();
+    fake.checkImpl = async () => ({
+      updateInfo: { version: '0.6.0' },
+    });
+    fake.downloadImpl = async () => ['/tmp/Dimo-0.6.0-mac.zip'];
+
+    const manager = new DesktopUpdaterManager({
+      currentVersion: '0.5.2',
+      beforeQuitForUpdate: vi.fn().mockResolvedValue(undefined),
+      isPackaged: () => true,
+      platform: 'darwin',
+      env: {},
+      loadAutoUpdater: () => fake,
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+    });
+
+    const update = await manager.check();
+    expect(update).not.toBeNull();
+    await manager.download(update!.token, () => undefined);
+    expect(fake.autoInstallOnAppQuit).toBe(true);
+
+    await manager.close(update!.token);
+    expect(fake.autoInstallOnAppQuit).toBe(false);
+
+    // Failed download also resets autoInstallOnAppQuit
+    const second = await manager.check();
+    fake.downloadImpl = async () => {
+      throw new Error('network error');
+    };
+    await expect(manager.download(second!.token, () => undefined)).rejects.toThrow(
+      /network error/
+    );
+    expect(fake.autoInstallOnAppQuit).toBe(false);
+  });
+
+  it('skips electron-updater on Linux .deb/non-AppImage installs and allows Linux AppImage updates', async () => {
+    const debResources = fs.mkdtempSync(path.join(os.tmpdir(), 'dimo-deb-'));
+    tempDirs.push(debResources);
+    fs.writeFileSync(path.join(debResources, 'package-type'), 'deb\n', 'utf8');
+
+    expect(
+      detectLinuxPackageType({ env: {}, resourcesPath: debResources })
+    ).toBe('deb');
+    expect(
+      isAutoUpdateSupportedOnPlatform({
+        platform: 'linux',
+        env: {},
+        resourcesPath: debResources,
+      })
+    ).toBe(false);
+
+    const debLoader = vi.fn(() => new FakeAutoUpdater());
+    const debManager = new DesktopUpdaterManager({
+      currentVersion: '0.5.2',
+      beforeQuitForUpdate: vi.fn().mockResolvedValue(undefined),
+      isPackaged: () => true,
+      platform: 'linux',
+      env: {},
+      resourcesPath: debResources,
+      loadAutoUpdater: debLoader,
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+    });
+    expect(await debManager.check()).toBeNull();
+    expect(debLoader).not.toHaveBeenCalled();
+
+    // Linux AppImage proceeds normally
+    const appImageUpdater = new FakeAutoUpdater();
+    appImageUpdater.checkImpl = async () => ({
+      updateInfo: { version: '0.6.0' },
+    });
+    const appImageManager = new DesktopUpdaterManager({
+      currentVersion: '0.5.2',
+      beforeQuitForUpdate: vi.fn().mockResolvedValue(undefined),
+      isPackaged: () => true,
+      platform: 'linux',
+      env: { APPIMAGE: '/opt/Dimo-0.5.2.AppImage' },
+      resourcesPath: debResources,
+      loadAutoUpdater: () => appImageUpdater,
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+    });
+    const result = await appImageManager.check();
+    expect(result?.version).toBe('0.6.0');
+  });
+
   it('shuts down sidecar cleanly before plain relaunch', async () => {
     const callOrder: string[] = [];
     const manager = new DesktopUpdaterManager({
@@ -183,6 +312,7 @@ describe('Electron M5 DesktopUpdaterManager', () => {
         callOrder.push('shutdown');
       },
       isPackaged: () => true,
+      platform: 'win32',
       loadAutoUpdater: () => new FakeAutoUpdater(),
       relaunchApp: () => callOrder.push('relaunch'),
       exitApp: () => callOrder.push('exit'),

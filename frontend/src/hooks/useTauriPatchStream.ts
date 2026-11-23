@@ -108,6 +108,12 @@ export const usePatchStream = <T extends object>(
   const dataRef = useRef<T | undefined>(undefined);
   const finishedRef = useRef<boolean>(false);
   const isInitializedRef = useRef<boolean>(false);
+  const initialDataRef = useRef(initialData);
+  initialDataRef.current = initialData;
+  const injectInitialEntryRef = useRef(injectInitialEntry);
+  injectInitialEntryRef.current = injectInitialEntry;
+  const deduplicatePatchesRef = useRef(deduplicatePatches);
+  deduplicatePatchesRef.current = deduplicatePatches;
   const argsKey = subscribeArgs ? JSON.stringify(subscribeArgs) : '';
 
   const retry = useCallback(() => {
@@ -128,10 +134,8 @@ export const usePatchStream = <T extends object>(
       return;
     }
 
-    const init = initialData();
-    if (injectInitialEntry) {
-      injectInitialEntry(init);
-    }
+    const init = initialDataRef.current();
+    injectInitialEntryRef.current?.(init);
     dataRef.current = init;
     finishedRef.current = false;
     isInitializedRef.current = false;
@@ -141,8 +145,18 @@ export const usePatchStream = <T extends object>(
     let cancelled = false;
     let pendingOps: Operation[] = [];
     let flushScheduled = false;
+    let flushFrameId: number | null = null;
+    let hasReceivedReady = false;
+
+    const cancelPendingFlushFrame = () => {
+      if (flushFrameId !== null && typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(flushFrameId);
+      }
+      flushFrameId = null;
+    };
 
     const flushPendingPatches = () => {
+      cancelPendingFlushFrame();
       flushScheduled = false;
       if (cancelled || !pendingOps.length) {
         pendingOps = [];
@@ -153,9 +167,8 @@ export const usePatchStream = <T extends object>(
       const current = dataRef.current;
       if (!current) return;
       try {
-        const filtered = deduplicatePatches
-          ? deduplicatePatches(opsToApply)
-          : opsToApply;
+        const dedupe = deduplicatePatchesRef.current;
+        const filtered = dedupe ? dedupe(opsToApply) : opsToApply;
         if (!filtered.length) return;
         const next = cloneAndApplyUpsertPatch(current, filtered);
         dataRef.current = next;
@@ -183,19 +196,26 @@ export const usePatchStream = <T extends object>(
       try {
         if (typeof msg === 'object' && msg !== null && 'JsonPatch' in msg) {
           const patches: Operation[] = msg.JsonPatch;
-          const filtered = deduplicatePatches
-            ? deduplicatePatches(patches)
-            : patches;
+          const dedupe = deduplicatePatchesRef.current;
+          const filtered = dedupe ? dedupe(patches) : patches;
           markInitialized();
           if (!filtered.length || !dataRef.current) return;
           pendingOps.push(...filtered);
           if (!flushScheduled) {
             flushScheduled = true;
-            queueMicrotask(flushPendingPatches);
+            if (
+              hasReceivedReady &&
+              typeof requestAnimationFrame === 'function'
+            ) {
+              flushFrameId = requestAnimationFrame(flushPendingPatches);
+            } else {
+              queueMicrotask(flushPendingPatches);
+            }
           }
           return;
         }
         if (msg === 'Ready') {
+          hasReceivedReady = true;
           flushPendingPatches();
           markInitialized();
           return;
@@ -221,7 +241,8 @@ export const usePatchStream = <T extends object>(
       if (cancelled || finishedRef.current || retryTimer !== undefined) {
         return;
       }
-      const delay = Math.min(1000 * 2 ** retryAttempts, 10_000);
+      const baseDelay = Math.min(1000 * 2 ** retryAttempts, 10_000);
+      const delay = Math.round(baseDelay * (0.75 + Math.random() * 0.5));
       retryAttempts += 1;
       setRetryCount(retryAttempts);
       setIsRetrying(true);
@@ -247,10 +268,8 @@ export const usePatchStream = <T extends object>(
         return;
       }
       if (isReconnect) {
-        const nextInit = initialData();
-        if (injectInitialEntry) {
-          injectInitialEntry(nextInit);
-        }
+        const nextInit = initialDataRef.current();
+        injectInitialEntryRef.current?.(nextInit);
         dataRef.current = nextInit;
         finishedRef.current = false;
         isInitializedRef.current = false;
@@ -360,6 +379,8 @@ export const usePatchStream = <T extends object>(
 
     return () => {
       cancelled = true;
+      cancelPendingFlushFrame();
+      hasReceivedReady = false;
       clearSnapshotWatchdog();
       if (retryTimer !== undefined) {
         clearTimeout(retryTimer);
@@ -375,16 +396,7 @@ export const usePatchStream = <T extends object>(
       setIsRetrying(false);
       setRetryCount(0);
     };
-  }, [
-    subscribeCommand,
-    argsKey,
-    eventChannel,
-    enabled,
-    initialData,
-    injectInitialEntry,
-    deduplicatePatches,
-    retryNonce,
-  ]);
+  }, [subscribeCommand, argsKey, eventChannel, enabled, retryNonce]);
 
   return {
     data,

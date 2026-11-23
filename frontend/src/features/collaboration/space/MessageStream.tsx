@@ -8,6 +8,8 @@ import {
   useState,
   type MutableRefObject,
 } from 'react';
+import { Crown } from 'lucide-react';
+import { AgentIcon, getAgentName } from '@/components/agents/AgentIcon';
 import { ConversationMessageNav } from '@/components/conversation-thread/ConversationMessageNav';
 import { Button } from '@/components/ui/button';
 import { PermissionRequestStack } from '@/components/NormalizedConversation/conversation/PermissionRequestCard';
@@ -18,11 +20,16 @@ import {
   agentRoster,
   displayName,
   extractEnvelopeCrossChatMeta,
+  extractProvisionActivity,
   formatRoundProgress,
+  formatSpaceSystemEventCopy,
   isCollaborationLimitNotice,
+  isSpaceSystemNotice,
   isStreamingSpaceMessage,
   messageAuthor,
+  parseSpaceSystemEvent,
   receiptStatusCopy,
+  resolveMemberAgentModelDisplay,
   resolveMessageConversationId,
   resolveMessageDeliveryStatus,
   resolveMessageReceipts,
@@ -87,7 +94,9 @@ const CollaborationMessageNavRail = memo(
       <div className="conv-message-nav-anchor">
         <ConversationMessageNav
           entries={navEntries}
-          activeIndex={activeNavIndex ?? navEntries.length - 1}
+          activeIndex={
+            activeNavIndex ?? navEntries[navEntries.length - 1]?.index ?? null
+          }
           onSelect={scrollToMessage}
         />
       </div>
@@ -130,6 +139,7 @@ type SpaceMessageRowProps = {
     avatar: MemberBotAvatarConfig
   ) => void;
   selectMemberForPreview: (spaceId: string, member: SpaceMember) => void;
+  onOpenSpace: (spaceId: string) => void;
 };
 
 const SpaceMessageRow = memo(function SpaceMessageRow({
@@ -154,6 +164,7 @@ const SpaceMessageRow = memo(function SpaceMessageRow({
   openMessageBubbleMenu,
   openMemberAvatarMenu,
   selectMemberForPreview,
+  onOpenSpace,
 }: SpaceMessageRowProps) {
   const rawReactions = message.envelope.reactions;
   const messageReactions = useMemo(() => {
@@ -168,6 +179,22 @@ const SpaceMessageRow = memo(function SpaceMessageRow({
         data-testid="collaboration-limit-notice"
       >
         {COPY.collaborationLimitNotice}
+      </div>
+    );
+  }
+  const spaceEvent = parseSpaceSystemEvent(message);
+  if (spaceEvent || message.envelope.summary === 'space_event') {
+    const eventText = spaceEvent
+      ? formatSpaceSystemEventCopy(spaceEvent, message.envelope.content)
+      : String(message.envelope.content ?? '').trim();
+    if (!eventText) return null;
+    return (
+      <div
+        className="collaboration-system-event-row"
+        data-testid={`collaboration-system-event-${message.seq}`}
+        data-event-kind={spaceEvent?.kind ?? 'space_event'}
+      >
+        <span className="collaboration-system-event-pill">{eventText}</span>
       </div>
     );
   }
@@ -214,7 +241,10 @@ const SpaceMessageRow = memo(function SpaceMessageRow({
   const crossSentTargets = envelopeCrossMeta.sentTo;
   const crossReceivedSources = envelopeCrossMeta.receivedFrom;
   const textBody = bubbleText(message.envelope);
-  const hasBody = textBody.trim().length > 0;
+  const provisionActivity = !fromYou
+    ? extractProvisionActivity(message.envelope)
+    : null;
+  const hasBody = textBody.trim().length > 0 || Boolean(provisionActivity);
   if (
     !hasBody &&
     crossSentTargets.length === 0 &&
@@ -226,6 +256,11 @@ const SpaceMessageRow = memo(function SpaceMessageRow({
   const showName = showsClusterName(cluster);
   const showAvatar = showsClusterAvatar(cluster);
   const avatar = getMemberAvatar(authorConversationId, name);
+  const { agentId: authorAgentId, modelLabel: authorModelLabel } =
+    resolveMemberAgentModelDisplay(authorMember);
+  const authorModelText =
+    authorModelLabel || (authorAgentId ? getAgentName(authorAgentId) : '');
+  const showLeadBadge = !isPrivateChatActive && isAuthorLead;
   const noticeLineColor =
     (crossReceivedSources[0]
       ? getMemberAvatar(undefined, crossReceivedSources[0].name).color
@@ -285,12 +320,41 @@ const SpaceMessageRow = memo(function SpaceMessageRow({
           </div>
           <div className="collaboration-message-main">
             {showName ? (
-              <p
-                className="collaboration-message-name"
-                style={{ color: avatar.color }}
-              >
-                {name}
-              </p>
+              <div className="collaboration-message-header">
+                <p
+                  className="collaboration-message-name"
+                  style={{ color: avatar.color }}
+                >
+                  {name}
+                </p>
+                {showLeadBadge ? (
+                  <span
+                    className="collaboration-message-lead-badge"
+                    data-testid={`collaboration-message-lead-${message.seq}`}
+                  >
+                    <Crown className="h-3 w-3 shrink-0" aria-hidden="true" />
+                    <span>{COPY.spaceLeadLabel}</span>
+                  </span>
+                ) : null}
+                {authorAgentId || authorModelText ? (
+                  <span
+                    className="collaboration-message-agent-meta"
+                    data-testid={`collaboration-message-agent-meta-${message.seq}`}
+                  >
+                    {authorAgentId ? (
+                      <AgentIcon
+                        agent={authorAgentId}
+                        className="collaboration-message-agent-icon h-3.5 w-3.5 shrink-0"
+                      />
+                    ) : null}
+                    {authorModelText ? (
+                      <span className="collaboration-message-model-label">
+                        {authorModelText}
+                      </span>
+                    ) : null}
+                  </span>
+                ) : null}
+              </div>
             ) : null}
             <SpaceMessageBody
               fromYou={fromYou}
@@ -301,6 +365,9 @@ const SpaceMessageRow = memo(function SpaceMessageRow({
               reactions={messageReactions}
               cards={threadCards}
               streaming={isStreamingSpaceMessage(message)}
+              provisionActivity={provisionActivity}
+              getMemberAvatar={getMemberAvatar}
+              onOpenSpace={onOpenSpace}
             />
           </div>
         </div>
@@ -407,6 +474,7 @@ const MESSAGE_STREAM_PICK_KEYS = [
   'receiptsBySeq',
   'respondingApprovalCardId',
   'selectMemberForPreview',
+  'selectSpace',
   'selected',
   'setActiveNavIndex',
   'setIsAtThreadBottom',
@@ -449,6 +517,7 @@ export const MessageStream = memo(function MessageStream() {
     receiptLabels,
     receiptsBySeq,
     selectMemberForPreview,
+    selectSpace,
     selected,
     setActiveNavIndex,
     setIsAtThreadBottom,
@@ -594,6 +663,16 @@ export const MessageStream = memo(function MessageStream() {
     visibleStartIndex,
   ]);
 
+  const navJumpTimerRef = useRef<number | null>(null);
+
+  const clearNavJumpGuard = useCallback(() => {
+    if (navJumpTimerRef.current !== null) {
+      window.clearTimeout(navJumpTimerRef.current);
+      navJumpTimerRef.current = null;
+    }
+    ignoreThreadScrollRef.current = false;
+  }, [ignoreThreadScrollRef]);
+
   useLayoutEffect(() => {
     if (activeNavIndex === null) {
       pendingNavTargetIndexRef.current = null;
@@ -618,12 +697,22 @@ export const MessageStream = memo(function MessageStream() {
       messageItemRefs.current.get(spaceMessageRefKey(target)) ??
       messageItemRefs.current.get(String(target.seq));
     if (el && typeof el.scrollIntoView === 'function') {
+      if (navJumpTimerRef.current !== null) {
+        window.clearTimeout(navJumpTimerRef.current);
+        navJumpTimerRef.current = null;
+      }
+      ignoreThreadScrollRef.current = true;
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      navJumpTimerRef.current = window.setTimeout(() => {
+        navJumpTimerRef.current = null;
+        ignoreThreadScrollRef.current = false;
+      }, 360);
     }
   }, [
     activeNavIndex,
     activeThreadKey,
     filteredMessages,
+    ignoreThreadScrollRef,
     messageItemRefs,
     visibleStartIndex,
   ]);
@@ -636,6 +725,10 @@ export const MessageStream = memo(function MessageStream() {
       ) {
         cancelAnimationFrame(navScrollRafRef.current);
         navScrollRafRef.current = null;
+      }
+      if (navJumpTimerRef.current !== null) {
+        window.clearTimeout(navJumpTimerRef.current);
+        navJumpTimerRef.current = null;
       }
     };
   }, []);
@@ -706,13 +799,17 @@ export const MessageStream = memo(function MessageStream() {
         ref={threadLogRef}
         className="collaboration-thread-log"
         onPointerDownCapture={() => {
-          ignoreThreadScrollRef.current = false;
+          clearNavJumpGuard();
           if (selected) {
             markSpaceInReviewMembersViewed(selected.space_id);
           }
         }}
-        onWheelCapture={() => {
-          ignoreThreadScrollRef.current = false;
+        onWheelCapture={(event) => {
+          clearNavJumpGuard();
+          if (event.deltaY < 0) {
+            followThreadBottomRef.current = false;
+            setIsAtThreadBottom((current) => (current ? false : current));
+          }
           if (selected) {
             markSpaceInReviewMembersViewed(selected.space_id);
           }
@@ -855,7 +952,7 @@ export const MessageStream = memo(function MessageStream() {
                 ) : null}
                 {visibleMessages.map((message, localIndex) => {
                   const index = visibleStartIndex + localIndex;
-                  const messageKey = isCollaborationLimitNotice(message)
+                  const messageKey = isSpaceSystemNotice(message)
                     ? `space-notice-${message.seq}`
                     : spaceMessageRefKey(message);
                   const rawMessageText = bubbleText(message.envelope);
@@ -871,12 +968,36 @@ export const MessageStream = memo(function MessageStream() {
                     message.envelope,
                     members
                   );
+                  const convMatched = authorConversationId
+                    ? memberLookup.membersByConvId.get(authorConversationId)
+                    : undefined;
+                  const rosterMatched = memberLookup.rosterByName.get(name);
+                  const nameMatched = memberLookup.membersByName.get(name);
                   let authorMember =
-                    memberLookup.rosterByName.get(name) ??
-                    (authorConversationId
-                      ? memberLookup.membersByConvId.get(authorConversationId)
+                    (convMatched &&
+                    (convMatched.model_label ||
+                      convMatched.model ||
+                      convMatched.agent ||
+                      convMatched.agent_id)
+                      ? convMatched
                       : undefined) ??
-                    memberLookup.membersByName.get(name);
+                    (rosterMatched &&
+                    (rosterMatched.model_label ||
+                      rosterMatched.model ||
+                      rosterMatched.agent ||
+                      rosterMatched.agent_id)
+                      ? rosterMatched
+                      : undefined) ??
+                    (nameMatched &&
+                    (nameMatched.model_label ||
+                      nameMatched.model ||
+                      nameMatched.agent ||
+                      nameMatched.agent_id)
+                      ? nameMatched
+                      : undefined) ??
+                    rosterMatched ??
+                    convMatched ??
+                    nameMatched;
                   if (!authorMember) {
                     const fallbackKey = `${authorConversationId}:${name}`;
                     authorMember =
@@ -919,6 +1040,7 @@ export const MessageStream = memo(function MessageStream() {
                       openMessageBubbleMenu={openMessageBubbleMenu}
                       openMemberAvatarMenu={openMemberAvatarMenu}
                       selectMemberForPreview={selectMemberForPreview}
+                      onOpenSpace={selectSpace}
                     />
                   );
                 })}

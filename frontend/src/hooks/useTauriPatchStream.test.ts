@@ -88,7 +88,7 @@ describe('usePatchStream', () => {
       expect(result.current.error).toBe('Stream disconnected unexpectedly');
 
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(1000);
+        await vi.advanceTimersByTimeAsync(1_250);
         await Promise.resolve();
       });
 
@@ -249,7 +249,7 @@ describe('usePatchStream', () => {
       expect(result.current.isRetrying).toBe(true);
 
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(1_000);
+        await vi.advanceTimersByTimeAsync(1_250);
         await Promise.resolve();
         await Promise.resolve();
       });
@@ -262,6 +262,132 @@ describe('usePatchStream', () => {
       });
 
       resolveLiveTail?.({ done: true, value: undefined });
+      unmount();
+    } finally {
+      unmountTransport();
+    }
+  });
+
+  it('does not tear down and resubscribe when callback prop identities change across renders', async () => {
+    let subscribeCount = 0;
+    let resolveNext: ((value: IteratorResult<RemoteEvent>) => void) | undefined;
+
+    const transport: BackendTransport = {
+      environment: 'web',
+      call: vi.fn(),
+      subscribe: vi.fn(() => {
+        subscribeCount += 1;
+        let sentReady = false;
+        const iterator: AsyncIterator<RemoteEvent> = {
+          next: async (): Promise<IteratorResult<RemoteEvent>> => {
+            if (!sentReady) {
+              sentReady = true;
+              return {
+                done: false,
+                value: { sequence: 1n, kind: 'patch', payload: 'Ready' },
+              };
+            }
+            return new Promise<IteratorResult<RemoteEvent>>((resolve) => {
+              resolveNext = resolve;
+            });
+          },
+          return: async (): Promise<IteratorResult<RemoteEvent>> => ({
+            done: true,
+            value: undefined,
+          }),
+        };
+        return { [Symbol.asyncIterator]: () => iterator };
+      }),
+    };
+
+    const unmountTransport = mountBackendTransport(transport);
+    try {
+      const { rerender, unmount } = renderHook(
+        ({ version }: { version: number }) =>
+          usePatchStream({
+            subscribeCommand: 'subscribe_diff_stream',
+            eventChannel: 'diff-stream',
+            initialData: () => ({ items: { version } }),
+            injectInitialEntry: () => undefined,
+            deduplicatePatches: (patches) => patches,
+            enabled: true,
+          }),
+        { initialProps: { version: 1 } }
+      );
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(subscribeCount).toBe(1);
+
+      rerender({ version: 2 });
+      rerender({ version: 3 });
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(subscribeCount).toBe(1);
+
+      resolveNext?.({ done: true, value: undefined });
+      unmount();
+    } finally {
+      unmountTransport();
+    }
+  });
+
+  it('applies randomized ±25% jitter to reconnect backoff delays', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(0);
+    let attempt = 0;
+
+    const transport: BackendTransport = {
+      environment: 'web',
+      call: vi.fn(),
+      subscribe: vi.fn(() => {
+        attempt += 1;
+        const iterator: AsyncIterator<RemoteEvent> = {
+          next: async (): Promise<IteratorResult<RemoteEvent>> => ({
+            done: true,
+            value: undefined,
+          }),
+          return: async (): Promise<IteratorResult<RemoteEvent>> => ({
+            done: true,
+            value: undefined,
+          }),
+        };
+        return { [Symbol.asyncIterator]: () => iterator };
+      }),
+    };
+
+    const unmountTransport = mountBackendTransport(transport);
+    try {
+      const { unmount } = renderHook(() =>
+        usePatchStream({
+          subscribeCommand: 'subscribe_diff_stream',
+          eventChannel: 'diff-stream',
+          initialData: () => ({ items: {} }),
+          enabled: true,
+        })
+      );
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(attempt).toBe(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(749);
+      });
+      expect(attempt).toBe(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1);
+        await Promise.resolve();
+      });
+      expect(attempt).toBe(2);
+
       unmount();
     } finally {
       unmountTransport();

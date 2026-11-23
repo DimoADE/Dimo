@@ -85,27 +85,51 @@ impl ServerApplicationDomains {
                 )
             }
             DomainCommand::RepoClone => self.clone_repo(args).await,
-            DomainCommand::RepoGitStatus => {
-                self.git_read(
-                    self.repo_path(parse(args)?).await?,
-                    git::GitService::get_detailed_status,
-                )
+            DomainCommand::RepoWorktrees => {
+                let args: RepoIdArgs = parse(args)?;
+                self.git_read(self.repo_path(args).await?, git::GitService::list_worktrees)
+                    .await
+            }
+            DomainCommand::RepoBranchDiffs => {
+                let args: RepoBranchDiffArgs = parse(args)?;
+                let path = self
+                    .repo_path(RepoIdArgs {
+                        repo_id: args.repo_id,
+                    })
+                    .await?;
+                self.git_read(path, |git, path| {
+                    git.get_branch_diffs(path, &args.branch, args.base_branch.as_deref())
+                })
                 .await
             }
+            DomainCommand::RepoWorktreeDiffs => {
+                let args: RepoWorktreeArgs = parse(args)?;
+                let path = self
+                    .resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
+                    .await?;
+                self.git_read(path, git::GitService::get_worktree_head_diffs)
+                    .await
+            }
+            DomainCommand::RepoGitStatus => {
+                let args: RepoWorktreeArgs = parse(args)?;
+                let path = self
+                    .resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
+                    .await?;
+                self.git_read(path, git::GitService::get_detailed_status)
+                    .await
+            }
             DomainCommand::RepoFileDiffs => {
-                self.git_read(
-                    self.repo_path(parse(args)?).await?,
-                    git::GitService::get_file_diffs,
-                )
-                .await
+                let args: RepoWorktreeArgs = parse(args)?;
+                let path = self
+                    .resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
+                    .await?;
+                self.git_read(path, git::GitService::get_file_diffs).await
             }
             DomainCommand::RepoStageFile => {
                 let args: RepoFileArgs = parse(args)?;
                 self.git_write(
-                    self.repo_path(RepoIdArgs {
-                        repo_id: args.repo_id,
-                    })
-                    .await?,
+                    self.resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
+                        .await?,
                     |git, path| git.stage_file(path, &args.file_path),
                 )
                 .await
@@ -113,10 +137,8 @@ impl ServerApplicationDomains {
             DomainCommand::RepoUnstageFile => {
                 let args: RepoFileArgs = parse(args)?;
                 self.git_write(
-                    self.repo_path(RepoIdArgs {
-                        repo_id: args.repo_id,
-                    })
-                    .await?,
+                    self.resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
+                        .await?,
                     |git, path| git.unstage_file(path, &args.file_path),
                 )
                 .await
@@ -124,24 +146,26 @@ impl ServerApplicationDomains {
             DomainCommand::RepoRevertFile => {
                 let args: RepoFileArgs = parse(args)?;
                 self.git_write(
-                    self.repo_path(RepoIdArgs {
-                        repo_id: args.repo_id,
-                    })
-                    .await?,
+                    self.resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
+                        .await?,
                     |git, path| git.revert_file(path, &args.file_path),
                 )
                 .await
             }
             DomainCommand::RepoStageAll => {
+                let args: RepoWorktreeArgs = parse(args)?;
                 self.git_write(
-                    self.repo_path(parse(args)?).await?,
+                    self.resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
+                        .await?,
                     git::GitService::stage_all,
                 )
                 .await
             }
             DomainCommand::RepoRevertAll => {
+                let args: RepoWorktreeArgs = parse(args)?;
                 self.git_write(
-                    self.repo_path(parse(args)?).await?,
+                    self.resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
+                        .await?,
                     git::GitService::revert_all,
                 )
                 .await
@@ -149,28 +173,27 @@ impl ServerApplicationDomains {
             DomainCommand::RepoCommit => {
                 let args: RepoCommitArgs = parse(args)?;
                 self.git_write(
-                    self.repo_path(RepoIdArgs {
-                        repo_id: args.repo_id,
-                    })
-                    .await?,
+                    self.resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
+                        .await?,
                     |git, path| git.commit_changes(path, &args.message),
                 )
                 .await
             }
             DomainCommand::RepoGitLog => {
-                self.git_read(
-                    self.repo_path(parse(args)?).await?,
-                    git::GitService::get_log_status,
-                )
+                let args: RepoLogArgs = parse(args)?;
+                let path = self
+                    .resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
+                    .await?;
+                self.git_read(path, |git, path| {
+                    git.get_log_status_with_options(path, args.branches.as_deref(), args.max_count)
+                })
                 .await
             }
             DomainCommand::RepoCheckoutBranch => {
                 let args: RepoBranchArgs = parse(args)?;
                 self.git_write(
-                    self.repo_path(RepoIdArgs {
-                        repo_id: args.repo_id,
-                    })
-                    .await?,
+                    self.resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
+                        .await?,
                     |git, path| git.checkout_branch(path, &args.branch),
                 )
                 .await
@@ -178,10 +201,8 @@ impl ServerApplicationDomains {
             DomainCommand::RepoCreateBranch => {
                 let args: RepoBranchArgs = parse(args)?;
                 self.git_write(
-                    self.repo_path(RepoIdArgs {
-                        repo_id: args.repo_id,
-                    })
-                    .await?,
+                    self.resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
+                        .await?,
                     |git, path| git.create_branch(path, &args.branch, args.from_ref.as_deref()),
                 )
                 .await
@@ -189,9 +210,7 @@ impl ServerApplicationDomains {
             DomainCommand::RepoDeleteBranch => {
                 let args: RepoBranchArgs = parse(args)?;
                 let path = self
-                    .repo_path(RepoIdArgs {
-                        repo_id: args.repo_id,
-                    })
+                    .resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
                     .await?;
                 git::GitCli::new()
                     .git(&path, ["branch", "-D", &args.branch])
@@ -301,10 +320,16 @@ impl ServerApplicationDomains {
                 .await
             }
             DomainCommand::WorkspaceGitLog => {
-                self.git_read(
-                    self.worktree_path(parse(args)?).await?,
-                    git::GitService::get_log_status,
-                )
+                let args: WorkspaceLogArgs = parse(args)?;
+                let path = self
+                    .worktree_path(WorkspaceRepoArgs {
+                        workspace_id: args.workspace_id,
+                        repo_id: args.repo_id,
+                    })
+                    .await?;
+                self.git_read(path, |git, path| {
+                    git.get_log_status_with_options(path, args.branches.as_deref(), args.max_count)
+                })
                 .await
             }
             DomainCommand::WorkspaceCommitDetail => {
@@ -378,6 +403,7 @@ impl ServerApplicationDomains {
             DomainCommand::SessionCreateProject => self.create_project_session(args).await,
             DomainCommand::SessionEnsureWorkspace => self.ensure_project_workspace(args).await,
             DomainCommand::SessionRename => self.rename_session(args).await,
+            DomainCommand::SessionUpdateWorkspace => self.update_session_workspace(args).await,
             DomainCommand::SessionUpdateStatus => {
                 let args: SessionStatusArgs = parse(args)?;
                 conversations::workbench_status::apply_manual_status(
@@ -1373,6 +1399,55 @@ impl ServerApplicationDomains {
         serialize(self.require_session(args.session_id).await?)
     }
 
+    async fn update_session_workspace(&self, args: Value) -> Result<Value, ApplicationError> {
+        let args: UpdateSessionWorkspaceArgs = parse(args)?;
+        let session = self.require_session(args.session_id).await?;
+        let target_workspace = self.require_workspace(args.workspace_id).await?;
+        if target_workspace.archived {
+            return Err(ApplicationError::bad_request(
+                "Cannot switch session to an archived workspace",
+            ));
+        }
+        let current_workspace = self.require_workspace(session.workspace_id).await?;
+        if target_workspace.project_id != current_workspace.project_id {
+            return Err(ApplicationError::bad_request(
+                "Target workspace does not belong to the same project",
+            ));
+        }
+        if session.workspace_id == target_workspace.id {
+            return serialize(session);
+        }
+        if db::models::execution_process::ExecutionProcess::has_running_non_dev_server_processes_for_session(
+            &self.pool,
+            session.id,
+        )
+        .await
+        .map_err(internal_error)?
+        {
+            return Err(ApplicationError::bad_request(
+                "Cannot switch workspace while an execution process is running",
+            ));
+        }
+        self.deployment
+            .container()
+            .ensure_container_exists(&target_workspace)
+            .await
+            .map_err(internal_error)?;
+        conversations::ConversationSessionService::new(self.conversations.clone())
+            .prepare_workspace_switch(session.id)
+            .await
+            .map_err(|error| ApplicationError::bad_request(error.to_string()))?;
+        Session::update_workspace(
+            &self.pool,
+            session.id,
+            target_workspace.id,
+            Some(target_workspace.task_id),
+        )
+        .await
+        .map_err(internal_error)?;
+        serialize(self.require_session(session.id).await?)
+    }
+
     async fn file_tree(&self, args: Value) -> Result<Value, ApplicationError> {
         let args: FileTreeArgs = parse(args)?;
         let root = self.existing_local_path(&args.root_path).await?;
@@ -1955,6 +2030,31 @@ impl ServerApplicationDomains {
             .await
             .map_err(internal_error)?
             .path)
+    }
+
+    pub(crate) async fn resolve_repo_worktree_path(
+        &self,
+        repo_id: Uuid,
+        worktree_path: Option<&str>,
+    ) -> Result<PathBuf, ApplicationError> {
+        let repo_path = self.repo_path(RepoIdArgs { repo_id }).await?;
+        let Some(candidate) = worktree_path
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(repo_path);
+        };
+        let git = self.deployment.git().clone();
+        let candidate_path = PathBuf::from(candidate);
+        let resolved = tokio::task::block_in_place(|| {
+            git.resolve_registered_worktree_path(&repo_path, &candidate_path)
+        })
+        .map_err(internal_error)?;
+        resolved.ok_or_else(|| {
+            ApplicationError::forbidden(
+                "worktreePath is not a registered worktree of the requested repository",
+            )
+        })
     }
 
     pub(crate) async fn worktree_path(
@@ -2585,9 +2685,41 @@ struct CloneRepoArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct RepoWorktreeArgs {
+    pub(crate) repo_id: Uuid,
+    #[serde(default)]
+    pub(crate) worktree_path: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RepoBranchDiffArgs {
+    repo_id: Uuid,
+    #[serde(alias = "branchName")]
+    branch: String,
+    #[serde(default)]
+    base_branch: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RepoLogArgs {
+    repo_id: Uuid,
+    #[serde(default)]
+    worktree_path: Option<String>,
+    #[serde(default)]
+    branches: Option<Vec<String>>,
+    #[serde(default)]
+    max_count: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RepoFileArgs {
     repo_id: Uuid,
     file_path: String,
+    #[serde(default)]
+    worktree_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2595,6 +2727,8 @@ struct RepoFileArgs {
 struct RepoCommitArgs {
     repo_id: Uuid,
     message: String,
+    #[serde(default)]
+    worktree_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2605,6 +2739,8 @@ struct RepoBranchArgs {
     branch: String,
     #[serde(default)]
     from_ref: Option<String>,
+    #[serde(default)]
+    worktree_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2612,6 +2748,17 @@ struct RepoBranchArgs {
 pub(crate) struct WorkspaceRepoArgs {
     pub(crate) workspace_id: Uuid,
     pub(crate) repo_id: Uuid,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceLogArgs {
+    workspace_id: Uuid,
+    repo_id: Uuid,
+    #[serde(default)]
+    branches: Option<Vec<String>>,
+    #[serde(default)]
+    max_count: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -2723,6 +2870,15 @@ struct EnsureWorkspaceArgs {
 struct RenameSessionArgs {
     session_id: Uuid,
     name: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateSessionWorkspaceArgs {
+    #[serde(alias = "session_id")]
+    session_id: Uuid,
+    #[serde(alias = "workspace_id")]
+    workspace_id: Uuid,
 }
 
 #[derive(Deserialize)]

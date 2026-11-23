@@ -30,7 +30,7 @@ impl AgentConnectionRunner {
         *self.last_activity.lock().await = Instant::now();
         let cleared_suggestion =
             if let Some(stored) = self.session_controls.write().await.get_mut(&session_id) {
-                stored.asserted_config_values.clear();
+                stored.drift_retry_counts.clear();
                 stored.last_turn_usage = None;
                 stored.prompt_suggestion.take().is_some()
             } else {

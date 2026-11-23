@@ -1,6 +1,6 @@
 import {
   COPY,
-  isCollaborationLimitNotice,
+  isSpaceSystemNotice,
   messageAuthor,
   type SpaceEnvelopeParties,
 } from './spaceModel';
@@ -11,7 +11,7 @@ export function isCollabThreadUserBubble(message: {
   origin?: string;
   envelope?: SpaceEnvelopeParties | null;
 }): boolean {
-  if (isCollaborationLimitNotice(message)) return false;
+  if (isSpaceSystemNotice(message)) return false;
   return messageAuthor(message.envelope) === COPY.you;
 }
 

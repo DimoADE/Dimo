@@ -1,8 +1,19 @@
-# IM 渠道密钥存明文 ~/.dimo/.env，有意不用系统钥匙串
+---
+status: accepted
+date: 2026-07-04
+decision-makers: Dimo maintainers
+---
 
-chat_channel 此前把飞书等 IM 渠道的密钥明文存在命令层自建的 JSON 文件里（绕开 Deployment 分层）。逻辑下沉到 `services::chat_delivery` 时，密钥迁至 `~/.dimo/.env`（文件权限 0600）。这是对"桌面应用密钥应入系统钥匙串"这一常规做法的**有意偏离**——按用户决策明文存储、不加密，换取零依赖、可直接编辑与备份的简单性。
+# IM 渠道密钥以 `0600` 明文存储于 `~/.dimo/.env`
+
+Chat Channel（IM 渠道）的密钥由 `services::chat_delivery` 统一管理，以明文键值对形式存储在 `~/.dimo/.env`（Unix 权限 `0600`），有意不接入系统钥匙串。
+
+## Decision
+
+- 所有 IM 渠道密钥集中在 `~/.dimo/.env`，由 `services::chat_delivery` 读取与原子写回，避免在命令层散落自建 JSON 文件。
+- 明确选择本地明文存储（不经系统钥匙串加密），以换取零平台依赖、无头服务器（`dimo-server`）行为一致、以及可直接编辑与备份的简单性。
 
 ## Consequences
 
-- 收录范围严格限定为 IM 渠道密钥。模型供应商 API key、MCP env 等的既有存放处**保持现状**，不并入 .env。
-- 若未来安全要求提高，迁移路径是把 .env 的读取点换成 keyring 后端，改动面限于 chat_delivery 一处。
+- 收录范围严格限定为 IM 渠道密钥；模型供应商 API Key、Agent 原生配置凭据与 MCP 环境变量各自保留在其既有存储边界内，不并入 `~/.dimo/.env`。
+- 若未来需要切换到系统钥匙串或外部凭据管理后端，改动面收敛在 `services::chat_delivery` 的单一读写边界内。

@@ -80,8 +80,8 @@ use crate::{
     pi_trust::{PI_COMMAND_ENV, PI_CONFIG_DIR_ENV, PI_SESSION_DIR_ENV, PI_TRUST_WORKSPACE_ENV},
     session_config_guard::{
         self, GROK_MODELS_UPDATE_METHOD, GrokModelCatalog, asserted_from_preferred,
-        config_option_rejection, fold_grok_catalog_model_choices, parse_grok_model_catalog,
-        preferred_controls_map, take_asserted_config_drift,
+        check_asserted_config_drift, config_option_rejection, fold_grok_catalog_model_choices,
+        parse_grok_model_catalog, preferred_controls_map,
     },
     session_notice,
     state::{AgentConnectionSnapshot, AgentConnectionStatus},

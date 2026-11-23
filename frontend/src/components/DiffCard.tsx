@@ -532,7 +532,10 @@ export default function DiffCard({
   const expandable = true;
 
   return (
-    <div className="my-2 overflow-clip rounded-xl border border-border/60 bg-muted/20">
+    <div
+      className="my-2 overflow-clip rounded-xl border border-border/60 bg-muted/20"
+      style={{ contain: 'style' }}
+    >
       <div
         className={`sticky top-0 z-[5] flex items-center bg-transparent px-4 py-2 ${
           expanded ? 'border-b border-border/60' : ''
@@ -572,7 +575,12 @@ export default function DiffCard({
       </div>
 
       {expanded && diffFile && (
-        <div>
+        <div
+          style={{
+            contentVisibility: 'auto',
+            containIntrinsicSize: 'auto 240px',
+          }}
+        >
           <DiffView
             diffFile={diffFile}
             diffViewWrap={wrapText}

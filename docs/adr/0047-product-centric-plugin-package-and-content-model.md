@@ -1,53 +1,26 @@
 ---
 status: accepted
 date: 2026-08-13
-decision-makers:
-  - Dimo maintainers
+decision-makers: Dimo maintainers
 ---
 
 # 产品中心的 Plugin Package、内容与配置模型
 
-> 目录页信息架构已由 [ADR-0066](0066-plugin-marketplace-authoring-and-session-honesty.md)
-> 修订：设置 → 插件增加「已安装 / 插件市场」两个目录 Tab。详情页仍只有「内容」和「配置」。
-
-## Context
-
-ADR-0046 建立了统一生命周期、隔离执行、Capability Broker、Runtime lock 与 App extension
-host，但沿用了以 App/Agent contribution 分类解释插件的开发者视角。实际用户只关心插件提供
-了什么功能。把 Skill、Runtime、MCP、命令、激活代和贡献数量直接作为详情页结构，会让
-Office 重新看起来像旧 Agent Plugin 工具包，也掩盖它对文件预览等平台能力的扩展。
+Dimo 插件面向用户的产品界面与作者公共包布局以“完整功能产品”为中心设计，而非以内部扩展点（App / Agent contribution、激活代或 Runtime 锁数量）解释插件。内核生命周期与 SDK 边界见 [ADR-0046](0046-full-stack-plugin-platform-and-isolated-sdk.md)，全信任执行模型见 [ADR-0048](0048-full-trust-plugin-execution-model.md)，市场与安装预览流程见 [ADR-0066](0066-plugin-marketplace-authoring-and-session-honesty.md)。
 
 ## Decision
 
-1. Dimo Plugin 在产品界面中是一个不可再拆分的功能产品，不使用“平台扩展/Agent 扩展”分类。
-2. 每个包必须有根 `README.md`。frontmatter 的 `summary` 是独立的一句话元数据；README 正文
-   是用户说明入口。
-3. 可供用户或 Agent 阅读/使用的资源统一进入根 `contents/`，build 生成并签名结构化内容索引。
-4. 依赖描述统一进入根 `depends/`；作者入口位于 `runtime/`，发布执行物位于 `dist/`。
-5. 根 `config.json` 是用户配置的唯一事实。manifest 内联 schema；Host 校验并原子写回此文件。
-   它是可变用户数据，不进入 executable digest 或 activation generation。
-6. manifest 使用产品语言 `integrations` 和 `dependencies` 描述内部接线。Kernel 可以编译为私有
-   IR，但不得把该 IR 当作公共包格式或用户信息架构。
-7. 插件目录采用单列列表；点击后进入独立详情页，只有“内容”和“配置”两个主要 Tab。
-8. generation、contribution、handler、runtime lock 属于诊断模型，不出现在普通详情页。
-9. Agent-native plugin 不复用 Dimo 产品详情。它在对应 Agent 设置底部以列表加预览呈现，
-   预览只包含 Skill、MCP、Runtime、Hook 与 Workflow，不展示 App extension、Dimo capability、
-   activation generation 或产品包诊断。
-10. `PluginAction` 不再是公共产品或 SDK 概念。可复用的结构化操作统一建模为
-    `contents/workflows/` 中的 Plugin Workflow；迁移期遗留字段只能作为兼容输入，不能重新投影为
-    用户可见的“动作”或“调用命令”。
-
-## Relationship to ADR-0046
-
-本 ADR 修订 ADR-0046 的公共包布局、术语与产品 UI。ADR-0048 进一步修订执行信任与权限
-模型；原子 generation、内容寻址 Runtime、SDK 和 Office 无核心特判要求继续有效。
+1. **不可拆分的产品视角**：Dimo Plugin 在产品界面中作为单一完整产品呈现，不按“平台扩展 / Agent 扩展”切分用户分类。
+2. **根 `README.md` 与一句话摘要**：每个包必须包含根 `README.md`；其 frontmatter 中的 `summary` 是独立的一句话简介元数据（不从正文或标题推断），供目录列表与详情页标题区展示；正文作为用户说明入口。
+3. **统一内容目录（`contents/`）**：可供用户或 Agent 阅读、使用的 Skill、MCP、Hook、Workflow、模板与其他资源统一置于根 `contents/`，构建时生成结构化内容索引并由 Host 校验后通过 Product Detail DTO 暴露（UI 不直接读取源码路径）。
+4. **清晰包布局**：依赖描述位于根 `depends/`，作者源码入口位于 `runtime/`，发布构建物位于 `dist/`。
+5. **配置单一真相源（`config.json`）**：根 `config.json` 是用户配置的唯一事实，由 manifest 内联 schema 校验并经 Host 原子写回；它是可变用户数据，不计入 executable digest 或 `ActivationGeneration`，插件更新时保留并重新校验用户配置而不静默覆写。
+6. **面向产品的 Manifest 术语**：`.dimo-plugin/plugin.json` 使用 `integrations` 与 `dependencies` 描述内部接线；Plugin Kernel 可在内部编译为私有 IR，但不得将该 IR 暴露为公共包格式或用户信息架构。
+7. **精简目录与详情信息架构**：设置 → 插件提供“已安装”与“插件市场”两个目录 Tab（[ADR-0066](0066-plugin-marketplace-authoring-and-session-honesty.md)），采用单列列表；点击条目进入独立详情页，仅包含“内容”与“配置”两个主要 Tab（配置页可由插件提供自定义详情扩展面，仍以 `config.json` 为真相源）。`ActivationGeneration`、contribution、handler 与 Runtime 锁属于诊断视图，不干扰常规详情页。
+8. **Agent 原生插件独立边界**：Codex、Claude Code 等 Agent-native plugin 不复用 Dimo 产品详情页，而是在“设置 → Agent → 对应 Agent”底部以默认折叠的列表加预览呈现（仅展示 Skill、MCP、Runtime、Hook 与 Workflow），使用独立 DTO 避免跨界泄漏 Dimo App 或产品包诊断术语。
+9. **结构化动作统一为 Plugin Workflow**：可复用的结构化操作统一建模为 `contents/workflows/` 中的 Plugin Workflow，不再定义独立的公共 `PluginAction` 概念。
 
 ## Consequences
 
-- Plugin SDK、CLI scaffold、Office reference package、Host DTO 和 UI 必须同时迁移，不能维护两套
-  面向作者的 manifest。
-- 更新安装物时要保留并重新验证用户 `config.json`，而不是用包内默认值静默覆盖。
-- UI 不再从源码路径读取 README/contents；Host 返回已验证的 Product Detail DTO。
-- Agent-native plugin 仍在各 Agent 设置内管理，但不会影响 Dimo Product Plugin 的统一展示。
-- Agent-native 资源投影与 Dimo Product Detail 使用不同 DTO/视图边界，避免任何一侧的术语或
-  权限语义泄漏到另一侧。
+- Plugin SDK、CLI scaffold、官方插件、Host DTO 与设置 UI 共用同一公共包布局与产品术语，不维护双套面向作者的 manifest 约定。
+- 用户在设置中看到的是清晰的功能说明、内容资源与可编辑配置，而开发者与运维仍可在诊断界面获取完整底层证据。

@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { JSX } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { useTranslation } from 'react-i18next';
 import { Plus, ScrollText, Terminal as TerminalIcon, X } from 'lucide-react';
 import type { IDockviewPanelProps } from 'dockview-react';
@@ -648,6 +649,56 @@ function AgentCommandTab({
   );
 }
 
+const LOG_URL_REGEX = /(https?:\/\/[^\s]+)/gi;
+
+const LogLineItem = memo(function LogLineItem({
+  content,
+  isStderr,
+  onOpenUrl,
+}: {
+  content: string;
+  isStderr: boolean;
+  onOpenUrl: (url: string) => void;
+}) {
+  const rendered = useMemo(() => {
+    if (!content.includes('http://') && !content.includes('https://')) {
+      return content;
+    }
+    const parts: Array<JSX.Element | string> = [];
+    let lastIndex = 0;
+
+    for (const match of content.matchAll(LOG_URL_REGEX)) {
+      const matchedUrl = match[0];
+      const matchIndex = match.index ?? 0;
+
+      if (matchIndex > lastIndex) {
+        parts.push(content.slice(lastIndex, matchIndex));
+      }
+
+      parts.push(
+        <button
+          key={`${matchedUrl}-${matchIndex}`}
+          type="button"
+          onClick={() => onOpenUrl(matchedUrl)}
+          className="text-primary underline hover:text-primary/80"
+        >
+          {matchedUrl}
+        </button>
+      );
+
+      lastIndex = matchIndex + matchedUrl.length;
+    }
+
+    if (lastIndex < content.length) {
+      parts.push(content.slice(lastIndex));
+    }
+
+    return parts.length > 0 ? parts : content;
+  }, [content, onOpenUrl]);
+
+  return <span className={isStderr ? 'text-destructive' : ''}>{rendered}</span>;
+});
+
 function LogViewerTab({
   session,
   isActive,
@@ -658,51 +709,23 @@ function LogViewerTab({
   onOpenUrl: (url: string) => void;
 }) {
   const { logs, error } = useLogStream(session.processId ?? '');
-  const containerRef = useRef<HTMLPreElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const virtualizer = useVirtualizer({
+    count: logs.length,
+    getScrollElement: () => containerRef.current,
+    estimateSize: () => 20,
+    overscan: 24,
+  });
 
   useEffect(() => {
     const element = containerRef.current;
-    if (element) {
+    if (element && logs.length > 0) {
       element.scrollTop = element.scrollHeight;
     }
-  }, [logs]);
+  }, [logs.length]);
 
-  const renderLogLine = useCallback(
-    (content: string) => {
-      const parts: Array<JSX.Element | string> = [];
-      const urlRegex = /(https?:\/\/[^\s]+)/gi;
-      let lastIndex = 0;
-
-      for (const match of content.matchAll(urlRegex)) {
-        const matchedUrl = match[0];
-        const matchIndex = match.index ?? 0;
-
-        if (matchIndex > lastIndex) {
-          parts.push(content.slice(lastIndex, matchIndex));
-        }
-
-        parts.push(
-          <button
-            key={`${matchedUrl}-${matchIndex}`}
-            type="button"
-            onClick={() => onOpenUrl(matchedUrl)}
-            className="text-primary underline hover:text-primary/80"
-          >
-            {matchedUrl}
-          </button>
-        );
-
-        lastIndex = matchIndex + matchedUrl.length;
-      }
-
-      if (lastIndex < content.length) {
-        parts.push(content.slice(lastIndex));
-      }
-
-      return parts.length > 0 ? parts : content;
-    },
-    [onOpenUrl]
-  );
+  const virtualItems = virtualizer.getVirtualItems();
 
   return (
     <div
@@ -715,24 +738,51 @@ function LogViewerTab({
             Log stream error: {error}
           </div>
         )}
-        <pre
+        <div
           ref={containerRef}
-          className="flex-1 overflow-auto p-3 text-xs font-mono whitespace-pre-wrap break-words leading-relaxed"
+          className="flex-1 overflow-auto p-3 text-xs font-mono leading-relaxed"
         >
           {logs.length === 0 && !error && (
             <span className="text-muted-foreground">
               {i18n.t('panels:ui.terminal.waitingForDevServerOutput')}
             </span>
           )}
-          {logs.map((entry, index) => (
-            <span
-              key={index}
-              className={entry.type === 'STDERR' ? 'text-destructive' : ''}
+          {logs.length > 0 && (
+            <div
+              style={{
+                height: `${virtualizer.getTotalSize()}px`,
+                width: '100%',
+                position: 'relative',
+              }}
             >
-              {renderLogLine(entry.content)}
-            </span>
-          ))}
-        </pre>
+              {virtualItems.map((virtualRow) => {
+                const entry = logs[virtualRow.index];
+                if (!entry) return null;
+                return (
+                  <div
+                    key={virtualRow.key}
+                    data-index={virtualRow.index}
+                    ref={virtualizer.measureElement}
+                    className="whitespace-pre-wrap break-words"
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      width: '100%',
+                      transform: `translateY(${virtualRow.start}px)`,
+                    }}
+                  >
+                    <LogLineItem
+                      content={entry.content}
+                      isStderr={entry.type === 'STDERR'}
+                      onOpenUrl={onOpenUrl}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

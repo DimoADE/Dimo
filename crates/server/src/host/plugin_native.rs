@@ -1,10 +1,40 @@
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
 
 use application::ApplicationError;
 use plugins::{NativePluginAdapter, NativePluginDescriptor};
 use serde_json::{Value, json};
 
 use crate::domains::{ServerApplicationDomains, internal_error, parse, plugin_error, serialize};
+
+const NATIVE_CLI_DISCOVER_TIMEOUT: Duration = Duration::from_secs(5);
+const NATIVE_CLI_CACHE_TTL: Duration = Duration::from_secs(30);
+
+#[derive(Clone)]
+struct CachedNativePluginEntry {
+    format: &'static str,
+    plugin: NativePluginDescriptor,
+    item: Value,
+}
+
+struct NativePluginCacheState {
+    fetched_at: Instant,
+    entries: Vec<CachedNativePluginEntry>,
+}
+
+fn native_plugin_cache() -> &'static Mutex<Option<NativePluginCacheState>> {
+    static CACHE: OnceLock<Mutex<Option<NativePluginCacheState>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn invalidate_native_plugin_cache() {
+    if let Ok(mut guard) = native_plugin_cache().lock() {
+        *guard = None;
+    }
+}
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -14,23 +44,20 @@ struct PluginIdentityArgs {
 
 impl ServerApplicationDomains {
     pub(crate) async fn merge_native_cli_plugins(&self, plugins: &mut Vec<Value>) {
-        for (adapter, format) in native_cli_adapters().await {
-            let Ok(discovered) = adapter.discover().await else {
-                continue;
-            };
-            let capabilities = adapter.capabilities();
-            for native in discovered {
-                if let Some(existing) = plugins.iter_mut().find(|plugin| {
-                    plugin.get("id").and_then(Value::as_str) == Some(native.id.as_str())
-                }) {
-                    if let Some(formats) = existing.get_mut("formats").and_then(Value::as_array_mut)
-                        && !formats.iter().any(|item| item.as_str() == Some(format))
-                    {
-                        formats.push(Value::String(format.to_owned()));
-                    }
-                } else {
-                    plugins.push(native_plugin_item(native, format, capabilities));
+        let entries = discover_all_native_cli_plugins_cached().await;
+        for entry in entries {
+            if let Some(existing) = plugins.iter_mut().find(|plugin| {
+                plugin.get("id").and_then(Value::as_str) == Some(entry.plugin.id.as_str())
+            }) {
+                if let Some(formats) = existing.get_mut("formats").and_then(Value::as_array_mut)
+                    && !formats
+                        .iter()
+                        .any(|item| item.as_str() == Some(entry.format))
+                {
+                    formats.push(Value::String(entry.format.to_owned()));
                 }
+            } else {
+                plugins.push(entry.item);
             }
         }
     }
@@ -47,6 +74,7 @@ impl ServerApplicationDomains {
             .set_enabled(&descriptor.id, enabled)
             .await
             .map_err(plugin_error)?;
+        invalidate_native_plugin_cache();
         let refreshed = find_native_descriptor(&adapter, &descriptor.id).await?;
         Ok(Some(native_plugin_item(
             refreshed,
@@ -67,6 +95,7 @@ impl ServerApplicationDomains {
             return Ok(None);
         };
         adapter.update(&descriptor.id).await.map_err(plugin_error)?;
+        invalidate_native_plugin_cache();
         let refreshed = find_native_descriptor(&adapter, &descriptor.id).await?;
         Ok(Some(native_plugin_item(
             refreshed,
@@ -86,6 +115,7 @@ impl ServerApplicationDomains {
             .uninstall(&descriptor.id)
             .await
             .map_err(plugin_error)?;
+        invalidate_native_plugin_cache();
         Ok(true)
     }
 
@@ -106,18 +136,116 @@ impl ServerApplicationDomains {
     }
 }
 
+async fn discover_all_native_cli_plugins_cached() -> Vec<CachedNativePluginEntry> {
+    if let Ok(guard) = native_plugin_cache().lock()
+        && let Some(state) = guard.as_ref()
+        && state.fetched_at.elapsed() < NATIVE_CLI_CACHE_TTL
+    {
+        return state.entries.clone();
+    }
+
+    let (codex_entries, claude_entries, muse_entries) = tokio::join!(
+        discover_single_cli_adapter("codex", "codex", |program| {
+            plugins::OfficialCliNativePluginAdapter::codex(program)
+        }),
+        discover_single_cli_adapter("claude", "claude_code", |program| {
+            plugins::OfficialCliNativePluginAdapter::claude_code(program)
+        }),
+        discover_single_cli_adapter("muse", "muse_code", |program| {
+            plugins::OfficialCliNativePluginAdapter::muse_code(program)
+        }),
+    );
+
+    let mut entries = codex_entries;
+    entries.extend(claude_entries);
+    entries.extend(muse_entries);
+
+    if let Ok(mut guard) = native_plugin_cache().lock() {
+        *guard = Some(NativePluginCacheState {
+            fetched_at: Instant::now(),
+            entries: entries.clone(),
+        });
+    }
+    entries
+}
+
+async fn resolve_native_cli_binary(binary: &'static str) -> Option<std::path::PathBuf> {
+    if let Some(program) = utils::shell::resolve_executable_path(binary).await {
+        return Some(program);
+    }
+    if binary == "muse" {
+        return tokio::task::spawn_blocking(
+            crate::host::native::muse_plugins::resolve_muse_default,
+        )
+        .await
+        .ok()
+        .flatten();
+    }
+    None
+}
+
+async fn discover_single_cli_adapter(
+    binary: &'static str,
+    format: &'static str,
+    build: impl FnOnce(std::path::PathBuf) -> plugins::OfficialCliNativePluginAdapter,
+) -> Vec<CachedNativePluginEntry> {
+    let Some(program) = resolve_native_cli_binary(binary).await else {
+        return Vec::new();
+    };
+    let adapter = build(program);
+    let capabilities = adapter.capabilities();
+    let discovered =
+        match tokio::time::timeout(NATIVE_CLI_DISCOVER_TIMEOUT, adapter.discover()).await {
+            Ok(Ok(items)) => items,
+            Ok(Err(error)) => {
+                tracing::debug!(binary, %error, "native CLI plugin discovery failed");
+                return Vec::new();
+            }
+            Err(_) => {
+                tracing::warn!(binary, "native CLI plugin discovery timed out");
+                return Vec::new();
+            }
+        };
+    tokio::task::spawn_blocking(move || {
+        discovered
+            .into_iter()
+            .map(|plugin| {
+                let item = native_plugin_item(plugin.clone(), format, capabilities);
+                CachedNativePluginEntry {
+                    format,
+                    plugin,
+                    item,
+                }
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
 async fn native_cli_adapters() -> Vec<(plugins::OfficialCliNativePluginAdapter, &'static str)> {
+    let (codex_bin, claude_bin, muse_bin) = tokio::join!(
+        resolve_native_cli_binary("codex"),
+        resolve_native_cli_binary("claude"),
+        resolve_native_cli_binary("muse"),
+    );
     let mut adapters = Vec::new();
-    if let Some(program) = utils::shell::resolve_executable_path("codex").await {
+    if let Some(program) = codex_bin {
         adapters.push((
             plugins::OfficialCliNativePluginAdapter::codex(program),
             "codex",
         ));
     }
-    if let Some(program) = utils::shell::resolve_executable_path("claude").await {
+    if let Some(program) = claude_bin {
         adapters.push((
             plugins::OfficialCliNativePluginAdapter::claude_code(program),
             "claude_code",
+        ));
+    }
+    if let Some(program) = muse_bin {
+        adapters.push((
+            plugins::OfficialCliNativePluginAdapter::muse_code(program),
+            "muse_code",
         ));
     }
     adapters
@@ -134,7 +262,9 @@ async fn find_native_cli_plugin(
     ApplicationError,
 > {
     for (adapter, format) in native_cli_adapters().await {
-        let Ok(discovered) = adapter.discover().await else {
+        let Ok(Ok(discovered)) =
+            tokio::time::timeout(NATIVE_CLI_DISCOVER_TIMEOUT, adapter.discover()).await
+        else {
             continue;
         };
         if let Some(plugin) = discovered.into_iter().find(|plugin| plugin.id == plugin_id) {
@@ -148,9 +278,9 @@ async fn find_native_descriptor(
     adapter: &plugins::OfficialCliNativePluginAdapter,
     plugin_id: &str,
 ) -> Result<NativePluginDescriptor, ApplicationError> {
-    adapter
-        .discover()
+    tokio::time::timeout(NATIVE_CLI_DISCOVER_TIMEOUT, adapter.discover())
         .await
+        .map_err(|_| ApplicationError::internal("native plugin discovery timed out"))?
         .map_err(plugin_error)?
         .into_iter()
         .find(|plugin| plugin.id == plugin_id)
@@ -167,6 +297,7 @@ fn native_plugin_item(
     let source_kind = match plugin.ecosystem {
         plugins::NativeEcosystem::Codex => "codex_native",
         plugins::NativeEcosystem::ClaudeCode => "claude_code_native",
+        plugins::NativeEcosystem::MuseCode => "muse_code_native",
     };
     json!({
         "id": plugin.id,

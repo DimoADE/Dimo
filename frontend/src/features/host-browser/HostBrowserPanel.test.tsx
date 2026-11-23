@@ -1,3 +1,4 @@
+import { StrictMode } from 'react';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -1874,7 +1875,12 @@ describe('HostBrowserPanel', () => {
     backendCall.mockImplementation(
       (
         _command: string,
-        args: { input?: { operation?: string; input?: { bounds?: { visible: boolean } } } }
+        args: {
+          input?: {
+            operation?: string;
+            input?: { bounds?: { visible: boolean } };
+          };
+        }
       ) => {
         const op = args?.input?.operation;
         if (op === 'tab.create') {
@@ -1973,5 +1979,329 @@ describe('HostBrowserPanel', () => {
     });
 
     expect(dispatchedSurfaceBounds.at(-1)).toEqual({ visible: false });
+  });
+
+  it('handles forwarded guest tab.shortcut events for reload, zoom, find, and close-tab', async () => {
+    const closePanel = vi.fn();
+    backendCall.mockImplementation(
+      async (_cmd: string, args?: { input?: { operation?: string } }) => {
+        if (args?.input?.operation === 'tab.create') {
+          return {
+            tabId: 'tab-shortcut',
+            url: 'https://example.com/',
+            title: 'Example',
+            grant: { level: 'none' },
+          };
+        }
+        return { ok: true };
+      }
+    );
+
+    render(
+      <HostBrowserPanel
+        pluginId="dimo.browser"
+        panelVisible
+        requestedUrl="https://example.com/"
+        panelApi={{
+          id: 'browser-shortcut-panel',
+          close: closePanel,
+          updateParameters: () => {},
+        }}
+      />
+    );
+
+    await waitFor(() =>
+      expect(backendCall).toHaveBeenCalledWith(
+        'plugin_invoke_contribution',
+        expect.objectContaining({
+          input: expect.objectContaining({ operation: 'tab.create' }),
+        })
+      )
+    );
+
+    const emitHostEvent = (payload: Record<string, unknown>) => {
+      for (const handler of backendListen.handlers) {
+        handler(payload);
+      }
+    };
+
+    backendCall.mockClear();
+    emitHostEvent({
+      kind: 'tab.shortcut',
+      tabId: 'tab-shortcut',
+      action: 'reload',
+    });
+    await waitFor(() =>
+      expect(backendCall).toHaveBeenCalledWith('plugin_invoke_contribution', {
+        pluginId: 'dimo.browser',
+        handler: 'browser.dispatch',
+        input: {
+          operation: 'tab.reload',
+          input: { tabId: 'tab-shortcut' },
+        },
+      })
+    );
+
+    emitHostEvent({
+      kind: 'tab.shortcut',
+      tabId: 'tab-shortcut',
+      action: 'zoom-in',
+    });
+    await waitFor(() =>
+      expect(backendCall).toHaveBeenCalledWith('plugin_invoke_contribution', {
+        pluginId: 'dimo.browser',
+        handler: 'browser.dispatch',
+        input: {
+          operation: 'tab.zoom',
+          input: { tabId: 'tab-shortcut', factor: 1 },
+        },
+      })
+    );
+
+    emitHostEvent({
+      kind: 'tab.shortcut',
+      tabId: 'tab-shortcut',
+      action: 'close-tab',
+    });
+    expect(closePanel).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks tab.create with openInUi: false and UI-owned bounds in Electron mode so canvas handoff never duplicates nodes', async () => {
+    const previousDesktop = window.dimoDesktop;
+    Object.defineProperty(window, 'dimoDesktop', {
+      configurable: true,
+      writable: true,
+      value: {
+        invoke: vi.fn(async () => ({ ok: true })),
+        on: vi.fn(() => () => {}),
+      },
+    });
+    try {
+      backendCall.mockResolvedValue({
+        tabId: 'tab-electron-canvas',
+        url: 'https://github.com/',
+        title: 'GitHub',
+        grant: { level: 'none' },
+      });
+
+      render(
+        <HostBrowserPanel
+          pluginId="dimo.browser"
+          surfaceHost="canvas"
+          panelVisible
+          requestedUrl="https://github.com/"
+          panelApi={{
+            id: 'plugin:dimo.browser/browser:1',
+            updateParameters: () => {},
+          }}
+        />
+      );
+
+      await waitFor(() => {
+        expect(backendCall).toHaveBeenCalledWith('plugin_invoke_contribution', {
+          pluginId: 'dimo.browser',
+          handler: 'browser.dispatch',
+          input: {
+            operation: 'tab.create',
+            input: expect.objectContaining({
+              url: 'https://github.com/',
+              openInUi: false,
+              bounds: expect.objectContaining({
+                visible: true,
+                width: 320,
+                height: 240,
+              }),
+            }),
+          },
+        });
+      });
+    } finally {
+      Object.defineProperty(window, 'dimoDesktop', {
+        configurable: true,
+        writable: true,
+        value: previousDesktop,
+      });
+    }
+  });
+
+  it.each(['dockview', 'canvas'] as const)(
+    'creates the requestedUrl tab once under React.StrictMode in %s mode without stalling',
+    async (surfaceHost) => {
+      const previousDesktop = window.dimoDesktop;
+      Object.defineProperty(window, 'dimoDesktop', {
+        configurable: true,
+        writable: true,
+        value: {
+          invoke: vi.fn(async () => ({ ok: true })),
+          on: vi.fn(() => () => {}),
+        },
+      });
+      try {
+        backendCall.mockResolvedValue({
+          tabId: `tab-strict-${surfaceHost}`,
+          url: 'https://github.com/',
+          title: 'GitHub',
+          grant: { level: 'none' },
+        });
+
+        render(
+          <StrictMode>
+            <HostBrowserPanel
+              pluginId="dimo.browser"
+              surfaceHost={surfaceHost}
+              panelVisible
+              requestedUrl="https://github.com/"
+              panelApi={{
+                id: `plugin:dimo.browser/browser:strict-${surfaceHost}`,
+                updateParameters: () => {},
+              }}
+            />
+          </StrictMode>
+        );
+
+        await waitFor(() => {
+          expect(
+            screen.getByTestId('electron-browser-surface-slot')
+          ).toHaveAttribute(
+            'data-browser-surface-slot',
+            `tab-strict-${surfaceHost}`
+          );
+        });
+
+        const createCalls = backendCall.mock.calls.filter(
+          ([cmd, args]) =>
+            cmd === 'plugin_invoke_contribution' &&
+            (args as { input?: { operation?: string } })?.input?.operation ===
+              'tab.create'
+        );
+        expect(createCalls).toHaveLength(1);
+        expect(screen.getByRole('combobox')).toHaveValue('https://github.com/');
+        expect(
+          screen.queryByText(
+            i18n.t('browserPanel.loadFailed', { ns: 'panels' })
+          )
+        ).not.toBeInTheDocument();
+      } finally {
+        Object.defineProperty(window, 'dimoDesktop', {
+          configurable: true,
+          writable: true,
+          value: previousDesktop,
+        });
+      }
+    }
+  );
+
+  it('does not prematurely close an existing nativeTabId during React.StrictMode double-mount in canvas mode', async () => {
+    const previousDesktop = window.dimoDesktop;
+    Object.defineProperty(window, 'dimoDesktop', {
+      configurable: true,
+      writable: true,
+      value: {
+        invoke: vi.fn(async () => ({ ok: true })),
+        on: vi.fn(() => () => {}),
+      },
+    });
+    try {
+      backendCall.mockImplementation(
+        (_command: string, args: { input?: { operation?: string } }) => {
+          if (args?.input?.operation === 'tab.list') {
+            return Promise.resolve({
+              tabs: [
+                {
+                  tabId: 'tab-existing-strict',
+                  url: 'https://github.com/',
+                  title: 'GitHub',
+                  grant: { level: 'none' },
+                },
+              ],
+            });
+          }
+          return Promise.resolve({ ok: true });
+        }
+      );
+
+      render(
+        <StrictMode>
+          <HostBrowserPanel
+            pluginId="dimo.browser"
+            surfaceHost="canvas"
+            panelVisible
+            requestedUrl="https://github.com/"
+            nativeTabId="tab-existing-strict"
+            panelApi={{
+              id: 'plugin:dimo.browser/browser:strict-existing',
+              updateParameters: () => {},
+            }}
+          />
+        </StrictMode>
+      );
+
+      await waitFor(() => {
+        expect(
+          screen.getByTestId('electron-browser-surface-slot')
+        ).toHaveAttribute('data-browser-surface-slot', 'tab-existing-strict');
+      });
+
+      const closeCalls = backendCall.mock.calls.filter(
+        ([cmd, args]) =>
+          cmd === 'plugin_invoke_contribution' &&
+          (args as { input?: { operation?: string } })?.input?.operation ===
+            'tab.close'
+      );
+      expect(closeCalls).toHaveLength(0);
+    } finally {
+      Object.defineProperty(window, 'dimoDesktop', {
+        configurable: true,
+        writable: true,
+        value: previousDesktop,
+      });
+    }
+  });
+
+  it('retries tab.create when clicking Reload on the load-failed screen without an active tab', async () => {
+    const user = userEvent.setup();
+    let createAttempt = 0;
+    backendCall.mockImplementation(
+      (_command: string, args: { input?: { operation?: string } }) => {
+        if (args?.input?.operation === 'tab.create') {
+          createAttempt += 1;
+          if (createAttempt === 1) {
+            return Promise.reject(new Error('temporary startup error'));
+          }
+          return Promise.resolve({
+            tabId: 'tab-retried',
+            url: 'https://github.com/',
+            title: 'GitHub',
+            grant: { level: 'none' },
+          });
+        }
+        return Promise.resolve({ ok: true });
+      }
+    );
+
+    render(
+      <HostBrowserPanel
+        pluginId="dimo.browser"
+        panelVisible
+        requestedUrl="https://github.com/"
+      />
+    );
+
+    expect(
+      await screen.findByText('temporary startup error')
+    ).toBeInTheDocument();
+
+    const reloadButtons = screen.getAllByRole('button', {
+      name: i18n.t('browserPanel.reload', { ns: 'panels' }),
+    });
+    await user.click(reloadButtons[reloadButtons.length - 1]);
+
+    await waitFor(() => {
+      expect(createAttempt).toBe(2);
+      expect(
+        screen.queryByText('temporary startup error')
+      ).not.toBeInTheDocument();
+      expect(screen.getByTestId('host-browser-surface')).toBeInTheDocument();
+    });
   });
 });

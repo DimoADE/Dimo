@@ -173,6 +173,9 @@ pub struct StatusDiffEntry {
 pub struct WorktreeEntry {
     pub path: String,
     pub branch: Option<String>,
+    pub head_sha: Option<String>,
+    pub is_detached: bool,
+    pub is_bare: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -603,18 +606,28 @@ impl GitCli {
         let mut current_path: Option<String> = None;
         let mut current_head: Option<String> = None;
         let mut current_branch: Option<String> = None;
+        let mut current_detached = false;
+        let mut current_bare = false;
 
         for line in out.lines() {
             let line = line.trim();
 
             if line.is_empty() {
-                // End of current worktree entry, save it if we have required data
-                if let (Some(path), Some(_head)) = (current_path.take(), current_head.take()) {
-                    entries.push(WorktreeEntry {
-                        path,
-                        branch: current_branch.take(),
-                    });
+                if let Some(path) = current_path.take() {
+                    let head = current_head.take();
+                    if head.is_some() || current_bare {
+                        entries.push(WorktreeEntry {
+                            path,
+                            branch: current_branch.take(),
+                            head_sha: head,
+                            is_detached: current_detached,
+                            is_bare: current_bare,
+                        });
+                    }
                 }
+                current_branch = None;
+                current_detached = false;
+                current_bare = false;
             } else if let Some(path) = line.strip_prefix("worktree ") {
                 current_path = Some(path.to_string());
             } else if let Some(head) = line.strip_prefix("HEAD ") {
@@ -624,14 +637,23 @@ impl GitCli {
                 current_branch = branch_ref
                     .strip_prefix("refs/heads/")
                     .map(|name| name.to_string());
+            } else if line == "detached" {
+                current_detached = true;
+            } else if line == "bare" {
+                current_bare = true;
             }
         }
 
         // Handle the last entry if no trailing empty line
-        if let (Some(path), Some(_head)) = (current_path, current_head) {
+        if let Some(path) = current_path
+            && (current_head.is_some() || current_bare)
+        {
             entries.push(WorktreeEntry {
                 path,
                 branch: current_branch,
+                head_sha: current_head,
+                is_detached: current_detached,
+                is_bare: current_bare,
             });
         }
 
@@ -1220,16 +1242,34 @@ impl GitCli {
         self.git(worktree_path, ["diff", "HEAD", "--", file_path])
     }
 
-    /// Get git log entries with format: hash, summary, author, timestamp, refs.
+    /// Get git log entries with format: hash, parents, summary, author, timestamp, refs.
     pub fn get_log(&self, worktree_path: &Path, max_count: usize) -> Result<String, GitCliError> {
-        self.git(
-            worktree_path,
-            [
-                "log",
-                &format!("--max-count={max_count}"),
-                "--format=%H%x00%s%x00%aN%x00%ct%x00%D",
-            ],
-        )
+        self.get_log_for_refs(worktree_path, &[], max_count)
+    }
+
+    /// Get topological git log entries across one or more refs (or HEAD when `refs` is empty).
+    /// Format per line: `<sha>\0<space-separated parents>\0<summary>\0<author>\0<timestamp>\0<refs>`.
+    pub fn get_log_for_refs(
+        &self,
+        worktree_path: &Path,
+        refs: &[String],
+        max_count: usize,
+    ) -> Result<String, GitCliError> {
+        let max_arg = format!("--max-count={max_count}");
+        let mut args: Vec<String> = vec![
+            "log".to_string(),
+            "--topo-order".to_string(),
+            max_arg,
+            "--format=%H%x00%P%x00%s%x00%aN%x00%ct%x00%D".to_string(),
+        ];
+        if !refs.is_empty() {
+            for r in refs {
+                let valid = crate::validation::validate_ref_or_sha(r, "log ref")?;
+                args.push(valid.to_string());
+            }
+            args.push("--".to_string());
+        }
+        self.git(worktree_path, args)
     }
 
     /// Get the number of commits ahead and behind between two refs.

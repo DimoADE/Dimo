@@ -35,6 +35,8 @@ const DEFAULT_OUTPUT_BYTE_LIMIT: usize = 512 * 1024;
 const HARD_OUTPUT_BYTE_LIMIT: usize = 16 * 1024 * 1024;
 const MAX_LINE_BOUNDARY_SEARCH: usize = 8 * 1024;
 const TERMINAL_OUTPUT_BUFFER: usize = 256;
+const MAX_RETAINED_EXITED_TERMINALS: usize = 32;
+static EXIT_ORDER_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// One output chunk plus the monotonic cursor a re-attaching viewer uses to
 /// tell snapshot overlap from live data.
@@ -81,6 +83,9 @@ impl OutputTap {
 
     async fn recv(&self) -> Option<TerminalOutputChunk> {
         loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             {
                 let mut chunks = self
                     .chunks
@@ -93,7 +98,7 @@ impl OutputTap {
                     return None;
                 }
             }
-            self.notify.notified().await;
+            notified.await;
         }
     }
 }
@@ -271,6 +276,7 @@ struct AgentTerminalSession {
     args: Vec<String>,
     output_history: Arc<Mutex<VecDeque<u8>>>,
     seq: AtomicU64,
+    exited_order: AtomicU64,
     subscribers: Arc<Mutex<Vec<TerminalOutputTx>>>,
     exit_status: Arc<RwLock<Option<AgentTerminalExit>>>,
     exit_notify: Arc<Notify>,
@@ -367,6 +373,7 @@ impl AgentTerminalRegistry {
             args: args.args.clone(),
             output_history: Arc::new(Mutex::new(VecDeque::new())),
             seq: AtomicU64::new(0),
+            exited_order: AtomicU64::new(0),
             subscribers: Arc::new(Mutex::new(Vec::new())),
             exit_status: Arc::new(RwLock::new(None)),
             exit_notify: Arc::new(Notify::new()),
@@ -380,6 +387,7 @@ impl AgentTerminalRegistry {
             .write()
             .await
             .insert(terminal_id, Arc::clone(&session));
+        prune_exited_sessions(&self.sessions, &self.lifecycle_tx).await;
 
         let mut handles: Vec<JoinHandle<()>> = Vec::new();
         if let Some(handle) =
@@ -400,6 +408,7 @@ impl AgentTerminalRegistry {
             Arc::clone(&session),
             child,
             process_job,
+            Arc::clone(&self.sessions),
             self.lifecycle_tx.clone(),
         ));
 
@@ -519,12 +528,7 @@ impl AgentTerminalRegistry {
 
     pub async fn wait_for_exit(&self, terminal_id: AgentTerminalId) -> Option<AgentTerminalExit> {
         let session = self.sessions.read().await.get(&terminal_id)?.clone();
-        loop {
-            if let Some(exit_status) = session.exit_status.read().await.clone() {
-                return Some(exit_status);
-            }
-            session.exit_notify.notified().await;
-        }
+        Some(wait_for_session_exit(&session).await)
     }
 
     pub async fn kill_terminal(&self, terminal_id: AgentTerminalId) -> bool {
@@ -535,15 +539,7 @@ impl AgentTerminalRegistry {
             return true;
         }
         session.kill_notify.notify_one();
-        let _ = tokio::time::timeout(KILL_REPORT_BUDGET, async {
-            loop {
-                if session.exit_status.read().await.is_some() {
-                    break;
-                }
-                session.exit_notify.notified().await;
-            }
-        })
-        .await;
+        let _ = tokio::time::timeout(KILL_REPORT_BUDGET, wait_for_session_exit(&session)).await;
         true
     }
 
@@ -601,15 +597,7 @@ impl AgentTerminalRegistry {
         let was_running = session.exit_status.read().await.is_none();
         session.kill_notify.notify_one();
         if was_running {
-            let _ = tokio::time::timeout(KILL_REPORT_BUDGET, async {
-                loop {
-                    if session.exit_status.read().await.is_some() {
-                        break;
-                    }
-                    session.exit_notify.notified().await;
-                }
-            })
-            .await;
+            let _ = tokio::time::timeout(KILL_REPORT_BUDGET, wait_for_session_exit(&session)).await;
             let mut exit_guard = session.exit_status.write().await;
             if exit_guard.is_none() {
                 *exit_guard = Some(AgentTerminalExit::Signal {
@@ -650,6 +638,18 @@ impl AgentTerminalRegistry {
 
     pub fn subscribe_lifecycle(&self) -> broadcast::Receiver<AgentTerminalLifecycleEvent> {
         self.lifecycle_tx.subscribe()
+    }
+}
+
+async fn wait_for_session_exit(session: &AgentTerminalSession) -> AgentTerminalExit {
+    loop {
+        let notified = session.exit_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if let Some(exit_status) = session.exit_status.read().await.clone() {
+            return exit_status;
+        }
+        notified.await;
     }
 }
 
@@ -710,19 +710,61 @@ async fn drain_readers(session: &AgentTerminalSession) {
     }
 }
 
+async fn prune_exited_sessions(
+    sessions: &Arc<RwLock<HashMap<AgentTerminalId, Arc<AgentTerminalSession>>>>,
+    lifecycle_tx: &broadcast::Sender<AgentTerminalLifecycleEvent>,
+) {
+    let evicted: Vec<(AgentTerminalId, Arc<AgentTerminalSession>)> = {
+        let mut guard = sessions.write().await;
+        let mut exited: Vec<(AgentTerminalId, u64)> = guard
+            .iter()
+            .filter_map(|(id, session)| {
+                let order = session.exited_order.load(Ordering::Acquire);
+                (order > 0).then_some((*id, order))
+            })
+            .collect();
+        if exited.len() <= MAX_RETAINED_EXITED_TERMINALS {
+            return;
+        }
+        exited.sort_unstable_by_key(|(_, order)| *order);
+        let remove_count = exited.len() - MAX_RETAINED_EXITED_TERMINALS;
+        exited
+            .into_iter()
+            .take(remove_count)
+            .filter_map(|(id, _)| guard.remove(&id).map(|session| (id, session)))
+            .collect()
+    };
+
+    for (terminal_id, session) in evicted {
+        {
+            let mut history = session.output_history.lock().await;
+            history.clear();
+            history.shrink_to_fit();
+        }
+        session.subscribers.lock().await.clear();
+        let _ = lifecycle_tx.send(AgentTerminalLifecycleEvent::Released { terminal_id });
+    }
+}
+
 async fn publish_exit(
     terminal_id: AgentTerminalId,
     session: &AgentTerminalSession,
     status: AgentTerminalExit,
+    sessions: &Arc<RwLock<HashMap<AgentTerminalId, Arc<AgentTerminalSession>>>>,
     lifecycle_tx: &broadcast::Sender<AgentTerminalLifecycleEvent>,
 ) {
     drain_readers(session).await;
     *session.exit_status.write().await = Some(status.clone());
+    session.exited_order.store(
+        EXIT_ORDER_SEQ.fetch_add(1, Ordering::AcqRel),
+        Ordering::Release,
+    );
     session.exit_notify.notify_waiters();
     let _ = lifecycle_tx.send(AgentTerminalLifecycleEvent::Exited {
         terminal_id,
         exit: status,
     });
+    prune_exited_sessions(sessions, lifecycle_tx).await;
 }
 
 fn map_exit_status(status: std::process::ExitStatus) -> AgentTerminalExit {
@@ -750,6 +792,7 @@ async fn own_terminal_process(
     session: Arc<AgentTerminalSession>,
     mut child: AsyncGroupChild,
     process_job: ProcessTreeJob,
+    sessions: Arc<RwLock<HashMap<AgentTerminalId, Arc<AgentTerminalSession>>>>,
     lifecycle_tx: broadcast::Sender<AgentTerminalLifecycleEvent>,
 ) {
     let pid = child.id();
@@ -791,6 +834,7 @@ async fn own_terminal_process(
                             terminal_id,
                             &session,
                             AgentTerminalExit::Unknown,
+                            &sessions,
                             &lifecycle_tx,
                         )
                         .await;
@@ -839,7 +883,7 @@ async fn own_terminal_process(
         return;
     }
 
-    publish_exit(terminal_id, &session, exit_status, &lifecycle_tx).await;
+    publish_exit(terminal_id, &session, exit_status, &sessions, &lifecycle_tx).await;
 }
 
 fn configure_terminal_command(
@@ -1125,3 +1169,59 @@ pub async fn configured_terminal_shell() -> Option<String> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod lost_wakeup_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn output_tap_recv_never_hangs_under_concurrent_push_and_close() {
+        for round in 0..200_u64 {
+            let (tx, mut rx) = TerminalOutputTx::pair();
+            let producer = tokio::spawn(async move {
+                tx.push(TerminalOutputChunk {
+                    seq: round * 2 + 1,
+                    data: b"chunk-a".to_vec(),
+                });
+                tokio::task::yield_now().await;
+                tx.push(TerminalOutputChunk {
+                    seq: round * 2 + 2,
+                    data: b"chunk-b".to_vec(),
+                });
+                tx.close();
+            });
+
+            let mut received = Vec::new();
+            loop {
+                let next = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                    .await
+                    .unwrap_or_else(|_| panic!("OutputTap::recv hung on round {round}"));
+                match next {
+                    Some(chunk) => received.push(chunk.seq),
+                    None => break,
+                }
+            }
+
+            producer.await.expect("producer task finished");
+            assert_eq!(received, vec![round * 2 + 1, round * 2 + 2]);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn output_tap_recv_never_misses_immediate_close_without_chunks() {
+        for round in 0..200_u64 {
+            let (tx, mut rx) = TerminalOutputTx::pair();
+            let closer = tokio::spawn(async move {
+                tx.close();
+            });
+
+            let next = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("OutputTap::recv hung waiting for close on round {round}")
+                });
+            closer.await.expect("closer task finished");
+            assert!(next.is_none());
+        }
+    }
+}

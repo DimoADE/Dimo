@@ -80,6 +80,10 @@ const BUILT_IN_ICON_PATHS: Partial<
     light: '/agents/mimo-code-light.svg',
     dark: '/agents/mimo-code-dark.svg',
   },
+  muse_code: {
+    light: '/agents/muse-code-light.svg',
+    dark: '/agents/muse-code-dark.svg',
+  },
 };
 
 const BUILT_IN_DISPLAY_NAMES: Partial<Record<string, string>> = {
@@ -106,6 +110,7 @@ const BUILT_IN_DISPLAY_NAMES: Partial<Record<string, string>> = {
   zcode: 'ZCode',
   omp: 'OMP',
   mimo_code: 'MiMo Code',
+  muse_code: 'Muse Code',
 };
 
 function getResolvedTheme(theme: ThemeMode): 'light' | 'dark' {
@@ -151,6 +156,10 @@ export function normalizeAgentIconKey(
     case 'mimo':
     case 'mimocode':
       return 'mimo_code';
+    case 'muse':
+    case 'musecode':
+    case 'muse_native':
+      return 'muse_code';
     default:
       return key;
   }

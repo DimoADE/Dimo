@@ -9,10 +9,7 @@ use std::{
 };
 
 use db::models::{
-    project::Project,
-    repo::Repo,
-    workspace::Workspace,
-    workspace_repo::WorkspaceRepo,
+    project::Project, repo::Repo, workspace::Workspace, workspace_repo::WorkspaceRepo,
 };
 use deployment::Deployment;
 use local_deployment::LocalDeployment;
@@ -463,16 +460,7 @@ pub async fn open_external_terminal(
     {
         match app.as_str() {
             "terminal" | "wt" => {
-                Command::new("wt")
-                    .arg("-d")
-                    .arg(&working_dir)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
-                    .map_err(|err| {
-                        DesktopError::Internal(format!("Failed to launch Windows Terminal: {err}"))
-                    })?;
+                launch_windows_terminal(&working_dir)?;
             }
             "ghostty" => {
                 Command::new("ghostty")
@@ -501,15 +489,7 @@ pub async fn open_external_terminal(
     {
         match app.as_str() {
             "terminal" => {
-                Command::new("x-terminal-emulator")
-                    .current_dir(&working_dir)
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
-                    .map_err(|err| {
-                        DesktopError::Internal(format!("Failed to launch terminal: {err}"))
-                    })?;
+                launch_linux_terminal(&working_dir)?;
             }
             "ghostty" => {
                 Command::new("ghostty")
@@ -535,6 +515,159 @@ pub async fn open_external_terminal(
     }
 }
 
+#[cfg(target_os = "windows")]
+fn launch_windows_terminal(working_dir: &Path) -> Result<(), DesktopError> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    match Command::new("wt")
+        .arg("-d")
+        .arg(working_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => return Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(DesktopError::Internal(format!(
+                "Failed to launch Windows Terminal: {err}"
+            )));
+        }
+    }
+
+    // `wt` is not installed; launch PowerShell via ShellExecute (`Start-Process`)
+    // so the interactive console receives clean console handles instead of inheriting
+    // dimo-server's redirected stdio pipes, passing the path via env to avoid quoting issues.
+    match Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Start-Process -FilePath powershell.exe -ArgumentList '-NoLogo','-NoExit' -WorkingDirectory $env:DIMO_TERMINAL_CWD",
+        ])
+        .env("DIMO_TERMINAL_CWD", working_dir)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => return Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(DesktopError::Internal(format!(
+                "Failed to launch PowerShell fallback terminal: {err}"
+            )));
+        }
+    }
+
+    // Launch interactive `cmd.exe` via `start` so the child gets fresh OS console
+    // handles rather than inheriting dimo-server's redirected stdio pipes (Rust's
+    // `Command` sets `STARTF_USESTDHANDLES` even with `CREATE_NEW_CONSOLE`).
+    Command::new("cmd.exe")
+        .args(["/D", "/C", "start", "", "cmd.exe", "/D", "/K"])
+        .current_dir(working_dir)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|err| {
+            DesktopError::Internal(format!(
+                "Failed to launch Windows Terminal or fallback shell: {err}"
+            ))
+        })?;
+    Ok(())
+}
+
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+fn linux_terminal_args_for_program(program: &str, working_dir: &Path) -> Vec<std::ffi::OsString> {
+    let basename = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program);
+    let dir = working_dir.as_os_str().to_os_string();
+    match basename {
+        "gnome-terminal" | "xfce4-terminal" | "alacritty" => {
+            vec!["--working-directory".into(), dir]
+        }
+        "konsole" => vec!["--workdir".into(), dir],
+        "kitty" => vec!["--directory".into(), dir],
+        "wezterm" => vec!["start".into(), "--cwd".into(), dir],
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+fn linux_terminal_candidates(
+    env_terminal: Option<&str>,
+    working_dir: &Path,
+) -> Vec<(String, Vec<std::ffi::OsString>)> {
+    const FALLBACK_TERMINALS: &[&str] = &[
+        "x-terminal-emulator",
+        "gnome-terminal",
+        "konsole",
+        "xfce4-terminal",
+        "alacritty",
+        "kitty",
+        "wezterm",
+        "xterm",
+    ];
+
+    let mut candidates = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    if let Some(preferred) = env_terminal
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        seen.insert(preferred.to_string());
+        let args = linux_terminal_args_for_program(preferred, working_dir);
+        candidates.push((preferred.to_string(), args));
+    }
+
+    for &program in FALLBACK_TERMINALS {
+        if seen.insert(program.to_string()) {
+            let args = linux_terminal_args_for_program(program, working_dir);
+            candidates.push((program.to_string(), args));
+        }
+    }
+
+    candidates
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn launch_linux_terminal(working_dir: &Path) -> Result<(), DesktopError> {
+    let env_terminal = std::env::var("TERMINAL").ok();
+    let candidates = linux_terminal_candidates(env_terminal.as_deref(), working_dir);
+    let mut last_err = None;
+
+    for (program, args) in candidates {
+        match Command::new(&program)
+            .args(&args)
+            .current_dir(working_dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_) => return Ok(()),
+            Err(err) => {
+                last_err = Some(err);
+            }
+        }
+    }
+
+    Err(DesktopError::Internal(format!(
+        "Failed to launch terminal (tried $TERMINAL and Linux fallbacks): {}",
+        last_err
+            .map(|err| err.to_string())
+            .unwrap_or_else(|| "no terminal emulator found".to_string())
+    )))
+}
+
 fn open_warp_terminal(working_dir: &Path) -> Result<(), DesktopError> {
     let encoded_path = percent_encode_query_component(&working_dir.to_string_lossy());
     let warp_uri = format!("warp://action/new_window?path={encoded_path}");
@@ -555,15 +688,38 @@ fn open_warp_terminal(working_dir: &Path) -> Result<(), DesktopError> {
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        Command::new("cmd")
-            .args(["/C", "start", "", &warp_uri])
+        // Avoid `cmd /C start` which expands `%XX` percent-encodings as environment variables.
+        match Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Process -FilePath $env:DIMO_WARP_URI",
+            ])
+            .env("DIMO_WARP_URI", &warp_uri)
             .creation_flags(CREATE_NO_WINDOW)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .map_err(|err| DesktopError::Internal(format!("Failed to launch Warp: {err}")))?;
-        Ok(())
+        {
+            Ok(_) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                Command::new("explorer.exe")
+                    .arg(&warp_uri)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .map_err(|fallback_err| {
+                        DesktopError::Internal(format!("Failed to launch Warp: {fallback_err}"))
+                    })?;
+                Ok(())
+            }
+            Err(err) => Err(DesktopError::Internal(format!(
+                "Failed to launch Warp: {err}"
+            ))),
+        }
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -643,6 +799,45 @@ mod tests {
         assert_eq!(
             percent_encode_query_component("/Users/demo/My Project#1"),
             "/Users/demo/My%20Project%231"
+        );
+    }
+
+    #[test]
+    fn linux_terminal_candidates_prioritize_env_and_include_cross_distro_fallbacks() {
+        let dir = Path::new("/tmp/my workspace");
+        let candidates = linux_terminal_candidates(Some("kitty"), dir);
+        let names: Vec<&str> = candidates.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "kitty",
+                "x-terminal-emulator",
+                "gnome-terminal",
+                "konsole",
+                "xfce4-terminal",
+                "alacritty",
+                "wezterm",
+                "xterm",
+            ]
+        );
+        assert_eq!(
+            candidates[0].1,
+            vec![
+                std::ffi::OsString::from("--directory"),
+                dir.as_os_str().to_os_string()
+            ]
+        );
+        let wezterm = candidates
+            .iter()
+            .find(|(p, _)| p == "wezterm")
+            .expect("wezterm fallback");
+        assert_eq!(
+            wezterm.1,
+            vec![
+                std::ffi::OsString::from("start"),
+                std::ffi::OsString::from("--cwd"),
+                dir.as_os_str().to_os_string()
+            ]
         );
     }
 

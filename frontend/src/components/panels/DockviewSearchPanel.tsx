@@ -13,7 +13,7 @@ import {
 
 function DockviewSearchPanel(_props: IDockviewPanelProps) {
   const { t } = useTranslation('panels');
-  const { rootPath } = useFileTreeStore();
+  const rootPath = useFileTreeStore((state) => state.rootPath);
   const { openFilePreview } = usePanelActionsContext();
   const search = useWorkspaceTextSearch(rootPath);
 

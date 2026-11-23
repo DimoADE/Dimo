@@ -7,6 +7,10 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    sync::{
+        Mutex as StdMutex, OnceLock,
+        atomic::{AtomicBool, AtomicI64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -29,7 +33,30 @@ use services::services::usage::{
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
+/// Minimum interval between automatic background vendor transcript rescans.
+pub const VENDOR_SYNC_COOLDOWN_MS: i64 = 30_000;
+
 static VENDOR_SYNC: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static LAST_VENDOR_SYNC_MS: AtomicI64 = AtomicI64::new(0);
+static VENDOR_SYNC_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+static LAST_PROVIDER_STATUS: OnceLock<StdMutex<Vec<ProjectUsageProviderStatus>>> = OnceLock::new();
+static CHECKED_MISSING_MODEL_SESSIONS: OnceLock<StdMutex<HashMap<Uuid, i64>>> = OnceLock::new();
+
+fn last_provider_status_cache() -> &'static StdMutex<Vec<ProjectUsageProviderStatus>> {
+    LAST_PROVIDER_STATUS.get_or_init(|| StdMutex::new(Vec::new()))
+}
+
+fn checked_missing_model_sessions() -> &'static StdMutex<HashMap<Uuid, i64>> {
+    CHECKED_MISSING_MODEL_SESSIONS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+struct VendorSyncInFlightGuard;
+
+impl Drop for VendorSyncInFlightGuard {
+    fn drop(&mut self) {
+        VENDOR_SYNC_IN_FLIGHT.store(false, Ordering::Release);
+    }
+}
 
 pub async fn apply_usage_updated(
     conn: &mut SqliteConnection,
@@ -106,6 +133,11 @@ fn has_provided_tokens(usage: &ConversationUsage) -> bool {
 
 pub async fn catch_up_usage_snapshots(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     let pending = StaleUsageEventRow::list_pending(pool).await?;
+    let unchecked_missing_models = list_unchecked_missing_model_sessions(pool).await?;
+    if pending.is_empty() && unchecked_missing_models.is_empty() {
+        return Ok(());
+    }
+
     let mut conn = pool.acquire().await?;
     for row in pending {
         let Some(usage) = usage_from_normalized_json(&row.normalized_json) else {
@@ -127,7 +159,9 @@ pub async fn catch_up_usage_snapshots(pool: &SqlitePool) -> Result<(), sqlx::Err
         )
         .await?;
     }
-    backfill_missing_session_models(&mut conn).await?;
+    if !unchecked_missing_models.is_empty() {
+        backfill_missing_session_models(&mut conn, &unchecked_missing_models).await?;
+    }
     Ok(())
 }
 
@@ -137,21 +171,46 @@ struct SessionModelBackfillRow {
     normalized_json: String,
 }
 
+async fn list_unchecked_missing_model_sessions(
+    pool: &SqlitePool,
+) -> Result<Vec<(Uuid, i64)>, sqlx::Error> {
+    let missing: Vec<(Uuid, i64)> = sqlx::query_as(
+        r#"SELECT s.id,
+                  COALESCE(
+                      (SELECT MAX(e.sequence)
+                       FROM conversation_events e
+                       WHERE e.conversation_id = s.id),
+                      0
+                  ) AS max_sequence
+           FROM sessions s
+           WHERE s.deleted_at IS NULL
+             AND (s.model IS NULL OR trim(s.model) = '')"#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if missing.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let checked = checked_missing_model_sessions()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    Ok(missing
+        .into_iter()
+        .filter(|(id, max_seq)| checked.get(id).copied() != Some(*max_seq))
+        .collect())
+}
+
 /// Historical sessions often have occupancy-only `usage_updated` events and a
 /// NULL `sessions.model`. The model id usually arrived on
 /// `session_config_options_updated`; fold the latest one so the dashboard
 /// does not group those sessions as `unprovided`.
-async fn backfill_missing_session_models(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
-    let missing: Option<(i64,)> = sqlx::query_as(
-        r#"SELECT 1
-           FROM sessions
-           WHERE deleted_at IS NULL
-             AND (model IS NULL OR trim(model) = '')
-           LIMIT 1"#,
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
-    if missing.is_none() {
+async fn backfill_missing_session_models(
+    conn: &mut SqliteConnection,
+    candidates: &[(Uuid, i64)],
+) -> Result<(), sqlx::Error> {
+    if candidates.is_empty() {
         return Ok(());
     }
 
@@ -183,6 +242,17 @@ async fn backfill_missing_session_models(conn: &mut SqliteConnection) -> Result<
             Some(&model),
         )
         .await?;
+    }
+
+    let mut checked = checked_missing_model_sessions()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for &(id, max_seq) in candidates {
+        if filled.contains(&id) {
+            checked.remove(&id);
+        } else {
+            checked.insert(id, max_seq);
+        }
     }
     Ok(())
 }
@@ -469,9 +539,85 @@ pub async fn assemble_project_usage_statistics(
 ) -> Result<ProjectUsageStatistics, sqlx::Error> {
     let (provider_status, _) =
         tokio::try_join!(sync_vendor_usage_logs(pool), catch_up_usage_snapshots(pool),)?;
-    let vendor_logs = load_vendor_usage_logs(pool, cutoff_time).await?;
-    let rows =
-        ConversationUsageSnapshotRecord::list_attributed(pool, project_uuid, cutoff_time).await?;
+    assemble_statistics_from_db(
+        pool,
+        scope,
+        project_id,
+        project_name,
+        project_uuid,
+        cutoff_time,
+        now_ms,
+        provider_status,
+    )
+    .await
+}
+
+/// Serve usage statistics immediately from SQLite when cached vendor rows exist
+/// (or a scan already ran in this process), returning `needs_background_sync` so
+/// the caller can refresh vendor logs asynchronously without blocking the UI.
+///
+/// Cold databases with no cached vendor files and no prior scan in this process
+/// fall back to synchronous assembly so the first-ever load is complete.
+pub async fn assemble_project_usage_statistics_cached(
+    pool: &SqlitePool,
+    scope: String,
+    project_id: String,
+    project_name: String,
+    project_uuid: Option<Uuid>,
+    cutoff_time: i64,
+    now_ms: i64,
+) -> Result<(ProjectUsageStatistics, bool), sqlx::Error> {
+    let has_cached_vendor_files = VendorUsageFileRecord::has_any(pool).await?;
+    let last_sync_ms = LAST_VENDOR_SYNC_MS.load(Ordering::Acquire);
+
+    if !has_cached_vendor_files && last_sync_ms == 0 {
+        let stats = assemble_project_usage_statistics(
+            pool,
+            scope,
+            project_id,
+            project_name,
+            project_uuid,
+            cutoff_time,
+            now_ms,
+        )
+        .await?;
+        return Ok((stats, false));
+    }
+
+    catch_up_usage_snapshots(pool).await?;
+    let provider_status = cached_provider_status(pool).await?;
+    let stats = assemble_statistics_from_db(
+        pool,
+        scope,
+        project_id,
+        project_name,
+        project_uuid,
+        cutoff_time,
+        now_ms,
+        provider_status,
+    )
+    .await?;
+
+    let stale = last_sync_ms == 0 || now_ms.saturating_sub(last_sync_ms) >= VENDOR_SYNC_COOLDOWN_MS;
+    let needs_background_sync = stale && !VENDOR_SYNC_IN_FLIGHT.load(Ordering::Acquire);
+    Ok((stats, needs_background_sync))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn assemble_statistics_from_db(
+    pool: &SqlitePool,
+    scope: String,
+    project_id: String,
+    project_name: String,
+    project_uuid: Option<Uuid>,
+    cutoff_time: i64,
+    now_ms: i64,
+    provider_status: Vec<ProjectUsageProviderStatus>,
+) -> Result<ProjectUsageStatistics, sqlx::Error> {
+    let (vendor_logs, rows) = tokio::try_join!(
+        load_vendor_usage_logs(pool, cutoff_time),
+        ConversationUsageSnapshotRecord::list_attributed(pool, project_uuid, cutoff_time),
+    )?;
     let mut sessions = attributed_sessions_from_rows(rows, cutoff_time);
     let unattributed_vendor_sessions = align_vendor_usage(&mut sessions, &vendor_logs);
     sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
@@ -486,16 +632,82 @@ pub async fn assemble_project_usage_statistics(
     ))
 }
 
+async fn cached_provider_status(
+    pool: &SqlitePool,
+) -> Result<Vec<ProjectUsageProviderStatus>, sqlx::Error> {
+    {
+        let cached = last_provider_status_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !cached.is_empty() {
+            return Ok(cached.clone());
+        }
+    }
+
+    let counts = VendorUsageSessionRecord::count_by_provider(pool).await?;
+    Ok(counts
+        .into_iter()
+        .map(|(provider, sessions_scanned)| ProjectUsageProviderStatus {
+            provider,
+            success: true,
+            error: None,
+            sessions_scanned,
+        })
+        .collect())
+}
+
+fn record_vendor_sync_completion(provider_status: &[ProjectUsageProviderStatus]) {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    LAST_VENDOR_SYNC_MS.store(now_ms, Ordering::Release);
+    let mut cached = last_provider_status_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *cached = provider_status.to_vec();
+}
+
 pub async fn sync_vendor_usage_logs(
     pool: &SqlitePool,
 ) -> Result<Vec<ProjectUsageProviderStatus>, sqlx::Error> {
-    sync_vendor_usage_logs_with_roots(pool, VendorLogRoots::local()).await
+    VENDOR_SYNC_IN_FLIGHT.store(true, Ordering::Release);
+    let _in_flight = VendorSyncInFlightGuard;
+    let (provider_status, _) =
+        sync_vendor_usage_logs_with_roots_changed(pool, VendorLogRoots::local()).await?;
+    record_vendor_sync_completion(&provider_status);
+    Ok(provider_status)
+}
+
+/// Run a deduplicated background vendor log sync. Returns `Ok(true)` if any
+/// vendor usage rows changed in SQLite, or `Ok(false)` when another sync is
+/// already running or no files changed.
+pub async fn sync_vendor_usage_logs_if_changed(pool: &SqlitePool) -> Result<bool, sqlx::Error> {
+    if VENDOR_SYNC_IN_FLIGHT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(false);
+    }
+    let _in_flight = VendorSyncInFlightGuard;
+    let (provider_status, changed) =
+        sync_vendor_usage_logs_with_roots_changed(pool, VendorLogRoots::local()).await?;
+    record_vendor_sync_completion(&provider_status);
+    Ok(changed)
 }
 
 pub async fn sync_vendor_usage_logs_with_roots(
     pool: &SqlitePool,
     roots: VendorLogRoots,
 ) -> Result<Vec<ProjectUsageProviderStatus>, sqlx::Error> {
+    let (provider_status, _) = sync_vendor_usage_logs_with_roots_changed(pool, roots).await?;
+    Ok(provider_status)
+}
+
+async fn sync_vendor_usage_logs_with_roots_changed(
+    pool: &SqlitePool,
+    roots: VendorLogRoots,
+) -> Result<(Vec<ProjectUsageProviderStatus>, bool), sqlx::Error> {
     let _guard = VENDOR_SYNC.lock().await;
     let known = VendorUsageFileRecord::list(pool).await?;
     let known_map: HashMap<String, (i64, i64)> = known
@@ -537,7 +749,7 @@ pub async fn sync_vendor_usage_logs_with_roots(
             }),
         })
         .collect();
-    apply_vendor_usage_scan(
+    let changed = apply_vendor_usage_scan(
         pool,
         &updates,
         &scan.live_paths,
@@ -556,7 +768,7 @@ pub async fn sync_vendor_usage_logs_with_roots(
             status.sessions_scanned = counts.get(&status.provider).copied().unwrap_or(0);
         }
     }
-    Ok(provider_status)
+    Ok((provider_status, changed))
 }
 
 async fn load_vendor_usage_logs(
@@ -1165,5 +1377,128 @@ mod vendor_sync_tests {
         assert_eq!(snapshot.protocol_input_tokens, Some(250));
         assert_eq!(snapshot.protocol_output_tokens, Some(90));
         assert_eq!(snapshot.protocol_total_tokens, Some(340));
+    }
+
+    #[tokio::test]
+    async fn cached_assembly_serves_warm_db_immediately_and_signals_background_sync() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sessions_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        std::fs::write(
+            sessions_dir.join("rollout.jsonl"),
+            r#"{"timestamp":"2026-08-31T14:23:27Z","type":"session_meta","payload":{"session_id":"cached-1"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"cached_input_tokens":0,"output_tokens":10}}}}
+"#,
+        )
+        .expect("write");
+
+        let pool = pool().await;
+        let roots = VendorLogRoots {
+            codex_sessions: Some(sessions_dir),
+            ..VendorLogRoots::default()
+        };
+        let (_, changed_first) = sync_vendor_usage_logs_with_roots_changed(&pool, roots.clone())
+            .await
+            .expect("first sync");
+        assert!(changed_first);
+        let (_, changed_second) = sync_vendor_usage_logs_with_roots_changed(&pool, roots)
+            .await
+            .expect("second sync");
+        assert!(!changed_second);
+
+        // Simulate a cold process with a warm SQLite database (no sync in this process yet).
+        LAST_VENDOR_SYNC_MS.store(0, Ordering::Release);
+        {
+            let mut cached = last_provider_status_cache()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            cached.clear();
+        }
+
+        let now_ms = 2_000_000_000_000_i64;
+        let (stats, needs_bg) = assemble_project_usage_statistics_cached(
+            &pool,
+            "global".to_string(),
+            "global".to_string(),
+            "全局".to_string(),
+            None,
+            0,
+            now_ms,
+        )
+        .await
+        .expect("cached assembly");
+
+        assert!(
+            needs_bg,
+            "warm DB with stale sync should request background refresh"
+        );
+        assert_eq!(stats.unattributed_vendor_sessions, 1);
+        assert!(
+            stats
+                .provider_status
+                .iter()
+                .any(|s| s.provider == "codex" && s.sessions_scanned == 1)
+        );
+
+        // Within cooldown window, no background refresh should be requested.
+        LAST_VENDOR_SYNC_MS.store(now_ms - 1_000, Ordering::Release);
+        let (_, needs_bg_within_cooldown) = assemble_project_usage_statistics_cached(
+            &pool,
+            "global".to_string(),
+            "global".to_string(),
+            "全局".to_string(),
+            None,
+            0,
+            now_ms,
+        )
+        .await
+        .expect("cached assembly within cooldown");
+        assert!(!needs_bg_within_cooldown);
+    }
+
+    #[tokio::test]
+    async fn catch_up_skips_unchanged_unbackfillable_session_until_new_event_arrives() {
+        let pool = pool().await;
+        let conversation_id = Uuid::new_v4();
+        insert_session(&pool, conversation_id).await;
+
+        catch_up_usage_snapshots(&pool)
+            .await
+            .expect("first catch up");
+        assert!(
+            list_unchecked_missing_model_sessions(&pool)
+                .await
+                .expect("list")
+                .is_empty(),
+            "unbackfillable session at seq 0 should be cached"
+        );
+
+        // Once a new event with a model config arrives, max_sequence changes and it is re-checked.
+        insert_event(
+            &pool,
+            conversation_id,
+            1,
+            ConversationEvent::SessionConfigOptionsUpdated {
+                options: vec![agents::AgentSessionConfigOption {
+                    key: "model".into(),
+                    label: "Model".into(),
+                    description: None,
+                    category: Some("model".into()),
+                    value: Some(serde_json::json!("claude-sonnet-4-6")),
+                    choices: Vec::new(),
+                    dependency: None,
+                }],
+            },
+        )
+        .await;
+
+        catch_up_usage_snapshots(&pool)
+            .await
+            .expect("second catch up");
+        let session = DbConversationSummary::find_by_id(&pool, conversation_id)
+            .await
+            .expect("session")
+            .expect("exists");
+        assert_eq!(session.model.as_deref(), Some("claude-sonnet-4-6"));
     }
 }

@@ -2020,6 +2020,36 @@ process.cwd = function () {
   return slot && slot.cwd ? slot.cwd : realCwd();
 };
 
+const MAX_SLOT_LINE_BUFFER_CHARS = 1024 * 1024;
+
+function appendBoundedSlotBuffer(slot, field, text, muxField) {
+  let buf = slot[field] + text;
+  let idx;
+  while ((idx = buf.indexOf("\n")) !== -1) {
+    const line = buf.slice(0, idx).replace(/\r$/, "");
+    buf = buf.slice(idx + 1);
+    if (line.length > 0) {
+      sendMux({
+        pluginId: slot.pluginId,
+        generation: slot.generation,
+        [muxField]: line,
+      });
+    }
+  }
+  if (buf.length > MAX_SLOT_LINE_BUFFER_CHARS) {
+    const truncated = buf.slice(0, MAX_SLOT_LINE_BUFFER_CHARS).replace(/\r$/, "");
+    buf = "";
+    if (truncated.length > 0) {
+      sendMux({
+        pluginId: slot.pluginId,
+        generation: slot.generation,
+        [muxField]: `${truncated}...[truncated]`,
+      });
+    }
+  }
+  slot[field] = buf;
+}
+
 process.stdout.write = function (chunk, encoding, cb) {
   const slot = als.getStore();
   if (slot) {
@@ -2029,19 +2059,7 @@ process.stdout.write = function (chunk, encoding, cb) {
         : Buffer.from(chunk).toString(
             typeof encoding === "string" ? encoding : "utf8",
           );
-    slot.stdoutBuffer += text;
-    let idx;
-    while ((idx = slot.stdoutBuffer.indexOf("\n")) !== -1) {
-      const line = slot.stdoutBuffer.slice(0, idx).replace(/\r$/, "");
-      slot.stdoutBuffer = slot.stdoutBuffer.slice(idx + 1);
-      if (line.length > 0) {
-        sendMux({
-          pluginId: slot.pluginId,
-          generation: slot.generation,
-          line,
-        });
-      }
-    }
+    appendBoundedSlotBuffer(slot, "stdoutBuffer", text, "line");
     if (typeof encoding === "function") encoding();
     else if (typeof cb === "function") cb();
     return true;
@@ -2058,19 +2076,7 @@ process.stderr.write = function (chunk, encoding, cb) {
         : Buffer.from(chunk).toString(
             typeof encoding === "string" ? encoding : "utf8",
           );
-    slot.stderrBuffer += text;
-    let idx;
-    while ((idx = slot.stderrBuffer.indexOf("\n")) !== -1) {
-      const line = slot.stderrBuffer.slice(0, idx).replace(/\r$/, "");
-      slot.stderrBuffer = slot.stderrBuffer.slice(idx + 1);
-      if (line.length > 0) {
-        sendMux({
-          pluginId: slot.pluginId,
-          generation: slot.generation,
-          stderr: line,
-        });
-      }
-    }
+    appendBoundedSlotBuffer(slot, "stderrBuffer", text, "stderr");
     if (typeof encoding === "function") encoding();
     else if (typeof cb === "function") cb();
     return true;
@@ -2135,9 +2141,10 @@ function waitForSlotReady(slot, importPromise) {
   });
 }
 
-function createVolatileValue(initialValue) {
+function createVolatileValue(initialValue, onDispose) {
   let current = initialValue;
   const listeners = new Set();
+  const derivedChildren = new Set();
   const volatile = {
     get() {
       return current;
@@ -2146,10 +2153,16 @@ function createVolatileValue(initialValue) {
       return current;
     },
     select(selector) {
-      const derived = createVolatileValue(selector(current));
-      listeners.add((next) => {
+      let derived;
+      const forward = (next) => {
         derived.set(selector(next));
+      };
+      derived = createVolatileValue(selector(current), () => {
+        listeners.delete(forward);
+        derivedChildren.delete(derived);
       });
+      listeners.add(forward);
+      derivedChildren.add(derived);
       return derived;
     },
     subscribe(listener) {
@@ -2172,7 +2185,17 @@ function createVolatileValue(initialValue) {
       return true;
     },
     clearListeners() {
+      for (const child of [...derivedChildren]) {
+        child.clearListeners();
+      }
+      derivedChildren.clear();
       listeners.clear();
+      if (typeof onDispose === "function") {
+        onDispose();
+      }
+    },
+    dispose() {
+      this.clearListeners();
     },
   };
   return volatile;
@@ -2534,14 +2557,15 @@ for await (const rawLine of hostInput) {
         await slot.disposeWorker?.();
       } catch {}
       sharedServiceContainer.disposeByPlugin(slot.pluginId, slot.generation);
+      slot.stdoutBuffer = "";
       if (slot.stderrBuffer.trim().length > 0) {
         sendMux({
           pluginId: slot.pluginId,
           generation: slot.generation,
           stderr: slot.stderrBuffer.replace(/\r$/, ""),
         });
-        slot.stderrBuffer = "";
       }
+      slot.stderrBuffer = "";
       slot.disposed = true;
       try {
         slot.stdin.end();
@@ -2943,9 +2967,8 @@ async fn exchange_muxed(
         .map_err(|_| WorkerHostError::new("worker_timeout", "Worker request timed out"))??;
         remaining_worker_budget = remaining_worker_budget.saturating_sub(read_started.elapsed());
 
-        let envelope: Value = serde_json::from_str(&raw_line).map_err(|error| {
-            WorkerHostError::new("worker_protocol_invalid", error.to_string())
-        })?;
+        let envelope: Value = serde_json::from_str(&raw_line)
+            .map_err(|error| WorkerHostError::new("worker_protocol_invalid", error.to_string()))?;
         if let Some(stderr_line) = envelope.get("stderr").and_then(Value::as_str) {
             let target_plugin = envelope
                 .get("pluginId")

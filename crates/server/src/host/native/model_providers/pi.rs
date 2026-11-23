@@ -43,6 +43,15 @@ pub(super) fn project_with_pi_native(
             None,
         );
     }
+    let url_counts: std::collections::HashMap<String, usize> =
+        view.providers
+            .iter()
+            .fold(std::collections::HashMap::new(), |mut counts, provider| {
+                if !provider.api_url.is_empty() {
+                    *counts.entry(provider.api_url.clone()).or_insert(0) += 1;
+                }
+                counts
+            });
     for provider in &mut view.providers {
         let slug = pi_native_id(&StoredProvider {
             id: provider.id.clone(),
@@ -52,9 +61,12 @@ pub(super) fn project_with_pi_native(
             api_key: provider.api_key.clone(),
             model: provider.model.clone(),
         });
+        let unique_url = url_counts.get(&provider.api_url).copied().unwrap_or(0) == 1;
         let configured_in_models = native.providers.iter().any(|item| {
             !item.api_url.is_empty()
-                && (item.id == provider.id || item.id == slug || item.api_url == provider.api_url)
+                && (item.id == provider.id
+                    || item.id == slug
+                    || (unique_url && item.api_url == provider.api_url))
         });
         if configured_in_models {
             provider.bound = true;
@@ -425,17 +437,23 @@ pub(super) async fn disable_native_pi_provider(
     let mut ids = vec![provider.id.clone(), slug];
     let mut next_default: Option<(String, String)> = None;
     if let Some(entries) = models.get_mut("providers").and_then(Value::as_object_mut) {
-        if let Some(url_key) = entries.iter().find_map(|(k, v)| {
-            let url = v
-                .as_object()
-                .and_then(|o| o.get("baseUrl").or_else(|| o.get("base_url")))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .unwrap_or("");
-            (!provider.api_url.is_empty() && url == provider.api_url).then(|| k.clone())
-        }) && !ids.contains(&url_key)
-        {
-            ids.push(url_key);
+        let exact_present = ids.iter().any(|id| entries.contains_key(id));
+        if !exact_present && !provider.api_url.is_empty() {
+            let url_matches: Vec<String> = entries
+                .iter()
+                .filter_map(|(k, v)| {
+                    let url = v
+                        .as_object()
+                        .and_then(|o| o.get("baseUrl").or_else(|| o.get("base_url")))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .unwrap_or("");
+                    (url == provider.api_url).then(|| k.clone())
+                })
+                .collect();
+            if url_matches.len() == 1 && !ids.contains(&url_matches[0]) {
+                ids.push(url_matches[0].clone());
+            }
         }
         for id in &ids {
             entries.remove(id);

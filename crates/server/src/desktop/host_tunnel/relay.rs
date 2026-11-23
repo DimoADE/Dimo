@@ -12,20 +12,26 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf},
     net::TcpStream,
-    sync::{Mutex, mpsc},
+    sync::{Mutex, mpsc, oneshot},
     task::{JoinHandle, JoinSet},
 };
-use utils::tunnel::TunnelEndpoint;
+use utils::tunnel::{RELAY_CONTROL_TIMEOUT_MS, RELAY_HEARTBEAT_INTERVAL_MS, TunnelEndpoint};
 
 use super::{
     RelayState, drop_rejected_account_lease, load_or_create_host_id_sync, load_store,
-    promote_pending_if_connected, publish_browser_origins, valid_account_lease,
+    promote_pending_if_connected, publish_browser_origins, refresh_active_pairing_beacons,
+    valid_account_lease,
 };
 
 const RELAY_REJECTION_PREFIX: &str = "relay rejected control session: ";
 const MAX_UPGRADE_HEADER_BYTES: usize = 8192;
 const MUX_CHUNK_MAX_BYTES: usize = 32 * 1024;
 const MUX_CHANNEL_CAPACITY: usize = 512;
+const CONTROL_HANDSHAKE_TIMEOUT: Duration =
+    Duration::from_millis(RELAY_HEARTBEAT_INTERVAL_MS + 5_000);
+const CONTROL_IDLE_TIMEOUT: Duration = Duration::from_millis(RELAY_CONTROL_TIMEOUT_MS);
+const POOL_STREAM_READ_TIMEOUT: Duration = Duration::from_secs(90);
+const BEACON_REFRESH_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 type MuxConnMap = Arc<Mutex<HashMap<String, mpsc::Sender<Vec<u8>>>>>;
 
@@ -43,6 +49,9 @@ struct QuickTunnelRuntime {
 
 static QUICK_TUNNEL: LazyLock<Mutex<Option<QuickTunnelRuntime>>> =
     LazyLock::new(|| Mutex::new(None));
+
+static QUICK_TUNNEL_STATE: LazyLock<Arc<Mutex<RelayState>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(RelayState::default())));
 
 static QUICK_TUNNEL_ORIGIN: LazyLock<RwLock<Option<String>>> = LazyLock::new(|| RwLock::new(None));
 
@@ -188,6 +197,10 @@ pub(super) async fn relay_snapshot() -> RelayState {
     }
 }
 
+pub(super) async fn quick_tunnel_snapshot() -> RelayState {
+    QUICK_TUNNEL_STATE.lock().await.clone()
+}
+
 pub(super) async fn ensure_quick_tunnel(local_port: u16) {
     if cfg!(test) {
         return;
@@ -202,6 +215,11 @@ pub(super) async fn ensure_quick_tunnel(local_port: u16) {
         }
     }
     stop_quick_tunnel().await;
+    {
+        let mut state = QUICK_TUNNEL_STATE.lock().await;
+        state.status = "connecting".to_string();
+        state.error = None;
+    }
     let handle = tokio::spawn(run_quick_tunnel_supervisor(local_port));
     *QUICK_TUNNEL.lock().await = Some(QuickTunnelRuntime { local_port, handle });
 }
@@ -211,6 +229,7 @@ pub async fn stop_quick_tunnel() {
         runtime.handle.abort();
     }
     set_quick_tunnel_origin(None);
+    *QUICK_TUNNEL_STATE.lock().await = RelayState::default();
     if let Ok(store) = load_store().await {
         publish_browser_origins(&store);
     }
@@ -269,6 +288,7 @@ async fn connect_tcp_with_fallback(host: &str, port: u16) -> Result<TcpStream, S
         .map_err(|_| format!("TCP connect to {host}:{port} timed out"))?
         .map_err(|err| err.to_string())?;
     let _ = stream.set_nodelay(true);
+    utils::net::configure_tcp_keepalive(&stream);
     Ok(stream)
 }
 
@@ -346,6 +366,7 @@ async fn connect_to_relay_host(host: &str, port: u16) -> Result<RelayStream, Str
 }
 
 async fn run_quick_tunnel_supervisor(local_port: u16) {
+    let state = QUICK_TUNNEL_STATE.clone();
     loop {
         if let Ok(store) = load_store().await
             && let Some(lease) = valid_account_lease(&store)
@@ -353,17 +374,34 @@ async fn run_quick_tunnel_supervisor(local_port: u16) {
             let host = lease.relay_host.trim().to_string();
             let port = lease.relay_port;
             let token = lease.lease_token.trim().to_string();
-            let state = Arc::new(Mutex::new(RelayState::default()));
             let key = format!("{host}:{port}:official");
-            if let Err(error) =
-                maintain_control(&host, port, &token, local_port, &key, &state).await
-                && let Some(reason) = terminal_lease_rejection(&error)
             {
-                tracing::warn!(reason, "official relay rejected the account lease");
-                drop_rejected_account_lease(&token).await;
+                let mut snapshot = state.lock().await;
+                snapshot.status = "connecting".to_string();
+                snapshot.connected_key = Some(key.clone());
+            }
+            match maintain_control(&host, port, &token, local_port, &key, &state).await {
+                Ok(()) => {
+                    set_quick_tunnel_origin(None);
+                    let mut snapshot = state.lock().await;
+                    snapshot.status = "connecting".to_string();
+                }
+                Err(error) => {
+                    set_quick_tunnel_origin(None);
+                    {
+                        let mut snapshot = state.lock().await;
+                        snapshot.status = "connecting".to_string();
+                        snapshot.error = Some(error.clone());
+                    }
+                    if let Some(reason) = terminal_lease_rejection(&error) {
+                        tracing::warn!(reason, "official relay rejected the account lease");
+                        drop_rejected_account_lease(&token).await;
+                    }
+                }
             }
         } else {
             set_quick_tunnel_origin(None);
+            *state.lock().await = RelayState::default();
         }
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
@@ -538,6 +576,39 @@ async fn maintain_control(
         .unwrap_or_else(|| "default".to_string());
 
     let stream = connect_to_relay_host(host, port).await?;
+    maintain_control_on_stream(
+        stream,
+        host,
+        port,
+        token,
+        &host_id,
+        local_port,
+        key,
+        state,
+        CONTROL_HANDSHAKE_TIMEOUT,
+        CONTROL_IDLE_TIMEOUT,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn maintain_control_on_stream<S>(
+    stream: S,
+    host: &str,
+    port: u16,
+    token: &str,
+    host_id: &str,
+    local_port: u16,
+    key: &str,
+    state: &Arc<Mutex<RelayState>>,
+    handshake_timeout: Duration,
+    idle_timeout: Duration,
+    publish_to_host: bool,
+) -> Result<(), String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let (reader, mut writer) = tokio::io::split(stream);
 
     // Never transmit local hostname or internal LAN IPs to the public relay control plane.
@@ -548,6 +619,28 @@ async fn maintain_control(
         .await
         .map_err(|error| error.to_string())?;
     writer.flush().await.map_err(|error| error.to_string())?;
+
+    let mut lines = BufReader::new(reader).lines();
+
+    // Wait for the relay's first control response (OK / ERR / first frame) before reporting
+    // "connected" or advertising the public tenant origin.
+    let first_line = loop {
+        let maybe_line = tokio::time::timeout(handshake_timeout, lines.next_line())
+            .await
+            .map_err(|_| "tunnel control handshake timed out".to_string())?
+            .map_err(|error| error.to_string())?;
+        let Some(line) = maybe_line else {
+            return Err("tunnel control closed during handshake".to_string());
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(err_reason) = trimmed.strip_prefix("ERR ") {
+            return Err(format!("{RELAY_REJECTION_PREFIX}{err_reason}"));
+        }
+        break line;
+    };
 
     {
         let mut snapshot = state.lock().await;
@@ -561,30 +654,44 @@ async fn maintain_control(
         port,
     };
     let scheme = if port == 443 { "https" } else { "http" };
-    let tenant_origin = utils::tunnel::format_tenant_origin(scheme, &endpoint, &host_id);
-    set_quick_tunnel_origin(Some(tenant_origin));
-    if let Ok(store) = load_store().await {
-        publish_browser_origins(&store);
+    let tenant_origin = utils::tunnel::format_tenant_origin(scheme, &endpoint, host_id);
+    if publish_to_host {
+        set_quick_tunnel_origin(Some(tenant_origin.clone()));
+        if let Ok(store) = load_store().await {
+            publish_browser_origins(&store);
+        }
+        promote_pending_if_connected(host, port, token, host_id).await;
+        {
+            let beacon_host = host.to_string();
+            let beacon_origin = tenant_origin.clone();
+            tokio::spawn(async move {
+                refresh_active_pairing_beacons(&beacon_host, port, &beacon_origin).await;
+            });
+        }
     }
-    promote_pending_if_connected(host, port, token, &host_id).await;
 
     let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel::<String>();
+    let (write_err_tx, mut write_err_rx) = oneshot::channel::<String>();
     let writer_task = tokio::spawn(async move {
         while let Some(first) = ctrl_rx.recv().await {
-            if writer.write_all(first.as_bytes()).await.is_err() {
-                break;
+            if let Err(err) = writer.write_all(first.as_bytes()).await {
+                let _ = write_err_tx.send(format!("tunnel control write failed: {err}"));
+                return;
             }
             while let Ok(next) = ctrl_rx.try_recv() {
-                if writer.write_all(next.as_bytes()).await.is_err() {
+                if let Err(err) = writer.write_all(next.as_bytes()).await {
+                    let _ = write_err_tx.send(format!("tunnel control write failed: {err}"));
                     return;
                 }
             }
-            if writer.flush().await.is_err() {
-                break;
+            if let Err(err) = writer.flush().await {
+                let _ = write_err_tx.send(format!("tunnel control flush failed: {err}"));
+                return;
             }
         }
     });
 
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let local_http_client = reqwest::Client::builder()
         .no_proxy()
         .pool_max_idle_per_host(16)
@@ -594,12 +701,50 @@ async fn maintain_control(
 
     let mux_conns: MuxConnMap = Arc::new(Mutex::new(HashMap::new()));
     let mut mux_tasks = JoinSet::new();
+    let mut beacon_refresh_ticker = tokio::time::interval_at(
+        tokio::time::Instant::now() + BEACON_REFRESH_INTERVAL,
+        BEACON_REFRESH_INTERVAL,
+    );
+    beacon_refresh_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let outcome: Result<(), String> = async {
-        let mut lines = BufReader::new(reader).lines();
-        while let Some(line) = lines.next_line().await.map_err(|error| error.to_string())? {
+        let mut pending_first_line = Some(first_line);
+        let idle_deadline = tokio::time::sleep(idle_timeout);
+        tokio::pin!(idle_deadline);
+
+        loop {
+            let line = if let Some(initial) = pending_first_line.take() {
+                initial
+            } else {
+                tokio::select! {
+                    line_res = lines.next_line() => {
+                        match line_res.map_err(|error| error.to_string())? {
+                            Some(line) => {
+                                idle_deadline.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
+                                line
+                            }
+                            None => return Err("tunnel control closed".to_string()),
+                        }
+                    }
+                    write_err = &mut write_err_rx => {
+                        return Err(write_err.unwrap_or_else(|_| "tunnel control writer exited".to_string()));
+                    }
+                    () = &mut idle_deadline => {
+                        return Err("tunnel control heartbeat timed out".to_string());
+                    }
+                    _ = beacon_refresh_ticker.tick(), if publish_to_host => {
+                        let beacon_host = host.to_string();
+                        let beacon_origin = tenant_origin.clone();
+                        tokio::spawn(async move {
+                            refresh_active_pairing_beacons(&beacon_host, port, &beacon_origin).await;
+                        });
+                        continue;
+                    }
+                }
+            };
+
             let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with("OK ") {
+            if trimmed.is_empty() || trimmed.starts_with("OK ") || trimmed == "OK" {
                 continue;
             }
             if let Some(err_reason) = trimmed.strip_prefix("ERR ") {
@@ -630,7 +775,7 @@ async fn maintain_control(
                     let count = count.min(4);
                     for _ in 0..count {
                         let host = host.to_string();
-                        let host_id = host_id.clone();
+                        let host_id = host_id.to_string();
                         let token = token.to_string();
                         tokio::spawn(async move {
                             let _ =
@@ -647,7 +792,7 @@ async fn maintain_control(
                         continue;
                     }
                     let host = host.to_string();
-                    let host_id = host_id.clone();
+                    let host_id = host_id.to_string();
                     let token = token.to_string();
                     tokio::spawn(async move {
                         let _ = open_v2_data_path(host, port, host_id, token, conn_id, local_port)
@@ -664,7 +809,7 @@ async fn maintain_control(
                     }
                     while mux_tasks.try_join_next().is_some() {}
                     let Ok(raw_req) = BASE64.decode(raw_req_b64) else {
-                        send_mux_close(&ctrl_tx, &host_id, &conn_id);
+                        send_mux_close(&ctrl_tx, host_id, &conn_id);
                         continue;
                     };
                     let (tx, rx) = mpsc::channel::<Vec<u8>>(MUX_CHANNEL_CAPACITY);
@@ -673,7 +818,7 @@ async fn maintain_control(
 
                     let mux_conns_clone = mux_conns.clone();
                     let ctrl_tx_clone = ctrl_tx.clone();
-                    let host_id_clone = host_id.clone();
+                    let host_id_clone = host_id.to_string();
                     mux_tasks.spawn(async move {
                         run_mux_local_bridge(
                             local_port,
@@ -701,7 +846,7 @@ async fn maintain_control(
                             Ok(Ok(())) => {}
                             Ok(Err(_)) | Err(_) => {
                                 mux_conns.lock().await.remove(&conn_id);
-                                send_mux_close(&ctrl_tx, &host_id, &conn_id);
+                                send_mux_close(&ctrl_tx, host_id, &conn_id);
                             }
                         }
                     }
@@ -723,7 +868,7 @@ async fn maintain_control(
                     }
                     let client = local_http_client.clone();
                     let ctrl_tx = ctrl_tx.clone();
-                    let host_id = host_id.clone();
+                    let host_id = host_id.to_string();
                     tokio::spawn(async move {
                         let url = format!("http://127.0.0.1:{local_port}{path}");
                         let m = reqwest::Method::from_bytes(method.as_bytes())
@@ -765,7 +910,6 @@ async fn maintain_control(
                 }
             }
         }
-        Err("tunnel control closed".to_string())
     }
     .await;
 
@@ -798,9 +942,9 @@ async fn open_prewarmed_pool_stream(
     let mut line = String::new();
     loop {
         line.clear();
-        let n = buf_remote
-            .read_line(&mut line)
+        let n = tokio::time::timeout(POOL_STREAM_READ_TIMEOUT, buf_remote.read_line(&mut line))
             .await
+            .map_err(|_| "prewarmed pool stream read timed out".to_string())?
             .map_err(|error| error.to_string())?;
         if n == 0 {
             return Ok(());
@@ -879,17 +1023,18 @@ async fn open_data_path(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
+    use std::{collections::HashMap, sync::Arc, time::Duration};
 
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
+        io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
         net::TcpListener,
         sync::{Mutex, mpsc},
     };
 
     use super::{
-        MUX_CHUNK_MAX_BYTES, MuxConnMap, RelayControlClientFrame, RelayControlServerFrame,
+        MUX_CHUNK_MAX_BYTES, MuxConnMap, RELAY_REJECTION_PREFIX, RelayControlClientFrame,
+        RelayControlServerFrame, RelayState, maintain_control_on_stream,
         perform_http_tunnel_upgrade, run_mux_local_bridge,
     };
 
@@ -1063,5 +1208,188 @@ mod tests {
         );
         assert_eq!(reassembled, expected_response);
         assert!(saw_close, "expected MuxClose after local EOF");
+    }
+
+    #[tokio::test]
+    async fn control_handshake_rejection_never_marks_connected() {
+        let (client, server) = tokio::io::duplex(4096);
+        let (server_read, mut server_write) = tokio::io::split(server);
+        let server_task = tokio::spawn(async move {
+            let mut lines = BufReader::new(server_read).lines();
+            let handshake = lines.next_line().await.expect("read").expect("line");
+            assert!(handshake.starts_with("DIMO-CTRL v2 host-test tok-1 "));
+            server_write
+                .write_all(b"ERR lease_expired\n")
+                .await
+                .expect("write err");
+            server_write.flush().await.expect("flush");
+        });
+
+        let state = Arc::new(Mutex::new(RelayState {
+            status: "connecting".to_string(),
+            error: None,
+            connected_key: None,
+        }));
+        let result = maintain_control_on_stream(
+            client,
+            "127.0.0.1",
+            17891,
+            "tok-1",
+            "host-test",
+            17891,
+            "key-1",
+            &state,
+            Duration::from_secs(2),
+            Duration::from_secs(5),
+            false,
+        )
+        .await;
+
+        server_task.await.expect("server completes");
+        let err = result.expect_err("handshake rejection must return error");
+        assert!(err.starts_with(RELAY_REJECTION_PREFIX), "got {err}");
+        assert!(err.contains("lease_expired"), "got {err}");
+        assert_eq!(state.lock().await.status, "connecting");
+    }
+
+    #[tokio::test]
+    async fn control_idle_watchdog_times_out_silent_stream() {
+        let (client, server) = tokio::io::duplex(4096);
+        let (server_read, mut server_write) = tokio::io::split(server);
+        let server_task = tokio::spawn(async move {
+            let mut lines = BufReader::new(server_read).lines();
+            let _ = lines.next_line().await.expect("read").expect("line");
+            server_write
+                .write_all(b"OK host-test\n")
+                .await
+                .expect("write ok");
+            server_write.flush().await.expect("flush");
+            // Keep both halves alive without sending any further frames.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            drop(lines);
+        });
+
+        let state = Arc::new(Mutex::new(RelayState {
+            status: "connecting".to_string(),
+            error: None,
+            connected_key: None,
+        }));
+        let err = tokio::time::timeout(
+            Duration::from_secs(2),
+            maintain_control_on_stream(
+                client,
+                "127.0.0.1",
+                17891,
+                "tok-1",
+                "host-test",
+                17891,
+                "key-1",
+                &state,
+                Duration::from_secs(2),
+                Duration::from_millis(120),
+                false,
+            ),
+        )
+        .await
+        .expect("must not hang")
+        .expect_err("idle stream must time out");
+
+        assert_eq!(err, "tunnel control heartbeat timed out");
+        assert_eq!(state.lock().await.status, "connected");
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn control_writer_failure_aborts_read_loop() {
+        struct FailAfterHandshakeStream {
+            inner: tokio::io::DuplexStream,
+            writes_seen: usize,
+        }
+        impl tokio::io::AsyncRead for FailAfterHandshakeStream {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+            }
+        }
+        impl tokio::io::AsyncWrite for FailAfterHandshakeStream {
+            fn poll_write(
+                mut self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+                buf: &[u8],
+            ) -> std::task::Poll<std::io::Result<usize>> {
+                self.writes_seen += 1;
+                if self.writes_seen > 1 {
+                    return std::task::Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "simulated write error",
+                    )));
+                }
+                std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+            }
+            fn poll_flush(
+                mut self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+            }
+            fn poll_shutdown(
+                mut self: std::pin::Pin<&mut Self>,
+                cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+            }
+        }
+
+        let (client, server) = tokio::io::duplex(4096);
+        let (server_read, mut server_write) = tokio::io::split(server);
+        let server_task = tokio::spawn(async move {
+            let mut lines = BufReader::new(server_read).lines();
+            let _ = lines.next_line().await.expect("read").expect("line");
+            server_write
+                .write_all(b"OK host-test\n{\"type\":\"ping\",\"ts\":42}\n")
+                .await
+                .expect("write ok and ping");
+            server_write.flush().await.expect("flush");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            drop(lines);
+        });
+
+        let state = Arc::new(Mutex::new(RelayState {
+            status: "connecting".to_string(),
+            error: None,
+            connected_key: None,
+        }));
+        let err = tokio::time::timeout(
+            Duration::from_secs(2),
+            maintain_control_on_stream(
+                FailAfterHandshakeStream {
+                    inner: client,
+                    writes_seen: 0,
+                },
+                "127.0.0.1",
+                17891,
+                "tok-1",
+                "host-test",
+                17891,
+                "key-1",
+                &state,
+                Duration::from_secs(2),
+                Duration::from_secs(30),
+                false,
+            ),
+        )
+        .await
+        .expect("writer error must abort loop before idle timeout")
+        .expect_err("writer failure must return error");
+
+        assert!(
+            err.contains("tunnel control write failed")
+                || err.contains("tunnel control flush failed"),
+            "unexpected error: {err}"
+        );
+        server_task.abort();
     }
 }

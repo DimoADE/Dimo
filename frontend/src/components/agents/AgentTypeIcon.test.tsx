@@ -16,6 +16,7 @@ describe('AgentTypeIcon', () => {
     ['command_code', 'Command Code'],
     ['zcode', 'ZCode'],
     ['omp', 'OMP'],
+    ['muse_code', 'Muse Code'],
   ])(
     'renders brand artwork for %s instead of the generic glyph',
     (agent, name) => {

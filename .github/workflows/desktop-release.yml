@@ -220,7 +220,11 @@ jobs:
   build:
     name: Build ${{ matrix.artifact_name }}
     needs: [prepare-release, build-frontend, probe-runners]
-    if: ${{ always() && !failure() && !cancelled() }}
+    if: >-
+      !cancelled() &&
+      (needs.prepare-release.result == 'success' || needs.prepare-release.result == 'skipped') &&
+      needs.build-frontend.result == 'success' &&
+      needs.probe-runners.result == 'success'
     runs-on: ${{ matrix.runner }}
     env:
       CARGO_INCREMENTAL: "0"
@@ -345,15 +349,19 @@ jobs:
           security list-keychains -d user -s "$keychain_path" login.keychain-db
           security find-identity -v -p codesigning "$keychain_path"
 
+          apple_csc_name="${APPLE_SIGNING_IDENTITY#Developer ID Application: }"
           printf 'APPLE_SIGNING_IDENTITY=%s\n' "$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+          printf 'APPLE_CSC_NAME=%s\n' "$apple_csc_name" >> "$GITHUB_ENV"
           echo "APPLE_API_KEY_PATH=$api_key_path" >> "$GITHUB_ENV"
           echo "DIMO_MACOS_KEYCHAIN=$keychain_path" >> "$GITHUB_ENV"
+          echo "CSC_KEYCHAIN=$keychain_path" >> "$GITHUB_ENV"
 
       - name: Package Electron desktop installers
         timeout-minutes: 140
         env:
           NODE_OPTIONS: --max-old-space-size=6144
-          CSC_NAME: ${{ runner.os == 'macOS' && needs.prepare-release.outputs.apple_signing_enabled == 'true' && env.APPLE_SIGNING_IDENTITY || '' }}
+          CSC_NAME: ${{ runner.os == 'macOS' && needs.prepare-release.outputs.apple_signing_enabled == 'true' && env.APPLE_CSC_NAME || '' }}
+          CSC_KEYCHAIN: ${{ runner.os == 'macOS' && needs.prepare-release.outputs.apple_signing_enabled == 'true' && env.CSC_KEYCHAIN || '' }}
           CSC_LINK: ${{ runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'pfx' && secrets.WINDOWS_CERTIFICATE || '' }}
           CSC_KEY_PASSWORD: ${{ runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'pfx' && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
           CSC_IDENTITY_AUTO_DISCOVERY: ${{ (runner.os == 'macOS' && needs.prepare-release.outputs.apple_signing_enabled == 'true') || (runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'pfx') }}
@@ -420,6 +428,9 @@ jobs:
               --issuer "$APPLE_API_ISSUER" \
               --wait
             xcrun stapler staple "$dmg_path"
+            # Signing and stapling mutate the DMG bytes, invalidating the
+            # pre-sign blockmap produced by electron-builder.
+            rm -f "${dmg_path}.blockmap"
           fi
 
           tar -czf "$tar_path" -C "electron/release/mac-arm64" "$app_name"

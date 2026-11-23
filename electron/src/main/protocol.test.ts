@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   convertFileSrcToAssetUrl,
@@ -14,9 +14,12 @@ import {
   PreviewAssetScope,
   handleAppProtocolRequest,
   handleAssetProtocolRequest,
+  isValidAbsolutePath,
   mimeTypeForPath,
   parseByteRange,
   resolveAppDistFile,
+  resolveAppDistFileAsync,
+  stripWindowsVerbatimPrefix,
   toSafeWebStream,
 } from './protocol';
 
@@ -29,6 +32,7 @@ function makeTempDir(prefix: string): string {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop()!;
     fs.rmSync(dir, { recursive: true, force: true });
@@ -66,8 +70,30 @@ describe('asset URL encoding & decoding', () => {
   });
 });
 
-describe('PreviewAssetScope', () => {
-  it('allows explicitly granted files and directories while rejecting siblings and unallowed paths', () => {
+describe('PreviewAssetScope & Windows path normalization', () => {
+  it('strips Windows verbatim prefixes and rejects Windows drive-relative paths', () => {
+    expect(stripWindowsVerbatimPrefix('\\\\?\\C:\\Users\\Alice\\a.txt', 'win32')).toBe(
+      'C:\\Users\\Alice\\a.txt'
+    );
+    expect(
+      stripWindowsVerbatimPrefix('\\\\?\\UNC\\fileserver\\share\\a.txt', 'win32')
+    ).toBe('\\\\fileserver\\share\\a.txt');
+    expect(stripWindowsVerbatimPrefix('/etc/hosts', 'linux')).toBe('/etc/hosts');
+
+    expect(isValidAbsolutePath('C:\\Users\\Alice', 'win32')).toBe(true);
+    expect(isValidAbsolutePath('C:/Users/Alice', 'win32')).toBe(true);
+    expect(isValidAbsolutePath('\\\\?\\C:\\Users\\Alice', 'win32')).toBe(true);
+    expect(isValidAbsolutePath('\\\\?\\UNC\\srv\\share\\file.txt', 'win32')).toBe(true);
+    expect(isValidAbsolutePath('\\\\srv\\share\\file.txt', 'win32')).toBe(true);
+    // Drive-relative paths on Windows are NOT absolute.
+    expect(isValidAbsolutePath('/foo', 'win32')).toBe(false);
+    expect(isValidAbsolutePath('\\foo', 'win32')).toBe(false);
+    expect(isValidAbsolutePath('C:foo', 'win32')).toBe(false);
+    expect(isValidAbsolutePath('relative\\file.txt', 'win32')).toBe(false);
+    expect(isValidAbsolutePath('/foo', 'linux')).toBe(true);
+  });
+
+  it('allows explicitly granted files and directories while rejecting siblings, drive-relative paths, and unallowed paths', async () => {
     const root = makeTempDir('dimo-scope-');
     const allowedDir = path.join(root, 'preview');
     const siblingDir = path.join(root, 'preview-evil');
@@ -87,6 +113,7 @@ describe('PreviewAssetScope', () => {
 
     scope.allow({ directories: [allowedDir] });
     expect(scope.isAllowed(insideFile)).toBe(true);
+    expect(await scope.isAllowedAsync(insideFile)).toBe(true);
     expect(scope.isAllowed(siblingFile)).toBe(false);
     expect(scope.isAllowed(path.join(allowedDir, '..', 'preview-evil', 'secret.txt'))).toBe(
       false
@@ -95,10 +122,28 @@ describe('PreviewAssetScope', () => {
 
     scope.allow({ path: singleFile });
     expect(scope.isAllowed(singleFile)).toBe(true);
+
+    if (process.platform === 'win32') {
+      const verbatimDir = `\\\\?\\${allowedDir}`;
+      const verbatimInside = `\\\\?\\${insideFile}`;
+      const verbatimSingle = `\\\\?\\${singleFile}`;
+
+      expect(scope.isAllowed(verbatimInside)).toBe(true);
+      expect(await scope.isAllowedAsync(verbatimInside)).toBe(true);
+      expect(scope.isAllowed(verbatimSingle)).toBe(true);
+
+      const verbatimScope = new PreviewAssetScope('win32');
+      verbatimScope.allow({ directories: [verbatimDir] });
+      expect(verbatimScope.isAllowed(insideFile)).toBe(true);
+      expect(await verbatimScope.isAllowedAsync(insideFile)).toBe(true);
+      expect(() => verbatimScope.allow({ path: '/drive-relative/file.txt' })).toThrow(
+        /Invalid preview asset path/
+      );
+    }
   });
 });
 
-describe('resolveAppDistFile', () => {
+describe('resolveAppDistFile & resolveAppDistFileAsync', () => {
   it('serves dist files, falls back to index.html for extensionless and dotted SPA routes, and blocks missing static assets and traversal', () => {
     const distDir = makeTempDir('dimo-dist-');
     const assetsDir = path.join(distDir, 'assets');
@@ -108,7 +153,7 @@ describe('resolveAppDistFile', () => {
     fs.writeFileSync(indexHtml, '<!doctype html>');
     fs.writeFileSync(mainJs, 'console.log(1);');
 
-    const realDist = fs.realpathSync(distDir);
+    const realDist = stripWindowsVerbatimPrefix(fs.realpathSync(distDir));
     const expectedIndex = path.join(realDist, 'index.html');
     expect(resolveAppDistFile(distDir, 'dimo-app://localhost/')).toBe(expectedIndex);
     expect(resolveAppDistFile(distDir, 'dimo-app://localhost/assets/main.js')).toBe(
@@ -134,6 +179,29 @@ describe('resolveAppDistFile', () => {
     expect(resolveAppDistFile(distDir, 'dimo-app://localhost/..%2F..%2Fetc/passwd')).toBeNull();
     expect(resolveAppDistFile(distDir, 'dimo-app://other-host/index.html')).toBeNull();
   });
+
+  it('caches fs.promises.realpath(distRoot) across repeated resolveAppDistFileAsync requests', async () => {
+    const distDir = makeTempDir('dimo-dist-cache-');
+    const assetsDir = path.join(distDir, 'assets');
+    fs.mkdirSync(assetsDir, { recursive: true });
+    fs.writeFileSync(path.join(distDir, 'index.html'), '<!doctype html>');
+    fs.writeFileSync(path.join(assetsDir, 'main.js'), 'export {};');
+
+    const realpathSpy = vi.spyOn(fs.promises, 'realpath');
+
+    const first = await resolveAppDistFileAsync(distDir, 'dimo-app://localhost/');
+    const second = await resolveAppDistFileAsync(
+      distDir,
+      'dimo-app://localhost/assets/main.js'
+    );
+    expect(first).toBeTruthy();
+    expect(second).toBeTruthy();
+
+    const distRootCalls = realpathSpy.mock.calls.filter(
+      (call) => String(call[0]) === distDir
+    );
+    expect(distRootCalls).toHaveLength(1);
+  });
 });
 
 describe('dimo-app:// CSP & dimo-asset:// CORS/OPTIONS protocol handlers', () => {
@@ -152,8 +220,19 @@ describe('dimo-app:// CSP & dimo-asset:// CORS/OPTIONS protocol handlers', () =>
     expect(rootRes.headers.get('content-security-policy')).toBe(
       APP_CONTENT_SECURITY_POLICY
     );
-    expect(APP_CONTENT_SECURITY_POLICY).toContain("script-src 'self' dimo-app://localhost");
-    expect(APP_CONTENT_SECURITY_POLICY).toContain("'wasm-unsafe-eval'");
+    expect(APP_CONTENT_SECURITY_POLICY).toContain(
+      "script-src 'self' dimo-app://localhost dimo-asset://localhost http://127.0.0.1:* http://localhost:* blob: 'wasm-unsafe-eval'"
+    );
+    expect(APP_CONTENT_SECURITY_POLICY).toContain(
+      "style-src 'self' dimo-app://localhost http://127.0.0.1:* http://localhost:* 'unsafe-inline'"
+    );
+    expect(APP_CONTENT_SECURITY_POLICY).toContain(
+      "font-src 'self' dimo-app://localhost dimo-asset://localhost http://127.0.0.1:* http://localhost:* data:"
+    );
+    expect(APP_CONTENT_SECURITY_POLICY).toContain(
+      "worker-src 'self' dimo-app://localhost http://127.0.0.1:* http://localhost:* blob:"
+    );
+    expect(APP_CONTENT_SECURITY_POLICY).toContain("object-src 'none'");
     expect(APP_CONTENT_SECURITY_POLICY).not.toContain("'unsafe-eval'");
     expect(await rootRes.text()).toContain('<!doctype html>');
 
@@ -256,6 +335,41 @@ describe('toSafeWebStream', () => {
     nodeStream.destroy(new Error('simulated EIO'));
 
     await expect(readNext).rejects.toThrow('simulated EIO');
+  });
+
+  it('propagates errors from an already-errored stream instead of silently closing', async () => {
+    const nodeStream = new PassThrough();
+    nodeStream.on('error', () => {
+      // Absorb initial error event before wrapping so stream.errored is populated.
+    });
+    nodeStream.destroy(new Error('early open failure'));
+
+    const webStream = toSafeWebStream(nodeStream);
+    const reader = webStream.getReader();
+
+    await expect(reader.read()).rejects.toThrow('early open failure');
+  });
+
+  it('keeps the underlying Node stream paused before attaching data listeners and applies backpressure', async () => {
+    const nodeStream = new PassThrough();
+    const pauseSpy = vi.spyOn(nodeStream, 'pause');
+    const webStream = toSafeWebStream(nodeStream);
+
+    // Paused immediately during wrapping before any consumer reads.
+    expect(pauseSpy).toHaveBeenCalled();
+
+    nodeStream.write(Buffer.from('chunk-1'));
+    nodeStream.write(Buffer.from('chunk-2'));
+    nodeStream.end();
+
+    const reader = webStream.getReader();
+    const chunks: string[] = [];
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      chunks.push(Buffer.from(value).toString());
+    }
+    expect(chunks.join('')).toBe('chunk-1chunk-2');
   });
 
   it('destroys the underlying Node stream on reader cancel and ignores late stream errors', async () => {

@@ -8,6 +8,53 @@ export type Space = {
   lead_member_id?: string | null;
 };
 
+export type SpaceSystemEvent =
+  | {
+      kind: 'group_created';
+      actorName?: string | null;
+      actorIsUser?: boolean;
+      groupName?: string | null;
+      members?: string[];
+    }
+  | {
+      kind: 'member_invited' | 'member_joined';
+      actorName?: string | null;
+      actorIsUser?: boolean;
+      memberName?: string | null;
+    };
+
+export type ProvisionedBotEntry = {
+  nickname: string;
+  identityMemberId?: string | null;
+  conversationId?: string | null;
+  agentId?: string | null;
+  model?: string | null;
+  modelLabel?: string | null;
+  avatar?: unknown;
+  color?: string | null;
+  status?: string | null;
+};
+
+export type ProvisionedGroupMemberSummary = {
+  nickname: string;
+  identityMemberId?: string | null;
+  avatar?: unknown;
+  color?: string | null;
+};
+
+export type ProvisionedGroupEntry = {
+  spaceId: string;
+  name: string;
+  memberCount: number;
+  members: ProvisionedGroupMemberSummary[];
+  status?: string | null;
+};
+
+export type SpaceTurnProvisionActivity = {
+  bots: ProvisionedBotEntry[];
+  groups: ProvisionedGroupEntry[];
+};
+
 export type SpaceMessage = {
   id?: string;
   seq: number;
@@ -35,6 +82,8 @@ export type SpaceMessage = {
     cross_chat_received_from?: unknown;
     crossChatReplyReceivedFrom?: unknown;
     cross_chat_reply_received_from?: unknown;
+    spaceEvent?: SpaceSystemEvent | null;
+    provisionActivity?: SpaceTurnProvisionActivity | null;
   };
 };
 

@@ -81,6 +81,8 @@ pub(super) type ThreadMemberJoinRow = (
     Option<String>,
     String,
     Option<String>,
+    Option<String>,
+    Option<String>,
     i64,
 );
 
@@ -89,7 +91,7 @@ pub(super) async fn workspace_thread_members(
     workspace_id: &str,
 ) -> Result<HashMap<String, Vec<SidebarMember>>, CollaborationError> {
     let rows = sqlx::query_as::<_, ThreadMemberJoinRow>(
-        r#"SELECT tm.thread_id, m.id, m.name, m.avatar, m.color, tm.conversation_id, m.agent, m.is_supervisor
+        r#"SELECT tm.thread_id, m.id, m.name, m.avatar, m.color, tm.conversation_id, m.agent, m.model, m.config_values, m.is_supervisor
            FROM collaboration_thread_members tm
            JOIN collaboration_members m ON m.id = tm.member_id
            WHERE tm.status = 'active'
@@ -103,15 +105,51 @@ pub(super) async fn workspace_thread_members(
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
+    let requests: Vec<(Option<String>, Option<String>, Option<Uuid>)> = rows
+        .iter()
+        .map(|(_, _, _, _, _, conv_id, agent, model_col, cfg_raw, _)| {
+            let explicit_model =
+                extract_explicit_model_from_raw(cfg_raw.as_deref()).or_else(|| {
+                    model_col
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                });
+            (
+                agent.clone(),
+                explicit_model,
+                Uuid::parse_str(conv_id.trim()).ok(),
+            )
+        })
+        .collect();
+    let resolved = crate::collaboration::resolve_agent_models_batch(pool, &requests).await;
     let mut by_thread: HashMap<String, Vec<SidebarMember>> = HashMap::new();
-    for (thread_id, member_id, name, avatar, color, conversation_id, agent, is_supervisor) in rows {
-        by_thread.entry(thread_id).or_default().push(SidebarMember {
+    for (
+        (
+            thread_id,
             member_id,
             name,
             avatar,
             color,
             conversation_id,
             agent,
+            _model_col,
+            _cfg_raw,
+            is_supervisor,
+        ),
+        model_info,
+    ) in rows.into_iter().zip(resolved.into_iter())
+    {
+        by_thread.entry(thread_id).or_default().push(SidebarMember {
+            member_id,
+            name,
+            avatar,
+            color,
+            conversation_id,
+            agent: model_info.agent_id.or(agent),
+            model: model_info.model,
+            model_label: model_info.model_label,
             is_supervisor: is_supervisor != 0,
         });
     }
@@ -832,8 +870,79 @@ pub async fn enrich_space_members_batch(
         }
     }
 
+    let mut identity_ids: Vec<String> = Vec::new();
+    for member in &members {
+        if member.kind != "agent" {
+            continue;
+        }
+        if let Some((mid, _, _, _)) = member
+            .conversation_id
+            .as_deref()
+            .map(str::trim)
+            .and_then(|cid| identity_by_conv.get(cid))
+            && !identity_ids.iter().any(|existing| existing == mid)
+        {
+            identity_ids.push(mid.clone());
+        }
+    }
+
+    let mut member_cfg_map: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    if !identity_ids.is_empty() {
+        let placeholders = std::iter::repeat_n("?", identity_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, agent, model, config_values FROM collaboration_members WHERE id IN ({placeholders})"
+        );
+        let mut q =
+            sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(&sql);
+        for mid in &identity_ids {
+            q = q.bind(mid);
+        }
+        if let Ok(rows) = q.fetch_all(pool).await {
+            for (mid, agent, model_col, cfg_raw) in rows {
+                let explicit_model =
+                    extract_explicit_model_from_raw(cfg_raw.as_deref()).or_else(|| {
+                        model_col
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                    });
+                member_cfg_map.insert(mid, (agent, explicit_model));
+            }
+        }
+    }
+
+    let model_requests: Vec<(Option<String>, Option<String>, Option<Uuid>)> = members
+        .iter()
+        .map(|member| {
+            if member.kind != "agent" {
+                return (None, None, None);
+            }
+            let identity_id = member
+                .conversation_id
+                .as_deref()
+                .map(str::trim)
+                .and_then(|cid| identity_by_conv.get(cid))
+                .map(|(mid, _, _, _)| mid.as_str());
+            let (agent, explicit_model) = identity_id
+                .and_then(|mid| member_cfg_map.get(mid))
+                .cloned()
+                .unwrap_or((None, None));
+            let conv_uuid = member
+                .conversation_id
+                .as_deref()
+                .map(str::trim)
+                .and_then(|cid| Uuid::parse_str(cid).ok());
+            (agent, explicit_model, conv_uuid)
+        })
+        .collect();
+    let resolved_models =
+        crate::collaboration::resolve_agent_models_batch(pool, &model_requests).await;
+
     let mut listed = Vec::with_capacity(members.len());
-    for member in members {
+    for (member, model_info) in members.into_iter().zip(resolved_models.into_iter()) {
         let (identity_member_id, is_supervisor, avatar, color) = member
             .conversation_id
             .as_deref()
@@ -841,6 +950,7 @@ pub async fn enrich_space_members_batch(
             .and_then(|cid| identity_by_conv.get(cid))
             .map(|(mid, sup, av, col)| (Some(mid.clone()), *sup, av.clone(), col.clone()))
             .unwrap_or((None, false, None, None));
+        let is_agent = member.kind == "agent";
         let mut value = serde_json::to_value(&member).map_err(|error| {
             CollaborationError::new("conversation_control_failed", error.to_string())
         })?;
@@ -852,6 +962,18 @@ pub async fn enrich_space_members_batch(
             }
             if let Some(col) = color {
                 object.insert("color".into(), json!(col));
+            }
+            if is_agent {
+                if let Some(agent_id) = model_info.agent_id {
+                    object.insert("agent".into(), json!(agent_id));
+                    object.insert("agent_id".into(), json!(agent_id));
+                }
+                if let Some(model) = model_info.model {
+                    object.insert("model".into(), json!(model));
+                }
+                if let Some(model_label) = model_info.model_label {
+                    object.insert("model_label".into(), json!(model_label));
+                }
             }
         }
         listed.push(value);

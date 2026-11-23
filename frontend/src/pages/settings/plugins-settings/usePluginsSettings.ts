@@ -50,6 +50,7 @@ export function usePluginsSettings({
   const [queries, setQueries] = useState<Record<PluginEcosystem, string>>({
     codex: '',
     claude_code: '',
+    muse_code: '',
     dimo: '',
   });
   const [isLoading, setIsLoading] = useState(true);

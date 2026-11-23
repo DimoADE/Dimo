@@ -24,6 +24,7 @@ describe('AgentIcon', () => {
     ['trae', 'TRAE CLI', '/agents/trae.svg'],
     ['command_code', 'Command Code', '/agents/command-code.svg'],
     ['zcode', 'ZCode', '/agents/zcode.svg'],
+    ['muse_code', 'Muse Code', '/agents/muse-code-light.svg'],
   ])('renders the real %s artwork', (agent, name, src) => {
     render(<AgentIcon agent={agent} />);
 
@@ -66,6 +67,8 @@ describe('AgentIcon', () => {
     ],
     ['gemini', 'Google Antigravity', '/agents/antigravity.svg'],
     ['mimo', 'MiMo Code', '/agents/mimo-code-light.svg'],
+    ['muse', 'Muse Code', '/agents/muse-code-light.svg'],
+    ['muse-native', 'Muse Code', '/agents/muse-code-light.svg'],
   ])('normalizes %s to built-in artwork', (agent, name, src) => {
     render(<AgentIcon agent={agent} />);
 

@@ -143,8 +143,16 @@ impl PlanUsageResult {
     }
 }
 
-fn plan_usage_cache() -> &'static Mutex<HashMap<AgentId, AgentPlanUsage>> {
-    static CACHE: OnceLock<Mutex<HashMap<AgentId, AgentPlanUsage>>> = OnceLock::new();
+const PLAN_USAGE_CACHE_TTL: Duration = Duration::from_secs(120);
+
+#[derive(Debug, Clone)]
+struct CachedPlanUsage {
+    usage: AgentPlanUsage,
+    cached_at: std::time::Instant,
+}
+
+fn plan_usage_cache() -> &'static Mutex<HashMap<AgentId, CachedPlanUsage>> {
+    static CACHE: OnceLock<Mutex<HashMap<AgentId, CachedPlanUsage>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -152,7 +160,16 @@ pub fn cached_plan_usage(agent_id: &AgentId) -> Option<AgentPlanUsage> {
     plan_usage_cache()
         .lock()
         .ok()
-        .and_then(|cache| cache.get(agent_id).cloned())
+        .and_then(|cache| cache.get(agent_id).map(|entry| entry.usage.clone()))
+}
+
+fn fresh_cached_plan_usage(agent_id: &AgentId) -> Option<AgentPlanUsage> {
+    plan_usage_cache().lock().ok().and_then(|cache| {
+        cache
+            .get(agent_id)
+            .filter(|entry| entry.cached_at.elapsed() < PLAN_USAGE_CACHE_TTL)
+            .map(|entry| entry.usage.clone())
+    })
 }
 
 pub async fn probe_plan_usage(agent_id: &AgentId) -> PlanUsageResult {
@@ -163,6 +180,9 @@ pub async fn probe_plan_usage_with(
     agent_id: &AgentId,
     context: &PlanProbeContext,
 ) -> PlanUsageResult {
+    if let Some(usage) = fresh_cached_plan_usage(agent_id) {
+        return PlanUsageResult::Ok { usage };
+    }
     let result = match agent_id.as_str() {
         "claude_code" => probe_claude_plan_usage(context).await,
         "codex" => probe_codex_plan_usage(context).await,
@@ -178,7 +198,13 @@ pub async fn probe_plan_usage_with(
     if let PlanUsageResult::Ok { usage } = &result
         && let Ok(mut cache) = plan_usage_cache().lock()
     {
-        cache.insert(agent_id.clone(), usage.clone());
+        cache.insert(
+            agent_id.clone(),
+            CachedPlanUsage {
+                usage: usage.clone(),
+                cached_at: std::time::Instant::now(),
+            },
+        );
     }
     result
 }
@@ -2260,6 +2286,57 @@ mod tests {
                 reason: PlanUsageUnavailableReason::UnsupportedAgent
             }
         );
+    }
+
+    #[test]
+    fn fresh_plan_usage_cache_short_circuits_probe_until_ttl_expires() {
+        let agent_id = AgentId::parse("test_plan_usage_cache_agent").expect("valid agent id");
+        let expected = AgentPlanUsage {
+            plan_type: Some("pro".into()),
+            windows: vec![PlanUsageWindow {
+                id: "primary".into(),
+                used_percent: Some(42.0),
+                window_minutes: Some(300),
+                resets_at_ms: None,
+            }],
+            credits: None,
+        };
+
+        {
+            let mut cache = plan_usage_cache().lock().expect("lock");
+            cache.insert(
+                agent_id.clone(),
+                CachedPlanUsage {
+                    usage: expected.clone(),
+                    cached_at: std::time::Instant::now(),
+                },
+            );
+        }
+
+        let fresh = tokio_test_block_on(probe_plan_usage(&agent_id));
+        assert_eq!(fresh, PlanUsageResult::Ok { usage: expected });
+
+        // Simulate expired cache entry: probe should fall through to UnsupportedAgent
+        // while `cached_plan_usage` still retains the last known snapshot.
+        {
+            let mut cache = plan_usage_cache().lock().expect("lock");
+            if let Some(entry) = cache.get_mut(&agent_id) {
+                entry.cached_at = std::time::Instant::now()
+                    .checked_sub(PLAN_USAGE_CACHE_TTL + Duration::from_secs(1))
+                    .unwrap_or(entry.cached_at);
+            }
+        }
+        assert!(cached_plan_usage(&agent_id).is_some());
+        let stale = tokio_test_block_on(probe_plan_usage(&agent_id));
+        assert_eq!(
+            stale,
+            PlanUsageResult::Unavailable {
+                reason: PlanUsageUnavailableReason::UnsupportedAgent
+            }
+        );
+
+        let mut cache = plan_usage_cache().lock().expect("lock");
+        cache.remove(&agent_id);
     }
 
     fn tokio_test_block_on<F: std::future::Future>(future: F) -> F::Output {

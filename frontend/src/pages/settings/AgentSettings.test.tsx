@@ -107,8 +107,7 @@ vi.mock('./PluginsSettings', () => ({
 }));
 
 vi.mock('@/lib/desktopShell', async (importOriginal) => {
-  const original =
-    await importOriginal<typeof import('@/lib/desktopShell')>();
+  const original = await importOriginal<typeof import('@/lib/desktopShell')>();
   return {
     ...original,
     getDesktopShell: () => {
@@ -1307,6 +1306,171 @@ describe('AgentSettings', () => {
       expect(api.bindModelProvider).toHaveBeenCalledWith(
         'codex',
         'prov-router-1'
+      )
+    );
+  });
+
+  it('names imported ModelRouter providers by group and suffixes _1 when importing multiple keys from the same group', async () => {
+    const toastSuccessSpy = vi.spyOn(toast, 'success');
+    api.bar.mockResolvedValue([
+      {
+        agent_id: 'codex',
+        display_name: 'Codex',
+        description: 'OpenAI Codex (official native app-server engine)',
+        icon_light: null,
+        icon_dark: null,
+        icon_svg: null,
+        source: 'built_in_profile',
+        built_in: true,
+        retired: false,
+        enabled: true,
+        position: 0,
+        lifecycle: 'ready',
+        authentication: 'none',
+        runtime_version: '0.169.0',
+        acp_version: '0.169.0',
+        active_operation: null,
+        rollback_available: false,
+        settings_features: ['authentication_mode', 'reusable_model_providers'],
+      },
+    ]);
+    const savedProviders: Array<{
+      id: string;
+      name: string;
+      agent_id: string;
+      api_url: string;
+      api_key: string;
+      credential_present: boolean;
+      model: string;
+      bound: boolean;
+      managed: boolean;
+    }> = [];
+    let nextId = 1;
+
+    api.modelProviders.mockImplementation(async () => ({
+      agent_id: 'codex',
+      bound_provider_id: null,
+      multi_enable: false,
+      providers: [...savedProviders],
+    }));
+    api.saveModelProvider.mockImplementation(async (req) => {
+      const created = {
+        id: `prov-group-${nextId++}`,
+        name: req.name,
+        agent_id: req.agent_id,
+        api_url: req.api_url,
+        api_key: req.api_key ?? '',
+        credential_present: Boolean(req.api_key),
+        model: req.model,
+        bound: false,
+        managed: true,
+      };
+      savedProviders.push(created);
+      return {
+        agent_id: 'codex',
+        bound_provider_id: null,
+        multi_enable: false,
+        providers: [...savedProviders],
+      };
+    });
+    api.bindModelProvider.mockResolvedValue({
+      agent_id: 'codex',
+      bound_provider_id: 'prov-group-3',
+      multi_enable: false,
+      providers: [],
+    });
+
+    redeemImportTicketMock
+      .mockResolvedValueOnce({
+        apiKey: 'vxr-gpt-1',
+        agentId: 'codex',
+        protocol: 'openai',
+        baseUrl: 'https://site.test/api/router/v1',
+        group: 'Dimo-GPT',
+        model: { id: 'gpt-5', name: 'GPT-5' },
+        models: [{ id: 'gpt-5', name: 'GPT-5' }],
+      })
+      .mockResolvedValueOnce({
+        apiKey: 'vxr-claude-1',
+        agentId: 'codex',
+        protocol: 'openai',
+        baseUrl: 'https://site.test/api/router/v1',
+        group: 'Dimo-Claude',
+        model: { id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5' },
+        models: [{ id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5' }],
+      })
+      .mockResolvedValueOnce({
+        apiKey: 'vxr-gpt-2',
+        agentId: 'codex',
+        protocol: 'openai',
+        baseUrl: 'https://site.test/api/router/v1',
+        group: 'Dimo-GPT',
+        model: { id: 'gpt-5-mini', name: 'GPT-5 Mini' },
+        models: [{ id: 'gpt-5-mini', name: 'GPT-5 Mini' }],
+      });
+
+    render(<AgentSettings />);
+    await screen.findAllByText('Codex');
+
+    const listener = tauriListeners.get('dimo://modelrouter-import');
+    expect(listener).toBeDefined();
+
+    await act(async () => {
+      listener?.({ ticket: 'tkt_group_1', agentId: 'codex' });
+    });
+    await waitFor(() =>
+      expect(api.saveModelProvider).toHaveBeenNthCalledWith(1, {
+        id: null,
+        name: 'Dimo-GPT',
+        agent_id: 'codex',
+        api_url: 'https://site.test/api/router/v1',
+        api_key: 'vxr-gpt-1',
+        model: 'gpt-5',
+      })
+    );
+
+    await act(async () => {
+      listener?.({ ticket: 'tkt_group_2', agentId: 'codex' });
+    });
+    await waitFor(() =>
+      expect(api.saveModelProvider).toHaveBeenNthCalledWith(2, {
+        id: null,
+        name: 'Dimo-Claude',
+        agent_id: 'codex',
+        api_url: 'https://site.test/api/router/v1',
+        api_key: 'vxr-claude-1',
+        model: 'claude-sonnet-4-5',
+      })
+    );
+
+    await act(async () => {
+      listener?.({ ticket: 'tkt_group_3', agentId: 'codex' });
+    });
+    await waitFor(() =>
+      expect(api.saveModelProvider).toHaveBeenNthCalledWith(3, {
+        id: null,
+        name: 'Dimo-GPT_1',
+        agent_id: 'codex',
+        api_url: 'https://site.test/api/router/v1',
+        api_key: 'vxr-gpt-2',
+        model: 'gpt-5-mini',
+      })
+    );
+
+    const lastToastCall = toastSuccessSpy.mock.calls.at(-1);
+    const lastToastOptions = lastToastCall?.[1] as {
+      description?: string;
+      action?: { label: string; onClick: () => void };
+    };
+    expect(lastToastOptions.description).toBe('Dimo-GPT_1 · GPT-5 Mini');
+
+    await act(async () => {
+      lastToastOptions.action?.onClick();
+    });
+    await waitFor(() =>
+      expect(api.bindModelProvider).toHaveBeenCalledWith(
+        'codex',
+        'prov-group-3'
       )
     );
   });

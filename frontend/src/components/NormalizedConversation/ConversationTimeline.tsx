@@ -333,6 +333,7 @@ const AgentTimelineConversation = forwardRef<
     currentFindMatch,
     goToFindMatch,
     detachFromBottom,
+    cancelPendingJump,
     handleJumpToVirtualIndex,
     handleScroll,
     scrollToIndex,
@@ -861,6 +862,7 @@ const AgentTimelineConversation = forwardRef<
     sideRows,
     sessionBindReady: conversation.sessionBindReady,
     connecting: conversation.connecting,
+    connectingSince: conversation.connectingSince,
     runtimeConnection: runtimeStatus.connection,
     runtimeRequest: runtimeStatus.request,
     controlsAgentId: conversation.controlsAgentId,
@@ -1031,6 +1033,8 @@ const AgentTimelineConversation = forwardRef<
           onWheel={(event) => {
             if (wheelDetachesConversationFollow(event.deltaY)) {
               detachFromBottom();
+            } else if (event.deltaY !== 0) {
+              cancelPendingJump();
             }
           }}
           onContextMenu={(event) => {

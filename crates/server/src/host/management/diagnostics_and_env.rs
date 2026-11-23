@@ -218,6 +218,7 @@ pub(super) fn discover_executable_in_common_locations(executable: &str) -> Optio
             dirs.push(local_app_data.join("Programs").join("Kiro CLI"));
             dirs.push(local_app_data.join("Programs").join("Kiro").join("bin"));
             dirs.push(local_app_data.join("Programs").join("TraeCLI").join("bin"));
+            dirs.push(local_app_data.join("Programs").join("muse"));
         }
         for env_key in ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"] {
             if let Some(program_files) = std::env::var_os(env_key).map(PathBuf::from) {

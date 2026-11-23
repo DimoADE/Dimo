@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     io::{Read, Write},
     path::PathBuf,
-    sync::{Arc, Mutex, mpsc as std_mpsc},
+    sync::{Arc, Mutex},
     thread,
 };
 
@@ -205,11 +205,15 @@ impl Scrollback {
     }
 }
 
+const PTY_INPUT_CHANNEL_CAPACITY: usize = 1024;
+type SharedMasterPty = Arc<Mutex<Box<dyn MasterPty + Send>>>;
+type SharedPtyChild = Arc<Mutex<Box<dyn portable_pty::Child + Send>>>;
+
 struct PtySession {
     working_dir: PathBuf,
-    input_tx: std_mpsc::Sender<Vec<u8>>,
-    master: Box<dyn MasterPty + Send>,
-    child: Box<dyn portable_pty::Child + Send>,
+    input_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    master: SharedMasterPty,
+    child: SharedPtyChild,
     scrollback: Arc<Mutex<Scrollback>>,
     subscribers: Arc<Mutex<Vec<TerminalOutputTx>>>,
     _input_handle: thread::JoinHandle<()>,
@@ -302,6 +306,10 @@ impl PtyService {
                 .slave
                 .spawn_command(cmd)
                 .map_err(|e| PtyError::CreateFailed(e.to_string()))?;
+            #[cfg(windows)]
+            if let Some(pid) = child.process_id() {
+                let _ = utils::process::assign_pid_to_guardian_job(pid);
+            }
             drop(pty_pair.slave);
 
             let writer = pty_pair
@@ -312,19 +320,20 @@ impl PtyService {
                 .master
                 .try_clone_reader()
                 .map_err(|e| PtyError::CreateFailed(e.to_string()))?;
-            let (input_tx, input_rx) = std_mpsc::channel::<Vec<u8>>();
+            let (input_tx, input_rx) =
+                tokio::sync::mpsc::channel::<Vec<u8>>(PTY_INPUT_CHANNEL_CAPACITY);
 
             Ok::<_, PtyError>((pty_pair.master, child, writer, reader, input_tx, input_rx))
         })
         .await
         .map_err(|e| PtyError::CreateFailed(e.to_string()))??;
 
-        let (master, child, mut writer, mut reader, input_tx, input_rx) = result;
+        let (master, child, mut writer, mut reader, input_tx, mut input_rx) = result;
 
         let input_handle = thread::Builder::new()
             .name(format!("pty-writer-{short_id}"))
             .spawn(move || {
-                while let Ok(data) = input_rx.recv() {
+                while let Some(data) = input_rx.blocking_recv() {
                     if writer.write_all(&data).is_err() {
                         break;
                     }
@@ -343,8 +352,8 @@ impl PtyService {
         let session = PtySession {
             working_dir: session_working_dir,
             input_tx,
-            master,
-            child,
+            master: Arc::new(Mutex::new(master)),
+            child: Arc::new(Mutex::new(child)),
             scrollback,
             subscribers,
             _input_handle: input_handle,
@@ -357,10 +366,12 @@ impl PtyService {
                 .lock()
                 .map_err(|e| PtyError::CreateFailed(e.to_string()))?;
             if sessions.contains_key(&session_id) {
-                let mut child = session.child;
+                let child = Arc::clone(&session.child);
                 tokio::task::spawn_blocking(move || {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    if let Ok(mut child) = child.lock() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
                 });
                 return Err(PtyError::CreateFailed(format!(
                     "terminal id '{session_id}' already exists"
@@ -411,8 +422,10 @@ impl PtyService {
                             subscriber.close();
                         }
                     }
-                    let _ = session.child.kill();
-                    let _ = session.child.wait();
+                    if let Ok(mut child) = session.child.lock() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
                 }
             })
             .map_err(|e| PtyError::CreateFailed(e.to_string()))?;
@@ -439,20 +452,23 @@ impl PtyService {
 
     pub async fn subscribe_output(&self, session_id: Uuid) -> Result<TerminalOutputRx, PtyError> {
         let (tx, rx) = TerminalOutputTx::pair();
-        let sessions = self
-            .sessions
-            .lock()
-            .map_err(|e| PtyError::CreateFailed(e.to_string()))?;
-        let session = sessions
-            .get(&session_id)
-            .ok_or(PtyError::SessionNotFound(session_id))?;
+        let subscribers = {
+            let sessions = self
+                .sessions
+                .lock()
+                .map_err(|e| PtyError::CreateFailed(e.to_string()))?;
+            let session = sessions
+                .get(&session_id)
+                .ok_or(PtyError::SessionNotFound(session_id))?;
 
-        if session.closed {
-            return Err(PtyError::SessionClosed);
-        }
+            if session.closed {
+                return Err(PtyError::SessionClosed);
+            }
 
-        session
-            .subscribers
+            Arc::clone(&session.subscribers)
+        };
+
+        subscribers
             .lock()
             .map_err(|e| PtyError::CreateFailed(e.to_string()))?
             .push(tx);
@@ -477,37 +493,49 @@ impl PtyService {
             session.input_tx.clone()
         };
 
-        input_tx
-            .send(data.to_vec())
-            .map_err(|e| PtyError::WriteFailed(e.to_string()))?;
-
-        Ok(())
+        let payload = data.to_vec();
+        match tokio::time::timeout(std::time::Duration::from_secs(2), input_tx.send(payload)).await
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(PtyError::WriteFailed(
+                "PTY input channel closed".to_string(),
+            )),
+            Err(_) => Err(PtyError::WriteFailed("PTY input buffer full".to_string())),
+        }
     }
 
     pub async fn resize(&self, session_id: Uuid, cols: u16, rows: u16) -> Result<(), PtyError> {
-        let sessions = self
-            .sessions
-            .lock()
-            .map_err(|e| PtyError::ResizeFailed(e.to_string()))?;
-        let session = sessions
-            .get(&session_id)
-            .ok_or(PtyError::SessionNotFound(session_id))?;
+        let master = {
+            let sessions = self
+                .sessions
+                .lock()
+                .map_err(|e| PtyError::ResizeFailed(e.to_string()))?;
+            let session = sessions
+                .get(&session_id)
+                .ok_or(PtyError::SessionNotFound(session_id))?;
 
-        if session.closed {
-            return Err(PtyError::SessionClosed);
-        }
+            if session.closed {
+                return Err(PtyError::SessionClosed);
+            }
 
-        session
-            .master
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| PtyError::ResizeFailed(e.to_string()))?;
+            Arc::clone(&session.master)
+        };
 
-        Ok(())
+        tokio::task::spawn_blocking(move || {
+            let master = master
+                .lock()
+                .map_err(|e| PtyError::ResizeFailed(e.to_string()))?;
+            master
+                .resize(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .map_err(|e| PtyError::ResizeFailed(e.to_string()))
+        })
+        .await
+        .map_err(|e| PtyError::ResizeFailed(e.to_string()))?
     }
 
     pub async fn close_session(&self, session_id: Uuid) -> Result<(), PtyError> {
@@ -523,32 +551,72 @@ impl PtyService {
                     subscriber.close();
                 }
             }
-            let mut child = session.child;
             let _ = tokio::task::spawn_blocking(move || {
-                let _ = child.kill();
-                let _ = child.wait();
+                if let Ok(mut child) = session.child.lock() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                drop(session.master);
+                drop(session.input_tx);
             })
             .await;
         }
         Ok(())
     }
 
+    /// Kill and drain every active PTY session concurrently (used on host shutdown).
+    pub async fn close_all(&self) {
+        let removed: Vec<PtySession> = {
+            let mut sessions = self
+                .sessions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            sessions.drain().map(|(_, session)| session).collect()
+        };
+        let tasks = removed.into_iter().map(|mut session| {
+            session.closed = true;
+            if let Ok(mut subscribers) = session.subscribers.lock() {
+                for subscriber in subscribers.drain(..) {
+                    subscriber.close();
+                }
+            }
+            tokio::task::spawn_blocking(move || {
+                if let Ok(mut child) = session.child.lock() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                drop(session.master);
+                drop(session.input_tx);
+            })
+        });
+        let _ = futures::future::join_all(tasks).await;
+    }
+
     pub fn has_running_in_directory(&self, root: &std::path::Path) -> Result<bool, PtyError> {
         let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-        let mut sessions = self
-            .sessions
-            .lock()
-            .map_err(|e| PtyError::CreateFailed(e.to_string()))?;
-        for session in sessions.values_mut() {
-            let cwd = std::fs::canonicalize(&session.working_dir)
-                .unwrap_or_else(|_| session.working_dir.clone());
-            if cwd.starts_with(&root)
-                && !session.closed
-                && session
-                    .child
-                    .try_wait()
-                    .map_err(|e| PtyError::CreateFailed(e.to_string()))?
-                    .is_none()
+        let candidates: Vec<(PathBuf, SharedPtyChild)> = {
+            let sessions = self
+                .sessions
+                .lock()
+                .map_err(|e| PtyError::CreateFailed(e.to_string()))?;
+            sessions
+                .values()
+                .filter(|session| !session.closed)
+                .map(|session| (session.working_dir.clone(), Arc::clone(&session.child)))
+                .collect()
+        };
+        for (working_dir, child) in candidates {
+            let cwd = std::fs::canonicalize(&working_dir).unwrap_or(working_dir);
+            if !cwd.starts_with(&root) {
+                continue;
+            }
+            let mut child = child
+                .lock()
+                .map_err(|e| PtyError::CreateFailed(e.to_string()))?;
+            if child
+                .try_wait()
+                .map_err(|e| PtyError::CreateFailed(e.to_string()))?
+                .is_none()
             {
                 return Ok(true);
             }

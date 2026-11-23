@@ -19,7 +19,9 @@ export function pluginDetailQueryKey(pluginId: string) {
 }
 
 export function isProductPlugin(plugin: PluginControlItem) {
-  return !['codex_native', 'claude_code_native'].includes(plugin.sourceKind);
+  return !['codex_native', 'claude_code_native', 'muse_code_native'].includes(
+    plugin.sourceKind
+  );
 }
 
 export function errorMessage(error: unknown) {

@@ -30,9 +30,7 @@ export function StatusNoticeActorChip({
         title={label}
         aria-label={label}
         data-testid={
-          actor.id
-            ? `status-notice-actor-${actor.id}`
-            : 'status-notice-actor'
+          actor.id ? `status-notice-actor-${actor.id}` : 'status-notice-actor'
         }
       >
         {content}

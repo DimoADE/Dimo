@@ -461,6 +461,11 @@
 .conv-entry-item {
   /* intentionally left without content-visibility */
 }
+
+[data-panel='conversation-logs'],
+[data-panel='child-conversation-logs'] {
+  overflow-anchor: none;
+}
 .resend-checkpoint-surface {
   width: 100%;
   padding: 18px;

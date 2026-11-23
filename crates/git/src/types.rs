@@ -420,12 +420,25 @@ pub struct GitFileDiffEntry {
     pub is_image: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq, Eq)]
+pub struct GitWorktreeInfo {
+    pub path: String,
+    pub branch: Option<String>,
+    pub head_sha: Option<String>,
+    pub is_main: bool,
+    pub is_detached: bool,
+    pub is_bare: bool,
+}
+
 /// A single git log entry.
 #[derive(Debug, Clone, Serialize, TS)]
 pub struct GitLogEntry {
     pub sha: String,
+    /// Parent commit full SHAs in git order (first parent is mainline).
+    pub parents: Vec<String>,
     pub summary: String,
     pub author: String,
+    #[ts(type = "number")]
     pub timestamp: i64,
     /// Branch/tag refs pointing at this commit (e.g. "master", "origin/main", "v1.0").
     pub refs: Vec<String>,

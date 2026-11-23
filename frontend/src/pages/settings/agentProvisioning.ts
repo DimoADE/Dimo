@@ -13,7 +13,7 @@ export type NativeEngineAgentHint =
   | null
   | undefined;
 
-const NATIVE_ENGINE_AGENT_IDS = new Set(['claude_code', 'codex']);
+const NATIVE_ENGINE_AGENT_IDS = new Set(['claude_code', 'codex', 'muse_code']);
 
 export function isNativeEngineAgent(
   agentOrId?: NativeEngineAgentHint

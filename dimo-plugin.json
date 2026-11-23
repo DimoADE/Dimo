@@ -73,7 +73,7 @@
       "publisher": "dimo",
       "repository": "https://github.com/DimoADE/Dimo-plugin-voice-input",
       "category": "ai-enhancement",
-      "summary": "AI 语音输入与智能听写：支持实时流式字幕、Whisper/Groq/多模态音频识别、自定义术语热词与听写后智能去口水词润色。"
+      "summary": "AI 语音输入与智能听写：支持本地离线 GGUF 模型（免 Key 一键下载/零拷贝链接）、Whisper/Groq/xAI/OpenRouter 多引擎、16kHz FIR 重采样与 VAD 静音过滤、别名热词纠错及交互对照预览。"
     }
   ]
 }

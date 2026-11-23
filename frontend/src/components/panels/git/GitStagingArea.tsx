@@ -21,13 +21,14 @@ interface GitStagingAreaProps {
   viewMode?: DiffListView;
   workspaceId?: string | null;
   repoRootPath?: string | null;
+  readOnly?: boolean;
   onSelectFile: (path: string) => void;
   onDoubleClickFile?: (path: string) => void;
-  onStageFile: (path: string) => void;
-  onUnstageFile: (path: string) => void;
-  onRevertFile: (path: string) => void;
-  onStageAll: () => void;
-  onRevertAll: () => void;
+  onStageFile?: (path: string) => void;
+  onUnstageFile?: (path: string) => void;
+  onRevertFile?: (path: string) => void;
+  onStageAll?: () => void;
+  onRevertAll?: () => void;
 }
 
 interface SectionHeaderProps {
@@ -65,7 +66,7 @@ const SectionHeader = memo(function SectionHeader({
       <div className="flex items-center gap-1.5">
         {icon}
         <span>{label}</span>
-        <span className="text-muted-foreground/60">({count})</span>
+        <span className="text-muted-foreground/60 tabular-nums">({count})</span>
       </div>
       <div
         className="flex items-center gap-0.5"
@@ -93,6 +94,7 @@ export const GitStagingArea = memo(function GitStagingArea({
   viewMode = 'flat',
   workspaceId = null,
   repoRootPath = null,
+  readOnly = false,
   onSelectFile,
   onDoubleClickFile,
   onStageFile,
@@ -113,8 +115,8 @@ export const GitStagingArea = memo(function GitStagingArea({
   // Multi-select click handler
   const handleFileClick = useCallback(
     (path: string, e?: React.MouseEvent) => {
-      const isCtrl = e?.ctrlKey || e?.metaKey;
-      const isShift = e?.shiftKey;
+      const isCtrl = !readOnly && (e?.ctrlKey || e?.metaKey);
+      const isShift = !readOnly && e?.shiftKey;
 
       if (isCtrl) {
         setSelectedPaths((prev) => {
@@ -145,7 +147,7 @@ export const GitStagingArea = memo(function GitStagingArea({
         onSelectFile(path);
       }
     },
-    [lastClickedPath, stagedFiles, unstagedFiles, onSelectFile]
+    [readOnly, lastClickedPath, stagedFiles, unstagedFiles, onSelectFile]
   );
 
   // Context menu handler
@@ -174,10 +176,11 @@ export const GitStagingArea = memo(function GitStagingArea({
     return buildFileContextActions({
       section: contextMenu.section,
       filePaths: activePaths,
-      onStageFile,
-      onUnstageFile,
-      onRevertFile: (path: string) =>
-        setDiscardTarget({ type: 'files', paths: [path] }),
+      onStageFile: readOnly ? undefined : onStageFile,
+      onUnstageFile: readOnly ? undefined : onUnstageFile,
+      onRevertFile: readOnly
+        ? undefined
+        : (path: string) => setDiscardTarget({ type: 'files', paths: [path] }),
       onCopyPath: (path: string) => {
         void writeTextToClipboard(path).then((copied) => {
           if (!copied) {
@@ -186,7 +189,7 @@ export const GitStagingArea = memo(function GitStagingArea({
         });
       },
     });
-  }, [contextMenu, selectedPaths, onStageFile, onUnstageFile]);
+  }, [contextMenu, selectedPaths, readOnly, onStageFile, onUnstageFile]);
 
   // Discard handlers
   const handleRevertAll = useCallback(() => {
@@ -200,9 +203,9 @@ export const GitStagingArea = memo(function GitStagingArea({
   const handleDiscardConfirm = useCallback(() => {
     if (!discardTarget) return;
     if (discardTarget.type === 'all') {
-      onRevertAll();
+      onRevertAll?.();
     } else {
-      discardTarget.paths.forEach((p) => onRevertFile(p));
+      discardTarget.paths.forEach((p) => onRevertFile?.(p));
     }
     setDiscardTarget(null);
   }, [discardTarget, onRevertAll, onRevertFile]);
@@ -219,7 +222,7 @@ export const GitStagingArea = memo(function GitStagingArea({
         : [];
 
   // Batch actions for selected files
-  const hasMultiSelection = selectedPaths.size > 1;
+  const hasMultiSelection = !readOnly && selectedPaths.size > 1;
 
   return (
     <div className="flex flex-col gap-1.5 px-1.5 py-1 min-h-0">
@@ -230,7 +233,7 @@ export const GitStagingArea = memo(function GitStagingArea({
           <div className="flex-1" />
           <button
             className="px-1.5 py-0.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground"
-            onClick={() => selectedPaths.forEach((p) => onStageFile(p))}
+            onClick={() => selectedPaths.forEach((p) => onStageFile?.(p))}
             title={i18n.t('panels:ui.gitStaging.stageSelected')}
           >
             <Plus className="h-3 w-3 inline mr-0.5" />
@@ -238,7 +241,7 @@ export const GitStagingArea = memo(function GitStagingArea({
           </button>
           <button
             className="px-1.5 py-0.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground"
-            onClick={() => selectedPaths.forEach((p) => onUnstageFile(p))}
+            onClick={() => selectedPaths.forEach((p) => onUnstageFile?.(p))}
             title={i18n.t('panels:ui.gitStaging.unstageSelected')}
           >
             <Minus className="h-3 w-3 inline mr-0.5" />
@@ -276,13 +279,15 @@ export const GitStagingArea = memo(function GitStagingArea({
             collapsed={stagedCollapsed}
             onToggle={() => setStagedCollapsed((prev) => !prev)}
             actions={
-              <button
-                className="p-0.5 rounded bg-transparent text-muted-foreground hover:text-foreground"
-                onClick={onStageAll}
-                title={i18n.t('panels:ui.gitStaging.unstageAll')}
-              >
-                <Minus className="h-3 w-3" />
-              </button>
+              readOnly ? null : (
+                <button
+                  className="p-0.5 rounded bg-transparent text-muted-foreground hover:text-foreground"
+                  onClick={onStageAll}
+                  title={i18n.t('panels:ui.gitStaging.unstageAll')}
+                >
+                  <Minus className="h-3 w-3" />
+                </button>
+              )
             }
           />
           {!stagedCollapsed &&
@@ -298,7 +303,7 @@ export const GitStagingArea = memo(function GitStagingArea({
                 onContextMenu={(path, e) =>
                   handleContextMenu(path, 'staged', e)
                 }
-                onUnstageFile={onUnstageFile}
+                onUnstageFile={readOnly ? undefined : onUnstageFile}
               />
             ) : (
               <div className="flex flex-col gap-0.5">
@@ -317,7 +322,7 @@ export const GitStagingArea = memo(function GitStagingArea({
                     onContextMenu={(path, e) =>
                       handleContextMenu(path, 'staged', e)
                     }
-                    onUnstageFile={onUnstageFile}
+                    onUnstageFile={readOnly ? undefined : onUnstageFile}
                   />
                 ))}
               </div>
@@ -335,22 +340,24 @@ export const GitStagingArea = memo(function GitStagingArea({
             collapsed={changesCollapsed}
             onToggle={() => setChangesCollapsed((prev) => !prev)}
             actions={
-              <>
-                <button
-                  className="p-0.5 rounded bg-transparent text-muted-foreground hover:text-foreground"
-                  onClick={onStageAll}
-                  title={i18n.t('panels:ui.gitStaging.stageAll')}
-                >
-                  <Plus className="h-3 w-3" />
-                </button>
-                <button
-                  className="p-0.5 rounded bg-transparent text-muted-foreground hover:text-destructive"
-                  onClick={handleRevertAll}
-                  title={i18n.t('panels:ui.gitStaging.discardAll')}
-                >
-                  <Undo2 className="h-3 w-3" />
-                </button>
-              </>
+              readOnly ? null : (
+                <>
+                  <button
+                    className="p-0.5 rounded bg-transparent text-muted-foreground hover:text-foreground"
+                    onClick={onStageAll}
+                    title={i18n.t('panels:ui.gitStaging.stageAll')}
+                  >
+                    <Plus className="h-3 w-3" />
+                  </button>
+                  <button
+                    className="p-0.5 rounded bg-transparent text-muted-foreground hover:text-destructive"
+                    onClick={handleRevertAll}
+                    title={i18n.t('panels:ui.gitStaging.discardAll')}
+                  >
+                    <Undo2 className="h-3 w-3" />
+                  </button>
+                </>
+              )
             }
           />
           {!changesCollapsed &&
@@ -366,8 +373,8 @@ export const GitStagingArea = memo(function GitStagingArea({
                 onContextMenu={(path, e) =>
                   handleContextMenu(path, 'unstaged', e)
                 }
-                onStageFile={onStageFile}
-                onRevertFile={handleRevertFile}
+                onStageFile={readOnly ? undefined : onStageFile}
+                onRevertFile={readOnly ? undefined : handleRevertFile}
               />
             ) : (
               <div className="flex flex-col gap-0.5">
@@ -386,8 +393,8 @@ export const GitStagingArea = memo(function GitStagingArea({
                     onContextMenu={(path, e) =>
                       handleContextMenu(path, 'unstaged', e)
                     }
-                    onStageFile={onStageFile}
-                    onRevertFile={handleRevertFile}
+                    onStageFile={readOnly ? undefined : onStageFile}
+                    onRevertFile={readOnly ? undefined : handleRevertFile}
                   />
                 ))}
               </div>

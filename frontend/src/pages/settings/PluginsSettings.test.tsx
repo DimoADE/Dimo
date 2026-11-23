@@ -15,8 +15,7 @@ import { renderWithQueryClient as render } from '@/test/QueryClientHarness';
 const dialogOpenMock = vi.hoisted(() => vi.fn());
 
 vi.mock('@/lib/desktopShell', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('@/lib/desktopShell')>();
+  const actual = await importOriginal<typeof import('@/lib/desktopShell')>();
   return {
     ...actual,
     getDesktopShell: () => {

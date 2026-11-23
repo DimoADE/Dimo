@@ -8,8 +8,7 @@ const scope = vi.hoisted(() => ({
 
 vi.mock('@/lib/previewAssetScope', () => scope);
 vi.mock('@/lib/desktopShell', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('@/lib/desktopShell')>();
+  const actual = await importOriginal<typeof import('@/lib/desktopShell')>();
   return {
     ...actual,
     getDesktopShell: () => {

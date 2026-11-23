@@ -144,4 +144,12 @@ export class BoundHostTransport implements BackendTransport {
     }
     return getLocalDesktopTransport().artifactPreviewUrl?.(lease) ?? '';
   }
+
+  detach(): void {
+    this.remote.detach();
+  }
+
+  destroy(): void {
+    this.remote.destroy?.();
+  }
 }

@@ -325,6 +325,15 @@
     "showFewerNotices": "Show fewer notices",
     "loadingBotSession": "Loading Bot session…"
   },
+  "composerContext": {
+    "regionLabel": "Workspace and session context",
+    "defaultDirectory": "Default directory",
+    "worktree": "Worktree",
+    "branchLabel": "Branch: {{branch}}",
+    "permissionLabel": "Permission mode: {{mode}}",
+    "switchWorkspaceLabel": "Switch workspace: {{workspace}}",
+    "workspaceSwitchFailed": "Failed to switch workspace"
+  },
   "liveFeedback": {
     "placeholder": "Steer this turn",
     "send": "Send",

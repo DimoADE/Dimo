@@ -1,4 +1,10 @@
-import { useCallback, useRef, type Dispatch, type SetStateAction } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  type Dispatch,
+  type SetStateAction,
+} from 'react';
 import type { ExecutorProfileId } from 'shared/types';
 import { imagesApi } from '@/lib/api';
 import { getInvokeErrorMessage } from '@/lib/errors';
@@ -28,6 +34,14 @@ export function useSessionComposerImageUpload({
   setAttachedImages: Dispatch<SetStateAction<SessionComposerImage[]>>;
   onError?: (message: string) => void;
 }) {
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const latestRef = useRef({
     draftMessage,
     executorProfile,
@@ -48,6 +62,9 @@ export function useSessionComposerImageUpload({
       for (const file of files) {
         try {
           const response = await imagesApi.uploadForAttempt(workspaceId, file);
+          if (!mountedRef.current) {
+            return;
+          }
           const previewUrl = URL.createObjectURL(file);
 
           setAttachedImages((prev) => {
@@ -75,6 +92,9 @@ export function useSessionComposerImageUpload({
             return nextApplication.attachments;
           });
         } catch (error) {
+          if (!mountedRef.current) {
+            return;
+          }
           const message = getInvokeErrorMessage(error).trim();
           latestRef.current.onError?.(message || 'Could not attach file');
         }

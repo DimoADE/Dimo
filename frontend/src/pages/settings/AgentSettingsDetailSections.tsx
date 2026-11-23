@@ -32,6 +32,7 @@ import { DshAuthPanel } from './DshAuthPanel';
 import { DshPluginManager } from './DshPluginManager';
 import { DshSessionDefaults } from './DshSessionDefaults';
 import { GrokPluginManager } from './GrokPluginManager';
+import { MusePluginManager } from './MusePluginManager';
 import { OpenCodePluginHealth } from './OpenCodePluginHealth';
 import { OpenCodeProviderConnections } from './OpenCodeProviderConnections';
 import { OpenCodeSubscriptionPanel } from './OpenCodeSubscriptionPanel';
@@ -469,6 +470,21 @@ export function AgentSettingsDetailSections({
             summary={t('settings:agents.pluginCount', { count: pluginCount })}
           >
             <GrokPluginManager
+              onChanged={onPreflight}
+              onCount={setPluginCount}
+            />
+          </CollapsibleSettingsSection>
+        ) : selectedAgent.agent_id === 'muse_code' ||
+          selectedAgent.settings_features?.includes('muse_plugins') ? (
+          <CollapsibleSettingsSection
+            id={`${selectedAgent.agent_id}-native-plugins`}
+            title={t('settings:agents.pluginsTab')}
+            description={t('settings:agents.pluginsDescription')}
+            expanded={nativePluginsExpanded}
+            onToggle={() => setNativePluginsExpanded((current) => !current)}
+            summary={t('settings:agents.pluginCount', { count: pluginCount })}
+          >
+            <MusePluginManager
               onChanged={onPreflight}
               onCount={setPluginCount}
             />

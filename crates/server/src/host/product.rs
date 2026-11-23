@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 use crate::{
     domains::{ServerApplicationDomains, internal_error, parse, serialize},
-    host_ops::{RepoIdArgs, WorkspaceRepoArgs},
+    host_ops::{RepoIdArgs, RepoWorktreeArgs, WorkspaceRepoArgs},
 };
 
 #[derive(Deserialize)]
@@ -224,6 +224,8 @@ struct RemoteArgs {
 struct CommitArgs {
     repo_id: Option<Uuid>,
     workspace_id: Option<Uuid>,
+    #[serde(default)]
+    worktree_path: Option<String>,
     sha: Option<String>,
     commit_hash: Option<String>,
 }
@@ -1375,8 +1377,10 @@ impl ServerApplicationDomains {
     }
 
     async fn pull_repo(&self, args: Value) -> Result<Value, ApplicationError> {
-        let args: RepoIdArgs = parse(args)?;
-        let path = self.repo_path(args).await?;
+        let args: RepoWorktreeArgs = parse(args)?;
+        let path = self
+            .resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
+            .await?;
         let git = self.deployment.git().clone();
         let result = tokio::task::spawn_blocking(move || git.pull(&path))
             .await
@@ -1505,16 +1509,23 @@ impl ServerApplicationDomains {
         args: Value,
         op: impl FnOnce(&git::GitService, &std::path::Path) -> Result<(), git::GitServiceError> + Send,
     ) -> Result<Value, ApplicationError> {
-        let args: RepoIdArgs = parse(args)?;
-        self.git_write(self.repo_path(args).await?, op).await
+        let args: RepoWorktreeArgs = parse(args)?;
+        let path = self
+            .resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
+            .await?;
+        self.git_write(path, op).await
     }
 
-    async fn resolve_commit_target(&self, args: Value) -> Result<(PathBuf, String), ApplicationError> {
+    async fn resolve_commit_target(
+        &self,
+        args: Value,
+    ) -> Result<(PathBuf, String), ApplicationError> {
         let args: CommitArgs = parse(args)?;
         let path = if let Some(workspace_id) = args.workspace_id {
             self.primary_worktree(workspace_id, args.repo_id).await?
         } else if let Some(repo_id) = args.repo_id {
-            self.repo_path(RepoIdArgs { repo_id }).await?
+            self.resolve_repo_worktree_path(repo_id, args.worktree_path.as_deref())
+                .await?
         } else {
             return Err(ApplicationError::bad_request("workspace or repo required"));
         };
@@ -2030,9 +2041,7 @@ mod tests {
     #[test]
     fn push_workspace_error_maps_rejected_non_force_to_structured_force_push_required() {
         let err = map_push_workspace_error(
-            git::GitServiceError::GitCLI(git::GitCliError::PushRejected(
-                "non-fast-forward".into(),
-            )),
+            git::GitServiceError::GitCLI(git::GitCliError::PushRejected("non-fast-forward".into())),
             false,
         );
         assert_eq!(
@@ -2056,7 +2065,9 @@ mod tests {
         let sig = git2::Signature::now("Test", "test@example.com").expect("sig");
         std::fs::write(dir.path().join("base.txt"), "base\n").expect("write base");
         let mut index = repo.index().expect("index");
-        index.add_path(std::path::Path::new("base.txt")).expect("add base");
+        index
+            .add_path(std::path::Path::new("base.txt"))
+            .expect("add base");
         index.write().expect("write index");
         let base_tree_id = index.write_tree().expect("write base tree");
         let base_tree = repo.find_tree(base_tree_id).expect("find base tree");
@@ -2066,7 +2077,9 @@ mod tests {
         let parent_commit = repo.find_commit(parent_oid).expect("find parent");
 
         std::fs::write(dir.path().join("hello.txt"), "hello world\n").expect("write file");
-        index.add_path(std::path::Path::new("hello.txt")).expect("add");
+        index
+            .add_path(std::path::Path::new("hello.txt"))
+            .expect("add");
         index.write().expect("write index");
         let tree_id = index.write_tree().expect("write tree");
         let tree = repo.find_tree(tree_id).expect("find tree");

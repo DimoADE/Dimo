@@ -510,13 +510,18 @@ async fn prepare_sqlite_snapshot(pool: &SqlitePool, asset_dir: &Path) -> Option<
         return None;
     }
 
-    let snapshot_path = asset_dir.join(format!(".db.sqlite.dimo-backup-snapshot.{}.tmp", Uuid::new_v4()));
+    let snapshot_path = asset_dir.join(format!(
+        ".db.sqlite.dimo-backup-snapshot.{}.tmp",
+        Uuid::new_v4()
+    ));
     let snapshot_str = snapshot_path.to_string_lossy().to_string();
     let guard = TempFileGuard::new(snapshot_path.clone());
 
     match tokio::time::timeout(
         Duration::from_secs(15),
-        sqlx::query("VACUUM INTO ?1").bind(&snapshot_str).execute(pool),
+        sqlx::query("VACUUM INTO ?1")
+            .bind(&snapshot_str)
+            .execute(pool),
     )
     .await
     {
@@ -798,10 +803,13 @@ fn commit_staged_with_rollback(
 ) -> Result<(), DesktopError> {
     // Commit SQLite database files first so any lock/sharing error fails immediately
     // before touching config files, while still guaranteeing rollback of all entries.
-    staged.pairs.sort_by_key(|(logical, _, _)| !entry_is_sqlite_db(logical));
+    staged
+        .pairs
+        .sort_by_key(|(logical, _, _)| !entry_is_sqlite_db(logical));
 
     let run_id = Uuid::new_v4();
-    let mut committed: Vec<RollbackRecord> = Vec::with_capacity(staged.pairs.len() + stale_sidecars.len());
+    let mut committed: Vec<RollbackRecord> =
+        Vec::with_capacity(staged.pairs.len() + stale_sidecars.len());
 
     // Move aside stale WAL/SHM sidecars under rollback protection before replacing db.sqlite.
     for (idx, sidecar) in stale_sidecars.iter().enumerate() {
@@ -967,7 +975,8 @@ fn stage_pending_restore(
         ))
     })?;
 
-    let manifest_tmp = pending_root.join(format!("{PENDING_RESTORE_MANIFEST}.{}.tmp", Uuid::new_v4()));
+    let manifest_tmp =
+        pending_root.join(format!("{PENDING_RESTORE_MANIFEST}.{}.tmp", Uuid::new_v4()));
     let mut tmp_guard = TempFileGuard::new(manifest_tmp.clone());
     fs::write(&manifest_tmp, manifest_bytes).map_err(|error| {
         DesktopError::Internal(format!(
@@ -1066,10 +1075,7 @@ pub fn apply_pending_backup_restore(data_dir: &Path) -> Result<usize, DesktopErr
         }
 
         let parent = entry.target_path.parent().ok_or_else(|| {
-            DesktopError::BadRequest(format!(
-                "Invalid restore target for {}",
-                entry.logical_path
-            ))
+            DesktopError::BadRequest(format!("Invalid restore target for {}", entry.logical_path))
         })?;
         fs::create_dir_all(parent).map_err(|error| {
             DesktopError::Internal(format!(
@@ -1097,7 +1103,10 @@ pub fn apply_pending_backup_restore(data_dir: &Path) -> Result<usize, DesktopErr
 
     let stale_sidecars = stale_sqlite_sidecars_for_restore(
         data_dir,
-        manifest.entries.iter().map(|entry| entry.logical_path.clone()),
+        manifest
+            .entries
+            .iter()
+            .map(|entry| entry.logical_path.clone()),
     );
     let restored_count = manifest.entries.len();
 
@@ -1157,7 +1166,9 @@ async fn backup_restore_stage_with_roots(
         let preview = preview_from_backup(&backup, &roots);
         let items = decode_and_validate_restore_entries(&backup, &roots)?;
         let total = items.len();
-        let restores_sqlite = items.iter().any(|item| entry_is_sqlite_db(&item.logical_path));
+        let restores_sqlite = items
+            .iter()
+            .any(|item| entry_is_sqlite_db(&item.logical_path));
 
         // When SQLite is actively open (live server), stage the entire restore set
         // atomically under `.pending-restore/` so DB and config files are committed
@@ -1186,7 +1197,10 @@ async fn backup_restore_stage_with_roots(
         for (index, item) in items.iter().enumerate() {
             check_backup_cancelled()?;
             let parent = item.target.parent().ok_or_else(|| {
-                DesktopError::BadRequest(format!("Invalid restore target for {}", item.logical_path))
+                DesktopError::BadRequest(format!(
+                    "Invalid restore target for {}",
+                    item.logical_path
+                ))
             })?;
             fs::create_dir_all(parent).map_err(|error| {
                 DesktopError::Internal(format!(

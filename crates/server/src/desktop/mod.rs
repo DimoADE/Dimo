@@ -7,6 +7,7 @@ pub mod host_tunnel;
 pub mod host_windows;
 pub mod launcher;
 pub mod logging;
+pub mod plugin_dev_server;
 pub mod remote_desktop;
 pub mod routes;
 pub mod settings_watcher;
@@ -54,16 +55,6 @@ pub struct PluginDevConnection {
     pub protocol_version: &'static str,
 }
 
-impl PluginDevConnection {
-    pub fn current() -> Self {
-        Self {
-            endpoint: plugins::artifact_origin().unwrap_or_default().to_string(),
-            token: String::new(),
-            protocol_version: "1.0",
-        }
-    }
-}
-
 /// Runtime state attached to `ServerState` only when `dimo-server` runs in `--desktop` mode.
 #[derive(Clone)]
 pub struct DesktopRuntimeState {
@@ -73,6 +64,7 @@ pub struct DesktopRuntimeState {
     pub web_service: web_service::DesktopWebServiceContext,
     pub remote_desktop: Arc<remote_desktop::RemoteDesktopRegistry>,
     pub browser_bridge: Arc<browser_bridge::ElectronBrowserBridge>,
+    pub plugin_dev: PluginDevConnection,
     pub events: Arc<crate::HostEventBus>,
 }
 

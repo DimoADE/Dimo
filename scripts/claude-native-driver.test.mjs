@@ -1559,4 +1559,88 @@ test('normalizeSdkEvent correlates stream_event deltas and assistant messages vi
   assert.equal(streamMessageIds.size, 0);
 });
 
+test('session/set_mode updates config.permissionMode and forwards live setPermissionMode to activeTurn.queryHandle', async () => {
+  const capturedOptions = [];
+  const liveModeCalls = [];
+  let releaseFirstTurn;
+  let turnIndex = 0;
+
+  const mockSdk = {
+    query({ options }) {
+      capturedOptions.push(options);
+      const currentTurn = turnIndex++;
+      const handle = (async function* () {
+        if (currentTurn === 0) {
+          yield {
+            type: 'system',
+            subtype: 'init',
+            session_id: 'sess-live-mode',
+            model: 'claude-sonnet-4-5',
+          };
+          await new Promise((resolve) => {
+            releaseFirstTurn = resolve;
+          });
+        }
+        yield {
+          type: 'result',
+          subtype: 'success',
+          session_id: 'sess-live-mode',
+          result: `turn-${currentTurn}-ok`,
+        };
+      })();
+      handle.setPermissionMode = async (mode) => {
+        liveModeCalls.push(mode);
+      };
+      return handle;
+    },
+  };
+
+  const harness = createHarness({ sdkLoader: async () => mockSdk });
+
+  try {
+    await harness.request(1, 'initialize', {
+      permissionMode: 'default',
+    });
+
+    // Start first turn and wait until SDK query is active.
+    await harness.request(2, 'prompt/send', {
+      promptId: 'p-live-1',
+      text: 'Hold turn open',
+    });
+    await harness.waitFor(
+      (f) =>
+        f.method === 'engine/event' &&
+        f.params?.kind === 'session_initialized'
+    );
+
+    // Send session/set_mode concurrently during the active turn.
+    const setModeRes = await harness.request(3, 'session/set_mode', {
+      mode: 'acceptEdits',
+    });
+    assert.equal(setModeRes.result.ok, true);
+    assert.equal(setModeRes.result.appliedImmediately, true);
+    assert.equal(setModeRes.result.permissionMode, 'acceptEdits');
+    assert.deepEqual(liveModeCalls, ['acceptEdits']);
+
+    releaseFirstTurn?.();
+    await harness.waitFor(
+      (f) =>
+        f.method === 'engine/event' &&
+        f.params?.kind === 'turn_completed' &&
+        f.params?.promptId === 'p-live-1'
+    );
+
+    // Next turn without explicit permissionMode must inherit the updated config.permissionMode.
+    await harness.request(4, 'prompt/send', {
+      promptId: 'p-live-2',
+      text: 'Second turn',
+      waitForCompletion: true,
+    });
+    assert.equal(capturedOptions[1].permissionMode, 'acceptEdits');
+  } finally {
+    await harness.close();
+  }
+});
+
+
 

@@ -9,6 +9,9 @@ pub mod claude_events;
 pub mod codex;
 pub mod codex_protocol;
 pub mod descriptor;
+pub mod muse;
+pub mod muse_events;
+pub mod muse_protocol;
 pub mod registry;
 pub mod stream_router;
 
@@ -32,6 +35,7 @@ pub use descriptor::{
     resolve_native_engine_kind_with_env,
 };
 use futures::Stream;
+pub use muse::{MuseNativeDriver, MuseServer, MuseServerCacheKey};
 pub use registry::{EngineRegistry, invalidate_engine_caches_for_agent};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -180,6 +184,7 @@ pub fn is_placeholder_engine_session_id(raw: &str) -> bool {
         || trimmed.starts_with("dimo-new-session-")
         || trimmed.starts_with("claude-native-")
         || trimmed.starts_with("codex-native-")
+        || trimmed.starts_with("muse-native-")
 }
 
 /// Model metadata surfaced by native engine `initialize` or `model/list` queries.
@@ -229,8 +234,13 @@ const AUTH_FINGERPRINT_ENV_KEYS: &[&str] = &[
     "CODEX_ACCESS_TOKEN",
     "CODEX_API_KEY",
     "CODEX_HOME",
+    "META_API_KEY",
+    "MUSE_AUTH_MODE",
+    "MUSE_HOME",
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
 ];
 
 fn feed_length_prefixed(hasher: &mut Sha256, tag: &str, value: &str) {
@@ -354,6 +364,41 @@ impl EngineStartSpec {
                     || lower == "chatgpt.com"
                     || lower.ends_with(".chatgpt.com"))
             }
+            NativeEngineKind::MuseNative => {
+                if self
+                    .config_overrides
+                    .get("isThirdPartyProxy")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    return true;
+                }
+                let candidate = match &self.auth {
+                    EngineAuth::ApiKey {
+                        base_url: Some(url),
+                        ..
+                    } => Some(url.as_str()),
+                    _ => None,
+                }
+                .or_else(|| {
+                    self.config_overrides
+                        .get("baseUrl")
+                        .and_then(serde_json::Value::as_str)
+                })
+                .or_else(|| self.env.get("META_API_BASE_URL").map(String::as_str));
+
+                let Some(raw_url) = candidate.map(str::trim).filter(|s| !s.is_empty()) else {
+                    return false;
+                };
+                let Ok(parsed) = url::Url::parse(raw_url) else {
+                    return true;
+                };
+                let Some(host) = parsed.host_str() else {
+                    return true;
+                };
+                let lower = host.to_ascii_lowercase();
+                !(lower == "api.meta.ai" || lower.ends_with(".meta.ai"))
+            }
         }
     }
 
@@ -424,6 +469,66 @@ impl EngineStartSpec {
             );
         }
         self.resolve_home_dir().map(|home| home.join(".claude"))
+    }
+
+    /// Resolves the effective `~/.config/muse` (respecting `XDG_CONFIG_HOME`) directory
+    /// visible to a `MuseNativeDriver` session.
+    pub fn effective_muse_config_dir(&self) -> Option<PathBuf> {
+        if let Some(explicit) = self
+            .env
+            .get("XDG_CONFIG_HOME")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(PathBuf::from(explicit).join("muse"));
+        }
+        if self.isolate_profile
+            && let Some(instance_id) = self
+                .provider_instance_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        {
+            let root_base = self
+                .env
+                .get("DIMO_PROVIDER_INSTANCES_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| std::env::temp_dir().join("dimo-provider-instances"));
+            return Some(
+                root_base
+                    .join(stream_router::sanitize_instance_dir_segment(instance_id))
+                    .join("muse-config")
+                    .join("muse"),
+            );
+        }
+        if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+            return Some(PathBuf::from(xdg).join("muse"));
+        }
+        self.resolve_home_dir()
+            .map(|home| home.join(".config").join("muse"))
+    }
+
+    /// Deterministic SHA-256 hex digest over native Muse configuration & auth files
+    /// (`settings.json`, `auth.json`, `trust.json`) so `MuseServer` pooling invalidates
+    /// automatically when native files change.
+    pub fn native_muse_config_fingerprint(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(b"dimo-muse-native-config-v1\0");
+        if let Some(muse_dir) = self.effective_muse_config_dir() {
+            feed_length_prefixed(&mut hasher, "muse_config_dir", &muse_dir.to_string_lossy());
+            for name in ["settings.json", "auth.json", "trust.json"] {
+                let bytes = std::fs::read(muse_dir.join(name)).ok();
+                hash_optional_file_bytes(&mut hasher, name, bytes.as_deref());
+            }
+        }
+        let digest = hasher.finalize();
+        let mut hex = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut hex, "{byte:02x}");
+        }
+        hex
     }
 
     /// Deterministic SHA-256 hex digest over native Codex configuration/catalog/auth files
@@ -557,6 +662,7 @@ impl EngineHandle {
         let engine_kind = match engine_id.as_str() {
             "claude-native" => Some(NativeEngineKind::ClaudeNative),
             "codex-native" => Some(NativeEngineKind::CodexNative),
+            "muse-native" => Some(NativeEngineKind::MuseNative),
             _ => None,
         };
         Self {
@@ -1228,6 +1334,17 @@ pub trait NativeEngineDriver: Send + Sync + 'static {
         &self,
         _handle: &EngineHandle,
         _decision: EnginePermissionDecision,
+    ) -> Result<(), EngineError> {
+        Ok(())
+    }
+
+    /// Pushes a live permission-mode update to the underlying native engine.
+    /// Engines whose protocol applies policies per turn (such as Codex) leave
+    /// this as a no-op so the updated mode takes effect on the next turn.
+    async fn set_permission_mode(
+        &self,
+        _handle: &EngineHandle,
+        _mode: &str,
     ) -> Result<(), EngineError> {
         Ok(())
     }

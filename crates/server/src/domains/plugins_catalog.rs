@@ -132,13 +132,10 @@ impl ServerApplicationDomains {
             .runtime_inventory()
             .await
             .map_err(internal_error)?;
+        let mut quarantine_reasons = control_plane.quarantine_reasons().await.unwrap_or_default();
         let mut plugin_values = Vec::with_capacity(plugins.len());
         for plugin in &plugins {
-            let quarantine_reason = control_plane
-                .quarantine_reason(plugin.id())
-                .await
-                .ok()
-                .flatten();
+            let quarantine_reason = quarantine_reasons.remove(plugin.id());
             plugin_values.push(plugin_control_item_with_quarantine(
                 plugin,
                 quarantine_reason,
@@ -737,6 +734,7 @@ impl ServerApplicationDomains {
         let (ecosystem, program_name) = match args.ecosystem.as_str() {
             "codex" => (plugins::NativeEcosystem::Codex, "codex"),
             "claude_code" => (plugins::NativeEcosystem::ClaudeCode, "claude"),
+            "muse_code" => (plugins::NativeEcosystem::MuseCode, "muse"),
             other => {
                 return Err(ApplicationError::bad_request(format!(
                     "unsupported native plugin ecosystem `{other}`"
@@ -745,13 +743,25 @@ impl ServerApplicationDomains {
         };
         let commands = plugins::parse_official_plugin_import_commands(ecosystem, &args.command)
             .map_err(plugin_error)?;
-        let program = utils::shell::resolve_executable_path(program_name)
-            .await
-            .ok_or_else(|| {
-                ApplicationError::not_found(format!(
+        let program = match utils::shell::resolve_executable_path(program_name).await {
+            Some(path) => path,
+            None if ecosystem == plugins::NativeEcosystem::MuseCode => {
+                tokio::task::spawn_blocking(crate::host::native::muse_plugins::resolve_muse_default)
+                    .await
+                    .ok()
+                    .flatten()
+                    .ok_or_else(|| {
+                        ApplicationError::not_found(format!(
+                            "official `{program_name}` executable was not found"
+                        ))
+                    })?
+            }
+            None => {
+                return Err(ApplicationError::not_found(format!(
                     "official `{program_name}` executable was not found"
-                ))
-            })?;
+                )));
+            }
+        };
         let adapter: Box<dyn plugins::NativePluginAdapter> = match ecosystem {
             plugins::NativeEcosystem::Codex => {
                 Box::new(plugins::OfficialCliNativePluginAdapter::codex(&program))
@@ -759,6 +769,9 @@ impl ServerApplicationDomains {
             plugins::NativeEcosystem::ClaudeCode => Box::new(
                 plugins::OfficialCliNativePluginAdapter::claude_code(&program),
             ),
+            plugins::NativeEcosystem::MuseCode => {
+                Box::new(plugins::OfficialCliNativePluginAdapter::muse_code(&program))
+            }
         };
         let before = adapter
             .discover()
@@ -769,6 +782,10 @@ impl ServerApplicationDomains {
             .collect::<std::collections::BTreeSet<_>>();
         for parsed in &commands {
             let mut cmd = utils::process::new_hidden_tokio_command(&program, &parsed.args);
+            if ecosystem == plugins::NativeEcosystem::MuseCode {
+                cmd.env("MUSE_EXPERIMENTAL_PLUGINS", "1")
+                    .env("MUSE_NO_AUTO_UPDATE", "1");
+            }
             let output = utils::process::run_command_output_with_timeout(
                 &mut cmd,
                 std::time::Duration::from_secs(60),
@@ -790,7 +807,10 @@ impl ServerApplicationDomains {
                 let message = if detail.is_empty() {
                     format!("plugin import command failed: {}", parsed.display)
                 } else {
-                    format!("plugin import command failed ({}): {detail}", parsed.display)
+                    format!(
+                        "plugin import command failed ({}): {detail}",
+                        parsed.display
+                    )
                 };
                 return Err(ApplicationError::internal(message));
             }

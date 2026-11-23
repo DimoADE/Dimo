@@ -1,4 +1,10 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   ConversationPermissionView,
@@ -199,7 +205,8 @@ function Harness(props: Omit<UseSpaceMemberNoticesInput, 'getMemberAvatar'>) {
       <div data-testid="tab-notices">
         {tabNotices.map((item) => (
           <div key={item.id} data-testid={`tab-notice-${item.id}`}>
-            {item.actor?.name}:{item.kind === 'session-notice' ? item.notice.title : ''}
+            {item.actor?.name}:
+            {item.kind === 'session-notice' ? item.notice.title : ''}
           </div>
         ))}
       </div>
@@ -409,7 +416,9 @@ describe('useSpaceMemberNotices', () => {
     );
 
     expect(await screen.findByText('Edit deploy.yml')).toBeInTheDocument();
-    expect(screen.queryByText('Excluded Approval Card')).not.toBeInTheDocument();
+    expect(
+      screen.queryByText('Excluded Approval Card')
+    ).not.toBeInTheDocument();
     expect(
       screen.getByText('Which layout should we pick?')
     ).toBeInTheDocument();

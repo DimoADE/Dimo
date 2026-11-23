@@ -533,6 +533,16 @@ fn with_published_reachability(base: &[ReachabilityOrigin]) -> Vec<ReachabilityO
     items
 }
 
+async fn live_reachability(base: &[ReachabilityOrigin]) -> Vec<ReachabilityOrigin> {
+    let mut items = with_published_reachability(base);
+    for origin in crate::desktop::web_service::live_lan_origins().await {
+        if !items.iter().any(|item| item.origin == origin.origin) {
+            items.push(origin);
+        }
+    }
+    items
+}
+
 async fn enforce_origin<R>(
     State(state): State<Arc<ServerState<R>>>,
     request: Request,
@@ -809,7 +819,7 @@ async fn capabilities<R>(
         }
     }
     let mut capabilities = state.capabilities.clone();
-    capabilities.reachability = with_published_reachability(&capabilities.reachability);
+    capabilities.reachability = live_reachability(&capabilities.reachability).await;
     capabilities
         .capabilities
         .retain(|capability| credential.grants_capability(capability.as_str()));
@@ -935,17 +945,28 @@ async fn create_pairing<R>(
         .unwrap_or(DevicePermissionPreset::Workstation);
     match state.auth.create_pairing(&credential, request).await {
         Ok(challenge) => {
+            let expires_at_unix = chrono::DateTime::parse_from_rfc3339(&challenge.expires_at)
+                .ok()
+                .map(|dt| dt.timestamp());
             let payload = PairingInvitationPayload::from_challenge(
                 state.config.host_id.clone(),
                 preset,
                 &challenge,
-                with_published_reachability(&state.config.reachability),
+                live_reachability(&state.config.reachability).await,
             );
-            (
-                StatusCode::CREATED,
-                Json(IssuedPairingInvitation::from_payload(challenge, payload)),
-            )
-                .into_response()
+            let issued = IssuedPairingInvitation::from_payload(challenge, payload);
+            if !cfg!(test) {
+                let (code, host_id) = (issued.connection_code.clone(), issued.host_id.clone());
+                tokio::spawn(async move {
+                    crate::desktop::host_tunnel::publish_pairing_code_beacon(
+                        &code,
+                        &host_id,
+                        expires_at_unix,
+                    )
+                    .await;
+                });
+            }
+            (StatusCode::CREATED, Json(issued)).into_response()
         }
         Err(error) => auth_error_response(error),
     }

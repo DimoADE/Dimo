@@ -804,8 +804,7 @@ function toolActionType(
   ) {
     return {
       ...commandResult(status, output, structuredResult),
-      command:
-        command ?? (OPAQUE_TOOL_ID.test(labelName) ? '' : labelName),
+      command: command ?? (OPAQUE_TOOL_ID.test(labelName) ? '' : labelName),
     };
   }
 

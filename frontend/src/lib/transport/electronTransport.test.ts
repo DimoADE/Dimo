@@ -4,6 +4,7 @@ import type { DesktopShellBridge } from '@/lib/desktopShell';
 import type { RemoteEvent, ServerCapabilities } from './backendTransport';
 import {
   ElectronTransport,
+  getElectronBackendTransport,
   resetElectronBackendTransportForTests,
   setElectronBackendTransportForTests,
 } from './electronTransport';
@@ -38,17 +39,19 @@ function createMockWebTransport(): {
         capabilities: ['host_events'],
       })
     ),
-    listen: vi.fn(async (event: string, handler: (payload: unknown) => void) => {
-      let set = wsListeners.get(event);
-      if (!set) {
-        set = new Set();
-        wsListeners.set(event, set);
+    listen: vi.fn(
+      async (event: string, handler: (payload: unknown) => void) => {
+        let set = wsListeners.get(event);
+        if (!set) {
+          set = new Set();
+          wsListeners.set(event, set);
+        }
+        set.add(handler);
+        return () => {
+          set?.delete(handler);
+        };
       }
-      set.add(handler);
-      return () => {
-        set?.delete(handler);
-      };
-    }),
+    ),
     subscribe: vi.fn(function* () {
       // empty async generator mock
     } as unknown as WebTransport['subscribe']),
@@ -56,6 +59,7 @@ function createMockWebTransport(): {
       (lease: { leaseId: string; capabilityToken: string }) =>
         `http://127.0.0.1:4100/api/v1/previews/${lease.leaseId}/c/${lease.capabilityToken}/`
     ),
+    reconfigure: vi.fn(),
     destroy: vi.fn(),
   } as unknown as WebTransport;
 
@@ -82,17 +86,19 @@ function createMockShell(): {
       args,
     })),
     events: {
-      listen: vi.fn(async (event: string, handler: (payload: unknown) => void) => {
-        let set = ipcListeners.get(event);
-        if (!set) {
-          set = new Set();
-          ipcListeners.set(event, set);
+      listen: vi.fn(
+        async (event: string, handler: (payload: unknown) => void) => {
+          let set = ipcListeners.get(event);
+          if (!set) {
+            set = new Set();
+            ipcListeners.set(event, set);
+          }
+          set.add(handler);
+          return () => {
+            set?.delete(handler);
+          };
         }
-        set.add(handler);
-        return () => {
-          set?.delete(handler);
-        };
-      }),
+      ),
       emit: vi.fn(async () => undefined),
     },
     getWindowLabel: () => 'main',
@@ -109,6 +115,7 @@ function createMockShell(): {
 }
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   delete (window as unknown as Record<string, unknown>).dimoDesktop;
   resetRemoteDesktopMultiplexersForTests();
   resetElectronBackendTransportForTests();
@@ -152,13 +159,19 @@ describe('ElectronTransport', () => {
     });
 
     const serverReceived: unknown[] = [];
-    const unlistenServer = await transport.listen('host-client-changed', (payload) => {
-      serverReceived.push(payload);
-    });
+    const unlistenServer = await transport.listen(
+      'host-client-changed',
+      (payload) => {
+        serverReceived.push(payload);
+      }
+    );
     const browserReceived: unknown[] = [];
-    const unlistenBrowser = await transport.listen('plugin:browser:tab', (payload) => {
-      browserReceived.push(payload);
-    });
+    const unlistenBrowser = await transport.listen(
+      'plugin:browser:tab',
+      (payload) => {
+        browserReceived.push(payload);
+      }
+    );
 
     const themeReceived: unknown[] = [];
     const unlistenTheme = await transport.listen('theme-changed', (payload) => {
@@ -169,13 +182,31 @@ describe('ElectronTransport', () => {
       toastReceived.push(payload);
     });
 
-    expect(web.transport.listen).toHaveBeenCalledWith('host-client-changed', expect.any(Function));
-    expect(web.transport.listen).toHaveBeenCalledWith('plugin:browser:tab', expect.any(Function));
-    expect(web.transport.listen).toHaveBeenCalledWith('theme-changed', expect.any(Function));
-    expect(web.transport.listen).not.toHaveBeenCalledWith('desktop-toast', expect.any(Function));
+    expect(web.transport.listen).toHaveBeenCalledWith(
+      'host-client-changed',
+      expect.any(Function)
+    );
+    expect(web.transport.listen).toHaveBeenCalledWith(
+      'plugin:browser:tab',
+      expect.any(Function)
+    );
+    expect(web.transport.listen).toHaveBeenCalledWith(
+      'theme-changed',
+      expect.any(Function)
+    );
+    expect(web.transport.listen).not.toHaveBeenCalledWith(
+      'desktop-toast',
+      expect.any(Function)
+    );
 
-    expect(shell.shell.events.listen).toHaveBeenCalledWith('theme-changed', expect.any(Function));
-    expect(shell.shell.events.listen).toHaveBeenCalledWith('desktop-toast', expect.any(Function));
+    expect(shell.shell.events.listen).toHaveBeenCalledWith(
+      'theme-changed',
+      expect.any(Function)
+    );
+    expect(shell.shell.events.listen).toHaveBeenCalledWith(
+      'desktop-toast',
+      expect.any(Function)
+    );
     expect(shell.shell.events.listen).not.toHaveBeenCalledWith(
       'host-client-changed',
       expect.any(Function)
@@ -217,7 +248,8 @@ describe('ElectronTransport', () => {
         return { streamed: true, command, args };
       }
     );
-    (web.transport as unknown as { stream?: typeof webStream }).stream = webStream;
+    (web.transport as unknown as { stream?: typeof webStream }).stream =
+      webStream;
 
     const shell = createMockShell();
     const transport = new ElectronTransport({
@@ -247,10 +279,8 @@ describe('ElectronTransport', () => {
     const shellInvoke = shell.shell.invoke as ReturnType<typeof vi.fn>;
     shellInvoke.mockResolvedValueOnce({ events: [{ step: 1 }], done: true });
     const shellMessages: unknown[] = [];
-    const shellRes = await transport.stream(
-      'host_client_status',
-      {},
-      (msg) => shellMessages.push(msg)
+    const shellRes = await transport.stream('host_client_status', {}, (msg) =>
+      shellMessages.push(msg)
     );
     expect(shellMessages).toEqual([{ step: 1 }]);
     expect(shellRes).toEqual({ events: [{ step: 1 }], done: true });
@@ -266,7 +296,9 @@ describe('ElectronTransport', () => {
     });
 
     await transport.emit('dimo:test', { ok: true });
-    expect(shell.shell.events.emit).toHaveBeenCalledWith('dimo:test', { ok: true });
+    expect(shell.shell.events.emit).toHaveBeenCalledWith('dimo:test', {
+      ok: true,
+    });
 
     const caps = await transport.capabilities();
     expect(caps.protocol_version).toBe('1.0');
@@ -274,6 +306,70 @@ describe('ElectronTransport', () => {
     expect(
       transport.artifactPreviewUrl({ leaseId: 'L1', capabilityToken: 'T1' })
     ).toContain('/api/v1/previews/L1/c/T1/');
+  });
+
+  it('routes createDevicePairing through desktop shell and partitions connectivity recovery events', async () => {
+    const web = createMockWebTransport();
+    const shell = createMockShell();
+    const challenge = {
+      pairing_id: 'pair-1',
+      pairing_token: 'K7M2NPQX',
+      connection_code: 'K7M2NPQX',
+      expires_at: '2026-12-01T00:00:00Z',
+      requested_scopes: ['conversation.read'],
+      invitation: 'dimo-pairing:{}',
+      reachability: [{ origin: 'http://192.168.1.20:17891', kind: 'lan' }],
+    };
+    (shell.shell.invoke as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      challenge
+    );
+
+    const transport = new ElectronTransport({
+      backend: { baseUrl: 'http://127.0.0.1:4100', token: 'a'.repeat(64) },
+      webTransport: web.transport,
+      shell: shell.shell,
+    });
+
+    const result = await transport.createDevicePairing({
+      preset: 'workstation',
+      ttl_seconds: 604800,
+    });
+    expect(result).toEqual(challenge);
+    expect(shell.shell.invoke).toHaveBeenCalledWith(
+      'create_host_device_pairing',
+      {
+        request: { preset: 'workstation', ttl_seconds: 604800 },
+      }
+    );
+
+    const resumeEvents: unknown[] = [];
+    const rejectEvents: unknown[] = [];
+    await transport.listen('system-power-resumed', (p) => resumeEvents.push(p));
+    await transport.listen('host-tunnel-lease-rejected', (p) =>
+      rejectEvents.push(p)
+    );
+
+    expect(shell.shell.events.listen).toHaveBeenCalledWith(
+      'system-power-resumed',
+      expect.any(Function)
+    );
+    expect(web.transport.listen).not.toHaveBeenCalledWith(
+      'system-power-resumed',
+      expect.any(Function)
+    );
+    expect(web.transport.listen).toHaveBeenCalledWith(
+      'host-tunnel-lease-rejected',
+      expect.any(Function)
+    );
+    expect(shell.shell.events.listen).not.toHaveBeenCalledWith(
+      'host-tunnel-lease-rejected',
+      expect.any(Function)
+    );
+
+    shell.emitIpcEvent('system-power-resumed', { at: 1 });
+    web.emitWsEvent('host-tunnel-lease-rejected', { reason: 'lease_expired' });
+    expect(resumeEvents).toEqual([{ at: 1 }]);
+    expect(rejectEvents).toEqual([{ reason: 'lease_expired' }]);
   });
 });
 
@@ -389,7 +485,8 @@ describe('getLocalDesktopTransport & electronRemoteDesktopBridge', () => {
     const subCall = shellInvoke.mock.calls.find(
       (call) => call[0] === 'remote_desktop_subscribe'
     );
-    const subId = (subCall?.[1] as { subscriptionId: string } | undefined)?.subscriptionId;
+    const subId = (subCall?.[1] as { subscriptionId: string } | undefined)
+      ?.subscriptionId;
     expect(subId).toBeTruthy();
 
     web.emitWsEvent('dimo://remote-subscription-event', {
@@ -425,8 +522,9 @@ describe('getLocalDesktopTransport & electronRemoteDesktopBridge', () => {
     const errPromise = errIter.next();
     await vi.waitFor(() => {
       expect(
-        shellInvoke.mock.calls.filter((call) => call[0] === 'remote_desktop_subscribe')
-          .length
+        shellInvoke.mock.calls.filter(
+          (call) => call[0] === 'remote_desktop_subscribe'
+        ).length
       ).toBe(2);
     });
     const errSubCall = shellInvoke.mock.calls.filter(
@@ -442,6 +540,147 @@ describe('getLocalDesktopTransport & electronRemoteDesktopBridge', () => {
         sequence: 0,
       },
     });
-    await expect(errPromise).rejects.toThrow('Remote host rejected subscription');
+    await expect(errPromise).rejects.toThrow(
+      'Remote host rejected subscription'
+    );
+  });
+
+  it('rotates WebTransport baseUrl/token and reconnects active sockets on sidecar-restarted', async () => {
+    class MockWebSocket {
+      static readonly OPEN = 1;
+      static instances: MockWebSocket[] = [];
+      readonly sent: string[] = [];
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      constructor(
+        readonly url: string,
+        readonly protocols?: string | string[]
+      ) {
+        MockWebSocket.instances.push(this);
+      }
+      send(data: string) {
+        this.sent.push(data);
+      }
+      open() {
+        this.readyState = MockWebSocket.OPEN;
+        this.onopen?.();
+      }
+      close() {
+        this.readyState = 3;
+        this.onclose?.();
+      }
+    }
+
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ operation_id: 'op-1', data: { recovered: true } }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const shell = createMockShell();
+    let liveBackend = {
+      baseUrl: 'http://127.0.0.1:43210',
+      token: 'old-sidecar-token',
+    };
+
+    (window as unknown as Record<string, unknown>).dimoDesktop = {
+      platform: 'win32',
+      getWindowLabel: () => 'main',
+      getAppVersion: async () => '0.5.2',
+      get backend() {
+        return liveBackend;
+      },
+      getBackend: () => liveBackend,
+      invoke: shell.shell.invoke,
+      events: shell.shell.events,
+      window: {},
+      dialog: {},
+      fs: {},
+      path: {},
+      shell: {},
+      assets: { convertFileSrc: (p: string) => p },
+      updater: {},
+    };
+
+    const transport = getElectronBackendTransport();
+    expect(transport.origin).toBe('http://127.0.0.1:43210');
+
+    const unlisten = await transport.listen('plugin-updates-changed', () => {});
+    expect(MockWebSocket.instances).toHaveLength(1);
+    const oldSocket = MockWebSocket.instances[0]!;
+    expect(oldSocket.url).toBe('ws://127.0.0.1:43210/api/v1/ws');
+    oldSocket.open();
+
+    // Preload updates liveBackend before broadcasting sidecar-restarted.
+    liveBackend = {
+      baseUrl: 'http://127.0.0.1:45555',
+      token: 'new-sidecar-token',
+    };
+    shell.emitIpcEvent('sidecar-restarted', {
+      backend: liveBackend,
+      attempt: 1,
+    });
+
+    expect(transport.origin).toBe('http://127.0.0.1:45555');
+    // Cached singleton identity is preserved for existing React/mux holders.
+    expect(getElectronBackendTransport()).toBe(transport);
+    expect(oldSocket.readyState).toBe(3);
+    expect(MockWebSocket.instances).toHaveLength(2);
+    const newSocket = MockWebSocket.instances[1]!;
+    expect(newSocket.url).toBe('ws://127.0.0.1:45555/api/v1/ws');
+    expect(newSocket.protocols).not.toEqual(oldSocket.protocols);
+
+    newSocket.open();
+    expect(
+      newSocket.sent.some((frame) => {
+        const parsed = JSON.parse(frame);
+        return (
+          parsed.type === 'attach' &&
+          parsed.request?.channel === 'plugin-updates-changed'
+        );
+      })
+    ).toBe(true);
+
+    await transport.call('get_projects', {});
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:45555/api/v1/call/get_projects',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer new-sidecar-token',
+        }),
+      })
+    );
+
+    // Also supports fallback to dimoDesktop.getBackend() when payload lacks inline backend.
+    liveBackend = {
+      baseUrl: 'http://127.0.0.1:46666',
+      token: 'fallback-sidecar-token',
+    };
+    shell.emitIpcEvent('sidecar-restarted', { attempt: 2 });
+    expect(transport.origin).toBe('http://127.0.0.1:46666');
+    expect(MockWebSocket.instances).toHaveLength(3);
+    expect(MockWebSocket.instances[2]!.url).toBe(
+      'ws://127.0.0.1:46666/api/v1/ws'
+    );
+
+    // pagehide tears down the cached transport and detaches sidecar-restarted listener.
+    window.dispatchEvent(new Event('pagehide'));
+    expect(MockWebSocket.instances[2]!.readyState).toBe(3);
+    liveBackend = {
+      baseUrl: 'http://127.0.0.1:47777',
+      token: 'post-unload-token',
+    };
+    shell.emitIpcEvent('sidecar-restarted', {
+      backend: liveBackend,
+      attempt: 3,
+    });
+    expect(MockWebSocket.instances).toHaveLength(3);
+
+    unlisten();
   });
 });

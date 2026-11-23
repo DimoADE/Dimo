@@ -285,8 +285,9 @@ mod tests {
         let listed = list_space_messages(&pool, &space, None, None, MessageAudience::User)
             .await
             .unwrap();
-        assert_eq!(listed[0].envelope["reactions"][0]["emoji"], json!("🎉"));
-        assert_eq!(listed[0].envelope["reactions"][0]["actor"], json!("user"));
+        let posted_row = listed.iter().find(|m| m.id == posted.message_id).unwrap();
+        assert_eq!(posted_row.envelope["reactions"][0]["emoji"], json!("🎉"));
+        assert_eq!(posted_row.envelope["reactions"][0]["actor"], json!("user"));
 
         let cleared = toggle_space_reaction(&pool, &space, &posted.message_id, "user", "🎉")
             .await
@@ -295,7 +296,8 @@ mod tests {
         let listed = list_space_messages(&pool, &space, None, None, MessageAudience::User)
             .await
             .unwrap();
-        assert!(listed[0].envelope.get("reactions").is_none());
+        let posted_row = listed.iter().find(|m| m.id == posted.message_id).unwrap();
+        assert!(posted_row.envelope.get("reactions").is_none());
     }
 
     #[tokio::test]

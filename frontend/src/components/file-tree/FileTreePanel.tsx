@@ -2362,10 +2362,10 @@ export function FileTreePanel({
       {dragOverlay
         ? createPortal(
             <div
-              className="pointer-events-none fixed z-[10060] rounded-md border border-border/80 bg-popover/95 px-2 py-1 text-xs text-popover-foreground shadow-xl backdrop-blur-sm"
+              className="pointer-events-none fixed left-0 top-0 z-[10060] rounded-md border border-border/80 bg-popover px-2 py-1 text-xs text-popover-foreground shadow-xl"
               style={{
-                left: dragOverlay.x + 12,
-                top: dragOverlay.y + 12,
+                transform: `translate3d(${dragOverlay.x + 12}px, ${dragOverlay.y + 12}px, 0)`,
+                willChange: 'transform',
               }}
             >
               {dragOverlay.payload.kind === 'directory' ? 'Folder: ' : 'File: '}

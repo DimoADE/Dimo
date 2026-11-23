@@ -28,6 +28,8 @@ export function agentTerminalLabel(agentId: string | null | undefined): string {
       return 'OpenClaw';
     case 'cursor':
       return 'Cursor';
+    case 'muse_code':
+      return 'Muse';
     default: {
       if (!key) {
         return 'Agent';

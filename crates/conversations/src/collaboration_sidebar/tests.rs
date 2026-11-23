@@ -715,3 +715,68 @@ async fn space_and_dm_windows_paginate_backward_with_has_more_before() {
     assert!(!page3.has_more_before);
     assert_eq!(page3.oldest_seq, Some(1));
 }
+
+#[tokio::test]
+async fn enrich_space_members_batch_and_sidebar_populate_agent_and_model() {
+    let pool = setup_test_pool().await;
+    let workspace = Uuid::new_v4();
+    let conversation = Uuid::new_v4();
+    let space_id = Uuid::new_v4().to_string();
+    let seat_member_id = Uuid::new_v4().to_string();
+
+    let _direct_thread_id = seed_dm_session(&pool, workspace, conversation, "Backend").await;
+    let identity_id = identity::member_id_for_conversation(conversation);
+
+    sqlx::query("UPDATE collaboration_members SET agent = ?, model = ? WHERE id = ?")
+        .bind("codex")
+        .bind("gpt-6.2-sol")
+        .bind(&identity_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "INSERT INTO collaboration_spaces (id, workspace_id, name, created_at) VALUES (?, ?, 'Dev Team', '2026-10-24T00:00:00.000Z')",
+    )
+    .bind(&space_id)
+    .bind(workspace.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO collaboration_space_members
+           (space_id, member_id, conversation_id, nickname, kind, visible_to_agents)
+           VALUES (?, ?, ?, 'Backend', 'agent', 1)"#,
+    )
+    .bind(&space_id)
+    .bind(&seat_member_id)
+    .bind(conversation.to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let space_members = crate::collaboration::list_space_members(
+        &pool,
+        &space_id,
+        crate::collaboration::MessageAudience::User,
+    )
+    .await
+    .unwrap();
+    let enriched = groups::enrich_space_members_batch(&pool, &space_id, space_members)
+        .await
+        .unwrap();
+    assert_eq!(enriched[0]["agent"], json!("codex"));
+    assert_eq!(enriched[0]["agent_id"], json!("codex"));
+    assert_eq!(enriched[0]["model"], json!("gpt-6.2-sol"));
+    assert_eq!(enriched[0]["model_label"], json!("gpt-6.2-sol"));
+
+    let sidebar = list_sidebar(&pool, workspace).await.unwrap();
+    let dm_item = sidebar
+        .iter()
+        .find(|item| item.kind == "dm")
+        .expect("direct sidebar item");
+    let member = dm_item.member.as_ref().expect("sidebar member");
+    assert_eq!(member.agent.as_deref(), Some("codex"));
+    assert_eq!(member.model.as_deref(), Some("gpt-6.2-sol"));
+    assert_eq!(member.model_label.as_deref(), Some("gpt-6.2-sol"));
+}

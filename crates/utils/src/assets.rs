@@ -287,12 +287,58 @@ pub fn app_update_deletes_directory(
     macos_app_bundle_containing(current_exe).is_some_and(|bundle| dir.starts_with(bundle))
 }
 
+fn is_dimo_workspace_root(dir: &Path) -> bool {
+    dir.join("Cargo.toml").is_file()
+        && dir
+            .join("crates")
+            .join("utils")
+            .join("Cargo.toml")
+            .is_file()
+}
+
+fn workspace_root_from_ancestor(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|candidate| is_dimo_workspace_root(candidate))
+        .map(Path::to_path_buf)
+}
+
+fn workspace_root_from_exe(exe: &Path) -> Option<PathBuf> {
+    let mut cursor = exe.parent()?;
+    while let Some(name) = cursor.file_name().and_then(|n| n.to_str()) {
+        if name.eq_ignore_ascii_case("target") {
+            let root = cursor.parent()?;
+            if is_dimo_workspace_root(root) {
+                return Some(root.to_path_buf());
+            }
+        }
+        cursor = cursor.parent()?;
+    }
+    None
+}
+
+pub(crate) fn resolve_debug_dev_assets_dir(
+    current_dir: Option<&Path>,
+    current_exe: Option<&Path>,
+    compile_time_manifest_dir: &Path,
+) -> PathBuf {
+    let root = current_dir
+        .and_then(workspace_root_from_ancestor)
+        .or_else(|| current_exe.and_then(workspace_root_from_exe))
+        .unwrap_or_else(|| {
+            compile_time_manifest_dir
+                .parent()
+                .and_then(Path::parent)
+                .unwrap_or(compile_time_manifest_dir)
+                .to_path_buf()
+        });
+    crate::path::normalize_windows_extended_path_prefix(root).join("dev_assets")
+}
+
 fn debug_dev_assets_dir() -> PathBuf {
-    Path::new(PROJECT_ROOT)
-        .parent()
-        .and_then(Path::parent)
-        .unwrap_or_else(|| Path::new(PROJECT_ROOT))
-        .join("dev_assets")
+    let cwd = std::env::current_dir().ok();
+    let exe = std::env::current_exe().ok();
+    resolve_debug_dev_assets_dir(cwd.as_deref(), exe.as_deref(), Path::new(PROJECT_ROOT))
 }
 
 /// A legacy data directory whose database must be moved into the release

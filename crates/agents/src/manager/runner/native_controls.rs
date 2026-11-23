@@ -386,20 +386,31 @@ impl AgentConnectionRunner {
         }
 
         let mut asserted = BTreeMap::new();
-        if let Some(preferences) = self.preferred_controls.write().await.remove(&session_id) {
-            if let Some(pref_mode) = preferences
-                .mode
-                .as_deref()
-                .and_then(|m| driver.normalize_mode(m))
-            {
-                let mut auto_guard = self.auto_approve_mode.lock().await;
-                if pref_mode == engine_caps.modes.yolo_mode_id {
-                    *auto_guard = AgentAutoApproveMode::Yolo;
-                } else if *auto_guard == AgentAutoApproveMode::Yolo {
-                    *auto_guard = AgentAutoApproveMode::Off;
+        if let Some(preferences) = self
+            .preferred_controls
+            .read()
+            .await
+            .get(&session_id)
+            .cloned()
+        {
+            if let Some(raw_pref_mode) = preferences.mode.as_deref() {
+                if let Some(pref_mode) = driver.normalize_mode(raw_pref_mode) {
+                    let mut auto_guard = self.auto_approve_mode.lock().await;
+                    if pref_mode == engine_caps.modes.yolo_mode_id {
+                        *auto_guard = AgentAutoApproveMode::Yolo;
+                    } else if *auto_guard == AgentAutoApproveMode::Yolo {
+                        *auto_guard = AgentAutoApproveMode::Off;
+                    }
+                    drop(auto_guard);
+                    modes.current_mode_id = acp::schema::v1::SessionModeId::new(pref_mode.clone());
+                    asserted.insert("mode".to_string(), pref_mode);
+                } else {
+                    tracing::warn!(
+                        %session_id,
+                        raw_pref_mode,
+                        "preferred native session mode could not be normalized; falling back to default"
+                    );
                 }
-                drop(auto_guard);
-                modes.current_mode_id = acp::schema::v1::SessionModeId::new(pref_mode);
             }
             for item in &preferences.config {
                 let val = item.value.trim();
@@ -429,6 +440,7 @@ impl AgentConnectionRunner {
             entry.last_model_id = last_model_id;
             entry.available_commands = Some(commands);
             entry.asserted_config_values = asserted;
+            entry.drift_retry_counts.clear();
         }
 
         let snapshot = self.session_controls_snapshot(session_id).await;
@@ -476,6 +488,7 @@ impl AgentConnectionRunner {
     pub(in crate::manager) async fn apply_native_mode_change(
         &self,
         driver: &dyn NativeEngineDriver,
+        handle: &EngineHandle,
         session_id: AgentSessionId,
         mode_id: String,
     ) -> AgentSessionControlsSnapshot {
@@ -491,6 +504,14 @@ impl AgentConnectionRunner {
                 *auto_guard = AgentAutoApproveMode::Off;
             }
         }
+        if let Err(err) = driver.set_permission_mode(handle, &normalized).await {
+            tracing::warn!(
+                %session_id,
+                mode = %normalized,
+                %err,
+                "failed to push live native permission mode; updated mode will apply on next turn"
+            );
+        }
         {
             let mut controls = self.session_controls.write().await;
             let entry = controls.entry(session_id).or_default();
@@ -502,6 +523,11 @@ impl AgentConnectionRunner {
             entry
                 .asserted_config_values
                 .insert("mode".to_string(), normalized.clone());
+            entry.drift_retry_counts.remove("mode");
+        }
+        {
+            let mut prefs = self.preferred_controls.write().await;
+            prefs.entry(session_id).or_default().mode = Some(normalized.clone());
         }
         self.emit(
             Some(session_id),
@@ -531,6 +557,7 @@ impl AgentConnectionRunner {
     pub(in crate::manager) async fn apply_native_config_change(
         &self,
         driver: &dyn NativeEngineDriver,
+        handle: &EngineHandle,
         session_id: AgentSessionId,
         key: String,
         value: Value,
@@ -539,7 +566,7 @@ impl AgentConnectionRunner {
             && let Some(mode_str) = value.as_str().map(str::trim).filter(|s| !s.is_empty())
         {
             return self
-                .apply_native_mode_change(driver, session_id, mode_str.to_string())
+                .apply_native_mode_change(driver, handle, session_id, mode_str.to_string())
                 .await;
         }
 
@@ -551,8 +578,20 @@ impl AgentConnectionRunner {
             entry
                 .asserted_config_values
                 .insert(key.clone(), val_str.to_string());
+            entry.drift_retry_counts.remove(&key);
             if key == "model" {
                 entry.last_model_id = Some(val_str.to_string());
+            }
+            drop(controls);
+            let mut prefs = self.preferred_controls.write().await;
+            let entry = prefs.entry(session_id).or_default();
+            if let Some(existing) = entry.config.iter_mut().find(|item| item.key == key) {
+                existing.value = val_str.to_string();
+            } else {
+                entry.config.push(AgentSessionConfigOverride {
+                    key: key.clone(),
+                    value: val_str.to_string(),
+                });
             }
         }
         self.emit(
@@ -682,8 +721,8 @@ impl AgentConnectionRunner {
             .find(|o| o.key == "model")
             .map(|o| o.value.trim().to_string())
             .filter(|s| !s.is_empty())
-            .or(preferred_model)
             .or_else(|| stored.and_then(|s| s.asserted_config_values.get("model").cloned()))
+            .or(preferred_model)
             .or_else(|| self.snapshot.env.get("DIMO_DEFAULT_MODEL").cloned())
             .filter(|candidate| driver.accepts_model_id(candidate, &merged_env));
 
@@ -701,23 +740,21 @@ impl AgentConnectionRunner {
                 })
             });
 
-        let raw_mode = explicit_mode.or_else(|| {
-            stored.and_then(|s| current_select_option_value(&s.config_options, "mode"))
-        });
+        let raw_mode = explicit_mode
+            .or_else(|| stored.and_then(|s| s.asserted_config_values.get("mode").cloned()))
+            .or_else(|| {
+                stored.and_then(|s| current_select_option_value(&s.config_options, "mode"))
+            });
 
         let normalized_mode = raw_mode
             .as_deref()
             .and_then(|m| driver.normalize_mode(m))
             .or(raw_mode);
 
-        let effective_mode = if yolo {
-            match normalized_mode.as_deref() {
-                Some("plan") => Some("plan".to_string()),
-                _ => Some(driver.capabilities().modes.yolo_mode_id),
-            }
-        } else {
-            normalized_mode
-        };
+        // Explicit or stored session mode always wins; connection-level Yolo
+        // only serves as a fallback when no session mode has been established.
+        let effective_mode =
+            normalized_mode.or_else(|| yolo.then(|| driver.capabilities().modes.yolo_mode_id));
 
         (model, effort, effective_mode)
     }

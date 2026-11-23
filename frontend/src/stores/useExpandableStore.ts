@@ -15,6 +15,29 @@ function isProcessKey(key: string): boolean {
   return key.startsWith('process:');
 }
 
+const MAX_EXPANDABLE_KEYS = 2000;
+
+function withBoundedExpandableEntries(
+  current: Record<string, boolean>,
+  updates: readonly (readonly [string, boolean])[]
+): Record<string, boolean> {
+  const next: Record<string, boolean> = { ...current };
+  for (const [key, value] of updates) {
+    if (key in next) {
+      delete next[key];
+    }
+    next[key] = value;
+  }
+  const keys = Object.keys(next);
+  if (keys.length > MAX_EXPANDABLE_KEYS) {
+    const overflow = keys.length - MAX_EXPANDABLE_KEYS;
+    for (let i = 0; i < overflow; i += 1) {
+      delete next[keys[i]];
+    }
+  }
+  return next;
+}
+
 const useExpandableStore = create<State>((set) => ({
   expanded: {},
   revision: 0,
@@ -24,7 +47,7 @@ const useExpandableStore = create<State>((set) => ({
       s.expanded[key] === value
         ? s
         : {
-            expanded: { ...s.expanded, [key]: value },
+            expanded: withBoundedExpandableEntries(s.expanded, [[key, value]]),
             revision: s.revision + 1,
             processRevision: s.processRevision + (isProcessKey(key) ? 1 : 0),
           }
@@ -34,10 +57,10 @@ const useExpandableStore = create<State>((set) => ({
       keys.every((key) => s.expanded[key] === value)
         ? s
         : {
-            expanded: {
-              ...s.expanded,
-              ...Object.fromEntries(keys.map((key) => [key, value])),
-            },
+            expanded: withBoundedExpandableEntries(
+              s.expanded,
+              keys.map((key) => [key, value] as const)
+            ),
             revision: s.revision + 1,
             processRevision:
               s.processRevision + (keys.some(isProcessKey) ? 1 : 0),
@@ -47,7 +70,7 @@ const useExpandableStore = create<State>((set) => ({
     set((s) => {
       const next = !(s.expanded[key] ?? fallback);
       return {
-        expanded: { ...s.expanded, [key]: next },
+        expanded: withBoundedExpandableEntries(s.expanded, [[key, next]]),
         revision: s.revision + 1,
         processRevision: s.processRevision + (isProcessKey(key) ? 1 : 0),
       };

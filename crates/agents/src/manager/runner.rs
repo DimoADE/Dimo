@@ -141,10 +141,13 @@ pub(in crate::manager) struct SessionControlState {
     /// The matching first `agent_message_chunk` is dropped so skill paths
     /// are not rendered as the assistant's opening words.
     pub(in crate::manager) pi_startup_banner: Option<String>,
-    /// Values this host asserted at establishment and the agent confirmed.
-    /// Kept until the first prompt; a later push that contradicts them is
-    /// re-asserted once (Codeg `asserted_config_values`).
+    /// Confirmed desired control values for this session. Persists across turns
+    /// so unsolicited agent pushes back to defaults are suppressed and
+    /// re-asserted up to `MAX_CONFIG_DRIFT_RETRIES` times.
     pub(in crate::manager) asserted_config_values: BTreeMap<String, String>,
+    /// Per-key drift re-assertion counter for `asserted_config_values`. Reset
+    /// on explicit user/host control picks and at the start of each new turn.
+    pub(in crate::manager) drift_retry_counts: BTreeMap<String, u8>,
     /// Merged token & context-window usage accumulated during the active turn.
     pub(in crate::manager) last_turn_usage: Option<AgentUsage>,
     /// Latest normalized goal snapshot (`_meta.goal` / AIR / legacy `_meta.codex.goal`).
@@ -644,6 +647,9 @@ impl AgentConnectionRunner {
         if let Some(acp_session_id) = acp_session_id {
             self.stream_dedup.lock().await.remove(&acp_session_id);
         }
+        crate::terminal::agent_terminal_registry()
+            .release_all_for_session(session_id)
+            .await;
     }
 
     pub(in crate::manager) fn emit_connection_status(

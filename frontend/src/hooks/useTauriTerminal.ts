@@ -8,6 +8,7 @@ import {
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 import { backendCall, backendListen } from '@/lib/backendTransport';
 import { attachTerminalInput } from '@/utils/terminalInputAdapter';
@@ -22,6 +23,9 @@ import {
   type TerminalFitMeasurements,
 } from '@/hooks/terminalFitBox';
 type UnlistenFn = () => void;
+
+const sharedTextEncoder = new TextEncoder();
+const sharedTextDecoder = new TextDecoder();
 
 function isTerminalCopyShortcut(
   event: Pick<
@@ -76,7 +80,7 @@ async function writeTextToClipboard(text: string): Promise<boolean> {
 }
 
 function encodeBase64(str: string): string {
-  const bytes = new TextEncoder().encode(str);
+  const bytes = sharedTextEncoder.encode(str);
   const binString = Array.from(bytes, (byte) =>
     String.fromCodePoint(byte)
   ).join('');
@@ -84,12 +88,55 @@ function encodeBase64(str: string): string {
 }
 
 function decodeBase64ToBytes(base64: string): Uint8Array {
-  const binString = atob(base64);
-  return Uint8Array.from(binString, (char) => char.codePointAt(0)!);
+  const bin = atob(base64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) {
+    bytes[i] = bin.charCodeAt(i);
+  }
+  return bytes;
+}
+
+const MAX_ACTIVE_WEBGL_TERMINALS = 4;
+let activeWebglTerminalCount = 0;
+
+const MAX_REPLAY_BUFFER_CHUNKS = 2_000;
+const MAX_REPLAY_BUFFER_BYTES = 2 * 1024 * 1024;
+
+interface PooledWebglAddon {
+  addon: WebglAddon;
+  dispose: () => void;
+}
+
+function acquirePooledWebglAddon(onLost: () => void): PooledWebglAddon | null {
+  if (activeWebglTerminalCount >= MAX_ACTIVE_WEBGL_TERMINALS) {
+    return null;
+  }
+  const addon = new WebglAddon();
+  activeWebglTerminalCount += 1;
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    activeWebglTerminalCount = Math.max(0, activeWebglTerminalCount - 1);
+  };
+  const dispose = () => {
+    release();
+    try {
+      addon.dispose();
+    } catch {
+      // Addon may already be disposed by context loss or terminal disposal.
+    }
+  };
+  addon.onContextLoss(() => {
+    onLost();
+    dispose();
+  });
+  return { addon, dispose };
 }
 
 const ESC = String.fromCharCode(0x1b);
 const BEL = String.fromCharCode(0x07);
+const OSC_PREFIX = `${ESC}]`;
 const OSC9_RE = new RegExp(
   `${ESC}\\]9;9;([^${BEL}${ESC}]+)(?:${BEL}|${ESC}\\\\)`
 );
@@ -102,21 +149,26 @@ const ANSI_ESCAPE_RE = new RegExp(
 );
 
 function extractTerminalCwd(rawText: string): string | null {
-  const osc9Match = rawText.match(OSC9_RE);
-  if (osc9Match?.[1]) {
-    return osc9Match[1].trim();
-  }
-  const osc7Match = rawText.match(OSC7_RE);
-  if (osc7Match?.[1]) {
-    try {
-      const decoded = decodeURIComponent(osc7Match[1]);
-      if (/^\/[A-Za-z]:\//.test(decoded)) {
-        return decoded.slice(1).replace(/\//g, '\\');
-      }
-      return decoded;
-    } catch {
-      return osc7Match[1];
+  if (rawText.includes(OSC_PREFIX)) {
+    const osc9Match = rawText.match(OSC9_RE);
+    if (osc9Match?.[1]) {
+      return osc9Match[1].trim();
     }
+    const osc7Match = rawText.match(OSC7_RE);
+    if (osc7Match?.[1]) {
+      try {
+        const decoded = decodeURIComponent(osc7Match[1]);
+        if (/^\/[A-Za-z]:\//.test(decoded)) {
+          return decoded.slice(1).replace(/\//g, '\\');
+        }
+        return decoded;
+      } catch {
+        return osc7Match[1];
+      }
+    }
+  }
+  if (!rawText.includes('>')) {
+    return null;
   }
   const stripped = rawText.replace(ANSI_ESCAPE_RE, '');
   const psMatches = [
@@ -186,10 +238,14 @@ function hasUsableTerminalContainer(element: HTMLElement): boolean {
   }
 
   const rect = element.getBoundingClientRect();
-  return (
-    rect.width >= MIN_TERMINAL_CONTAINER_SIZE &&
-    rect.height >= MIN_TERMINAL_CONTAINER_SIZE
-  );
+  if (
+    rect.width < MIN_TERMINAL_CONTAINER_SIZE ||
+    rect.height < MIN_TERMINAL_CONTAINER_SIZE
+  ) {
+    return false;
+  }
+
+  return getComputedStyle(element).visibility !== 'hidden';
 }
 
 function hasLiveTerminalElement(
@@ -325,6 +381,7 @@ export function useTauriTerminal({
 }: UseTauriTerminalOptions): UseTauriTerminalResult {
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const webglAddonRef = useRef<PooledWebglAddon | null>(null);
   const sessionIdRef = useRef<string | null>(sessionId ?? null);
   const cwdRef = useRef<string | undefined>(cwd);
   const unlistenRef = useRef<UnlistenFn | null>(null);
@@ -332,6 +389,7 @@ export function useTauriTerminal({
   const themeObserverRef = useRef<{ disconnect: () => void } | null>(null);
   const containerElRef = useRef<HTMLDivElement | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const resizeFitFrameRef = useRef<number | null>(null);
   const onSessionIdRef = useRef(onSessionId);
   const onLinkActivatedRef = useRef(onLinkActivated);
   const onIoRef = useRef(onIo);
@@ -387,6 +445,10 @@ export function useTauriTerminal({
       window.cancelAnimationFrame(pendingInitFrameRef.current);
       pendingInitFrameRef.current = null;
     }
+    if (resizeFitFrameRef.current !== null) {
+      window.cancelAnimationFrame(resizeFitFrameRef.current);
+      resizeFitFrameRef.current = null;
+    }
 
     if (resizeObserverRef.current) {
       resizeObserverRef.current.disconnect();
@@ -421,6 +483,11 @@ export function useTauriTerminal({
     if (inputSubscriptionRef.current) {
       inputSubscriptionRef.current.dispose();
       inputSubscriptionRef.current = null;
+    }
+
+    if (webglAddonRef.current) {
+      webglAddonRef.current.dispose();
+      webglAddonRef.current = null;
     }
 
     if (terminalRef.current) {
@@ -506,6 +573,28 @@ export function useTauriTerminal({
       terminal.open(container);
       terminalOpenedRef.current = true;
 
+      let localWebglHandle: PooledWebglAddon | null = null;
+      if (document.documentElement.dataset.gpuMode !== 'software') {
+        try {
+          const handle = acquirePooledWebglAddon(() => {
+            if (webglAddonRef.current === handle) {
+              webglAddonRef.current = null;
+            }
+          });
+          if (handle) {
+            try {
+              terminal.loadAddon(handle.addon);
+              webglAddonRef.current = handle;
+              localWebglHandle = handle;
+            } catch {
+              handle.dispose();
+            }
+          }
+        } catch {
+          // Fall back cleanly to xterm's default DOM renderer when WebGL is unavailable.
+        }
+      }
+
       if (!readOnly) {
         // Capture input as soon as xterm is interactive. PTY creation/reattach
         // can still be in flight at this point; enqueueTerminalInput retains
@@ -561,15 +650,49 @@ export function useTauriTerminal({
 
       applyCurrentTheme();
 
+      let localUnlisten: UnlistenFn | null = null;
+      let localExitUnlisten: UnlistenFn | null = null;
+      let localThemeUnlisten: UnlistenFn | null = null;
+
+      const cleanupLocalListeners = (includeTheme = false) => {
+        if (localUnlisten) {
+          const fn = localUnlisten;
+          localUnlisten = null;
+          fn();
+          if (unlistenRef.current === fn) {
+            unlistenRef.current = null;
+          }
+        }
+        if (localExitUnlisten) {
+          const fn = localExitUnlisten;
+          localExitUnlisten = null;
+          fn();
+          if (exitUnlistenRef.current === fn) {
+            exitUnlistenRef.current = null;
+          }
+        }
+        if (includeTheme && localThemeUnlisten) {
+          const fn = localThemeUnlisten;
+          localThemeUnlisten = null;
+          fn();
+          if (themeUnlistenRef.current === fn) {
+            themeUnlistenRef.current = null;
+          }
+        }
+      };
+
       backendListen<{ theme: string }>('theme-changed', () => {
         applyCurrentTheme();
-      }).then((unlisten) => {
-        if (!isCurrentInitialization()) {
-          unlisten();
-          return;
-        }
-        themeUnlistenRef.current = unlisten;
-      });
+      })
+        .then((unlisten) => {
+          if (!isCurrentInitialization()) {
+            unlisten();
+            return;
+          }
+          localThemeUnlisten = unlisten;
+          themeUnlistenRef.current = unlisten;
+        })
+        .catch(() => undefined);
 
       const themeObserver = new MutationObserver(() => {
         applyCurrentTheme();
@@ -627,7 +750,7 @@ export function useTauriTerminal({
         const bytes = decodeBase64ToBytes(base64);
         try {
           terminal.write(bytes);
-          const decodedText = new TextDecoder().decode(bytes);
+          const decodedText = sharedTextDecoder.decode(bytes);
           onIoRef.current?.({
             type: 'output',
             data: decodedText,
@@ -643,7 +766,9 @@ export function useTauriTerminal({
       };
 
       const attachListener = async (currentSessionId: string) => {
+        cleanupLocalListeners(false);
         let replayBuffer: Array<{ data: string; seq: number }> | null = [];
+        let replayBufferBytes = 0;
         const unlisten = await backendListen<unknown>(
           `terminal-output:${currentSessionId}`,
           (payload) => {
@@ -659,6 +784,17 @@ export function useTauriTerminal({
             }
             if (replayBuffer) {
               replayBuffer.push(event);
+              replayBufferBytes += event.data.length;
+              while (
+                replayBuffer.length > MAX_REPLAY_BUFFER_CHUNKS ||
+                (replayBufferBytes > MAX_REPLAY_BUFFER_BYTES &&
+                  replayBuffer.length > 1)
+              ) {
+                const dropped = replayBuffer.shift();
+                if (dropped) {
+                  replayBufferBytes -= dropped.data.length;
+                }
+              }
               return;
             }
             writeOutput(event.data, event.seq);
@@ -666,39 +802,39 @@ export function useTauriTerminal({
         );
         if (!isCurrentInitialization()) {
           unlisten();
-          return {
-            flushReplay() {},
-          };
+          return null;
         }
+        localUnlisten = unlisten;
         unlistenRef.current = unlisten;
         const unlistenExit = await backendListen(
           `terminal-exit:${currentSessionId}`,
           () => {
+            if (!isCurrentInitialization()) {
+              return;
+            }
             writeQueueRef.current?.dispose();
-            if (isCurrentInitialization()) {
-              try {
-                terminal.write('\r\n\x1b[90m[Process exited]\x1b[0m\r\n');
-              } catch {
-                // Panel may already be disposing.
-              }
+            try {
+              terminal.write('\r\n\x1b[90m[Process exited]\x1b[0m\r\n');
+            } catch {
+              // Panel may already be disposing.
             }
           }
         );
         if (!isCurrentInitialization()) {
-          unlisten();
           unlistenExit();
-          if (unlistenRef.current === unlisten) {
-            unlistenRef.current = null;
-          }
-          return {
-            flushReplay() {},
-          };
+          cleanupLocalListeners(false);
+          return null;
         }
+        localExitUnlisten = unlistenExit;
         exitUnlistenRef.current = unlistenExit;
         return {
           flushReplay(snapshotSeq: number | null) {
             const buffered = replayBuffer ?? [];
             replayBuffer = null;
+            replayBufferBytes = 0;
+            if (!isCurrentInitialization()) {
+              return;
+            }
             if (
               snapshotSeq != null &&
               snapshotSeq > snapshotSeqFloorRef.current
@@ -712,7 +848,11 @@ export function useTauriTerminal({
         };
       };
 
+      let spawnedNewSession = false;
       const spawnSession = async (sessionId: string) => {
+        if (!isCurrentInitialization()) {
+          return false;
+        }
         await backendCall<string>('create_terminal', {
           workspaceId,
           cols: terminal.cols,
@@ -721,18 +861,47 @@ export function useTauriTerminal({
           sessionId,
           cwd: cwdRef.current || null,
         });
+        spawnedNewSession = true;
+        return isCurrentInitialization();
       };
 
       let resolvedSessionId = sessionIdRef.current;
-      let outputPump: Awaited<ReturnType<typeof attachListener>> | null = null;
+      let outputPump: Awaited<ReturnType<typeof attachListener>> = null;
+
+      const bailOutStale = () => {
+        if (spawnedNewSession && resolvedSessionId) {
+          void backendCall('close_terminal', {
+            sessionId: resolvedSessionId,
+          }).catch(() => {});
+        }
+        if (terminalRef.current === terminal) {
+          disposeView();
+        } else {
+          cleanupLocalListeners(true);
+          localWebglHandle?.dispose();
+          try {
+            terminal.dispose();
+          } catch {
+            // Terminal may already be disposed.
+          }
+        }
+      };
 
       try {
         if (resolvedSessionId) {
           outputPump = await attachListener(resolvedSessionId);
+          if (!isCurrentInitialization() || !outputPump) {
+            bailOutStale();
+            return;
+          }
           const snapshot = await backendCall<HostTerminalSnapshot>(
             'terminal_snapshot',
             { sessionId: resolvedSessionId }
           ).catch(() => null);
+          if (!isCurrentInitialization()) {
+            bailOutStale();
+            return;
+          }
           if (snapshot?.alive) {
             if (snapshot.data) {
               writeOutput(snapshot.data, 0);
@@ -741,73 +910,77 @@ export function useTauriTerminal({
             await backendCall<string>('attach_terminal', {
               sessionId: resolvedSessionId,
             });
+            if (!isCurrentInitialization()) {
+              bailOutStale();
+              return;
+            }
           } else {
             try {
-              await spawnSession(resolvedSessionId);
+              const stillCurrent = await spawnSession(resolvedSessionId);
+              if (!stillCurrent) {
+                bailOutStale();
+                return;
+              }
               outputPump.flushReplay(null);
             } catch {
+              if (!isCurrentInitialization()) {
+                bailOutStale();
+                return;
+              }
               outputPump.flushReplay(null);
-              if (unlistenRef.current) {
-                unlistenRef.current();
-                unlistenRef.current = null;
-              }
-              if (exitUnlistenRef.current) {
-                exitUnlistenRef.current();
-                exitUnlistenRef.current = null;
-              }
+              cleanupLocalListeners(false);
               resolvedSessionId = crypto.randomUUID();
               sessionIdRef.current = resolvedSessionId;
               outputPump = await attachListener(resolvedSessionId);
-              await spawnSession(resolvedSessionId);
+              if (!isCurrentInitialization() || !outputPump) {
+                bailOutStale();
+                return;
+              }
+              const stillCurrent = await spawnSession(resolvedSessionId);
+              if (!stillCurrent) {
+                bailOutStale();
+                return;
+              }
               outputPump.flushReplay(null);
             }
           }
         } else {
+          if (!isCurrentInitialization()) {
+            bailOutStale();
+            return;
+          }
           resolvedSessionId = crypto.randomUUID();
           sessionIdRef.current = resolvedSessionId;
           outputPump = await attachListener(resolvedSessionId);
-          await spawnSession(resolvedSessionId);
+          if (!isCurrentInitialization() || !outputPump) {
+            bailOutStale();
+            return;
+          }
+          const stillCurrent = await spawnSession(resolvedSessionId);
+          if (!stillCurrent) {
+            bailOutStale();
+            return;
+          }
           outputPump.flushReplay(null);
         }
       } catch (err) {
-        if (unlistenRef.current) {
-          unlistenRef.current();
-          unlistenRef.current = null;
+        if (!isCurrentInitialization()) {
+          bailOutStale();
+          return;
         }
-        if (exitUnlistenRef.current) {
-          exitUnlistenRef.current();
-          exitUnlistenRef.current = null;
-        }
+        cleanupLocalListeners(false);
 
         const message = err instanceof Error ? err.message : String(err);
         errorRef.current = message;
         setErrorState(message);
-        if (isCurrentInitialization()) {
-          terminal.writeln(
-            `\r\n\x1b[31mFailed to initialize terminal for ${tabId}: ${message}\x1b[0m`
-          );
-        }
+        terminal.writeln(
+          `\r\n\x1b[31mFailed to initialize terminal for ${tabId}: ${message}\x1b[0m`
+        );
         return;
       }
 
       if (!isCurrentInitialization() || !resolvedSessionId) {
-        if (terminalRef.current === terminal) {
-          disposeView();
-        } else {
-          if (unlistenRef.current) {
-            unlistenRef.current();
-            unlistenRef.current = null;
-          }
-          if (exitUnlistenRef.current) {
-            exitUnlistenRef.current();
-            exitUnlistenRef.current = null;
-          }
-          if (themeUnlistenRef.current) {
-            themeUnlistenRef.current();
-            themeUnlistenRef.current = null;
-          }
-          terminal.dispose();
-        }
+        bailOutStale();
         return;
       }
 
@@ -864,9 +1037,15 @@ export function useTauriTerminal({
       });
 
       const resizeObserver = new ResizeObserver(() => {
-        if (fitAddonRef.current && isCurrentInitialization()) {
-          fitTerminalIfReady(fitAddonRef.current, terminal, container);
+        if (resizeFitFrameRef.current !== null) {
+          return;
         }
+        resizeFitFrameRef.current = window.requestAnimationFrame(() => {
+          resizeFitFrameRef.current = null;
+          if (fitAddonRef.current && isCurrentInitialization()) {
+            fitTerminalIfReady(fitAddonRef.current, terminal, container);
+          }
+        });
       });
       observeTerminalFit(resizeObserver, container);
       resizeObserverRef.current = resizeObserver;

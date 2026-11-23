@@ -3,7 +3,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Diff } from 'shared/types';
 import DockviewDiffsReviewPanel from './DockviewDiffsReviewPanel';
 
-const { diffState, commitDiffState, clearTargetPathMock } = vi.hoisted(() => ({
+import type { DiffReviewSource } from '@/stores/useGitDiffNavigationStore';
+
+const {
+  diffState,
+  commitDiffState,
+  clearTargetPathMock,
+  reviewSourceState,
+  clearReviewSourceMock,
+  getWorktreeDiffsMock,
+} = vi.hoisted(() => ({
   diffState: { current: [] as Diff[] },
   commitDiffState: {
     current: {
@@ -21,6 +30,15 @@ const { diffState, commitDiffState, clearTargetPathMock } = vi.hoisted(() => ({
     },
   },
   clearTargetPathMock: vi.fn(),
+  reviewSourceState: { current: null as DiffReviewSource | null },
+  clearReviewSourceMock: vi.fn(),
+  getWorktreeDiffsMock: vi.fn(async () => [] as Diff[]),
+}));
+
+vi.mock('@/lib/api', () => ({
+  repoApi: {
+    getWorktreeDiffs: getWorktreeDiffsMock,
+  },
 }));
 
 vi.mock('@/contexts/WorktreeContext', () => ({
@@ -63,6 +81,8 @@ vi.mock('@/stores/useGitDiffNavigationStore', () => ({
       targetPath: null,
       requestToken: 0,
       clearTargetPath: clearTargetPathMock,
+      reviewSource: reviewSourceState.current,
+      clearReviewSource: clearReviewSourceMock,
     }),
 }));
 
@@ -125,6 +145,17 @@ function diff(path: string, additions: number, deletions = 0): Diff {
 describe('DockviewDiffsReviewPanel large changes', () => {
   beforeEach(() => {
     clearTargetPathMock.mockReset();
+    clearReviewSourceMock.mockReset();
+    getWorktreeDiffsMock.mockReset();
+    getWorktreeDiffsMock.mockResolvedValue([]);
+    reviewSourceState.current = null;
+    commitDiffState.current = {
+      commitSha: null,
+      commitInfo: null,
+      commitDiffs: [],
+      isLoading: false,
+      clearCommitDiff: vi.fn(),
+    };
     vi.stubGlobal(
       'IntersectionObserver',
       class {
@@ -305,5 +336,64 @@ describe('DockviewDiffsReviewPanel large changes', () => {
 
     const expandGroup = container.querySelector('.diff-expand-button-group');
     expect(expandGroup?.className).toContain('ml-auto');
+  });
+
+  it('renders read-only branch diff from reviewSource with dismissible context banner', () => {
+    reviewSourceState.current = {
+      kind: 'branch',
+      repoId: 'repo-1',
+      branch: 'feat/readonly-branch',
+      baseBranch: 'main',
+      diffs: [diff('src/branch-only.ts', 12, 3)],
+      isLoading: false,
+    };
+
+    render(<DockviewDiffsReviewPanel />);
+
+    const banner = screen.getByTestId('diff-review-source-banner');
+    expect(banner.textContent).toContain('feat/readonly-branch');
+    expect(banner.textContent).toContain('main');
+    expect(screen.getByTestId('diff-card')).toHaveAttribute(
+      'data-path',
+      'src/branch-only.ts'
+    );
+
+    const closeBtn = banner.querySelector('button');
+    expect(closeBtn).toBeTruthy();
+    fireEvent.click(closeBtn!);
+    expect(clearReviewSourceMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('loads external worktree diffs via repoApi.getWorktreeDiffs when reviewSource has no workspaceId', async () => {
+    getWorktreeDiffsMock.mockResolvedValueOnce([
+      diff('src/external-worktree.ts', 4, 1),
+    ]);
+    reviewSourceState.current = {
+      kind: 'worktree',
+      repoId: 'repo-1',
+      worktreePath: '/tmp/external-wt',
+      workspaceId: null,
+      label: 'external-wt',
+      branch: 'hotfix/auth',
+      isMain: false,
+    };
+
+    render(<DockviewDiffsReviewPanel />);
+
+    await waitFor(() =>
+      expect(getWorktreeDiffsMock).toHaveBeenCalledWith(
+        'repo-1',
+        '/tmp/external-wt'
+      )
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId('diff-card')).toHaveAttribute(
+        'data-path',
+        'src/external-worktree.ts'
+      )
+    );
+    const banner = screen.getByTestId('diff-review-source-banner');
+    expect(banner.textContent).toContain('external-wt');
+    expect(banner.textContent).toContain('hotfix/auth');
   });
 });

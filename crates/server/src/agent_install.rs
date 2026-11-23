@@ -449,9 +449,7 @@ where
     )
     .await?
     {
-        tracing::info!(
-            "Using the user-environment CLI that already matches the planned versions."
-        );
+        tracing::info!("Using the user-environment CLI that already matches the planned versions.");
         for component in &adopted.components {
             on_progress(
                 60,
@@ -830,9 +828,10 @@ async fn try_adopt_with_options(
             if agents::launch_program_is_legacy_acp_shim(agent_id, &path) {
                 return Ok(None);
             }
-            let version = probe_version_with_path(&path, candidate.version_args, extra_node_bin_dir)
-                .await
-                .unwrap_or_default();
+            let version =
+                probe_version_with_path(&path, candidate.version_args, extra_node_bin_dir)
+                    .await
+                    .unwrap_or_default();
             if version.is_empty() {
                 continue;
             }

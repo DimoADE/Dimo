@@ -83,6 +83,8 @@ struct UsageArgs {
     scope: Option<String>,
     project_id: Option<String>,
     date_range: Option<String>,
+    #[serde(default)]
+    force_refresh: bool,
 }
 
 #[derive(Serialize)]
@@ -456,6 +458,7 @@ pub(super) async fn project_usage(
         scope: None,
         project_id: None,
         date_range: None,
+        force_refresh: false,
     });
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -496,17 +499,56 @@ pub(super) async fn project_usage(
             )));
         }
     };
-    serialize(
-        conversations::assemble_project_usage_statistics(
-            &domains.pool,
-            scope,
-            project_id,
-            project_name,
-            project_uuid,
-            cutoff,
-            now_ms,
-        )
-        .await
-        .map_err(internal_error)?,
+    if args.force_refresh {
+        return serialize(
+            conversations::assemble_project_usage_statistics(
+                &domains.pool,
+                scope,
+                project_id,
+                project_name,
+                project_uuid,
+                cutoff,
+                now_ms,
+            )
+            .await
+            .map_err(internal_error)?,
+        );
+    }
+
+    let (stats, needs_background_sync) = conversations::assemble_project_usage_statistics_cached(
+        &domains.pool,
+        scope,
+        project_id,
+        project_name,
+        project_uuid,
+        cutoff,
+        now_ms,
     )
+    .await
+    .map_err(internal_error)?;
+
+    if needs_background_sync {
+        let pool = domains.pool.clone();
+        let events = crate::host::events::current_host_events();
+        tokio::spawn(async move {
+            match conversations::sync_vendor_usage_logs_if_changed(&pool).await {
+                Ok(true) => {
+                    let updated_at = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as i64;
+                    events.emit(
+                        "usage-statistics-updated",
+                        serde_json::json!({ "updatedAt": updated_at }),
+                    );
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "background vendor usage sync failed");
+                }
+            }
+        });
+    }
+
+    serialize(stats)
 }

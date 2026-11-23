@@ -135,6 +135,7 @@ impl AgentConnectionRunner {
             if let Some(stored) = controls.get_mut(&session_id) {
                 let settled = agent_session_config_options_from_acp(stored.config_options.clone());
                 stored.asserted_config_values = asserted_from_preferred(&preferred_map, &settled);
+                stored.drift_retry_counts.clear();
             }
         }
         if let Some(catalog) = self.grok_catalog.lock().await.clone() {

@@ -110,14 +110,9 @@ impl EventService {
                                     .get_old_column_value(0)
                                     .ok()
                                     .and_then(|value| <Uuid as Decode<Sqlite>>::decode(value).ok())
-                                    .zip(
-                                        preupdate
-                                            .get_old_column_value(1)
-                                            .ok()
-                                            .and_then(|value| {
-                                                <String as Decode<Sqlite>>::decode(value).ok()
-                                            }),
-                                    )
+                                    .zip(preupdate.get_old_column_value(1).ok().and_then(|value| {
+                                        <String as Decode<Sqlite>>::decode(value).ok()
+                                    }))
                                     .map(|(scratch_id, type_str)| {
                                         scratch_patch::remove(scratch_id, &type_str)
                                     })

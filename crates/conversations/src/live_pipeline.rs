@@ -1383,8 +1383,14 @@ mod tests {
         assert_eq!(conv_batches[0].1.previous_sequence, Some(1));
         assert_eq!(conv_batches[1].1.last_sequence, 1);
         assert_eq!(conv_batches[1].1.previous_sequence, Some(1));
-        let seq0 = conv_batches[0].1.live_sequence.expect("first live_sequence");
-        let seq1 = conv_batches[1].1.live_sequence.expect("second live_sequence");
+        let seq0 = conv_batches[0]
+            .1
+            .live_sequence
+            .expect("first live_sequence");
+        let seq1 = conv_batches[1]
+            .1
+            .live_sequence
+            .expect("second live_sequence");
         assert!(seq1 > seq0, "expected {seq1} > {seq0}");
     }
 }

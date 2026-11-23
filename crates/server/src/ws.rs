@@ -20,8 +20,10 @@ use remote_protocol::{
 use crate::{AuthenticatedCredential, runtime::ServerState};
 
 const LIVE_RECONCILE_INTERVAL: Duration = Duration::from_millis(300);
-const REVOCATION_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const REVOCATION_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(45);
+const WS_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CLIENT_FRAME_BYTES: usize = 1024 * 1024;
 
 struct DurablePollingRegistration;
@@ -155,6 +157,7 @@ async fn handle_socket<R>(
     let mut patch_streams = PatchStreamRegistry::new(&state.events);
     let mut live_ticker = tokio::time::interval(LIVE_RECONCILE_INTERVAL);
     live_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut idle_reconcile_skip_ticks: u8 = 0;
     let mut revocation_ticker = tokio::time::interval(REVOCATION_POLL_INTERVAL);
     revocation_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut keepalive_ticker = tokio::time::interval_at(
@@ -162,6 +165,7 @@ async fn handle_socket<R>(
         KEEP_ALIVE_INTERVAL,
     );
     keepalive_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_client_activity = tokio::time::Instant::now();
     let principal = credential.principal();
     let mut host_events = state.events.subscribe();
     let mut patch_events = state.events.subscribe_patch_streams();
@@ -172,10 +176,11 @@ async fn handle_socket<R>(
                 let Some(Ok(message)) = incoming else {
                     break;
                 };
+                last_client_activity = tokio::time::Instant::now();
                 let text = match message {
                     Message::Close(_) => break,
                     Message::Ping(payload) => {
-                        if sender.send(Message::Pong(payload)).await.is_err() {
+                        if send_frame(&mut sender, Message::Pong(payload)).await.is_err() {
                             break;
                         }
                         continue;
@@ -215,6 +220,7 @@ async fn handle_socket<R>(
                         continue;
                     }
                 };
+                idle_reconcile_skip_ticks = 0;
                 if handle_client_message(
                     state.as_ref(),
                     &principal,
@@ -360,7 +366,10 @@ async fn handle_socket<R>(
                             event.sequence > *after_sequence
                                 && (*channel == event.channel
                                     || (!*exact
-                                        && event.channel.starts_with(&format!("{channel}:"))))
+                                        && event
+                                            .channel
+                                            .strip_prefix(channel.as_str())
+                                            .is_some_and(|rest| rest.starts_with(':'))))
                         }
                         _ => false,
                     })
@@ -395,7 +404,9 @@ async fn handle_socket<R>(
                         }
                         _ => false,
                     })
-                    && reconcile_durable_subscriptions(
+                {
+                    idle_reconcile_skip_ticks = 0;
+                    if reconcile_durable_subscriptions(
                         state.as_ref(),
                         &principal,
                         &mut subscriptions,
@@ -405,17 +416,31 @@ async fn handle_socket<R>(
                     )
                     .await
                     .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+            _ = keepalive_ticker.tick() => {
+                if last_client_activity.elapsed() >= KEEP_ALIVE_TIMEOUT {
+                    break;
+                }
+                if send_frame(&mut sender, Message::Ping(Default::default()))
+                    .await
+                    .is_err()
                 {
                     break;
                 }
             }
-            _ = keepalive_ticker.tick() => {
-                if sender.send(Message::Ping(Default::default())).await.is_err() {
-                    break;
-                }
-            }
             _ = live_ticker.tick(), if has_durable_subscriptions(&subscriptions) => {
-                if reconcile_durable_subscriptions(
+                let has_workflow_runs = subscriptions
+                    .values()
+                    .any(|sub| matches!(sub, ActiveSubscription::WorkflowRun { .. }));
+                if !has_workflow_runs && idle_reconcile_skip_ticks > 0 {
+                    idle_reconcile_skip_ticks -= 1;
+                    continue;
+                }
+                match reconcile_durable_subscriptions(
                     state.as_ref(),
                     &principal,
                     &mut subscriptions,
@@ -424,9 +449,15 @@ async fn handle_socket<R>(
                     ws_e2ee_key.as_ref(),
                 )
                 .await
-                .is_err()
                 {
-                    break;
+                    Ok(emitted_any) => {
+                        idle_reconcile_skip_ticks = if emitted_any || has_workflow_runs {
+                            0
+                        } else {
+                            4
+                        };
+                    }
+                    Err(()) => break,
                 }
             }
         }
@@ -548,7 +579,7 @@ async fn reconcile_durable_subscriptions<R, S>(
     conversation_filter: Option<Option<uuid::Uuid>>,
     sender: &mut S,
     e2ee_key: Option<&[u8; 32]>,
-) -> Result<(), ()>
+) -> Result<bool, ()>
 where
     R: ConversationRepository + Send + Sync + 'static,
     S: futures::Sink<Message> + Unpin,
@@ -574,6 +605,7 @@ where
         )
         .map(|(id, subscription)| (*id, subscription.clone()))
         .collect::<Vec<_>>();
+    let mut emitted_any = false;
     for (subscription_id, subscription) in active {
         let bootstrap = match subscription {
             ActiveSubscription::HostEvent { .. } | ActiveSubscription::PatchStream { .. } => {
@@ -610,6 +642,7 @@ where
         let high_water_mark = bootstrap.high_water_mark;
         let mut cursor = subscription.after_sequence();
         for event in live_events(bootstrap) {
+            emitted_any = true;
             cursor = cursor.max(event.sequence);
             send_message(
                 sender,
@@ -625,7 +658,7 @@ where
             active.advance(cursor.max(high_water_mark));
         }
     }
-    Ok(())
+    Ok(emitted_any)
 }
 
 async fn handle_client_message<R, S>(
@@ -820,15 +853,18 @@ where
             );
             let task_key =
                 crate::patch_stream_task_key(&stream, &args).unwrap_or_else(|_| channel.clone());
+            // Track before awaiting so dropping/cancelling the socket mid-attach still
+            // releases the producer task via `PatchStreamRegistry::drop`.
+            patch_streams.track(request.subscription_id, task_key);
             if let Err(error) = state
                 .commands
                 .execute_name(principal, command, OperationId::new(), args)
                 .await
             {
+                patch_streams.release(&request.subscription_id);
                 subscriptions.remove(&request.subscription_id);
                 return Err(error);
             }
-            patch_streams.track(request.subscription_id, task_key);
             Ok((
                 bootstrap,
                 ActiveSubscription::PatchStream {
@@ -886,6 +922,16 @@ fn decode_ws_text(
     Ok(text.to_string())
 }
 
+async fn send_frame<S>(sender: &mut S, frame: Message) -> Result<(), ()>
+where
+    S: futures::Sink<Message> + Unpin,
+{
+    match tokio::time::timeout(WS_WRITE_TIMEOUT, sender.send(frame)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) | Err(_) => Err(()),
+    }
+}
+
 async fn send_message<S>(
     sender: &mut S,
     message: SubscriptionServerMessage,
@@ -906,10 +952,7 @@ where
     } else {
         text
     };
-    sender
-        .send(Message::Text(wire_text.into()))
-        .await
-        .map_err(|_| ())
+    send_frame(sender, Message::Text(wire_text.into())).await
 }
 
 /// Live polling reuses `attach`, which parks `after_sequence == 0` events in
@@ -987,9 +1030,7 @@ mod tests {
         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
         use tokio_tungstenite::{
             connect_async,
-            tungstenite::{
-                Message as ClientMessage, client::IntoClientRequest, http::HeaderValue,
-            },
+            tungstenite::{Message as ClientMessage, client::IntoClientRequest, http::HeaderValue},
         };
 
         let data_dir = tempfile::tempdir().expect("temp data dir");
@@ -1081,7 +1122,7 @@ mod tests {
             "expected initial projects patch stream Ready event"
         );
 
-        // Wait past REVOCATION_POLL_INTERVAL (250ms) to ensure the desktop owner
+        // Allow the initial revocation poll tick to execute and ensure the desktop owner
         // credential is never treated as revoked.
         tokio::time::sleep(Duration::from_millis(400)).await;
 

@@ -55,6 +55,7 @@ pub mod local_http;
 pub mod model_catalogs;
 pub mod model_provider_import;
 pub mod model_providers;
+pub mod muse_plugins;
 pub mod opencode_catalog;
 pub mod opencode_plugins;
 pub mod opencode_providers;

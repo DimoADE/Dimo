@@ -40,7 +40,7 @@ import { findMarkdownRenderer, useMarkdownRenderers } from '@dimoai/plugin-sdk';
 import { PluginBoundary } from '@/components/plugins/PluginBoundary';
 import { CodeBlock, CompactCodeBlock } from './CodeBlock';
 import { HtmlPreviewBlock, isHtmlPreviewLanguage } from './HtmlPreviewBlock';
-import { MermaidDiagram } from './MermaidDiagram';
+import { MermaidDiagram, resetMermaidSvgCache } from './MermaidDiagram';
 import { parseTagReferenceHref } from '@/lib/tagReferenceMarkers';
 import {
   MarkdownBlockCache,
@@ -148,6 +148,7 @@ function MarkdownImage({
       return;
     }
     let cancelled = false;
+    let acquiredPath: string | null = null;
     setFileSrcUrl(null);
     setFileSrcFailed(false);
     void hostFileSrc(fileSrcPath)
@@ -156,6 +157,7 @@ function MarkdownImage({
           releaseHostFileSrc(fileSrcPath);
           return;
         }
+        acquiredPath = fileSrcPath;
         setFileSrcUrl(url);
       })
       .catch(() => {
@@ -163,7 +165,10 @@ function MarkdownImage({
       });
     return () => {
       cancelled = true;
-      releaseHostFileSrc(fileSrcPath);
+      if (acquiredPath) {
+        releaseHostFileSrc(acquiredPath);
+        acquiredPath = null;
+      }
     };
   }, [fileSrcPath]);
   const imageUrl = isVibeImage
@@ -535,6 +540,7 @@ export function getMarkdownBlockElementCacheStats(): MarkdownBlockCacheStats {
 export function resetMarkdownBlockElementCache(): void {
   markdownBlockElementCache.clear();
   markdownBlockElementCache.resetStats();
+  resetMermaidSvgCache();
 }
 
 type CompileMarkdownBlockOptions = {

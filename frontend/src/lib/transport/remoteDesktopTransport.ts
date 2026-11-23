@@ -27,7 +27,9 @@ type RemoteSubscriptionEventEnvelope = {
   event?: WireRemoteEvent;
 };
 
-function normalizeRemoteSequence(value: number | bigint | string | undefined): bigint {
+function normalizeRemoteSequence(
+  value: number | bigint | string | undefined
+): bigint {
   if (typeof value === 'bigint') {
     return value;
   }
@@ -110,9 +112,10 @@ function createSharedChannelMultiplexer<T>(channel: string) {
   };
 }
 
-const remoteHostEventMux = createSharedChannelMultiplexer<RemoteHostEventEnvelope>(
-  REMOTE_HOST_EVENT_CHANNEL
-);
+const remoteHostEventMux =
+  createSharedChannelMultiplexer<RemoteHostEventEnvelope>(
+    REMOTE_HOST_EVENT_CHANNEL
+  );
 const remoteSubscriptionEventMux =
   createSharedChannelMultiplexer<RemoteSubscriptionEventEnvelope>(
     REMOTE_SUBSCRIPTION_EVENT_CHANNEL
@@ -215,6 +218,8 @@ function getDefaultRemoteDesktopBridge(): RemoteDesktopBridge {
   return electronRemoteDesktopBridge;
 }
 
+const MAX_REMOTE_SUBSCRIPTION_QUEUE_SIZE = 4096;
+
 function subscribeRemoteDesktopViaElectron(
   profileId: string,
   request: SubscriptionRequest
@@ -222,13 +227,43 @@ function subscribeRemoteDesktopViaElectron(
   return {
     [Symbol.asyncIterator]: (): AsyncIterator<RemoteEvent> => {
       const queue: RemoteEvent[] = [];
+      let queueHead = 0;
       let failure: Error | null = null;
       let wake: (() => void) | undefined;
       let closed = false;
       let started = false;
       let cancelled = false;
+      let remoteSubscribed = false;
+      let remoteCancelSent = false;
       let unlisten: (() => void) | undefined;
       const subscriptionId = randomUUID();
+
+      const queueSize = () => queue.length - queueHead;
+      const dequeue = (): RemoteEvent | undefined => {
+        if (queueHead >= queue.length) {
+          return undefined;
+        }
+        const item = queue[queueHead];
+        queueHead += 1;
+        if (queueHead >= 256 && queueHead * 2 >= queue.length) {
+          queue.splice(0, queueHead);
+          queueHead = 0;
+        } else if (queueHead === queue.length) {
+          queue.length = 0;
+          queueHead = 0;
+        }
+        return item;
+      };
+      const enqueue = (item: RemoteEvent) => {
+        if (queueSize() >= MAX_REMOTE_SUBSCRIPTION_QUEUE_SIZE) {
+          queueHead += 1;
+          if (queueHead >= 256 && queueHead * 2 >= queue.length) {
+            queue.splice(0, queueHead);
+            queueHead = 0;
+          }
+        }
+        queue.push(item);
+      };
 
       const wakeConsumer = () => {
         const pendingWake = wake;
@@ -237,68 +272,82 @@ function subscribeRemoteDesktopViaElectron(
       };
 
       const cancelSubscription = async () => {
-        if (cancelled) return;
         cancelled = true;
         closed = true;
+        queue.length = 0;
+        queueHead = 0;
         wakeConsumer();
-        unlisten?.();
-        unlisten = undefined;
-        if (!started) return;
-        await getDesktopShell()
-          .invoke('remote_desktop_cancel_subscription', {
-            subscriptionId,
-          })
-          .catch(() => undefined);
+        if (unlisten) {
+          const fn = unlisten;
+          unlisten = undefined;
+          fn();
+        }
+        if (remoteSubscribed && !remoteCancelSent) {
+          remoteCancelSent = true;
+          await getDesktopShell()
+            .invoke('remote_desktop_cancel_subscription', {
+              subscriptionId,
+            })
+            .catch(() => undefined);
+        }
       };
 
       return {
         next: async (): Promise<IteratorResult<RemoteEvent>> => {
-          if (failure && queue.length === 0) {
+          if (failure && queueSize() === 0) {
             const err = failure;
             failure = null;
             await cancelSubscription();
             throw err;
           }
-          if (closed && queue.length === 0) {
+          if (closed && queueSize() === 0) {
             return { value: undefined, done: true };
           }
           if (!started) {
             started = true;
-            unlisten = await remoteSubscriptionEventMux.subscribe(
-              (envelope) => {
-                if (!envelope || envelope.subscriptionId !== subscriptionId) {
-                  return;
-                }
-                const rawEvent = envelope.event;
-                if (!rawEvent) return;
-                if (rawEvent.kind === 'subscription_closed') {
-                  closed = true;
+            let acquiredUnlisten: () => void;
+            try {
+              acquiredUnlisten = await remoteSubscriptionEventMux.subscribe(
+                (envelope) => {
+                  if (!envelope || envelope.subscriptionId !== subscriptionId) {
+                    return;
+                  }
+                  const rawEvent = envelope.event;
+                  if (!rawEvent) return;
+                  if (rawEvent.kind === 'subscription_closed') {
+                    closed = true;
+                    wakeConsumer();
+                    return;
+                  }
+                  if (rawEvent.kind === 'subscription_error') {
+                    const payload = rawEvent.payload as
+                      | { message?: unknown; code?: unknown }
+                      | undefined;
+                    const message =
+                      typeof payload?.message === 'string' &&
+                      payload.message.trim().length > 0
+                        ? payload.message
+                        : 'Remote subscription failed';
+                    failure = new Error(message);
+                    closed = true;
+                    wakeConsumer();
+                    return;
+                  }
+                  if (closed) return;
+                  enqueue({
+                    ...rawEvent,
+                    sequence: normalizeRemoteSequence(rawEvent.sequence),
+                  });
                   wakeConsumer();
-                  return;
                 }
-                if (rawEvent.kind === 'subscription_error') {
-                  const payload = rawEvent.payload as
-                    | { message?: unknown; code?: unknown }
-                    | undefined;
-                  const message =
-                    typeof payload?.message === 'string' &&
-                    payload.message.trim().length > 0
-                      ? payload.message
-                      : 'Remote subscription failed';
-                  failure = new Error(message);
-                  closed = true;
-                  wakeConsumer();
-                  return;
-                }
-                if (closed) return;
-                queue.push({
-                  ...rawEvent,
-                  sequence: normalizeRemoteSequence(rawEvent.sequence),
-                });
-                wakeConsumer();
-              }
-            );
-            if (closed) {
+              );
+            } catch (error) {
+              closed = true;
+              cancelled = true;
+              throw error;
+            }
+            unlisten = acquiredUnlisten;
+            if (closed || cancelled) {
               await cancelSubscription();
               return { value: undefined, done: true };
             }
@@ -314,17 +363,18 @@ function subscribeRemoteDesktopViaElectron(
                     : {}),
                 },
               });
+              remoteSubscribed = true;
             } catch (error) {
               await cancelSubscription();
               throw error;
             }
-            if (closed) {
+            if (cancelled) {
               await cancelSubscription();
               return { value: undefined, done: true };
             }
           }
-          while (!closed || queue.length > 0 || failure !== null) {
-            const next = queue.shift();
+          while (!closed || queueSize() > 0 || failure !== null) {
+            const next = dequeue();
             if (next) {
               return { value: next, done: false };
             }
@@ -454,6 +504,10 @@ export class RemoteDesktopTransport implements BackendTransport {
     return `${this.baseUrl}/api/v1/previews/${encodeURIComponent(
       lease.leaseId
     )}/c/${encodeURIComponent(lease.capabilityToken)}/`;
+  }
+
+  detach(): void {
+    this.destroyed = true;
   }
 
   async destroy(): Promise<void> {

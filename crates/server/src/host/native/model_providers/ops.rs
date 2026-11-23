@@ -10,7 +10,7 @@ use api_types::{
 
 use super::{
     ProviderNativeHomes, claude::*, codex::*, common::*, gemini::*, grok::*, kimi::*, list,
-    list_with_native, load_store_with_natives, native_import_drafts, pi::*, save,
+    list_with_native, load_store_with_natives, muse::*, native_import_drafts, pi::*, save,
 };
 use crate::host::native::{
     model_provider_import::{cc_switch_app_type, drafts_to_preview, preview_cc_switch},
@@ -123,6 +123,7 @@ fn resolve_environment_api_key(
         "zcode" => keys.extend(["ZHIPU_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]),
         "cursor" => keys.push("CURSOR_API_KEY"),
         "kiro" => keys.push("KIRO_API_KEY"),
+        "muse_code" => keys.push("META_API_KEY"),
         "mimo_code" => keys.extend(["MIMO_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"]),
         id if api_types::AgentKind::Antigravity.matches_id(id) || id == "gemini" => {
             keys.extend(["GEMINI_API_KEY", "GOOGLE_GEMINI_API_KEY", "GOOGLE_API_KEY"]);
@@ -317,6 +318,12 @@ async fn resolve_native_fallback_api_key(
             );
             (!key.is_empty()).then_some(key)
         }
+        "muse_code" => native_muse_draft(&homes.muse)
+            .await
+            .ok()
+            .flatten()
+            .map(|draft| draft.api_key)
+            .filter(|value| !value.is_empty()),
         _ if is_antigravity(agent_id) => native_gemini_draft(&homes.gemini, agent_id)
             .await
             .ok()
@@ -425,23 +432,36 @@ pub(super) fn provider_is_in_use(
     {
         return true;
     }
+    let unique_url = !provider.api_url.trim().is_empty()
+        && store
+            .providers
+            .iter()
+            .filter(|item| {
+                item.agent_id == *agent_id && item.api_url.trim() == provider.api_url.trim()
+            })
+            .count()
+            <= 1;
     if let Some(native) = native_pi {
         let slug = pi_native_id(provider);
         if native.providers.iter().any(|item| {
             !item.api_url.is_empty()
-                && (item.id == provider.id || item.id == slug || item.api_url == provider.api_url)
+                && (item.id == provider.id
+                    || item.id == slug
+                    || (unique_url && item.api_url == provider.api_url))
         }) {
             return true;
         }
-        if native_active_matches_provider(
-            native.active_provider.as_deref(),
-            native
-                .providers
-                .iter()
-                .map(|item| (item.id.as_str(), item.api_url.as_str())),
-            None,
-            provider,
-        ) {
+        if unique_url
+            && native_active_matches_provider(
+                native.active_provider.as_deref(),
+                native
+                    .providers
+                    .iter()
+                    .map(|item| (item.id.as_str(), item.api_url.as_str())),
+                None,
+                provider,
+            )
+        {
             return true;
         }
     }
@@ -450,19 +470,21 @@ pub(super) fn provider_is_in_use(
         if native.providers.iter().any(|item| {
             item.source_id == provider.id
                 || item.source_id == slug
-                || (!item.api_url.is_empty() && item.api_url == provider.api_url)
+                || (unique_url && !item.api_url.is_empty() && item.api_url == provider.api_url)
         }) {
             return true;
         }
     }
-    if let Some(native) = native_omp
-        && native.drafts.iter().any(|item| {
+    if let Some(native) = native_omp {
+        let slug = agents::omp_providers::provider_slug(&provider.name);
+        if native.drafts.iter().any(|item| {
             item.enabled
                 && (item.id == provider.id
-                    || (!item.api_url.is_empty() && item.api_url == provider.api_url))
-        })
-    {
-        return true;
+                    || (!slug.is_empty() && item.id == slug)
+                    || (unique_url && !item.api_url.is_empty() && item.api_url == provider.api_url))
+        }) {
+            return true;
+        }
     }
     if let Some(native) = native_grok
         && !native_uses_dimo_grok_projection(Some(native))
@@ -591,12 +613,14 @@ pub async fn apply_import(
         if draft.skip_reason.is_some() {
             continue;
         }
+        let import_id = matches!(source, AgentModelProviderImportSource::Native)
+            .then(|| native_provider_id(&draft.source_id, &draft.api_url));
         save(
             store_path,
             home,
             environment,
             AgentModelProviderSaveRequest {
-                id: None,
+                id: import_id,
                 name: draft.name,
                 agent_id: agent_id.clone(),
                 api_url: draft.api_url,
@@ -886,6 +910,12 @@ async fn resolve_fallback_api_url(
                     .into_iter()
                     .find_map(|draft| (!draft.api_url.is_empty()).then_some(draft.api_url))
             }),
+        "muse_code" => native_muse_draft(&homes.muse)
+            .await
+            .ok()
+            .flatten()
+            .map(|draft| draft.api_url)
+            .filter(|url| !url.is_empty()),
         _ if is_antigravity(agent_id) => native_gemini_draft(&homes.gemini, agent_id)
             .await
             .ok()
@@ -1023,6 +1053,9 @@ pub(super) async fn capture_projection(
             capture_files(&homes.command_code, &["providers.json"], &mut backup).await?;
         }
         "zcode" => capture_files(&homes.zcode, &["settings.json"], &mut backup).await?,
+        "muse_code" => {
+            capture_files(&homes.muse, &["settings.json", "auth.json"], &mut backup).await?;
+        }
         _ => unreachable!("validated Agent"),
     }
     Ok(backup)
@@ -1075,6 +1108,7 @@ pub(super) fn empty_projection_backup(agent_id: &AgentId) -> ProviderProjectionB
         "omp" => ["models.yml", "config.yml"].as_slice(),
         "codebuddy" => [".env"].as_slice(),
         "qoder" | "auggie" | "zcode" => ["settings.json"].as_slice(),
+        "muse_code" => ["settings.json", "auth.json"].as_slice(),
         "trae" => ["traecli.toml"].as_slice(),
         "command_code" => ["providers.json"].as_slice(),
         _ => [].as_slice(),
@@ -1156,6 +1190,14 @@ pub(super) async fn restore_projection(
             restore_files(&homes.command_code, &[("providers.json", true)], backup).await
         }
         "zcode" => restore_files(&homes.zcode, &[("settings.json", true)], backup).await,
+        "muse_code" => {
+            restore_files(
+                &homes.muse,
+                &[("settings.json", false), ("auth.json", true)],
+                backup,
+            )
+            .await
+        }
         _ => validate_agent(agent_id),
     }
 }

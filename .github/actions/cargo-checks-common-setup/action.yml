@@ -24,18 +24,6 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Install Linux desktop dependencies
-      if: runner.os == 'Linux'
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          libwebkit2gtk-4.1-dev \
-          libgtk-3-dev \
-          libayatana-appindicator3-dev \
-          librsvg2-dev \
-          patchelf
-      shell: bash
-
     - name: Setup Node
       if: ${{ inputs.setup-node == 'true' }}
       uses: ./.github/actions/setup-node

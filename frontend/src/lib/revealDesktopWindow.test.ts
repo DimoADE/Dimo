@@ -7,8 +7,7 @@ const setFocus = vi.fn<() => Promise<void>>(async () => undefined);
 const invoke = vi.fn<(cmd: string) => Promise<void>>(async () => undefined);
 
 vi.mock('@/lib/desktopShell', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('@/lib/desktopShell')>();
+  const actual = await importOriginal<typeof import('@/lib/desktopShell')>();
   return {
     ...actual,
     getDesktopShell: () => {
@@ -203,7 +202,7 @@ describe('revealDesktopWindow', () => {
       path.resolve(__dirname, '../SettingsAppRoutes.tsx'),
       'utf8'
     );
-    expect(app).toContain('isSettingsSurfacePath(window.location.pathname)');
+    expect(app).toContain('isSettingsSurfacePath(location.pathname)');
     expect(settings).toContain('revealDesktopWindowAfterPaint');
   });
 

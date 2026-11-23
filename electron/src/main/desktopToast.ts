@@ -13,6 +13,7 @@ export const DESKTOP_TOAST_WIDTH = 456;
 export const DESKTOP_TOAST_HEIGHT = 520;
 export const DESKTOP_TOAST_MARGIN = 16;
 export const DESKTOP_TOAST_IDLE_CLOSE_MS = 60_000;
+export const DESKTOP_TOAST_MAX_PENDING = 50;
 
 export interface WorkAreaRect {
   x: number;
@@ -44,6 +45,11 @@ export function computeToastWindowPosition(
 export class DesktopToastQueue {
   private ready = false;
   private pending: DesktopToastPayload[] = [];
+  private readonly maxPending: number;
+
+  constructor(maxPending = DESKTOP_TOAST_MAX_PENDING) {
+    this.maxPending = Math.max(1, Math.floor(maxPending));
+  }
 
   isReady(): boolean {
     return this.ready;
@@ -62,11 +68,15 @@ export class DesktopToastQueue {
 
   /**
    * Returns `true` if the toast window is ready for immediate delivery, or
-   * queues the payload and returns `false`.
+   * queues the payload (bounded by `maxPending`, dropping oldest) and returns
+   * `false`.
    */
   enqueueOrDeliver(payload: DesktopToastPayload): boolean {
     if (this.ready) {
       return true;
+    }
+    if (this.pending.length >= this.maxPending) {
+      this.pending.splice(0, this.pending.length - this.maxPending + 1);
     }
     this.pending.push(payload);
     return false;
@@ -82,16 +92,20 @@ export interface DesktopToastManagerOptions {
   preloadPath: string;
   windows: WindowManager;
   idleCloseMs?: number;
+  platform?: NodeJS.Platform;
 }
 
 export class DesktopToastManager {
   private readonly options: DesktopToastManagerOptions;
+  private readonly platform: NodeJS.Platform;
   private readonly queue = new DesktopToastQueue();
   private toastWindow: BrowserWindow | null = null;
   private idleTimer: NodeJS.Timeout | null = null;
+  private linuxContentHeight = 148;
 
   constructor(options: DesktopToastManagerOptions) {
     this.options = options;
+    this.platform = options.platform ?? process.platform;
   }
 
   getWindow(): BrowserWindow | null {
@@ -136,16 +150,45 @@ export class DesktopToastManager {
   }
 
   setIgnoreMouseEvents(ignore: boolean): void {
+    // Electron ignores `{ forward: true }` on Linux, so enabling click-through
+    // would make toast cards permanently unclickable. On Linux we shrink the
+    // window bounds to the rendered toast stack height via `setContentHeight`.
+    if (this.platform === 'linux') {
+      return;
+    }
     const win = this.getWindow();
     if (win) {
       win.setIgnoreMouseEvents(ignore, { forward: true });
     }
   }
 
+  setContentHeight(height: number): void {
+    if (this.platform !== 'linux') {
+      return;
+    }
+    if (!Number.isFinite(height) || height <= 0) {
+      return;
+    }
+    const clamped = Math.max(
+      80,
+      Math.min(DESKTOP_TOAST_HEIGHT, Math.ceil(height))
+    );
+    if (clamped === this.linuxContentHeight) {
+      return;
+    }
+    this.linuxContentHeight = clamped;
+    const win = this.getWindow();
+    if (win) {
+      this.positionWindow(win);
+    }
+  }
+
   hide(): void {
     const win = this.getWindow();
     if (win) {
-      win.setIgnoreMouseEvents(true, { forward: true });
+      if (this.platform !== 'linux') {
+        win.setIgnoreMouseEvents(true, { forward: true });
+      }
       win.hide();
       this.scheduleIdleCleanup();
     }
@@ -157,8 +200,15 @@ export class DesktopToastManager {
     const win = this.getWindow();
     if (win) {
       this.toastWindow = null;
+      this.options.windows.unregisterAuxiliaryWebContents(win.webContents);
       win.destroy();
     }
+  }
+
+  private effectiveWindowHeight(): number {
+    return this.platform === 'linux'
+      ? this.linuxContentHeight
+      : DESKTOP_TOAST_HEIGHT;
   }
 
   private ensureWindow(): BrowserWindow {
@@ -171,7 +221,7 @@ export class DesktopToastManager {
     const win = new BrowserWindow({
       title: 'Desktop Toasts',
       width: DESKTOP_TOAST_WIDTH,
-      height: DESKTOP_TOAST_HEIGHT,
+      height: this.effectiveWindowHeight(),
       resizable: false,
       movable: false,
       minimizable: false,
@@ -196,10 +246,14 @@ export class DesktopToastManager {
 
     // Pass clicks on transparent backdrop pixels through to underlying windows
     // while forwarding hover events so toast cards can opt back into input.
-    win.setIgnoreMouseEvents(true, { forward: true });
+    // On Linux, Electron ignores `{ forward: true }`, so instead we keep mouse
+    // events enabled and resize the overlay tightly to the visible toast stack.
+    if (this.platform !== 'linux') {
+      win.setIgnoreMouseEvents(true, { forward: true });
+    }
 
     // Keep overlay visible across virtual desktops/fullscreen spaces on macOS.
-    if (process.platform === 'darwin') {
+    if (this.platform === 'darwin') {
       win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
     }
 
@@ -210,6 +264,7 @@ export class DesktopToastManager {
     );
 
     win.on('closed', () => {
+      this.options.windows.unregisterAuxiliaryWebContents(win.webContents);
       if (this.toastWindow === win) {
         this.toastWindow = null;
         this.queue.reset();
@@ -226,12 +281,17 @@ export class DesktopToastManager {
       main && !main.isDestroyed()
         ? screen.getDisplayMatching(main.getBounds())
         : screen.getPrimaryDisplay();
-    const { x, y } = computeToastWindowPosition(display.workArea);
+    const height = this.effectiveWindowHeight();
+    const { x, y } = computeToastWindowPosition(
+      display.workArea,
+      DESKTOP_TOAST_WIDTH,
+      height
+    );
     win.setBounds({
       x,
       y,
       width: DESKTOP_TOAST_WIDTH,
-      height: DESKTOP_TOAST_HEIGHT,
+      height,
     });
   }
 
@@ -251,6 +311,7 @@ export class DesktopToastManager {
       if (win && !win.isVisible() && this.queue.pendingCount() === 0) {
         this.queue.reset();
         this.toastWindow = null;
+        this.options.windows.unregisterAuxiliaryWebContents(win.webContents);
         win.destroy();
       }
     }, delayMs);

@@ -125,6 +125,7 @@ export interface DesktopShellUpdaterApi {
 
 export interface DesktopShellDesktopToastApi {
   setIgnoreMouseEvents?: (ignore: boolean) => Promise<void>;
+  setContentHeight?: (height: number) => Promise<void>;
 }
 
 export interface DesktopShellBridge {
@@ -140,10 +141,7 @@ export interface DesktopShellBridge {
   readonly events: DesktopShellEventsApi;
   readonly updater: DesktopShellUpdaterApi;
   readonly desktopToast?: DesktopShellDesktopToastApi;
-  invoke<T = unknown>(
-    cmd: string,
-    args?: Record<string, unknown>
-  ): Promise<T>;
+  invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T>;
 }
 
 export interface ElectronBackendConnectionInfo {
@@ -171,10 +169,7 @@ export interface ElectronDesktopBridge {
   readonly events: DesktopShellEventsApi;
   readonly updater: DesktopShellUpdaterApi;
   readonly desktopToast?: DesktopShellDesktopToastApi;
-  invoke<T = unknown>(
-    cmd: string,
-    args?: Record<string, unknown>
-  ): Promise<T>;
+  invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T>;
 }
 
 declare global {

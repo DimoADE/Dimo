@@ -1,6 +1,6 @@
 ---
 name: ui-element-tokens
-description: How to read "[UI 元素]" tokens inserted by the TauriUI调试器 plugin and jump to the referenced source.
+description: How to read "[UI 元素]" tokens inserted by the UI 调试器 plugin and jump to the referenced source.
 ---
 # UI element tokens
 

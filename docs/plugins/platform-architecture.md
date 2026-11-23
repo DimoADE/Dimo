@@ -1,22 +1,26 @@
 # Plugin Platform Architecture
 
+本文描述 Dimo `v0.5.2` Plugin Platform (`v4`) 的内核架构、生命周期、渲染三轨与远程执行边界。
+
+> 23 类贡献点、155 个 `host-api` 操作与 32 个 `host.call` 能力域的实时绑定矩阵见 [`contract-bindings.md`](contract-bindings.md)。
+
 ## 1. 目标与非目标
 
-Plugin Platform 的目标是让一个可安装包以同一个身份、版本和生命周期同时扩展：
+Plugin Platform 让一个可安装包以统一身份、版本、配置和生命周期同时扩展四个层面：
 
-- Agent：Skills、MCP、Hooks 与 Workflows；
-- App：文件 opener、preview provider、配置、命令和自定义界面；
-- Host：Worker handler、事件订阅和后台服务；
-- Runtime：本地 CLI、Binary、MCP 或 sidecar 资源。
+- **Agent**：Skills、MCP 与 Workflows；
+- **App**：文件 opener、preview provider、面板、设置页、命令、状态栏、主题与自定义界面；
+- **Host**：Worker handler、事件订阅、后台服务与 Provider 接缝；
+- **Runtime**：受校验并锁定的本地 CLI、Binary、MCP 或 sidecar 资源。
 
-平台不把 Tauri plugin、Rust 动态库或任意前端模块加载器暴露为公共兼容面。它也不尝试
-把 Codex/Claude Code 原生插件的全部能力自动翻译成 Dimo App contribution。
+平台不把 Electron 主进程模块、Rust 动态库或任意未声明的前端模块加载器暴露为公共兼容面，也不把 Codex / Claude Code 原生插件强行转换为 Dimo App contribution。
 
 ## 2. 核心设计约束（ADR-0046 / 0047 / 0048 / 0069）
 
-- **单一内核收敛**：Package 校验、安装快照、Runtime 锁探测、Activation Generation 发布与贡献点注册全部收敛在 `crates/plugins`（Plugin Kernel）一个深模块内，宿主命令与前端不再按特定插件 ID（如 `dimo.office`）写特判分支；
-- **非强制 Skill 约束**：插件包只需至少声明一项受支持的贡献（App-only、Provider-only、Theme-only 或 Agent-only 包均一等合法）；
-- **官方插件零特权**：官方插件与第三方插件使用同一套公开 SDK、清单 Schema 与 `ArtifactToolProvider` / `HostApiBridge` 租约接缝（由 `pnpm run plugin:no-privilege` 持续门禁校验）。
+- **单一内核收敛**：包校验、安装快照、Runtime 锁探测、Activation Generation 发布与贡献注册收敛在 `crates/plugins`（Plugin Kernel）一个深模块内；桌面壳（Electron `electron/` + `dimo-server --desktop`）与独立 `dimo-server` 共用同一内核，不按特定插件 ID 分支。
+- **单层扩展（ADR-0069）**：插件只面向宿主贡献点开发，不存在插件依赖插件、跨插件服务调用或插件自声明扩展点。
+- **任意贡献即合法**：插件只需至少声明一项受支持的贡献（App-only、Theme-only、Provider-only 或 Agent-only 包均一等合法）。
+- **官方插件零特权**：官方 15 个插件与第三方插件使用同一套公开 `@dimoai/plugin-sdk`、Package v4 清单与贡献点，由 CI 的 `pnpm run plugin:no-privilege` 强制校验。
 
 ## 3. 运行拓扑
 
@@ -24,39 +28,35 @@ Plugin Platform 的目标是让一个可安装包以同一个身份、版本和�
 Plugin source / .vxp
         │
         ▼
-┌──────────────────────── Dimo Host ─────────────────────────┐
-│ Package Inspector → Installation Store → Plugin Kernel      │
-│                                          │                  │
-│                 ┌────────────────────────┼─────────────┐    │
-│                 ▼                        ▼             ▼    │
-│        Host API Bridge         Runtime Resolver   Activation│
-│                 ▲                        ▲             │    │
-│                 │                        │             ▼    │
-│         Full Trust Worker ───────────────┘    Contribution  │
-│                                             Registry        │
-│                                                │            │
-│              ┌────────────────┬────────────────┼─────────┐  │
-│              ▼                ▼                ▼         ▼  │
-│         Agent Host       App Surface Host  Artifact Host  │  │
-│                                                      Automation│
-└──────────────┬────────────────┬─────────────────────────────┘
+┌──────────────────────── Dimo Host (dimo-server) ───────────┐
+│ Package Inspector → Installation Store → Plugin Kernel     │
+│                                          │                 │
+│                 ┌────────────────────────┼─────────────┐   │
+│                 ▼                        ▼             ▼   │
+│     HostCapabilityBroker       Runtime Resolver   Activation│
+│                 ▲                        ▲             │   │
+│                 │                        │             ▼   │
+│         Full Trust Worker ───────────────┘    Contribution │
+│                                                 Registry   │
+│                                                    │       │
+│              ┌────────────────┬────────────────────┼────┐  │
+│              ▼                ▼                    ▼    ▼  │
+│         Agent Host     App Extension Host   Artifact  Auto-│
+│                                               Host   mation│
+└──────────────┬────────────────┬────────────────────────────┘
                │                │
-        BackendTransport   versioned worker RPC
+       Remote Protocol v1   versioned worker RPC
                │
-       Desktop / Web / Remote client
+   Electron Desktop / WebUI / Remote Workstation / Mobile
 ```
 
-Worker 与 Runtime 永远运行在拥有数据目录的 Dimo Host。远程客户端不能把 Host 插件下载
-到本机执行，也不能因本机具备某能力而绕开 Server-bound window 的 Host 归属。
+Worker 与 Runtime 始终运行在持有数据目录的 Dimo Host 上。远程客户端只消费投影并通过 Remote Protocol v1 下发命令，不会把远端 Host 插件下载到本机执行。
 
-## 4. 深模块与 seam
+## 4. 深模块与接缝
 
 ### 4.1 Plugin Kernel
 
-Plugin Kernel 是外部唯一业务 seam。调用方不需要理解 manifest parser、数据库表、Worker
-进程、Runtime lock、package digest 或 generation drain。
-
-概念 interface：
+Plugin Kernel 是唯一的业务接缝；Electron 桌面壳与 `dimo-server`（Axum）路由只做鉴权、DTO 转换与错误映射：
 
 ```rust
 pub trait PluginKernel {
@@ -73,191 +73,79 @@ pub trait PluginKernel {
 }
 ```
 
-这不是要求最终 Rust trait 逐字一致，而是规定外部 interface 的深度：调用者提交意图并
-观察结果，不协调内部步骤。Tauri 和 Axum adapter 只能做鉴权、DTO 与错误转换。
-
 ### 4.2 Package Inspector / Compiler
 
-输入是目录、archive、registry artifact 或 linked development source，输出是不可变的
-`CompiledPluginPackage`：
+接收目录、`.vxp` 归档、市场制品或 linked development 源目录，只读编译为不可变 `CompiledPluginPackage`：
 
-- 规范化 identity、版本与来源；
-- canonical manifest；
-- content tree digest、entrypoint digest 和 resource digest；
-- typed contributions 与 Host API requirements；
-- Host/platform compatibility；
-- runtime candidates；
-- warnings 与 blocking diagnostics；
-- signature/provenance evidence。
+- 规范化 `(publisher, id)`、版本与来源锁；
+- 校验 canonical manifest、`README.md` `summary`、`config.schema` 与 `content.index.json`；
+- 计算 content tree / entrypoint / resource digest；
+- 解析贡献声明、平台兼容条件、Runtime 依赖与完整诊断列表（单次遍历报告全部违规）。
 
-解析器只读，不安装 Runtime、不执行 package code、不写 activation。所有路径在
-canonical package root 内解析，并拒绝 traversal、symlink escape、重复大小写身份、
-设备文件和不受支持的文件类型。
+所有路径在规范化包根目录内解析，拒绝绝对路径、`..` 穿越、符号链接逃逸与大小写碰撞。
 
 ### 4.3 Installation Store
 
-普通安装物化不可变 snapshot；linked development 显式引用用户目录。二者都生成 digest，
-但 linked source 每次变化后必须重新 inspect、计算 package digest 并走 candidate
-activation。安装目录不能直接被 Worker 写入；插件持久数据进入独立 data root。
-
-Installation Store 保留当前版本和至少一个可回滚版本。删除 package snapshot 不删除
-用户文件、Artifact、Conversation 或插件 data，除非用户单独选择清除插件 data。
+- 普通安装物化不可变快照；linked development 引用开发者目录，每次变动后重新 inspect、计算摘要并走候选激活代流程。
+- 安装快照目录对 Worker 只读；插件持久化数据写入独立 data root。
+- Store 保留当前版本及可回滚的上一验证版本；删除安装快照不会删除用户文件、Artifact、Conversation 或插件数据（除非用户显式选择清除数据）。
 
 ### 4.4 Contribution Registry
 
-Registry 保存当前已发布 generation 的只读运行时目录：
+保存当前已发布激活代的只读运行时目录（`ContributionRecord` 包含 `identity`、`package_version`、`package_digest`、`generation_id`、`kind`、`declaration`、`handler_route?`、`required`、`readiness`、`diagnostics`）。
 
-```text
-ContributionRecord
-├─ identity: publisher/plugin/contribution
-├─ package_version + package_digest
-├─ generation_id
-├─ kind + kind_version
-├─ declaration
-├─ handler_route?       # declarative contribution 可无 handler
-├─ required
-├─ readiness
-├─ surface_capabilities
-└─ diagnostics
-```
-
-Registry 不负责安装或启动 Worker。它的价值是让以下调用方使用同一目录：
-
-- Agent session assembly；
-- Composer 与 Automation action resolver；
-- file opener/preview resolver；
-- App navigation/settings/action inventory；
-- Runtime/diagnostics UI；
-- Remote protocol capabilities。
-
-Registry publication 是整个 generation 的一次原子替换。不得逐条 insert 后让调用方观察到
-半个插件。
+Agent 会话装配、Composer / Automation 动作解析、文件 opener / preview 解析、UI 槽位渲染、Provider 接缝与 Remote Protocol 能力发现共用同一份目录。Registry 发布以整个 generation 为单位原子替换，消费者永远观察不到半个插件。
 
 ### 4.5 Activation Manager
 
-Activation Manager 管理 candidate-first 事务和旧 generation drain：
+管理 candidate-first 事务与旧 generation drain：
 
 ```text
 installed → resolving → preparing_runtime → starting_candidate
           → validating_candidate → publishing → active
                                              ↘ active_degraded
 
-任一发布前失败 → installed/previous_active
+发布前任一环节失败 → 保持 installed / previous_active
 active → draining → disabled
 ```
 
-每个调用在开始时固定 generation lease。发布新 generation 后，旧 lease 可以完成但不得
-生成新的子调用；超时后取消并记录 `generation_drain_timeout`。Preview lease 的 drain
-策略按 provider 声明，可允许用户已打开视图自然关闭，但不得无限阻止更新。
+每次调用在开始时绑定 generation lease；新代发布后，旧 lease 允许完成当前调用但不允许派生新子调用，超时后取消并记录 `generation_drain_timeout`。Activation Manager 核对全部 required handlers、清单声明匹配、Runtime probe 结果与 SDK 版本兼容后才原子切换目录。
 
-Worker 发送 `ready` 只证明 transport 可用，不证明 activation 成功。Activation Manager
-还必须核对：
+### 4.6 HostCapabilityBroker
 
-- required handlers 完整；
-- handler 与 manifest declaration 匹配；
-- runtime probe 通过；
-- contribution identity 无非法冲突；
-- App artifact metadata 与 SDK major 兼容。
+在 Full Trust 模型（[ADR-0048](../adr/0048-full-trust-plugin-execution-model.md)）下，`HostCapabilityBroker` 为 Worker 与 `protocol: "2.0"` App 提供结构化的宿主能力 API（涵盖 `storage.kv`、`storage.settings`、`secrets`、`files`、`network.fetch`、`exec`、`runtime.*`、`artifact.*`、`conversation.*`、`collaboration.*`、`browser.*`、`remote.*`、`provider.presets.*`、`events`、`blob.*`、`app.notify.toast`、`log.*`、`plugin.self`；完整绑定见 [`contract-bindings.md`](contract-bindings.md)）。
 
-### 4.6 Host API Broker
-
-ADR-0048 将插件执行模型改为 Full Trust。Broker 是 Runtime、Artifact、conversation 与 app lifecycle
-等结构化 Host API 的便利层，而不是权限边界；插件也可以直接使用 Node 与浏览器环境能力。
-
-| Capability family       | 典型 scope                                            |
-| ----------------------- | ----------------------------------------------------- |
-| `filesystem.read/write` | opened artifact、workspace-relative glob、plugin data |
-| `network.fetch/listen`  | HTTPS domain allowlist、loopback allocated port       |
-| `runtime.execute`       | manifest 中一个精确 runtime lock 与固定 argv schema   |
-| `secrets.read`          | 仅当前 plugin 的 named secret                         |
-| `storage.*`             | 当前 plugin 的 settings/KV/SQLite                     |
-| `agent.*`               | 注册过的 tool/action、当前 invocation context         |
-| `artifact.*`            | 指定 Artifact ID、create/open preview/update evidence |
-| `conversation.*`        | 当前 Turn 或明确 scope 的只读/追加动作                |
-| `app.*`                 | 已声明 surface、navigation intent、notification       |
-| `system.*`              | clipboard、open external URL 等受限能力               |
-
-Broker 仍校验 plugin identity、generation、参数 schema 和 Runtime lock，防止生命周期串线或损坏；
-它不读取 persisted grant，也不按 capability scope 拒绝 Full Trust 插件。
+Broker 校验 plugin identity、generation、请求参数 Schema、文件根目录约束与 Runtime lock，用于保障生命周期一致性与结构化诊断，而不是权限审批门禁。
 
 ### 4.7 Worker Host
 
-默认 Worker 是独立 OS 进程，拥有：
+Worker 作为独立 OS 进程运行，支持 **Node**、**Python（CPython 3.12）** 与 **Native（Rust）** 三种运行时，统一使用 stdio JSON-RPC `1.1` 协议：
 
-- 当前用户完整环境变量、文件系统、网络与子进程能力；
-- package code 与插件根目录访问；
-- 有界 CPU、内存、进程数、输出和请求并发；
-- versioned JSON-RPC/stdio transport；
-- heartbeat、structured logs、crash/backoff 与强制终止；
-- activation-scoped lifecycle identity。
-
-首个实现使用 Dimo 管理的 JavaScript runtime；protocol 保持语言无关，使其他 Worker adapter
-后续能实现同一 seam。进程隔离只用于 crash containment、reload 与 generation drain，不应被描述
-为 security sandbox。
-
-Worker crash 只使其 generation 对应 executable contributions degraded/failed。Host 主进程
-和其他插件继续工作。连续重启使用有上限的指数退避；超过预算后停止自动重启，等待用户
-或新 generation。
+- 继承当前用户的本机权限，同时具有有界帧/消息上限（默认 32 MiB 单帧、64 MiB 逻辑消息 + `blob.*` 流式传输）、心跳与结构化日志；
+- 独立进程提供崩溃隔离、热更新与 generation drain，并非安全沙箱；
+- 单个 Worker 崩溃只影响该插件当前激活代的可执行贡献，采用有上限的指数退避重启，超预算后停止自动重启并记录崩溃证据供界面与 `dimo-plugin doctor` 排查。
 
 ### 4.8 Runtime Resolver
 
-Resolver 接受声明式 Runtime request，返回精确 lock：
+根据 `depends/runtimes/*.json` 解析出精确的 `RuntimeLock`（`runtime_id`、`version`、`target`、`source`、`digest`、`absolute_entrypoint`、`probe_evidence`、`ownership`）：
 
-```text
-RuntimeLock
-├─ runtime_id
-├─ version
-├─ target
-├─ source + provenance
-├─ digest + integrity_level
-├─ absolute_entrypoint
-├─ probe_evidence
-└─ ownership: managed | external
-```
+- 托管 Runtime 先下载到 staging 目录、校验 SHA-256 摘要并执行有界 probe，通过后原子发布；
+- 多个版本可并存；`gc-runtimes` 仅回收没有任何 installation、generation 或运行租约引用的托管 Runtime；
+- 外部 Runtime 每次使用前重新校验完整性。
 
-Managed Runtime 先下载到 staging，验证 digest，再 probe 并原子发布。Package installation
-保存 ref；GC 只删除无 installation/generation/lease 引用的版本。外部 Runtime lock 每次使用
-前重新验证；内容变化只有官方完整性证据匹配时才能自动采纳，否则 fail closed。
+### 4.9 App Extension Host（渲染三轨）
 
-Runtime invocation 采用固定 executable 与结构化 argv template，以保证可重复执行和诊断。原生
-sidecar 与 Worker 一样随插件启用获得 Full Trust，不再有单独 Trusted Native grant。
+按交互密度提供三条渲染轨道（[ADR-0069](../adr/0069-everything-is-a-plugin-platform.md)）：
 
-### 4.9 App Extension Host
+1. **宿主渲染 Descriptor（`L1`）**：`app.command`、`app.toolbar`、`app.status`、`app.composer.slash`、`app.composer.action`、`app.rail.section`、`app.timeline.card`、`app.settings.section`、`file.opener` / `artifact.preview`。由宿主原生组件和 Design Tokens 渲染，图标受 `@dimo/plugin-contract/catalog/icons` 校验。
+2. **Module Federation / 宿主内 App（`protocol: "2.0"`）**：面向 `app.panel`、`app.tab`、`app.kanban.view`、`app.settings.page`、Turn Hook 与 Cordis 风格 IoC 服务；在宿主 React 树内高频交互渲染，开发态由 `dimo plugin run dev` 提供 Vite HMR，卸载时经 `EffectScope` 零残留清理。
+3. **Full Trust 独立 HTML Surface（`protocol: "1.0"`）**：面向 `plugin.detail.panel` 与 `artifact.editor` 等文档型/富媒体页面；使用 iframe 作为挂载与生命周期接缝（非安全沙箱），通过带一次性 surface token 与 generation 绑定的 `postMessage` / `MessagePort` 桥接调用 Worker 与 `bridge.artifact`。
 
-App contribution 分两类：
-
-#### Host-rendered surface
-
-插件提供 descriptor，Dimo 使用自身组件和 design tokens 渲染。当前稳定的 Host-rendered kind：
-
-- `app.command`
-- `app.toolbar`
-- `app.status`
-- `app.composer.slash`
-- `app.timeline.card`
-- `app.settings.section`
-- `file.opener` / `artifact.preview`
-- `provider.model.importSource`
-
-Host-rendered surface 不执行 package App 代码，适合 Office 第一阶段迁移。
-
-#### Full Trust custom surface
-
-复杂 panel/editor 使用 iframe/webview 作为 mount 与 lifecycle seam，但不把它当安全沙箱：
-
-- document 可以加载脚本、样式、图片、字体和网络资源；
-- 不设置 iframe sandbox、CSP 或 Permissions Policy；
-- package 代码与 Dimo 运行在同一用户信任级别；
-- bridge 只接受 JSON-compatible typed messages；
-- 每个 mount 仍绑定 plugin/generation，unmount/generation change 后撤销 session；
-- navigation、download、clipboard 与浏览器 API 可直接使用，也可选择结构化 Host API。
-
-UI error boundary 只卸载对应 surface，并提供重试/诊断；不得白屏整个应用。
+所有插件 UI 均包裹在独立 Error Boundary 内，单面异常仅卸载对应视图并展示恢复/诊断入口，不影响整个工作台。
 
 ### 4.10 Artifact Host
 
-现有 Artifact 路径验证、provider probe、preview lease、进程 refcount、capability proxy 与 idle
-reap 属于 Artifact Host，而不是 Office Plugin。公共 preview contract：
+路径规范化、预览租约（`ArtifactPreviewLease`）、进程引用计数、loopback 代理与空闲回收属于通用 Artifact Host，不耦合任何具体插件：
 
 ```ts
 type RenderDescriptor =
@@ -266,156 +154,43 @@ type RenderDescriptor =
   | { kind: "pluginSurface"; surfaceId: string; sessionId: string };
 ```
 
-调用链必须是：
-
-```text
-file/artifact → resolver(media type, extension, user default)
-              → contribution invocation
-              → preview lease + RenderDescriptor
-              → generic preview panel
-```
-
-Resolver 优先用户默认，其次有效 priority，再按稳定 identity 排序。Provider 失效时回退到
-下一 compatible provider；同一文件已经打开的 lease 不在背后静默换 provider。
+打开文件时按 `用户默认 → priority → 稳定 identity` 解析贡献，当前已打开租约不会在后台被静默替换。
 
 ## 5. 身份、信任与数据模型
 
-### 5.1 身份
+- **产品身份**：由 `(publisher, plugin_id)` 唯一标识；未签名本地包标记为 `local-unverified`，不能冒充市场发布者。
+- **Full Trust**：安装或启用即授予本机用户权限；`publisher`、`packageDigest` 与 `generation` 用于更新来源校验、回滚、诊断与生命周期绑定。
+- **数据隔离**：每个插件身份拥有独立的 `config.json`、KV 命名空间、SQLite 文件、OS Keychain secrets 命名空间、data/cache 目录与结构化日志流。卸载默认保留数据，重新安装且 `(publisher, plugin_id)` 匹配时恢复挂载。
+- **供应链完整性**：`.vxp` 为确定性归档；安装过程只校验并解包，从不在终端用户机器上执行包内 build / lifecycle 脚本。
 
-Package identity 是 `(publisher, plugin_id)`，版本与 digest 标识安装 artifact。Unsigned
-local package 使用显式 `local-unverified` publisher evidence，不能冒充 Marketplace
-publisher。名称、图标和源目录不参与身份推断。
+## 6. 持久状态与状态机
 
-### 5.2 Full Trust
+Plugin Kernel 持久化权威表包括：`plugin_packages`、`plugin_installations`、`plugin_activation_intents`、`plugin_generations`、`plugin_contributions`、`plugin_runtime_locks`、`plugin_runtime_refs`、`plugin_bindings`、`plugin_settings`、`plugin_operations` 与 `plugin_audit`。Worker PID、内存 handler 与打开的 stdio 管道属于瞬态投影，Host 重启后依据完整 generation 证据重建，未完成操作标记为 `interrupted`。
 
-安装或启用 package 就是信任决定。Worker、App 与 Runtime 继承当前用户权限；Host 不维护或
-执行 capability grant/scope/trust-tier 门禁。Manifest 的旧 `permissions` 字段只作为兼容元数据，
-不会触发产品授权 UI。publisher、digest 与 generation 仍用于更新、rollback、诊断与生命周期绑定。
+插件汇总状态：`not_installed` | `installed_disabled` | `preparing_runtime` | `activating` | `active` | `active_degraded` | `incompatible` | `failed` | `updating` | `rolling_back`；单项贡献状态为 `ready` | `unavailable` | `degraded` | `incompatible`。错误统一通过包含稳定 `code`、`operationId`、`pluginIdentity`、`generation` 与诊断引用的信封返回。
 
-### 5.3 数据隔离
+## 7. 远程 Host 与多客户端
 
-每个 Plugin identity 获得独立：
+远程客户端通过版本化 Remote Protocol v1 获取 Host 上的插件目录、激活状态、客户端可渲染的 surface 类型、操作进度以及短期 preview / surface capability URL：
 
-- settings namespace；
-- KV namespace；
-- SQLite 文件及 append-only migration history；
-- secrets namespace；
-- data/cache/temp 目录；
-- structured log stream。
+- Web 与远程客户端不读取 Host 本机绝对路径，文件交互使用 Project / Workspace / Artifact 身份；
+- 预览代理只转发已登记租约的 loopback endpoint，不作为任意网络代理；
+- 主访问 token 不进入 iframe URL、插件消息或日志。
 
-Uninstall 默认保留 data，并在 UI 中单独提供“删除插件数据”。重新安装只有 identity 与
-publisher evidence 匹配时才能重新挂载保留数据。
+## 8. 产品信息架构契约
 
-### 5.4 供应链
+- `/plugins` 保留全局设置侧栏，提供「已安装」与「插件市场」两个 Tab；市场与设置安装经 Full Trust 确认后立即启用；能力等价官方插件按版本白名单自动安装并默认启用（用户可禁用或卸载）。
+- `/plugins/:pluginId` 仅设「内容」（README 与校验后的 `contents/`）与「配置」（基于 `config.schema` 原子读写 `config.json`）两个主 Tab。
+- 诊断信息（generation、contribution、runtime lock、崩溃记录、stdout/stderr 日志）集中展示在「运行状况」与 `dimo-plugin doctor`。
+- Agent 原生插件在「设置 → Agent → 对应 Agent」底部独立呈现，与 Dimo 产品插件生命周期解耦。
 
-`.vxp` 必须是确定性 archive。安装验证 package digest、文件清单、entrypoint metadata、
-runtime locks 和可选 signature/SBOM。Registry update 先下载 candidate，不在当前目录原地
-覆盖。npm/git materialization 禁止 lifecycle scripts；package build scripts 只在作者的
-开发环境运行，不在最终用户安装阶段运行。
+## 9. 内核不变量
 
-## 6. 持久状态
-
-建议 canonical schema 按职责拆分，但只有 Plugin Kernel 写入：
-
-| 表/聚合                     | 权威事实                                               |
-| --------------------------- | ------------------------------------------------------ |
-| `plugin_packages`           | identity、version、digest、source、signature、manifest |
-| `plugin_installations`      | 当前/rollback package、membership、data retention      |
-| `plugin_activation_intents` | enabled intent 与 target package                       |
-| `plugin_generations`        | 完整发布的 generation 和状态证据                       |
-| `plugin_contributions`      | generation 下规范化 declarations；可重建但用于查询     |
-| `plugin_grants`             | 旧 permission 元数据的兼容投影；不参与执行门禁         |
-| `plugin_runtime_locks`      | installation 使用的精确 Runtime evidence               |
-| `plugin_runtime_refs`       | installation/generation/lease refs                     |
-| `plugin_bindings`           | Agent/Project/Host 投影意图                            |
-| `plugin_settings`           | 非秘密 settings；secrets 进入系统凭据存储              |
-| `plugin_operations`         | install/update/activate/uninstall state machine        |
-| `plugin_audit`              | 不可变安全与破坏性操作证据                             |
-
-Worker PID、in-memory handler、heartbeat 和 open transport 是瞬态投影，不写成另一个权威。
-Host 重启后只根据完整 generation 证据重新建立进程；未完成 operation 标记 interrupted，并
-按操作语义回滚或允许重试，绝不假装成功。
-
-## 7. 状态与错误
-
-Plugin summary 状态：
-
-- `not_installed`
-- `installed_disabled`
-- `preparing_runtime`
-- `activating`
-- `active`
-- `active_degraded`
-- `incompatible`
-- `failed`
-- `updating`
-- `rolling_back`
-
-每个 contribution 另有 `ready / unavailable / degraded / incompatible`。
-聚合状态由事实派生，不持久化第二个真相。
-
-稳定错误至少覆盖：
-
-- package/manifest/path/signature/integrity invalid；
-- host/API/contribution/runtime incompatible；
-- Host API unsupported 或 invocation schema invalid；
-- registration mismatch/collision；
-- worker crashed/unresponsive/resource limit；
-- runtime install/probe/digest/ownership failure；
-- generation publish/drain/rollback failure；
-- surface unsupported/token expired/document load failure；
-- native adapter capability unavailable。
-
-错误 envelope 必须含 stable code、operation ID、plugin identity、generation（若有）、用户可
-执行恢复动作和可审计 diagnostic reference；不能只返回 Worker stderr。
-
-## 8. Remote 与多客户端
-
-Host inventory 通过 versioned Remote protocol 返回：
-
-- package/activation/contribution state；
-- 客户端可渲染的 surface kinds；
-- operation progress 与 durable sequence；
-- capability incompatibility；
-- 短期 surface/preview capability URL。
-
-Web 客户端不得读取 Host 本机绝对路径。文件操作使用 Project/Workspace/Artifact identity；
-preview proxy 只代理已注册 provider lease 的 loopback endpoint，不能成为任意 SSRF proxy。
-主 access token 不进入 iframe URL、插件消息或日志。
-
-## 9. 产品信息架构契约
-
-Plugin 模块服务于 Dimo Product Plugin，保留全局设置侧栏并采用“单列目录 → 独立详情”结构：
-
-- 目录行只显示图标、名称、README summary、发布者/版本和启停状态；
-- 点击目录行进入插件独立页面；
-- 内容 Tab 展示 README 与 Host 校验过的 `contents/` 索引；
-- 配置 Tab 依据 schema 编辑包根 `config.json`；
-- 安装/启用即为 Full Trust 决定；失败通过本地化 Toast 呈现；
-- contribution、generation、handler、runtime lock、digest 与 crash evidence 只进入诊断/开发工具。
-
-用户界面不把一个插件分成 App/Agent/Host/Runtime，也不以 Skill、MCP、Runtime 或命令数量
-解释插件价值。它们是 Kernel 的内部 integration 与执行事实。
-
-Codex、Claude Code 等 Agent-native plugin 位于“设置 → Agent”的对应 Agent 页面底部，默认
-折叠并使用原生插件的列表/预览。它只呈现当前 Agent 原生权威和 adapter 支持的操作，不重复
-列出 Dimo Package 的 App/Runtime 生命周期；若多格式 source 与 Dimo Package 相关联，可以
-显示可追溯链接，但仍是两个独立启停状态。
-
-远程窗口中两个入口都作用于当前 Server Profile 的 Host。当前客户端能力不允许安装或修改时，
-页面保持可浏览并准确禁用写操作，不把能力不可用伪装成无插件。
-
-## 10. 内核不变量
-
-1. 一个 Plugin identity 在一个 Host 上只有一个当前 installation 和一个已发布 generation。
-2. Contribution Registry 永远不暴露 candidate 或部分 generation。
-3. 结构化 Host API 调用能追溯到 declaration、generation、invocation 和 audit evidence；Full
-   Trust 插件直接执行的 Node/Browser 副作用不经过 Host 审计。
-4. Package 更新失败不会改变当前 generation。
-5. 禁用不会删除 Artifact、Conversation、Automation 或插件 data。
-6. Runtime GC 不删除仍被 installation、generation 或 lease 引用的内容。
-7. Agent、App 和 Runtime contribution 的 package version/digest 必须一致。
-8. 核心消费者只按 contribution kind/identity 调用，不识别具体插件 ID。
-9. Native Agent plugin 与 Dimo Product Plugin 保持独立 lifecycle，不互相替代启停状态。
-10. Built-in/source-bundled 只影响发现与可删除性，不绕过 schema、digest、activation 或
-    contract tests。
+1. 单个 `(publisher, plugin_id)` 在同一 Host 上至多只有一个当前 installation 与一个已发布 generation。
+2. Contribution Registry 永远不暴露未完成验证的 candidate 或部分 generation。
+3. 单层扩展：插件间零依赖，核心消费者只按 contribution kind 与 identity 解析，不识别具体插件 ID。
+4. 更新失败保留上一完整 generation 与原有 `config.json`。
+5. 禁用不删除 Artifact、Conversation、Automation 或插件数据。
+6. Runtime GC 不回收仍被 installation、generation 或运行租约引用的运行时。
+7. 同一激活代下 Agent、App、Host 与 Runtime 贡献共享精确一致的 package version 与 digest。
+8. Agent 原生插件与 Dimo 产品插件保持独立生命周期，互不替代启停状态。

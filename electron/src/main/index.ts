@@ -1,13 +1,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { app, protocol, session } from 'electron';
+import { app, powerMonitor, protocol, session } from 'electron';
 
 import {
   DEFAULT_APP_USER_MODEL_ID,
+  GPU_MODE_CHANGED_EVENT,
   SIDECAR_EXITED_EVENT,
   SIDECAR_RESTARTED_EVENT,
+  SYSTEM_POWER_RESUMED_EVENT,
   isHostWindowLabel,
+  type DesktopGpuMode,
 } from '../shared/ipcContract';
 import { ElectronBrowserController } from './browser/controller';
 import { NativeTabsRpcClient } from './browser/nativeTabsRpc';
@@ -53,8 +56,23 @@ function resolveCurrentDefaultDataDir(repoRoot?: string): string {
   });
 }
 
-function applyRenderingAccelerationMode(dataDir: string): void {
-  let mode = 'auto';
+function isSoftwareGpuFeatureStatus(
+  status: Partial<Electron.GPUFeatureStatus> | null | undefined
+): boolean {
+  const compositing = status?.gpu_compositing;
+  return (
+    compositing === 'disabled_software' ||
+    compositing === 'disabled_off' ||
+    compositing === 'disabled_off_ok' ||
+    compositing === 'unavailable_software' ||
+    compositing === 'unavailable_off'
+  );
+}
+
+function applyRenderingAccelerationMode(
+  dataDir: string
+): 'auto' | 'disable_gpu' | 'force_gpu' {
+  let mode: 'auto' | 'disable_gpu' | 'force_gpu' = 'auto';
   try {
     const settingsPath = path.join(dataDir, 'settings.json');
     const raw = fs.readFileSync(settingsPath, 'utf8');
@@ -75,6 +93,7 @@ function applyRenderingAccelerationMode(dataDir: string): void {
     app.commandLine.appendSwitch('ignore-gpu-blocklist');
     app.commandLine.appendSwitch('enable-gpu-rasterization');
   }
+  return mode;
 }
 
 const APP_USER_MODEL_ID = app.isPackaged
@@ -87,7 +106,9 @@ if (process.platform === 'win32') {
   app.setAppUserModelId(APP_USER_MODEL_ID);
 }
 registerPrivilegedSchemes(protocol);
-applyRenderingAccelerationMode(resolveCurrentDefaultDataDir(resolveRepoRoot()));
+const configuredAccelerationMode = applyRenderingAccelerationMode(
+  resolveCurrentDefaultDataDir(resolveRepoRoot())
+);
 
 // Enable smooth Wayland/X11 Ozone detection on Linux when not explicitly set.
 if (process.platform === 'linux' && !process.env.ELECTRON_OZONE_PLATFORM_HINT) {
@@ -139,6 +160,10 @@ if (!gotLock) {
     }
   };
   let browserRpc: NativeTabsRpcClient | null = null;
+  const candidateGuestPreload = path.join(__dirname, '../preload/webviewGuest.js');
+  const guestPreloadPath = fs.existsSync(candidateGuestPreload)
+    ? candidateGuestPreload
+    : undefined;
   const browser = new ElectronBrowserController({
     onEvent: (payload) => {
       browserRpc?.sendEvent(payload);
@@ -148,6 +173,7 @@ if (!gotLock) {
       browserRpc
         ? browserRpc.checkNavigation(url)
         : Promise.resolve({ allowed: true, preferSystem: false }),
+    guestPreloadPath,
   });
   browser.installWebviewSecurity(app);
   browserRpc = new NativeTabsRpcClient({
@@ -162,7 +188,25 @@ if (!gotLock) {
   let isQuitting = false;
   let installingUpdate = false;
   let exitPrepPromise: Promise<void> | null = null;
+  let settingsPrewarmTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearSettingsPrewarmTimer = () => {
+    if (settingsPrewarmTimer !== null) {
+      clearTimeout(settingsPrewarmTimer);
+      settingsPrewarmTimer = null;
+    }
+  };
   let activeDataDir: string | undefined = resolveEnvDataDir();
+  let gpuMode: DesktopGpuMode =
+    configuredAccelerationMode === 'disable_gpu' ? 'software' : 'hardware';
+  let gpuCrashCount = 0;
+
+  const setGpuMode = (nextMode: DesktopGpuMode) => {
+    if (gpuMode === nextMode) {
+      return;
+    }
+    gpuMode = nextMode;
+    windows?.broadcastEvent(GPU_MODE_CHANGED_EVENT, { mode: nextMode });
+  };
 
   deeplinks.registerProtocolClient(app);
 
@@ -177,28 +221,53 @@ if (!gotLock) {
     appVersion: app.getVersion(),
     getDataDir: () =>
       sidecar.getDataDir() ?? activeDataDir ?? resolveCurrentDefaultDataDir(resolveRepoRoot()),
+    onGpuProcessGone: () => {
+      gpuCrashCount += 1;
+      let softwareFallback = gpuCrashCount >= 2;
+      if (!softwareFallback) {
+        try {
+          softwareFallback = isSoftwareGpuFeatureStatus(app.getGPUFeatureStatus());
+        } catch {
+          softwareFallback = false;
+        }
+      }
+      if (softwareFallback) {
+        setGpuMode('software');
+      }
+    },
   };
   const recordCrash = createCrashRecorder(crashReporterOptions);
   const uninstallCrashHandlers = installCrashHandlers(crashReporterOptions);
+
+  let exitPrepFinished = false;
 
   const prepareForExit = async (): Promise<void> => {
     if (exitPrepPromise) {
       return exitPrepPromise;
     }
     isQuitting = true;
+    clearSettingsPrewarmTimer();
     exitPrepPromise = (async () => {
-      uninstallCrashHandlers();
-      browserRpc?.stop();
-      browser.destroy();
-      windows?.setQuitting(true);
-      toast?.destroy();
-      chrome?.destroy();
-      for (const win of windows?.allWindows() ?? []) {
-        if (!win.isDestroyed()) {
-          win.destroy();
+      try {
+        uninstallCrashHandlers();
+        browserRpc?.stop();
+        browser.destroy();
+        windows?.setQuitting(true);
+        // Mark sidecar as shutting down and start its graceful stop before
+        // destroying windows so window `closed` handlers skip firing unawaited
+        // `notifyWindowDestroyed` HTTP requests during exit.
+        const sidecarShutdown = sidecar.shutdown();
+        toast?.destroy();
+        chrome?.destroy();
+        for (const win of windows?.allWindows() ?? []) {
+          if (!win.isDestroyed()) {
+            win.destroy();
+          }
         }
+        await sidecarShutdown;
+      } finally {
+        exitPrepFinished = true;
       }
-      await sidecar.shutdown();
     })();
     return exitPrepPromise;
   };
@@ -221,7 +290,7 @@ if (!gotLock) {
   });
 
   app.on('before-quit', (event) => {
-    if (!isQuitting) {
+    if (!exitPrepFinished) {
       event.preventDefault();
       void gracefulExit();
     }
@@ -253,6 +322,15 @@ if (!gotLock) {
   void app
     .whenReady()
     .then(async () => {
+      if (gpuMode !== 'software') {
+        try {
+          if (isSoftwareGpuFeatureStatus(app.getGPUFeatureStatus())) {
+            gpuMode = 'software';
+          }
+        } catch {
+          // Ignore if GPU feature status is unavailable in headless/test runs.
+        }
+      }
       const repoRoot = resolveRepoRoot();
       const frontendDistDir = resolveFrontendDistDir(repoRoot);
       const preloadPath = resolvePreloadPath();
@@ -325,16 +403,30 @@ if (!gotLock) {
         },
         onMainWindowLoaded: () => {
           deeplinks.markMainWindowReady();
+          if (!smokeMode && !isQuitting) {
+            clearSettingsPrewarmTimer();
+            settingsPrewarmTimer = setTimeout(() => {
+              settingsPrewarmTimer = null;
+              if (!isQuitting) {
+                windows?.prewarmSettingsWindow();
+              }
+            }, 3_000);
+            settingsPrewarmTimer.unref?.();
+          }
         },
         onMainWindowClosed: () => {
+          clearSettingsPrewarmTimer();
           deeplinks.resetMainWindowReady();
         },
         onMainWindowClosedWithoutTray: () => {
           toast?.destroy();
         },
         onWindowClosed: (label, windowStillOpen) => {
+          if (isQuitting) {
+            return;
+          }
           void sidecar.notifyWindowDestroyed(label, windowStillOpen).then(() => {
-            if (isHostWindowLabel(label)) {
+            if (!isQuitting && isHostWindowLabel(label)) {
               windows?.broadcastEvent('host-client-changed', undefined);
             }
           });
@@ -386,7 +478,20 @@ if (!gotLock) {
         browser,
         browserRpc: browserRpc!,
         updater,
+        getGpuMode: () => gpuMode,
         onExitRequested: gracefulExit,
+      });
+
+      powerMonitor.on('resume', () => {
+        if (isQuitting) {
+          return;
+        }
+        void sidecar
+          .invokeDesktopCommand('reconnect_host_tunnel', {}, 'main')
+          .catch(() => undefined);
+        windows?.broadcastEvent(SYSTEM_POWER_RESUMED_EVENT, {
+          ts: Date.now(),
+        });
       });
 
       const mainWin = windows.createMainWindow();

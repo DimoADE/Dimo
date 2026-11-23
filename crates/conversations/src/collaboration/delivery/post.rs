@@ -40,9 +40,26 @@ pub async fn post_to_space_with(
 
 pub(crate) async fn post_to_space_inner(
     pool: &SqlitePool,
+    input: PostToSpace,
+    turn_delivery: &DeliveryContext,
+    mirror_direct_to_events: bool,
+) -> Result<SpacePostResult, CollaborationError> {
+    post_to_space_inner_with_extra(
+        pool,
+        input,
+        turn_delivery,
+        mirror_direct_to_events,
+        Map::new(),
+    )
+    .await
+}
+
+pub(crate) async fn post_to_space_inner_with_extra(
+    pool: &SqlitePool,
     mut input: PostToSpace,
     turn_delivery: &DeliveryContext,
     mirror_direct_to_events: bool,
+    extra_envelope: Map<String, Value>,
 ) -> Result<SpacePostResult, CollaborationError> {
     if parse_unassigned_space_id(input.space_id.trim()).is_some() {
         return Err(CollaborationError::new(
@@ -52,7 +69,8 @@ pub(crate) async fn post_to_space_inner(
     }
     let content = input.content.trim().to_string();
     let content = content.as_str();
-    if content.is_empty() {
+    let has_provision_activity = extra_envelope.contains_key("provisionActivity");
+    if content.is_empty() && !has_provision_activity {
         return Err(CollaborationError::new(
             "conversation_control_failed",
             "content must not be empty",
@@ -312,7 +330,7 @@ pub(crate) async fn post_to_space_inner(
         .unwrap_or_else(|| content.lines().next().unwrap_or(content).trim().to_string());
     let published = now_stamp();
     let sent_to = unique_cross_chat_peers(&input.space_id, &targets);
-    let mut extra = Map::new();
+    let mut extra = extra_envelope;
     if !sent_to.is_empty() {
         extra.insert("crossChatSentTo".to_string(), json!(sent_to));
     }
@@ -1076,6 +1094,375 @@ pub(crate) async fn insert_collaboration_limit_notice(
         }
     }
     Ok(())
+}
+
+fn format_group_created_fallback_content(
+    actor_name: Option<&str>,
+    actor_is_user: bool,
+    group_name: &str,
+    members: &[String],
+) -> String {
+    let actor = if actor_is_user {
+        "You"
+    } else {
+        actor_name
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Bot")
+    };
+    if members.is_empty() {
+        format!("{actor} created {group_name}")
+    } else {
+        format!("{actor} created {group_name} with {}", members.join(", "))
+    }
+}
+
+fn format_member_added_fallback_content(
+    actor_name: Option<&str>,
+    actor_is_user: bool,
+    member_nickname: &str,
+) -> String {
+    if actor_is_user {
+        format!("You invited {member_nickname} to join the group")
+    } else if let Some(actor) = actor_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case(member_nickname.trim()))
+    {
+        format!("{actor} invited {member_nickname} to join the group")
+    } else {
+        format!("{member_nickname} joined the group")
+    }
+}
+
+pub(crate) async fn insert_group_created_event(
+    pool: &SqlitePool,
+    space_id: &str,
+    actor_name: Option<&str>,
+    actor_is_user: bool,
+    group_name: &str,
+) -> Result<(), CollaborationError> {
+    if parse_unassigned_space_id(space_id).is_some()
+        || space_id.starts_with(identity::DIRECT_PREFIX)
+    {
+        return Ok(());
+    }
+    let clean_actor = actor_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let clean_group = group_name.trim();
+    let published = now_stamp();
+    let message_id = Uuid::new_v4().to_string();
+    let content = format_group_created_fallback_content(
+        clean_actor.as_deref(),
+        actor_is_user,
+        clean_group,
+        &[],
+    );
+    let mut extra = Map::new();
+    extra.insert(
+        "spaceEvent".to_string(),
+        json!({
+            "kind": "group_created",
+            "actorName": clean_actor,
+            "actorIsUser": actor_is_user,
+            "groupName": clean_group,
+            "members": [],
+        }),
+    );
+    let envelope = build_space_envelope(NewSpaceEnvelope {
+        id: &message_id,
+        sender: ENVELOPE_SYSTEM_SENDER,
+        to: Vec::new(),
+        content: &content,
+        reply_to: None,
+        published: &published,
+        summary: Some("space_event"),
+        conversation_id: None,
+        extra,
+    });
+    let mut conn = pool.acquire().await.map_err(db)?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *conn)
+        .await
+        .map_err(db)?;
+    let inserted = insert_space_message_tx(
+        &mut conn,
+        space_id,
+        &message_id,
+        &envelope,
+        &published,
+        "system",
+        &message_id,
+        0,
+        &[],
+    )
+    .await;
+    match inserted {
+        Ok(_) => {
+            sqlx::query("COMMIT")
+                .execute(&mut *conn)
+                .await
+                .map_err(db)?;
+        }
+        Err(error) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            return Err(db(error));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn record_member_added_event(
+    pool: &SqlitePool,
+    space_id: &str,
+    actor_name: Option<&str>,
+    actor_is_user: bool,
+    member_nickname: &str,
+    prefer_coalesce_initial: bool,
+) -> Result<(), CollaborationError> {
+    if parse_unassigned_space_id(space_id).is_some()
+        || space_id.starts_with(identity::DIRECT_PREFIX)
+    {
+        return Ok(());
+    }
+    let clean_member = member_nickname.trim();
+    if clean_member.is_empty() {
+        return Ok(());
+    }
+    let clean_actor = actor_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let mut conn = pool.acquire().await.map_err(db)?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *conn)
+        .await
+        .map_err(db)?;
+
+    let outcome: Result<(), CollaborationError> = async {
+        let total_messages: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM collaboration_space_messages WHERE space_id = ?",
+        )
+        .bind(space_id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(db)?;
+
+        if total_messages == 1 {
+            let first_row: Option<(String, String, String, String)> = sqlx::query_as(
+                r#"SELECT id, envelope_json, origin, created_at
+                   FROM collaboration_space_messages
+                   WHERE space_id = ?
+                   ORDER BY seq ASC
+                   LIMIT 1"#,
+            )
+            .bind(space_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(db)?;
+
+            if let Some((row_id, raw_env, origin, created_at)) = first_row
+                && origin == "system"
+                && let Ok(mut env) = serde_json::from_str::<Value>(&raw_env)
+                && env
+                    .pointer("/spaceEvent/kind")
+                    .and_then(Value::as_str)
+                    == Some("group_created")
+            {
+                let evt_actor_is_user = env
+                    .pointer("/spaceEvent/actorIsUser")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let evt_actor_name = env
+                    .pointer("/spaceEvent/actorName")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                let same_actor = evt_actor_is_user == actor_is_user
+                    && evt_actor_name.as_deref() == clean_actor.as_deref();
+                let within_initial_window = chrono::DateTime::parse_from_rfc3339(&created_at)
+                    .map(|dt| (Utc::now() - dt.with_timezone(&Utc)) <= Duration::seconds(120))
+                    .unwrap_or(false);
+
+                if same_actor && (prefer_coalesce_initial || within_initial_window) {
+                    // Don't list the creator in the "with ..." list if they were re-added.
+                    let is_creator_self = evt_actor_name
+                        .as_deref()
+                        .is_some_and(|a| a.eq_ignore_ascii_case(clean_member));
+                    if !is_creator_self {
+                        let mut members: Vec<String> = env
+                            .pointer("/spaceEvent/members")
+                            .and_then(Value::as_array)
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(Value::as_str)
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                    .map(str::to_string)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if !members.iter().any(|m| m.eq_ignore_ascii_case(clean_member)) {
+                            members.push(clean_member.to_string());
+                        }
+                        let group_name = env
+                            .pointer("/spaceEvent/groupName")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        let updated_content = format_group_created_fallback_content(
+                            evt_actor_name.as_deref(),
+                            evt_actor_is_user,
+                            &group_name,
+                            &members,
+                        );
+                        if let Some(evt_obj) =
+                            env.get_mut("spaceEvent").and_then(Value::as_object_mut)
+                        {
+                            evt_obj.insert("members".to_string(), json!(members));
+                        }
+                        env["content"] = json!(updated_content);
+                        sqlx::query(
+                            "UPDATE collaboration_space_messages SET envelope_json = ? WHERE id = ?",
+                        )
+                        .bind(env.to_string())
+                        .bind(&row_id)
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(db)?;
+                        let stamp = now_stamp();
+                        append_space_event_tx(
+                            &mut conn,
+                            space_id,
+                            "message",
+                            Some(&row_id),
+                            &json!({ "action": "space_event_updated" }),
+                            &stamp,
+                        )
+                        .await?;
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
+        let published = now_stamp();
+        let message_id = Uuid::new_v4().to_string();
+        let content = format_member_added_fallback_content(
+            clean_actor.as_deref(),
+            actor_is_user,
+            clean_member,
+        );
+        let mut extra = Map::new();
+        extra.insert(
+            "spaceEvent".to_string(),
+            json!({
+                "kind": "member_invited",
+                "actorName": clean_actor,
+                "actorIsUser": actor_is_user,
+                "memberName": clean_member,
+            }),
+        );
+        let envelope = build_space_envelope(NewSpaceEnvelope {
+            id: &message_id,
+            sender: ENVELOPE_SYSTEM_SENDER,
+            to: Vec::new(),
+            content: &content,
+            reply_to: None,
+            published: &published,
+            summary: Some("space_event"),
+            conversation_id: None,
+            extra,
+        });
+        insert_space_message_tx(
+            &mut conn,
+            space_id,
+            &message_id,
+            &envelope,
+            &published,
+            "system",
+            &message_id,
+            0,
+            &[],
+        )
+        .await
+        .map_err(db)?;
+        Ok(())
+    }
+    .await;
+
+    finish_tx(&mut conn, outcome).await
+}
+
+pub(crate) async fn attach_provision_activity_to_latest_agent_message(
+    pool: &SqlitePool,
+    space_id: &str,
+    conversation_id: Uuid,
+    after_seq: i64,
+    activity: &SpaceTurnProvisionActivity,
+) -> Result<bool, CollaborationError> {
+    if activity.is_empty() {
+        return Ok(false);
+    }
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        r#"SELECT id, envelope_json
+           FROM collaboration_space_messages
+           WHERE space_id = ? AND seq > ? AND origin = 'agent'
+           ORDER BY seq DESC
+           LIMIT 10"#,
+    )
+    .bind(space_id)
+    .bind(after_seq)
+    .fetch_all(pool)
+    .await
+    .map_err(db)?;
+    let nickname = member_nickname(pool, space_id, conversation_id)
+        .await
+        .ok()
+        .flatten();
+    let target = rows.into_iter().find(|(_, raw)| {
+        let parsed = parse_space_envelope_str(raw);
+        envelope_sender_is_conversation(&parsed, conversation_id, nickname.as_deref())
+    });
+    let Some((msg_id, raw_env)) = target else {
+        return Ok(false);
+    };
+    let Ok(mut env) = serde_json::from_str::<Value>(&raw_env) else {
+        return Ok(false);
+    };
+    if let Some(obj) = env.as_object_mut() {
+        obj.insert("provisionActivity".to_string(), json!(activity));
+    }
+    let mut conn = pool.acquire().await.map_err(db)?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut *conn)
+        .await
+        .map_err(db)?;
+    let outcome: Result<(), CollaborationError> = async {
+        sqlx::query("UPDATE collaboration_space_messages SET envelope_json = ? WHERE id = ?")
+            .bind(env.to_string())
+            .bind(&msg_id)
+            .execute(&mut *conn)
+            .await
+            .map_err(db)?;
+        let stamp = now_stamp();
+        append_space_event_tx(
+            &mut conn,
+            space_id,
+            "message",
+            Some(&msg_id),
+            &json!({ "action": "provision_activity_attached" }),
+            &stamp,
+        )
+        .await?;
+        Ok(())
+    }
+    .await;
+    finish_tx(&mut conn, outcome).await?;
+    Ok(true)
 }
 
 /// Private-chat IM is projected from conversation events. Mirror a DM

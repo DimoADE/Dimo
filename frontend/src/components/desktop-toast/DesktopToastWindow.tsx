@@ -79,6 +79,8 @@ export function DesktopToastWindow() {
   const hoveredToastIdsRef = useRef(new Set<string>());
   const focusedToastIdsRef = useRef(new Set<string>());
   const lastIgnoreMouseEventsRef = useRef<boolean | null>(null);
+  const stackRef = useRef<HTMLDivElement | null>(null);
+  const lastReportedHeightRef = useRef<number | null>(null);
   // Mirrors the dismiss timers so the close-button ring restarts / pauses with them.
   const [countdowns, setCountdowns] = useState<
     Record<string, { ms: number; epoch: number }>
@@ -96,6 +98,36 @@ export function DesktopToastWindow() {
       .desktopToast?.setIgnoreMouseEvents?.(shouldIgnore)
       ?.catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    const setContentHeight = getDesktopShell().desktopToast?.setContentHeight;
+    const node = stackRef.current;
+    if (!setContentHeight || !node) {
+      return undefined;
+    }
+    const reportHeight = () => {
+      const rectHeight = node.getBoundingClientRect().height;
+      if (rectHeight <= 0) {
+        return;
+      }
+      // Include the outer `p-4` (16px top + 16px bottom) padding so shadows aren't clipped.
+      const totalHeight = Math.ceil(rectHeight) + 32;
+      if (lastReportedHeightRef.current === totalHeight) {
+        return;
+      }
+      lastReportedHeightRef.current = totalHeight;
+      void setContentHeight(totalHeight).catch(() => undefined);
+    };
+    reportHeight();
+    if (typeof ResizeObserver === 'undefined') {
+      return undefined;
+    }
+    const observer = new ResizeObserver(reportHeight);
+    observer.observe(node);
+    return () => {
+      observer.disconnect();
+    };
+  }, [toasts.length]);
 
   useEffect(() => {
     const hoveredIds = hoveredToastIdsRef.current;
@@ -383,7 +415,10 @@ export function DesktopToastWindow() {
   return (
     <div className="h-full bg-transparent p-4">
       <div className="pointer-events-none flex h-full items-end justify-end">
-        <div className="vu-desktop-toast-stack flex w-[400px] max-w-full flex-col items-end gap-2.5">
+        <div
+          ref={stackRef}
+          className="vu-desktop-toast-stack flex w-[400px] max-w-full flex-col items-end gap-2.5"
+        >
           {toasts.map((toast) => {
             const status = replyStatus[toast.id] ?? 'idle';
             const draft = drafts[toast.id] ?? '';

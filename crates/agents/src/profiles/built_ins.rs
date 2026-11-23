@@ -76,6 +76,75 @@ pub(super) fn codex_profile() -> BuiltInProfile {
     }
 }
 
+pub(super) fn muse_code_profile() -> BuiltInProfile {
+    BuiltInProfile {
+        agent_id: AgentId::parse("muse_code").expect("bundled AgentId"),
+        display_name: "Muse Code",
+        description: "Meta Muse Code (official native MSP engine)",
+        icon: ProfileIcon {
+            light: "/agents/muse-code-light.svg",
+            dark: "/agents/muse-code-dark.svg",
+        },
+        registry_binding: None,
+        topology: ProfileTopology::NativeEngine(crate::engine::NativeEngineKind::MuseNative),
+        supported_platforms: DESKTOP_PLATFORMS,
+        install_sources: vec![ProfileInstallSource::Binary {
+            component: ProfileComponent::CombinedRuntime,
+            version: "1.4.25-R9361.1",
+            command: "muse",
+            args: &[],
+            artifacts: vec![
+                binary_artifact(
+                    "darwin-aarch64",
+                    "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.25-R9361.1&file=muse-aarch64-macos",
+                    "d8faeec8b3a2507125d97f1a79ae18781d254e8cd376f26531587fb6e043c27d",
+                ),
+                binary_artifact(
+                    "darwin-x86_64",
+                    "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.25-R9361.1&file=muse-x86-macos",
+                    "fb02e24b14958ead92325550f4dfef914bb4c496b6c504588e90c1e56fb166b0",
+                ),
+                binary_artifact(
+                    "linux-aarch64",
+                    "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.25-R9361.1&file=muse-aarch64-linux",
+                    "8fe089115ef137879fca46986d55edf18d5d3ab9cfdb6441c67e9d1807b4108a",
+                ),
+                binary_artifact(
+                    "linux-x86_64",
+                    "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.25-R9361.1&file=muse-x86-linux",
+                    "c1b728fb9732503c5e1869e3ad2f2c9bdb5b2638fb4cf398d6e2c46aa6d8f94a",
+                ),
+                binary_artifact(
+                    "windows-aarch64",
+                    "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.25-R9361.1&file=muse-aarch64-windows.exe",
+                    "8d325fc949a7e8c525e52526f2b84d5885b5c6c5b9cffea726cd4b8d0ae695ba",
+                ),
+                binary_artifact(
+                    "windows-x86_64",
+                    "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.25-R9361.1&file=muse-x86-windows.exe",
+                    "eb03512b06982dd02481fcf5f090442824d92ff6070607afe5c7228596f3b089",
+                ),
+            ],
+            entry: None,
+        }],
+        external_candidates: MUSE_CANDIDATES,
+        dependencies: ARCHIVE_DEPENDENCIES,
+        management_actions: MUSE_ACTIONS,
+        runtime_executable_env: None,
+        native_config: MUSE_CONFIG,
+        settings_features: MUSE_SETTINGS,
+        authentication_precedence: AuthenticationPrecedence::AccountThenApiKey,
+        authentication_required_by_default: true,
+        account_evidence: Some(AccountEvidence {
+            home_relative_directory: ".config/muse",
+            directory_override_env: Some("XDG_CONFIG_HOME"),
+            override_relative_directory: "muse",
+            relative_file: "auth.json",
+            kind: AccountEvidenceKind::NonEmptyObjectAt(&["providers", "meta"]),
+        }),
+    }
+}
+
 pub(super) fn antigravity_profile() -> BuiltInProfile {
     BuiltInProfile {
         agent_id: AgentId::parse("antigravity").expect("bundled AgentId"),

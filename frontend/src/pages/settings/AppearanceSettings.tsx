@@ -7,19 +7,13 @@ import {
 } from 'react';
 import { SelectableCard } from '@astryxdesign/core/SelectableCard';
 import {
-  SegmentedControl,
-  SegmentedControlItem,
-} from '@astryxdesign/core/SegmentedControl';
-import {
   Eye,
   Infinity as InfinityIcon,
-  LayoutGrid,
   Monitor,
   Moon,
   Palette,
   Sun,
   Type,
-  Users,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { ThemeMode, type Config } from 'shared/types';
@@ -40,12 +34,6 @@ import {
 import { backendEmit } from '@/lib/backendTransport';
 import { toPrettyCase } from '@/utils/string';
 
-import {
-  setCollaborationArrangement,
-  setLayoutArrangement,
-  useCollaborationArrangement,
-  useLayoutArrangement,
-} from '@/lib/layoutArrangement';
 import {
   KANBAN_SESSION_LIST_VIEWS,
   getKanbanSessionListView,
@@ -79,10 +67,6 @@ import { AccentColorField } from './AccentColorField';
 import { ColorThemeSettings } from './ColorThemeSettings';
 import { SettingsSection } from './SettingsUi';
 import { useLiveSettingsCommit } from './useLiveSettingsCommit';
-import {
-  CollaborationLayoutSchematic,
-  WorkspaceLayoutSchematic,
-} from './LayoutArrangementSchematic';
 import { SurfaceLoading } from '@/components/layout/SurfaceLoading';
 
 const THEME_CHOICES: {
@@ -235,11 +219,6 @@ export function AppearanceSettings() {
   const canvasViewportPosition = useCanvasViewportPosition();
   const [settingsNavFloat, setSettingsNavFloatState] = useState<boolean>(() =>
     getSettingsNavFloat()
-  );
-  const workspaceArrangement = useLayoutArrangement();
-  const collaborationArrangement = useCollaborationArrangement();
-  const [layoutPage, setLayoutPage] = useState<'workspace' | 'collaboration'>(
-    'workspace'
   );
   const previewFontSize = useEditorSettingsStore(
     (state) => state.previewFontSize
@@ -676,59 +655,6 @@ export function AppearanceSettings() {
                 }
               />
             </div>
-          </div>
-        </SettingsSection>
-
-        <SettingsSection
-          icon={LayoutGrid}
-          title={t('appearance.layout.title')}
-          description={t('appearance.layout.description')}
-          action={
-            <SegmentedControl
-              className="shrink-0"
-              value={layoutPage}
-              onChange={(value) =>
-                setLayoutPage(
-                  value === 'collaboration' ? 'collaboration' : 'workspace'
-                )
-              }
-              label={t('appearance.layout.title')}
-              size="sm"
-              layout="hug"
-            >
-              <SegmentedControlItem
-                value="workspace"
-                label={t('appearance.layout.workspaceLabel')}
-                icon={<Monitor className="h-3.5 w-3.5" aria-hidden="true" />}
-              />
-              <SegmentedControlItem
-                value="collaboration"
-                label={t('appearance.layout.collaborationLabel')}
-                icon={<Users className="h-3.5 w-3.5" aria-hidden="true" />}
-              />
-            </SegmentedControl>
-          }
-        >
-          <div className="flex flex-col gap-3">
-            {layoutPage === 'workspace' ? (
-              <WorkspaceLayoutSchematic
-                value={workspaceArrangement}
-                onChange={setLayoutArrangement}
-              />
-            ) : (
-              <CollaborationLayoutSchematic
-                value={collaborationArrangement}
-                onChange={setCollaborationArrangement}
-              />
-            )}
-            <p className="settings-row__description">
-              {layoutPage === 'workspace'
-                ? t('appearance.layout.dragHint')
-                : t('appearance.layout.collaborationHint')}
-            </p>
-            <p className="settings-row__description">
-              {t('appearance.layout.hint')}
-            </p>
           </div>
         </SettingsSection>
       </div>

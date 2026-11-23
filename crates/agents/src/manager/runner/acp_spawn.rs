@@ -292,11 +292,17 @@ impl AgentConnectionRunner {
         let (mut child, job) = group_spawn_no_window_with_job(&mut command)
             .map_err(|error| AgentError::Runtime(format!("failed to spawn ACP agent: {error}")))?;
         let child_pid = child.id();
-        *self.child_pid.lock().unwrap() = child_pid;
+        *self
+            .child_pid
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = child_pid;
         if let Some(pid) = child_pid {
             runtime_temp.record_owner_pid(pid);
         }
-        *self.process_job.lock().unwrap() = Some(job);
+        *self
+            .process_job
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(job);
         let stdout = child
             .inner()
             .stdout
@@ -466,7 +472,11 @@ impl AgentConnectionRunner {
             let _ = stdout_closed_rx.await;
         })
         .await;
-        let process_job = self.process_job.lock().unwrap().take();
+        let process_job = self
+            .process_job
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
         if !matches!(stop, AcpProcessStop::ChildExited(_)) {
             if let Some(ref job) = process_job {
                 let _ = job.terminate();
@@ -475,7 +485,10 @@ impl AgentConnectionRunner {
         } else if let Some(job) = process_job {
             job.close();
         }
-        *self.child_pid.lock().unwrap() = None;
+        *self
+            .child_pid
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
         if handshake_timed_out.load(Ordering::SeqCst) {
             let stderr = self.stderr_tail.summary();
             return Err(AgentError::Runtime(format_handshake_timeout_error(

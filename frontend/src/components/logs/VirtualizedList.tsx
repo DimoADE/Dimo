@@ -310,11 +310,28 @@ export function measureUnscaledBlockHeight(
 export function scheduleMeasuredScrollToIndex(
   scrollToIndex: (index: number) => void,
   index: number,
-  schedule: (callback: () => void) => void = (callback) =>
-    requestAnimationFrame(callback)
-): void {
+  schedule?: (callback: () => void) => void
+): () => void {
   scrollToIndex(index);
-  schedule(() => scrollToIndex(index));
+  let canceled = false;
+  let rafHandle: number | null = null;
+  const runFollowUp = () => {
+    rafHandle = null;
+    if (canceled) return;
+    scrollToIndex(index);
+  };
+  if (schedule) {
+    schedule(runFollowUp);
+  } else if (typeof requestAnimationFrame === 'function') {
+    rafHandle = requestAnimationFrame(runFollowUp);
+  }
+  return () => {
+    canceled = true;
+    if (rafHandle !== null && typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(rafHandle);
+      rafHandle = null;
+    }
+  };
 }
 
 export function isConversationNearBottom(
@@ -510,6 +527,14 @@ export function cancelVirtualizerFollowScroll(
   }
   pending.rafId = null;
   pending.scrollState = null;
+}
+
+export function isVirtualizerJumpActive(
+  virtualizer: object | null | undefined
+): boolean {
+  if (!virtualizer) return false;
+  const pending = virtualizer as CancelableVirtualizerScroll;
+  return pending.scrollState != null;
 }
 
 export function pendingAgentPermissionsFromEvents(

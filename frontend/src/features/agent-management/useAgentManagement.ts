@@ -130,6 +130,7 @@ export function useAgentManagement() {
           next.status === 'failed' ||
           next.status === 'canceled'
         ) {
+          agentManagementApi.invalidateBarCache?.();
           void refresh().catch(() => undefined);
         }
       }
@@ -158,7 +159,10 @@ export function useAgentManagement() {
         const dispose = await backendListen<void>(
           'agent-management-snapshot-invalidated',
           () => {
-            if (active) void refresh().catch(() => undefined);
+            if (active) {
+              agentManagementApi.invalidateBarCache?.();
+              void refresh().catch(() => undefined);
+            }
           }
         );
         if (active) unlisten = dispose;

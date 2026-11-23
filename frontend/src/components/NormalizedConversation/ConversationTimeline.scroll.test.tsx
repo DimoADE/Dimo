@@ -260,4 +260,57 @@ describe('opening a conversation', () => {
 
     expect(viewport.scrollTop).toBeGreaterThanOrEqual(2000);
   });
+
+  it('does not jump to the top when scrolling up one wheel notch from the bottom', async () => {
+    viewportHeight = 400;
+    const { container } = render(timelineElement());
+    const viewport = container.querySelector<HTMLElement>(
+      '[data-panel="conversation-logs"]'
+    );
+    if (!viewport) throw new Error('Conversation viewport was not rendered');
+    await waitFor(() =>
+      expect(viewport.scrollTop).toBeGreaterThanOrEqual(2000)
+    );
+
+    const beforeScrollTop = viewport.scrollTop;
+    fireEvent.wheel(viewport, { deltaY: -100 });
+    viewport.scrollTop = beforeScrollTop - 100;
+    fireEvent.scroll(viewport);
+    await nextFrame();
+    await nextFrame();
+
+    // TanStack Virtual may apply a positive scroll-anchoring delta when newly
+    // mounted rows above the viewport measure taller than the 72px estimate,
+    // keeping the read item stationary; scrollTop must never snap back to 0.
+    expect(viewport.scrollTop).toBeGreaterThan(1500);
+
+    // Subsequent upward scroll across already-measured rows moves upward smoothly.
+    const settledScrollTop = viewport.scrollTop;
+    fireEvent.wheel(viewport, { deltaY: -120 });
+    viewport.scrollTop = settledScrollTop - 120;
+    fireEvent.scroll(viewport);
+    await nextFrame();
+    expect(viewport.scrollTop).toBeGreaterThan(1300);
+    expect(viewport.scrollTop).toBeLessThanOrEqual(settledScrollTop);
+  });
+
+  it('scrolls to an earlier hidden turn when clicking its piano-key tick instead of snapping back down', async () => {
+    viewportHeight = 400;
+    history.view = historyView(40);
+    const { container, getByRole } = render(timelineElement());
+    const viewport = container.querySelector<HTMLElement>(
+      '[data-panel="conversation-logs"]'
+    );
+    if (!viewport) throw new Error('Conversation viewport was not rendered');
+    await waitFor(() =>
+      expect(viewport.scrollTop).toBeGreaterThanOrEqual(2000)
+    );
+
+    const firstTick = getByRole('button', { name: '跳转到第 1 条消息' });
+    fireEvent.click(firstTick);
+    await nextFrame();
+    await nextFrame();
+
+    expect(viewport.scrollTop).toBeLessThan(200);
+  });
 });

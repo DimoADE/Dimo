@@ -1,4 +1,5 @@
 import { useState, useRef, useMemo, useCallback, useEffect } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import {
   GitCompare,
   ChevronsUp,
@@ -10,12 +11,16 @@ import {
   Calendar,
   Hash,
   X,
+  Eye,
+  FolderGit2,
+  GitBranch,
 } from 'lucide-react';
 import { useParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useWorktree } from '@/contexts/WorktreeContext';
 import { useAttempt } from '@/hooks/useAttempt';
 import { useDiffStream } from '@/hooks/useDiffStream';
+import { repoApi } from '@/lib/api';
 import DiffCard from '@/components/DiffCard';
 import DiffViewSwitch, {
   DIFF_VIEW_BUTTON_COUNT,
@@ -139,23 +144,132 @@ function DockviewDiffsReviewPanel() {
     commitDiffs,
     isLoading: commitLoading,
     clearCommitDiff,
-  } = useCommitDiffStore();
+  } = useCommitDiffStore(
+    useShallow((state) => ({
+      commitSha: state.commitSha,
+      commitInfo: state.commitInfo,
+      commitDiffs: state.commitDiffs,
+      isLoading: state.isLoading,
+      clearCommitDiff: state.clearCommitDiff,
+    }))
+  );
   const isCommitMode = !!commitSha;
   const targetPath = useGitDiffNavigationStore((state) => state.targetPath);
   const targetToken = useGitDiffNavigationStore((state) => state.requestToken);
   const clearTargetPath = useGitDiffNavigationStore(
     (state) => state.clearTargetPath
   );
+  const reviewSource = useGitDiffNavigationStore(
+    (state) => state.reviewSource ?? null
+  );
+  const clearReviewSource = useGitDiffNavigationStore(
+    (state) => state.clearReviewSource
+  );
 
-  // Worktree diff mode (existing functionality)
+  const isBranchReviewMode = !isCommitMode && reviewSource?.kind === 'branch';
+  const isRepoWorktreeReviewMode =
+    !isCommitMode &&
+    reviewSource?.kind === 'worktree' &&
+    !reviewSource.workspaceId;
+  const streamWorkspaceId =
+    !isCommitMode &&
+    reviewSource?.kind === 'worktree' &&
+    reviewSource.workspaceId
+      ? reviewSource.workspaceId
+      : attemptId;
+
+  const [repoWorktreeState, setRepoWorktreeState] = useState<{
+    diffs: Diff[];
+    isLoading: boolean;
+    error: string | null;
+  }>({
+    diffs: [],
+    isLoading: false,
+    error: null,
+  });
+
+  const repoWorktreeRepoId =
+    isRepoWorktreeReviewMode && reviewSource.kind === 'worktree'
+      ? reviewSource.repoId
+      : null;
+  const repoWorktreePath =
+    isRepoWorktreeReviewMode && reviewSource.kind === 'worktree'
+      ? reviewSource.worktreePath
+      : null;
+
+  useEffect(() => {
+    if (!isRepoWorktreeReviewMode || !repoWorktreeRepoId) {
+      return;
+    }
+    let isCurrent = true;
+    setRepoWorktreeState((prev) => ({
+      ...prev,
+      isLoading: true,
+      error: null,
+    }));
+    void repoApi
+      .getWorktreeDiffs(repoWorktreeRepoId, repoWorktreePath)
+      .then((nextDiffs) => {
+        if (!isCurrent) return;
+        setRepoWorktreeState({
+          diffs: nextDiffs,
+          isLoading: false,
+          error: null,
+        });
+      })
+      .catch((err) => {
+        if (!isCurrent) return;
+        setRepoWorktreeState({
+          diffs: [],
+          isLoading: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [
+    isRepoWorktreeReviewMode,
+    repoWorktreeRepoId,
+    repoWorktreePath,
+    targetToken,
+  ]);
+
+  // Worktree diff mode (existing streaming functionality)
   const {
     diffs: worktreeDiffs,
-    error,
+    error: streamError,
     isInitialized,
-  } = useDiffStream(attemptId, !isCommitMode);
+  } = useDiffStream(
+    streamWorkspaceId,
+    !isCommitMode && !isBranchReviewMode && !isRepoWorktreeReviewMode
+  );
 
   // Select data source based on mode
-  const diffs = isCommitMode ? commitDiffs : worktreeDiffs;
+  const diffs = isCommitMode
+    ? commitDiffs
+    : isBranchReviewMode
+      ? reviewSource.diffs
+      : isRepoWorktreeReviewMode
+        ? repoWorktreeState.diffs
+        : worktreeDiffs;
+
+  const error = isCommitMode
+    ? null
+    : isBranchReviewMode
+      ? null
+      : isRepoWorktreeReviewMode
+        ? repoWorktreeState.error
+        : streamError;
+
+  const reviewSourceKey = useMemo(() => {
+    if (!reviewSource) return null;
+    if (reviewSource.kind === 'branch') {
+      return `branch:${reviewSource.repoId}:${reviewSource.branch}:${reviewSource.baseBranch ?? ''}`;
+    }
+    return `wt:${reviewSource.repoId}:${reviewSource.workspaceId ?? ''}:${reviewSource.worktreePath ?? ''}`;
+  }, [reviewSource]);
 
   // Compute stats from active diffs without opening a second diff stream
   const { fileCount, added, deleted } = useMemo(() => {
@@ -176,6 +290,7 @@ function DockviewDiffsReviewPanel() {
   const [processedIds, setProcessedIds] = useState<Set<string>>(new Set());
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(240);
+  const resizeAbortRef = useRef<AbortController | null>(null);
   const [loadingTimedOut, setLoadingTimedOut] = useState(false);
   const [stickyFileId, setStickyFileId] = useState<string | null>(null);
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
@@ -194,27 +309,50 @@ function DockviewDiffsReviewPanel() {
       : (ids[0] ?? null)
     : null;
 
-  // Reset collapse state when switching modes or commit
+  useEffect(() => {
+    return () => {
+      resizeAbortRef.current?.abort();
+      resizeAbortRef.current = null;
+    };
+  }, []);
+
+  // Reset collapse state when switching modes, commit, workspace attempt, or review source
   useEffect(() => {
     setCollapsedIds(new Set());
     setProcessedIds(new Set());
     setStickyFileId(null);
     setSelectedFileId(null);
-  }, [commitSha]);
+  }, [commitSha, streamWorkspaceId, reviewSourceKey]);
 
   // Safety timeout: if not initialized within 5s, stop showing spinner
   useEffect(() => {
-    if (isCommitMode || isInitialized || diffs.length > 0) {
+    if (
+      isCommitMode ||
+      isBranchReviewMode ||
+      isRepoWorktreeReviewMode ||
+      isInitialized ||
+      diffs.length > 0
+    ) {
       setLoadingTimedOut(false);
       return;
     }
     const timer = setTimeout(() => setLoadingTimedOut(true), 5000);
     return () => clearTimeout(timer);
-  }, [isCommitMode, isInitialized, diffs.length]);
+  }, [
+    isCommitMode,
+    isBranchReviewMode,
+    isRepoWorktreeReviewMode,
+    isInitialized,
+    diffs.length,
+  ]);
 
   const showLoading = isCommitMode
     ? commitLoading
-    : !isInitialized && !loadingTimedOut && diffs.length === 0;
+    : isBranchReviewMode
+      ? Boolean(reviewSource.isLoading) && diffs.length === 0
+      : isRepoWorktreeReviewMode
+        ? repoWorktreeState.isLoading && diffs.length === 0
+        : !isInitialized && !loadingTimedOut && diffs.length === 0;
 
   const diffRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -401,7 +539,19 @@ function DockviewDiffsReviewPanel() {
     return diffs[idx];
   }, [stickyFileId, ids, diffs]);
 
-  if (!isCommitMode && !attemptId) {
+  const showReviewSourceBanner =
+    !isCommitMode &&
+    reviewSource !== null &&
+    (reviewSource.kind === 'branch' ||
+      !reviewSource.isMain ||
+      (reviewSource.workspaceId ?? null) !== attemptId);
+
+  if (
+    !isCommitMode &&
+    !isBranchReviewMode &&
+    !isRepoWorktreeReviewMode &&
+    !streamWorkspaceId
+  ) {
     return (
       <div
         className="h-full w-full flex items-center justify-center text-muted-foreground text-sm"
@@ -535,6 +685,53 @@ function DockviewDiffsReviewPanel() {
           </div>
         )}
 
+        {/* Review source banner (read-only branch diff or switched worktree) */}
+        {showReviewSourceBanner && reviewSource && (
+          <div
+            data-testid="diff-review-source-banner"
+            className="mx-3 mb-2 shrink-0 flex items-center justify-between gap-2 rounded-xl border border-border/60 bg-muted/20 px-3 py-1.5 text-xs"
+          >
+            <div className="flex items-center gap-1.5 min-w-0">
+              {reviewSource.kind === 'branch' ? (
+                <>
+                  <Eye className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span className="truncate font-medium text-foreground">
+                    {i18n.t('panels:ui.git.comparingBranch', {
+                      branch: reviewSource.branch,
+                      base: reviewSource.baseBranch || 'HEAD',
+                    })}
+                  </span>
+                  <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                    {i18n.t('panels:ui.git.readOnlyBranchDiff')}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span className="truncate font-medium text-foreground">
+                    {reviewSource.label}
+                  </span>
+                  {reviewSource.branch && (
+                    <span className="inline-flex items-center gap-1 shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                      <GitBranch className="h-2.5 w-2.5" />
+                      {reviewSource.branch}
+                    </span>
+                  )}
+                </>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => clearReviewSource?.()}
+              className="shrink-0 p-1 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors"
+              title={t('diffsReviewPanel.backToWorktreeDiff')}
+              aria-label={t('diffsReviewPanel.backToWorktreeDiff')}
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+
         {diffs.length > 0 && (
           <div
             ref={toolbarRef}
@@ -658,7 +855,11 @@ function DockviewDiffsReviewPanel() {
                       expanded={!collapsedIds.has(id)}
                       onToggle={() => toggle(id)}
                       selectedAttempt={
-                        isCommitMode ? null : (workspace ?? null)
+                        isCommitMode ||
+                        isBranchReviewMode ||
+                        isRepoWorktreeReviewMode
+                          ? null
+                          : (workspace ?? null)
                       }
                     />
                   </div>
@@ -682,18 +883,30 @@ function DockviewDiffsReviewPanel() {
               className="workspace-resize-handle diffs-file-tree-resizer"
               onPointerDown={(event) => {
                 event.preventDefault();
+                resizeAbortRef.current?.abort();
+                const controller = new AbortController();
+                resizeAbortRef.current = controller;
                 const startX = event.clientX;
                 const startWidth = sidebarWidth;
                 const onMove = (move: PointerEvent) => {
                   const next = startWidth + startX - move.clientX;
                   setSidebarWidth(Math.min(480, Math.max(160, next)));
                 };
-                const onUp = () => {
-                  window.removeEventListener('pointermove', onMove);
-                  window.removeEventListener('pointerup', onUp);
+                const onEnd = () => {
+                  controller.abort();
+                  if (resizeAbortRef.current === controller) {
+                    resizeAbortRef.current = null;
+                  }
                 };
-                window.addEventListener('pointermove', onMove);
-                window.addEventListener('pointerup', onUp);
+                window.addEventListener('pointermove', onMove, {
+                  signal: controller.signal,
+                });
+                window.addEventListener('pointerup', onEnd, {
+                  signal: controller.signal,
+                });
+                window.addEventListener('pointercancel', onEnd, {
+                  signal: controller.signal,
+                });
               }}
             />
           )}

@@ -4,6 +4,7 @@ import { attemptsApi, repoApi } from '@/lib/api';
 interface UseGitCommitOptions {
   workspaceId: string | null;
   repoId: string | null;
+  worktreePath?: string | null;
   onSuccess?: () => void;
 }
 
@@ -26,6 +27,7 @@ interface UseGitCommitReturn {
 export function useGitCommit({
   workspaceId,
   repoId,
+  worktreePath = null,
   onSuccess,
 }: UseGitCommitOptions): UseGitCommitReturn {
   const [commitMessage, setCommitMessage] = useState('');
@@ -42,7 +44,9 @@ export function useGitCommit({
     setCommitLoading(true);
     setCommitError(null);
     try {
-      if (workspaceId) {
+      if (worktreePath) {
+        await repoApi.commitChanges(repoId, commitMessage.trim(), worktreePath);
+      } else if (workspaceId) {
         await attemptsApi.commitChanges(
           workspaceId,
           repoId,
@@ -58,7 +62,7 @@ export function useGitCommit({
     } finally {
       setCommitLoading(false);
     }
-  }, [workspaceId, repoId, commitMessage, onSuccess]);
+  }, [workspaceId, repoId, worktreePath, commitMessage, onSuccess]);
 
   const onCommitAndPush = useCallback(async () => {
     if (!repoId || !commitMessage.trim()) return;
@@ -67,7 +71,9 @@ export function useGitCommit({
     setCommitError(null);
     setOperationError(null);
     try {
-      if (workspaceId) {
+      if (worktreePath) {
+        await repoApi.commitChanges(repoId, commitMessage.trim(), worktreePath);
+      } else if (workspaceId) {
         await attemptsApi.commitChanges(
           workspaceId,
           repoId,
@@ -81,7 +87,9 @@ export function useGitCommit({
 
       // Push after commit
       setPushLoading(true);
-      if (workspaceId) {
+      if (worktreePath) {
+        await repoApi.push(repoId, worktreePath);
+      } else if (workspaceId) {
         const pushResult = await attemptsApi.push(workspaceId, {
           repo_id: repoId,
         });
@@ -99,14 +107,16 @@ export function useGitCommit({
       setCommitLoading(false);
       setPushLoading(false);
     }
-  }, [workspaceId, repoId, commitMessage, onSuccess]);
+  }, [workspaceId, repoId, worktreePath, commitMessage, onSuccess]);
 
   const onPush = useCallback(async () => {
     if (!repoId) return;
     setPushLoading(true);
     setOperationError(null);
     try {
-      if (workspaceId) {
+      if (worktreePath) {
+        await repoApi.push(repoId, worktreePath);
+      } else if (workspaceId) {
         const pushResult = await attemptsApi.push(workspaceId, {
           repo_id: repoId,
         });
@@ -124,14 +134,19 @@ export function useGitCommit({
     } finally {
       setPushLoading(false);
     }
-  }, [workspaceId, repoId, onSuccess]);
+  }, [workspaceId, repoId, worktreePath, onSuccess]);
 
   const onPull = useCallback(async () => {
     if (!repoId) return;
     setPullLoading(true);
     setOperationError(null);
     try {
-      if (workspaceId) {
+      if (worktreePath) {
+        const result = await repoApi.pull(repoId, worktreePath);
+        if (!result.success) {
+          setOperationError(`Pull failed: ${result.error ?? 'unknown'}`);
+        }
+      } else if (workspaceId) {
         const result = await attemptsApi.pullBranch(workspaceId, repoId);
         if (!result.success) {
           setOperationError(`Pull failed: ${result.error ?? 'unknown'}`);
@@ -148,14 +163,16 @@ export function useGitCommit({
     } finally {
       setPullLoading(false);
     }
-  }, [workspaceId, repoId, onSuccess]);
+  }, [workspaceId, repoId, worktreePath, onSuccess]);
 
   const onFetch = useCallback(async () => {
     if (!repoId) return;
     setFetchLoading(true);
     setOperationError(null);
     try {
-      if (workspaceId) {
+      if (worktreePath) {
+        await repoApi.fetch(repoId, worktreePath);
+      } else if (workspaceId) {
         await attemptsApi.fetchRemote(workspaceId, repoId);
       } else {
         await repoApi.fetch(repoId);
@@ -166,7 +183,7 @@ export function useGitCommit({
     } finally {
       setFetchLoading(false);
     }
-  }, [workspaceId, repoId, onSuccess]);
+  }, [workspaceId, repoId, worktreePath, onSuccess]);
 
   return {
     commitMessage,

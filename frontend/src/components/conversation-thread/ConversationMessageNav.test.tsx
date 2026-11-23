@@ -196,4 +196,131 @@ describe('ConversationMessageNav', () => {
 
     expect(onSelect).toHaveBeenCalledWith(4);
   });
+
+  it('clears pointer session on window pointerup and ignores hover moves with no button pressed', () => {
+    const onSelect = vi.fn();
+    render(
+      <ConversationMessageNav
+        activeIndex={0}
+        onSelect={onSelect}
+        entries={[
+          {
+            key: 'first',
+            index: 0,
+            ordinal: 1,
+            preview: 'First request',
+            additions: 0,
+            deletions: 0,
+          },
+          {
+            key: 'second',
+            index: 4,
+            ordinal: 2,
+            preview: 'Second request',
+            additions: 0,
+            deletions: 0,
+          },
+        ]}
+      />
+    );
+
+    const list = screen.getByTestId('conv-message-nav-list');
+    vi.spyOn(list, 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(900, 100, 22, 200)
+    );
+
+    // Press inside rail, then release outside the rail (only window sees pointerup).
+    fireEvent.pointerDown(list, {
+      button: 0,
+      buttons: 1,
+      pointerId: 1,
+      pointerType: 'mouse',
+      clientY: 110,
+    });
+    fireEvent.pointerUp(window, {
+      pointerId: 1,
+      pointerType: 'mouse',
+      clientY: 110,
+    });
+
+    // Moving the mouse back across the rail later without holding primary button must not scrub.
+    fireEvent.pointerMove(list, {
+      pointerId: 1,
+      pointerType: 'mouse',
+      buttons: 0,
+      clientY: 280,
+    });
+    expect(screen.queryByTestId('conv-message-nav-scrub-preview')).toBeNull();
+    expect(onSelect).not.toHaveBeenCalled();
+
+    // Even if window pointerup were somehow missed, a mouse move with buttons=0 ends the stale session.
+    fireEvent.pointerDown(list, {
+      button: 0,
+      buttons: 1,
+      pointerId: 1,
+      pointerType: 'mouse',
+      clientY: 110,
+    });
+    fireEvent.pointerMove(list, {
+      pointerId: 1,
+      pointerType: 'mouse',
+      buttons: 0,
+      clientY: 280,
+    });
+    expect(screen.queryByTestId('conv-message-nav-scrub-preview')).toBeNull();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('treats small pointer jitter during click as a click rather than a scrub drag', () => {
+    const onSelect = vi.fn();
+    render(
+      <ConversationMessageNav
+        activeIndex={0}
+        onSelect={onSelect}
+        entries={[
+          {
+            key: 'first',
+            index: 0,
+            ordinal: 1,
+            preview: 'First request',
+            additions: 0,
+            deletions: 0,
+          },
+          {
+            key: 'second',
+            index: 4,
+            ordinal: 2,
+            preview: 'Second request',
+            additions: 0,
+            deletions: 0,
+          },
+        ]}
+      />
+    );
+
+    const list = screen.getByTestId('conv-message-nav-list');
+    const captureSpy = vi.fn();
+    list.setPointerCapture = captureSpy;
+    const tick = screen.getByRole('button', { name: '跳转到第 2 条消息' });
+
+    fireEvent.pointerDown(tick, {
+      button: 0,
+      buttons: 1,
+      pointerId: 3,
+      pointerType: 'mouse',
+      clientY: 200,
+    });
+    fireEvent.pointerMove(tick, {
+      buttons: 1,
+      pointerId: 3,
+      pointerType: 'mouse',
+      clientY: 203,
+    });
+    expect(captureSpy).not.toHaveBeenCalled();
+    fireEvent.pointerUp(tick, { pointerId: 3, clientY: 203 });
+    fireEvent.click(tick);
+
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(onSelect).toHaveBeenCalledWith(4);
+  });
 });

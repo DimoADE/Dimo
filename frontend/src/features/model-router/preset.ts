@@ -43,6 +43,118 @@ export function supportsModelRouter(agentId: string) {
 export const ROUTER_PROVIDER_NAME = 'Dimo ModelRouter';
 export const ROUTER_OPENCODE_PROVIDER_ID = 'dimo-modelrouter';
 
+const DSH_PROVIDER_ID_BASE_MAX_LEN = 56;
+
+export function routerProviderBaseName(
+  provision: Pick<RouterProvision, 'group' | 'groups'>
+): string {
+  const rawGroup = provision.group?.trim();
+  if (rawGroup && rawGroup.toLowerCase() !== 'auto') {
+    return rawGroup;
+  }
+  const resolvedGroups = (provision.groups ?? [])
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0 && item.toLowerCase() !== 'auto');
+  if (resolvedGroups.length > 0) {
+    return resolvedGroups.join('+');
+  }
+  if (rawGroup) {
+    return rawGroup;
+  }
+  return ROUTER_PROVIDER_NAME;
+}
+
+export function nextUniqueRouterProviderName(
+  baseName: string,
+  existingNames: Iterable<string> = []
+): string {
+  const taken = new Set(
+    Array.from(existingNames, (name) => name.trim().toLowerCase()).filter(
+      Boolean
+    )
+  );
+  const trimmed = baseName.trim() || ROUTER_PROVIDER_NAME;
+  if (!taken.has(trimmed.toLowerCase())) {
+    return trimmed;
+  }
+  let suffix = 1;
+  while (taken.has(`${trimmed}_${suffix}`.toLowerCase())) {
+    suffix += 1;
+  }
+  return `${trimmed}_${suffix}`;
+}
+
+export function resolveRouterProviderName(
+  provision: Pick<RouterProvision, 'group' | 'groups'>,
+  existingNames: Iterable<string> = []
+): string {
+  return nextUniqueRouterProviderName(
+    routerProviderBaseName(provision),
+    existingNames
+  );
+}
+
+export function nextUniqueOpenCodeProviderId(
+  providerName: string,
+  existingIds: Iterable<string> = []
+): string {
+  const taken = new Set(
+    Array.from(existingIds, (id) => id.trim().toLowerCase()).filter(Boolean)
+  );
+  const raw = providerName
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[^a-z0-9]+/, '')
+    .replace(/[-._]+$/, '');
+  const base =
+    raw && /[a-z]/.test(raw) && /^[a-z0-9][a-z0-9._-]*$/.test(raw)
+      ? raw
+      : raw && /^[0-9][a-z0-9._-]*$/.test(raw)
+        ? `dimo-${raw}`
+        : ROUTER_OPENCODE_PROVIDER_ID;
+  if (!taken.has(base)) {
+    return base;
+  }
+  let suffix = 1;
+  while (taken.has(`${base}_${suffix}`)) {
+    suffix += 1;
+  }
+  return `${base}_${suffix}`;
+}
+
+export function nextUniqueDshProviderId(
+  providerName: string,
+  existingIds: Iterable<string> = []
+): string {
+  const taken = new Set(
+    Array.from(existingIds, (id) => id.trim().toLowerCase()).filter(Boolean)
+  );
+  const raw = providerName
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  const prefixed = !raw
+    ? ROUTER_OPENCODE_PROVIDER_ID
+    : /^[a-z]/.test(raw)
+      ? raw
+      : `dimo-${raw}`;
+  const base =
+    prefixed.slice(0, DSH_PROVIDER_ID_BASE_MAX_LEN).replace(/-+$/, '') ||
+    ROUTER_OPENCODE_PROVIDER_ID;
+  if (!taken.has(base)) {
+    return base;
+  }
+  let suffix = 1;
+  while (taken.has(`${base}-${suffix}`)) {
+    suffix += 1;
+  }
+  return `${base}-${suffix}`;
+}
+
 /**
  * Public model gateway. Matches the site `baseUrlForAgentImport` contract:
  * Claude Code, Gemini CLI, and Antigravity use the root because those clients
@@ -141,11 +253,13 @@ function modelField(provision: RouterProvision) {
 
 export function providerSaveRequest(
   provision: RouterProvision,
-  existingId: string | null
+  existingId: string | null,
+  providerName?: string
 ): AgentModelProviderSaveRequest {
+  const name = providerName?.trim() || routerProviderBaseName(provision);
   return {
     id: existingId,
-    name: ROUTER_PROVIDER_NAME,
+    name,
     agent_id: provision.agentId,
     api_url: officialModelBaseUrl(provision.agentId, provision.baseUrl),
     api_key: provision.apiKey,
@@ -155,13 +269,17 @@ export function providerSaveRequest(
 
 export function openCodeConnectRequest(
   provision: RouterProvision,
-  enabled = true
+  enabled = true,
+  identity?: { providerId?: string; name?: string }
 ): OpenCodeProviderConnectRequest {
   const anthropic = provision.protocol === 'anthropic';
   const issued = officialModelBaseUrl(provision.agentId, provision.baseUrl);
+  const name = identity?.name?.trim() || routerProviderBaseName(provision);
+  const providerId =
+    identity?.providerId?.trim() || nextUniqueOpenCodeProviderId(name);
   return {
-    provider_id: ROUTER_OPENCODE_PROVIDER_ID,
-    name: ROUTER_PROVIDER_NAME,
+    provider_id: providerId,
+    name,
     npm: anthropic ? '@ai-sdk/anthropic' : '@ai-sdk/openai-compatible',
     api: null,
     // The Anthropic SDK package expects the versioned root. Claude Code keeps
@@ -178,11 +296,15 @@ export function openCodeConnectRequest(
 
 export function dshProviderSaveRequest(
   provision: RouterProvision,
-  setDefault = true
+  setDefault = true,
+  identity?: { id?: string; displayName?: string }
 ): DshProviderSaveRequest {
+  const displayName =
+    identity?.displayName?.trim() || routerProviderBaseName(provision);
+  const id = identity?.id?.trim() || nextUniqueDshProviderId(displayName);
   return {
-    id: ROUTER_OPENCODE_PROVIDER_ID,
-    display_name: ROUTER_PROVIDER_NAME,
+    id,
+    display_name: displayName,
     notes: null,
     api: 'openai-completions',
     base_url: officialModelBaseUrl(provision.agentId, provision.baseUrl),

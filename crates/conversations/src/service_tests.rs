@@ -1184,3 +1184,202 @@ async fn terminal_active_turn_does_not_block_next_turn() {
         .await
         .expect("completed active turn should not block");
 }
+
+#[tokio::test]
+async fn backfilled_initial_mode_isolates_conversation_from_other_sessions_global_defaults() {
+    let pool = migrated_pool().await;
+    let claude = AgentId::parse("claude_code").expect("agent id");
+
+    let conv_a = ConversationRecord::create(
+        &pool,
+        Uuid::new_v4(),
+        CreateConversationRecord {
+            workspace_id: Uuid::new_v4(),
+            task_id: None,
+            title: Some("Session A"),
+            initial_prompt: None,
+            status: Some(SessionStatus::InProgress),
+            executor: Some("claude_code"),
+        },
+    )
+    .await
+    .expect("create conv A");
+    ConversationAgentBindingRecord::create(
+        &pool,
+        Uuid::new_v4(),
+        db::models::conversation::CreateConversationAgentBinding {
+            conversation_id: conv_a.id,
+            agent_id: &claude,
+            working_dir: "/work",
+            acp_session_id: None,
+            continuation_key: None,
+            acp_protocol_version: None,
+            runtime_version: None,
+            acp_version: None,
+            load_supported: false,
+            resume_supported: false,
+            close_supported: false,
+            terminal_supported: false,
+            additional_directories_supported: false,
+            prompt_capabilities_json: "{}",
+            session_capabilities_json: "{}",
+            client_capabilities_json: "{}",
+            mcp_servers_json: "[]",
+            modes_json: "[]",
+            config_options_json: "[]",
+            current_mode: None,
+            config_selection_json: "{}",
+            status: db::models::conversation::BindingStatus::Ready,
+        },
+    )
+    .await
+    .expect("create binding A");
+
+    // Conversation A locks its initial mode upon receiving SessionModes.
+    ConversationAgentBindingRecord::backfill_initial_mode(&pool, conv_a.id, "acceptEdits")
+        .await
+        .expect("backfill mode A");
+
+    // Conversation B changes mode to bypassPermissions, updating global agent_session_defaults.
+    let conv_b = ConversationRecord::create(
+        &pool,
+        Uuid::new_v4(),
+        CreateConversationRecord {
+            workspace_id: Uuid::new_v4(),
+            task_id: None,
+            title: Some("Session B"),
+            initial_prompt: None,
+            status: Some(SessionStatus::InProgress),
+            executor: Some("claude_code"),
+        },
+    )
+    .await
+    .expect("create conv B");
+    Session::update_agent_metadata(&pool, conv_b.id, Some("claude-b"), Some(&claude))
+        .await
+        .expect("bind agent B");
+    persist_confirmed_session_controls(&pool, conv_b.id, Some("bypassPermissions"), &[]).await;
+
+    // Resolving preferences for Conversation A must stay pinned to acceptEdits.
+    let binding_a = ConversationAgentBindingRecord::active_for_conversation(&pool, conv_a.id)
+        .await
+        .expect("read binding A");
+    let global_defaults: Vec<(String, serde_json::Value)> =
+        SessionDefaultRepository::new(pool.clone())
+            .list_for_agent(&claude)
+            .await
+            .expect("list defaults")
+            .into_iter()
+            .filter_map(|record| {
+                serde_json::from_str(&record.value_json)
+                    .ok()
+                    .map(|value| (record.option_id, value))
+            })
+            .collect();
+    let prefs_a = session_control_preferences(binding_a.as_ref(), &global_defaults);
+    assert_eq!(prefs_a.mode.as_deref(), Some("acceptEdits"));
+
+    // A brand-new conversation with no binding still inherits global default `bypassPermissions`.
+    let prefs_new = session_control_preferences(None, &global_defaults);
+    assert_eq!(prefs_new.mode.as_deref(), Some("bypassPermissions"));
+}
+
+#[tokio::test]
+async fn remembered_target_binding_mode_survives_cold_handoff_lookup() {
+    let pool = migrated_pool().await;
+    let codex = AgentId::parse("codex").expect("codex");
+    let claude = AgentId::parse("claude_code").expect("claude");
+
+    let conv = ConversationRecord::create(
+        &pool,
+        Uuid::new_v4(),
+        CreateConversationRecord {
+            workspace_id: Uuid::new_v4(),
+            task_id: None,
+            title: Some("Handoff"),
+            initial_prompt: None,
+            status: Some(SessionStatus::InProgress),
+            executor: Some("codex"),
+        },
+    )
+    .await
+    .expect("create conv");
+
+    // Prior Codex binding had `plan`, then conversation switched to Claude (`acceptEdits`).
+    ConversationAgentBindingRecord::create(
+        &pool,
+        Uuid::new_v4(),
+        db::models::conversation::CreateConversationAgentBinding {
+            conversation_id: conv.id,
+            agent_id: &codex,
+            working_dir: "/work",
+            acp_session_id: Some("codex-prev"),
+            continuation_key: None,
+            acp_protocol_version: None,
+            runtime_version: None,
+            acp_version: None,
+            load_supported: false,
+            resume_supported: false,
+            close_supported: false,
+            terminal_supported: false,
+            additional_directories_supported: false,
+            prompt_capabilities_json: "{}",
+            session_capabilities_json: "{}",
+            client_capabilities_json: "{}",
+            mcp_servers_json: "[]",
+            modes_json: "[]",
+            config_options_json: "[]",
+            current_mode: Some("plan"),
+            config_selection_json: "{}",
+            status: db::models::conversation::BindingStatus::Closed,
+        },
+    )
+    .await
+    .expect("create codex binding");
+    ConversationAgentBindingRecord::create(
+        &pool,
+        Uuid::new_v4(),
+        db::models::conversation::CreateConversationAgentBinding {
+            conversation_id: conv.id,
+            agent_id: &claude,
+            working_dir: "/work",
+            acp_session_id: Some("claude-active"),
+            continuation_key: None,
+            acp_protocol_version: None,
+            runtime_version: None,
+            acp_version: None,
+            load_supported: false,
+            resume_supported: false,
+            close_supported: false,
+            terminal_supported: false,
+            additional_directories_supported: false,
+            prompt_capabilities_json: "{}",
+            session_capabilities_json: "{}",
+            client_capabilities_json: "{}",
+            mcp_servers_json: "[]",
+            modes_json: "[]",
+            config_options_json: "[]",
+            current_mode: Some("acceptEdits"),
+            config_selection_json: "{}",
+            status: db::models::conversation::BindingStatus::Ready,
+        },
+    )
+    .await
+    .expect("create claude binding");
+
+    // Global Codex default is `full-access`.
+    let global_codex_defaults = vec![(
+        "mode".to_string(),
+        serde_json::Value::String("full-access".into()),
+    )];
+
+    // When cold-handing off back to Codex, lookup of prior Codex binding recovers `plan`.
+    let remembered = ConversationAgentBindingRecord::list_for_conversation(&pool, conv.id)
+        .await
+        .expect("list bindings")
+        .into_iter()
+        .rev()
+        .find(|binding| binding.agent_id == codex);
+    let prefs = session_control_preferences(remembered.as_ref(), &global_codex_defaults);
+    assert_eq!(prefs.mode.as_deref(), Some("plan"));
+}

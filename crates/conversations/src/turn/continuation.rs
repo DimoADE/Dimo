@@ -257,8 +257,25 @@ impl ConversationSessionService {
                     Some(launch_instance_id),
                 )
                 .await?;
+            let remembered_target_binding =
+                ConversationAgentBindingRecord::list_for_conversation(pool, input.conversation_id)
+                    .await
+                    .ok()
+                    .and_then(|bindings| {
+                        bindings.into_iter().rev().find(|binding| {
+                            binding_matches_target_instance(
+                                binding,
+                                &input.agent_id,
+                                effective_instance.as_deref(),
+                            )
+                        })
+                    });
             let mut preferences = self
-                .resolved_session_control_preferences(pool, &input.agent_id, None)
+                .resolved_session_control_preferences(
+                    pool,
+                    &input.agent_id,
+                    remembered_target_binding.as_ref(),
+                )
                 .await;
             preferences.mode = input.mode_override.clone().or(preferences.mode);
             for value in &input.config_overrides {

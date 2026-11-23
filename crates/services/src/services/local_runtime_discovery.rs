@@ -506,16 +506,18 @@ async fn probe_version(
     if std::env::var_os("HERMES_NPM_AUTO_SETUP").is_none() {
         command.env("HERMES_NPM_AUTO_SETUP", "0");
     }
-    let output =
-        utils::process::run_command_output_with_timeout(&mut command, LOCAL_RUNTIME_VERSION_TIMEOUT)
-            .await
-            .map_err(|error| {
-                if error.kind() == std::io::ErrorKind::TimedOut {
-                    anyhow::anyhow!("external Runtime version probe timed out")
-                } else {
-                    error.into()
-                }
-            })?;
+    let output = utils::process::run_command_output_with_timeout(
+        &mut command,
+        LOCAL_RUNTIME_VERSION_TIMEOUT,
+    )
+    .await
+    .map_err(|error| {
+        if error.kind() == std::io::ErrorKind::TimedOut {
+            anyhow::anyhow!("external Runtime version probe timed out")
+        } else {
+            error.into()
+        }
+    })?;
 
     if !output.status.success() {
         anyhow::bail!("external Runtime version probe failed");

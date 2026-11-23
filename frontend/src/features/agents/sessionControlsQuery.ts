@@ -19,6 +19,14 @@ function normalizeAgentType(agentType: string | null | undefined): string {
   if (normalized === 'codex-native' || normalized === 'codex_native') {
     return 'codex';
   }
+  if (
+    normalized === 'muse' ||
+    normalized === 'muse-code' ||
+    normalized === 'muse-native' ||
+    normalized === 'muse_native'
+  ) {
+    return 'muse_code';
+  }
   return normalized;
 }
 

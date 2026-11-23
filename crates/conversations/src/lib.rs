@@ -140,6 +140,7 @@ pub use session_info::{
     resolve_referenced_session, sanitize_agent_session_title, session_info_value,
 };
 pub use usage_accounting::{
-    assemble_project_usage_statistics, attributed_sessions_from_rows, catch_up_usage_snapshots,
-    session_stats_with_usage_snapshot, sync_vendor_usage_logs,
+    assemble_project_usage_statistics, assemble_project_usage_statistics_cached,
+    attributed_sessions_from_rows, catch_up_usage_snapshots, session_stats_with_usage_snapshot,
+    sync_vendor_usage_logs, sync_vendor_usage_logs_if_changed,
 };

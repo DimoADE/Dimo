@@ -86,13 +86,16 @@ export function getElectronShellBridge(
               ? (ignore: boolean) =>
                   source.desktopToast!.setIgnoreMouseEvents!(ignore)
               : undefined,
+          setContentHeight:
+            typeof source.desktopToast.setContentHeight === 'function'
+              ? (height: number) =>
+                  source.desktopToast!.setContentHeight!(height)
+              : undefined,
         }
       : undefined,
 
     invoke: <T = unknown>(cmd: string, args?: Record<string, unknown>) =>
-      args === undefined
-        ? source.invoke<T>(cmd)
-        : source.invoke<T>(cmd, args),
+      args === undefined ? source.invoke<T>(cmd) : source.invoke<T>(cmd, args),
   };
 
   cachedElectronSource = source;

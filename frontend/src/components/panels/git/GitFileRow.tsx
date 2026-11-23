@@ -143,33 +143,33 @@ export const GitFileRow = memo(function GitFileRow({
                 (onReviewFile ?? onSelect)(file.path);
               }}
             />
-            {section === 'unstaged' && (
-              <>
-                <IconButton
-                  label="Stage"
-                  variant="secondary"
-                  size="sm"
-                  className="!h-5 !w-5 [&_svg]:!h-3 [&_svg]:!w-3"
-                  icon={<Plus className="h-3 w-3" />}
-                  onClick={(e) => {
-                    stop(e);
-                    onStageFile?.(file.path);
-                  }}
-                />
-                <IconButton
-                  label="Discard Changes"
-                  variant="secondary"
-                  size="sm"
-                  className="!h-5 !w-5 hover:!text-destructive [&_svg]:!h-3 [&_svg]:!w-3"
-                  icon={<Undo2 className="h-3 w-3" />}
-                  onClick={(e) => {
-                    stop(e);
-                    onRevertFile?.(file.path);
-                  }}
-                />
-              </>
+            {section === 'unstaged' && onStageFile && (
+              <IconButton
+                label="Stage"
+                variant="secondary"
+                size="sm"
+                className="!h-5 !w-5 [&_svg]:!h-3 [&_svg]:!w-3"
+                icon={<Plus className="h-3 w-3" />}
+                onClick={(e) => {
+                  stop(e);
+                  onStageFile(file.path);
+                }}
+              />
             )}
-            {section === 'staged' && (
+            {section === 'unstaged' && onRevertFile && (
+              <IconButton
+                label="Discard Changes"
+                variant="secondary"
+                size="sm"
+                className="!h-5 !w-5 hover:!text-destructive [&_svg]:!h-3 [&_svg]:!w-3"
+                icon={<Undo2 className="h-3 w-3" />}
+                onClick={(e) => {
+                  stop(e);
+                  onRevertFile(file.path);
+                }}
+              />
+            )}
+            {section === 'staged' && onUnstageFile && (
               <IconButton
                 label="Unstage"
                 variant="secondary"
@@ -178,7 +178,7 @@ export const GitFileRow = memo(function GitFileRow({
                 icon={<Minus className="h-3 w-3" />}
                 onClick={(e) => {
                   stop(e);
-                  onUnstageFile?.(file.path);
+                  onUnstageFile(file.path);
                 }}
               />
             )}

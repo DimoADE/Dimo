@@ -27,6 +27,8 @@ export const CanvasPanelNodeBody = memo(function CanvasPanelNodeBody({
   const { removeCard, updatePanelNodeMeta } = useSessionCanvasView();
   const titleRef = useRef(panelTitle);
   titleRef.current = panelTitle;
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
   const paramsRef = useRef(panelParams ?? {});
   paramsRef.current = panelParams ?? {};
   const removeCardRef = useRef(removeCard);
@@ -53,7 +55,7 @@ export const CanvasPanelNodeBody = memo(function CanvasPanelNodeBody({
     }
   }, [panelParams]);
 
-  const mockDockviewProps = useMemo<IDockviewPanelProps>(() => {
+  const stableApis = useMemo(() => {
     const api = {
       id: panelId || instanceId,
       component: panelComponent,
@@ -61,7 +63,9 @@ export const CanvasPanelNodeBody = memo(function CanvasPanelNodeBody({
         return titleRef.current;
       },
       isVisible: true,
-      isActive: selected,
+      get isActive() {
+        return selectedRef.current;
+      },
       group: {
         id: 'editor-group-1',
         panels: [],
@@ -125,9 +129,17 @@ export const CanvasPanelNodeBody = memo(function CanvasPanelNodeBody({
       api: api as unknown as IDockviewPanelProps['api'],
       containerApi:
         containerApi as unknown as IDockviewPanelProps['containerApi'],
-      params: panelParams ?? {},
     };
-  }, [instanceId, panelComponent, panelId, panelParams, selected]);
+  }, [instanceId, panelComponent, panelId]);
+
+  const mockDockviewProps = useMemo<IDockviewPanelProps>(
+    () => ({
+      api: stableApis.api,
+      containerApi: stableApis.containerApi,
+      params: panelParams ?? {},
+    }),
+    [panelParams, stableApis]
+  );
 
   const PanelComponent = panelComponents[panelComponent];
 

@@ -1,101 +1,54 @@
-## Styling Guidelines
+# Frontend Styling & UI Guidelines
 
-### Source Of Truth
+## Source of Truth
 
-`../DESIGN.md` is the single source of truth for current frontend design. It
-defines the macOS Tahoe visual target, Windows compatibility rules, Liquid Glass
-boundaries, token roles, accessibility fallbacks, and migration map.
+[`../DESIGN.md`](../DESIGN.md) is the single source of truth for visual design: macOS Tahoe two-layer opaque surfaces, color tokens, typography ramp, tiered semantic corner radii, motion, and accessibility rules.
 
-### CSS Architecture
+## CSS Architecture
 
-All routes are still wrapped in `LegacyDesignScope` for compatibility, but that
-name is historical. Treat it as the active Tahoe app-design scope until the
-class and Tailwind config can be renamed safely.
+All routes mount inside `LegacyDesignScope` (`.legacy-design`), which scopes the active Tahoe token layer and Tailwind theme (`tailwind.legacy.config.js`).
 
 **Key CSS files:**
 
-- `src/styles/legacy/index.css` - current app-design token layer and Tailwind base.
-- `src/styles/conversation.css` - conversation compatibility island.
-- `src/styles/file-tree.css` - file tree compatibility island.
-- `src/styles/diff-style-overrides.css` - diff/syntax exception island.
-- `src/styles/dockview-ayu.css` - Dockview compatibility theme injected via `?raw`.
+- `src/styles/legacy/index.css` — primary app-design token layer, Tailwind base, and shadcn/ui target (`components.json`).
+- `src/styles/fonts.css` — `--type-*` typography ramp and font stacks.
+- `src/styles/conversation.css` — conversation timeline styling.
+- `src/styles/file-tree.css` — file tree styling.
+- `src/styles/diff-style-overrides.css` — diff/syntax styling (`data-theme='dark'` retained for `@git-diff-view`).
+- `src/styles/dockview-ayu.css` — Dockview theme injected via `?raw`.
 
-### Theme System
+## Theme & Token Rules
 
-Dark/light mode is toggled via `.dark` on the root element.
+Dark/light mode toggles via `.dark` on the root element.
 
-**Current variable conventions:**
+- Use CSS variables (`--surface-*`, `--text-*`, `--border-*`, `--shadow-*`, `--background`, `--foreground`, `--muted`, etc.) or Tailwind token classes for all product colors.
+- Both chrome (`--surface-topbar`, `--surface-sidebar`) and content (`--surface-card-strong`, `--surface-dialog`, `--surface-popover`) are **opaque** with identical resolved hex across macOS, Windows, and Linux.
+- Avoid local palettes or hard-coded surface hex values. Only syntax colors, terminal ANSI colors, annotation pens, and brand marks use explicit literals (tracked in `src/styles/colorLiterals.test.ts`).
 
-- App tokens: `--surface-*`, `--text-*`, `--border-*`, `--shadow-*`, plus
-  shadcn-compatible `--background`, `--foreground`, `--border`, `--muted`, etc.
-- Conversation, file-tree, diff, syntax, and terminal variables are compatibility
-  aliases. They should move toward the global token roles in `DESIGN.md`.
-
-**Rules:**
-
-- Use CSS variables or Tailwind token classes for product colors.
-- Reserve Liquid Glass for navigation and controls chrome only.
-- Keep content surfaces opaque.
-- Document platform exceptions, syntax colors, terminal ANSI colors, and brand
-  icon colors where explicit colors are unavoidable.
-- Do not introduce new local palettes or hard-coded surface colors.
-- Diff overrides may keep `data-theme='dark'` while the @git-diff-view adapter
-  requires it.
-
-### Tailwind Config
-
-- Config file: `tailwind.legacy.config.js` while the compatibility scope remains.
-- shadcn/ui config: `components.json` points to `src/styles/legacy/index.css`.
-
-### Component Styling
+## Component Styling & Radius Rules
 
 ```tsx
-// Product UI should state its design role through tokens/classes.
+// Grouped content surfaces
 <section className="settings-surface rounded-lg text-foreground" />
 
-// Controls-layer overlays should share the app popover/dialog roles.
+// Popovers and dialogs
 <div className="dialog-surface text-popover-foreground" />
 ```
 
-All standard corner utilities resolve through `--radius` (`14px`). Use
-`rounded-full` only for true circles, avatars, and status pills. Secondary and
-outline actions plus selectors use the shared raised-control surface (light
-fill + 1px hairline, no drop shadow); apply `.raised-control` to native
-controls and do not recreate the fill or border locally.
+- **Tiered semantic corner radii** (`src/styles/legacy/index.css`):
+  - `--radius-inner` (`rounded-sm`): `6px` (`0.375rem`) — compact inner items.
+  - `--radius-element` / `--radius` (`rounded-md`): `10px` (`0.625rem`) — buttons, inputs, selects.
+  - `--radius-container` (`rounded-lg`): `12px` (`0.75rem`) — cards, grouped lists, panels, sidebar, dialogs, popovers.
+  - `--radius-page` (`rounded-3xl`): `28px` (`1.75rem`) — chat/page shells.
+  - `--radius-full` (`rounded-full`): `9999px` — true circles, avatars, switches, status pills.
+- **Raised controls**: Secondary/outline buttons and native selects use `.raised-control` (light fill + 1px hairline, no drop shadow) rather than re-declaring local borders or fills.
+- **Single control frame**: Every search field, input, select, or composite control has exactly one element owning its background, border, radius, shadow, and focus ring. Keep layout/label wrappers visually transparent; when a custom wrapper owns the frame, make the nested native `<input>` transparent, borderless, and shadowless.
+- **Startup overlay focus isolation**: While first-run onboarding is active, `StartupOverlayContext` marks background workspace siblings `inert`.
 
-For inputs, searches, and selects, enforce a single visual frame: exactly one
-element or component owns the background, border, radius, shadow, and focus ring.
-Layout/label wrappers must remain visually transparent. When a custom wrapper is
-the frame, reset the nested native input to transparent, borderless, and
-shadowless. Do not style both wrapper and child as controls, and do not use broad
-descendant selectors for control chrome.
+## Astryx Primitives (`@astryxdesign/*`)
 
-<!-- ASTRYX:START -->
-Astryx v0.3.0 · 155 components
-CLI: run every command as `pnpm exec astryx <cmd>` (shown below as `astryx ...`).
+Chat composer, richtext, and selected UI primitives use `@astryxdesign/core` and `@astryxdesign/richtext` integrated directly into Dimo's Tahoe token layer (`src/styles/legacy/index.css`).
 
-SETUP (once, in app entry e.g. main.tsx) — without these, components render unstyled:
-  import "@astryxdesign/core/reset.css";
-  import "@astryxdesign/core/astryx.css";
-
-WORKFLOW — start every page from a template, never from scratch:
-1. `astryx build "<idea>"` — names the template to scaffold from and the parts it lacks.
-2. `astryx template <name> <path>` — scaffold it; keep its frame, gap and padding; replace the content.
-3. `astryx template <Block>` for parts it lacks; `astryx component <Name>` to read props before using one.
-Changing an existing page? Keep it: skip step 2 and add blocks/components inside its sections.
-
-RULES:
-- No <div> — components handle all layout and spacing.
-- Read `astryx docs layout` before changing a template's frame.
-- Dense data = rows (Table, List/Item), not Card-wrapped lists. Badge = counts only.
-- Style with component props first, then Tailwind utilities backed by tokens. No raw hex/px.
-- Palettes and custom colors go through the theme, never :root overrides. Run `astryx theme add <slug>` to import; `theme eject <slug>` only forks source. See `astryx docs theme`.
-- SELF-CHECK: re-read the file; replace any style={{…}}, raw <div>/<span>, imported .css/@apply, or hardcoded/arbitrary value (bg-[#fff], p-[13px]) with the component or a token-backed utility.
-
-`astryx help` lists every command. Key ones beyond the workflow:
-  search "<query>"   find any component / hook / doc / template
-  discover <words>   integrations you could add
-  docs <topic>       getting-started, principles, tokens, theme … (`astryx docs` lists all)
-  docs cli           commands, API reference, integration authoring
-  upgrade --from <old version> --apply   run after a dependency bump
-<!-- ASTRYX:END -->
+- CLI inspection: `pnpm exec astryx search "<query>"`, `pnpm exec astryx component <Name>`, `pnpm exec astryx docs <topic>`.
+- Follow Dimo's token layer (`DESIGN.md` + `src/styles/legacy/index.css`) as authoritative; do not import standalone Astryx reset/global theme stylesheets that override Dimo's `.legacy-design` tokens.
+- Prefer dense rows (`Table`, list rows) over card-wrapped lists, use badges for counts only, and avoid inline `style={{...}}` or arbitrary hex utilities when a token class exists.

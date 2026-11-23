@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
 import type { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import path from 'node:path';
 
 import { app } from 'electron';
 
@@ -39,6 +41,7 @@ export interface AutoUpdaterLike extends EventEmitter {
   autoDownload: boolean;
   autoInstallOnAppQuit: boolean;
   allowDowngrade?: boolean;
+  allowPrerelease?: boolean;
   channel?: string | null;
   forceDevUpdateConfig?: boolean;
   updateConfigPath?: string | null;
@@ -54,7 +57,70 @@ interface PendingUpdateSession {
   version: string;
   downloaded: boolean;
   downloading: boolean;
+  createdAt: number;
   cancellationToken?: UpdaterCancellationTokenLike;
+}
+
+const MAX_PENDING_UPDATES = 16;
+const PENDING_UPDATE_TTL_MS = 60 * 60 * 1000;
+
+export type LinuxPackageType =
+  | 'appimage'
+  | 'deb'
+  | 'rpm'
+  | 'snap'
+  | 'flatpak'
+  | 'unknown';
+
+export function detectLinuxPackageType(options?: {
+  env?: NodeJS.ProcessEnv;
+  resourcesPath?: string;
+}): LinuxPackageType {
+  const env = options?.env ?? process.env;
+  if (env.APPIMAGE?.trim()) {
+    return 'appimage';
+  }
+  if (env.SNAP?.trim()) {
+    return 'snap';
+  }
+  if (env.FLATPAK_ID?.trim()) {
+    return 'flatpak';
+  }
+  const resourcesPath = options?.resourcesPath ?? process.resourcesPath;
+  if (resourcesPath) {
+    try {
+      const raw = fs
+        .readFileSync(path.join(resourcesPath, 'package-type'), 'utf8')
+        .trim()
+        .toLowerCase();
+      if (
+        raw === 'deb' ||
+        raw === 'rpm' ||
+        raw === 'appimage' ||
+        raw === 'snap' ||
+        raw === 'flatpak'
+      ) {
+        return raw;
+      }
+    } catch {
+      // `package-type` marker file not present.
+    }
+  }
+  return 'unknown';
+}
+
+export function isAutoUpdateSupportedOnPlatform(options: {
+  platform: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
+  resourcesPath?: string;
+}): boolean {
+  if (options.platform !== 'linux') {
+    return true;
+  }
+  // On Linux, `latest-linux.yml` only supports in-place AppImage updates.
+  // `.deb`, `.rpm`, and system package installs would crash inside DebUpdater /
+  // AppImageUpdater and must fall back cleanly to manual GitHub releases.
+  return detectLinuxPackageType(options) === 'appimage';
 }
 
 export interface DesktopUpdaterManagerOptions {
@@ -66,6 +132,9 @@ export interface DesktopUpdaterManagerOptions {
   exitApp?: (code?: number) => void;
   logger?: Pick<Console, 'info' | 'warn' | 'error'>;
   platform?: NodeJS.Platform;
+  arch?: string;
+  env?: NodeJS.ProcessEnv;
+  resourcesPath?: string;
   /**
    * When true (production IPC mode), `install()` and `relaunch()` defer
    * `beforeQuitForUpdate()` + `quitAndInstall()` via `setImmediate` so the
@@ -251,6 +320,9 @@ export class DesktopUpdaterManager {
   private readonly options: DesktopUpdaterManagerOptions;
   private readonly logger: Pick<Console, 'info' | 'warn' | 'error'>;
   private readonly platform: NodeJS.Platform;
+  private readonly arch: string;
+  private readonly env: NodeJS.ProcessEnv;
+  private readonly resourcesPath: string | undefined;
   private readonly pending = new Map<string, PendingUpdateSession>();
   private updater: AutoUpdaterLike | null = null;
   private installStarted = false;
@@ -259,6 +331,9 @@ export class DesktopUpdaterManager {
     this.options = options;
     this.logger = options.logger ?? console;
     this.platform = options.platform ?? process.platform;
+    this.arch = options.arch ?? process.arch;
+    this.env = options.env ?? process.env;
+    this.resourcesPath = options.resourcesPath ?? process.resourcesPath;
   }
 
   isInstalling(): boolean {
@@ -269,17 +344,32 @@ export class DesktopUpdaterManager {
     return this.options.isPackaged ? this.options.isPackaged() : app.isPackaged;
   }
 
+  private hasDownloadedPendingSession(): boolean {
+    for (const session of this.pending.values()) {
+      if (session.downloaded) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private getUpdater(): AutoUpdaterLike {
     if (!this.updater) {
       const loader = this.options.loadAutoUpdater ?? defaultLoadAutoUpdater;
       const instance = loader();
       instance.autoDownload = false;
       instance.autoInstallOnAppQuit = false;
-      instance.allowDowngrade = false;
-      if (this.platform === 'win32' && process.arch === 'arm64') {
+      if (
+        this.platform === 'win32' &&
+        this.arch === 'arm64' &&
+        !instance.allowPrerelease
+      ) {
         instance.channel = 'latest-arm64';
       }
-      const devConfig = process.env.DIMO_UPDATER_DEV_CONFIG?.trim();
+      // Must be set AFTER `channel`, because electron-updater's `channel`
+      // setter silently flips `allowDowngrade` back to `true`.
+      instance.allowDowngrade = false;
+      const devConfig = this.env.DIMO_UPDATER_DEV_CONFIG?.trim();
       if (devConfig) {
         instance.forceDevUpdateConfig = true;
         instance.updateConfigPath = devConfig;
@@ -297,7 +387,25 @@ export class DesktopUpdaterManager {
   async check(options?: {
     timeout?: number;
   }): Promise<DesktopUpdateCheckResult | null> {
-    if (!this.isPackaged() && !process.env.DIMO_UPDATER_DEV_CONFIG?.trim()) {
+    const devConfig = this.env.DIMO_UPDATER_DEV_CONFIG?.trim();
+    if (!this.isPackaged() && !devConfig) {
+      return null;
+    }
+    if (
+      !devConfig &&
+      !isAutoUpdateSupportedOnPlatform({
+        platform: this.platform,
+        env: this.env,
+        resourcesPath: this.resourcesPath,
+      })
+    ) {
+      const packageType = detectLinuxPackageType({
+        env: this.env,
+        resourcesPath: this.resourcesPath,
+      });
+      this.logger.info(
+        `[electron:updater] in-app auto-update is unsupported for Linux package type "${packageType}"; falling back to manual releases`
+      );
       return null;
     }
 
@@ -341,12 +449,33 @@ export class DesktopUpdaterManager {
       return null;
     }
 
+    const now = Date.now();
+    for (const [existingToken, existing] of this.pending.entries()) {
+      if (!existing.downloading && now - existing.createdAt > PENDING_UPDATE_TTL_MS) {
+        this.pending.delete(existingToken);
+      }
+    }
+    while (this.pending.size >= MAX_PENDING_UPDATES) {
+      let evicted = false;
+      for (const [existingToken, existing] of this.pending.entries()) {
+        if (!existing.downloading) {
+          this.pending.delete(existingToken);
+          evicted = true;
+          break;
+        }
+      }
+      if (!evicted) {
+        break;
+      }
+    }
+
     const token = crypto.randomUUID();
     this.pending.set(token, {
       token,
       version: info.version,
       downloaded: false,
       downloading: false,
+      createdAt: now,
       cancellationToken: result?.cancellationToken,
     });
 
@@ -398,6 +527,11 @@ export class DesktopUpdaterManager {
       for (const payload of tracker.finish(token)) {
         emitEvent(payload);
       }
+    } catch (error) {
+      if (this.platform === 'darwin' && !this.hasDownloadedPendingSession()) {
+        updater.autoInstallOnAppQuit = false;
+      }
+      throw error;
     } finally {
       session.downloading = false;
       updater.removeListener('download-progress', onProgress);
@@ -460,6 +594,18 @@ export class DesktopUpdaterManager {
       } catch {
         // Best-effort cancellation only.
       }
+    }
+    if (
+      this.platform === 'darwin' &&
+      this.updater &&
+      !this.installStarted &&
+      !this.hasDownloadedPendingSession()
+    ) {
+      // Clear autoInstallOnAppQuit when the user dismisses or cancels a macOS
+      // update so `electron-updater` will not auto-install on a normal quit.
+      // Note: if Squirrel.Mac already staged the zip natively during download,
+      // Squirrel's ShipIt process still controls its own staged bundle.
+      this.updater.autoInstallOnAppQuit = false;
     }
   }
 

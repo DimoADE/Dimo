@@ -14,8 +14,7 @@ use super::write_bytes_document;
 const MODELS_DEV_URL: &str = "https://models.dev/api.json";
 const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_MODELS_DEV_BYTES: usize = 8 * 1024 * 1024;
-const BUNDLED_SNAPSHOT: &str =
-    include_str!("../../../resources/opencode/models-dev.json");
+const BUNDLED_SNAPSHOT: &str = include_str!("../../../resources/opencode/models-dev.json");
 
 fn is_oauth_provider(provider_id: &str) -> bool {
     matches!(provider_id, "openai" | "github-copilot" | "gitlab")

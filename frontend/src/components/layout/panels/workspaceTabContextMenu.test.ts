@@ -337,6 +337,63 @@ describe('buildWorkspaceTabContextMenu', () => {
       'new-terminal',
     ]);
   });
+
+  it('includes browser and plugin items in session, terminal, and space context menus when installed', () => {
+    const openBrowser = vi.fn();
+    const openCustomPlugin = vi.fn();
+
+    for (const tabKind of ['session', 'terminal', 'space'] as const) {
+      const items = buildWorkspaceTabContextMenu(
+        {
+          ...labels,
+          basicGroup: '基础',
+          newGroup: '新建',
+          session: '会话',
+        },
+        {
+          tabKind,
+          includeLayoutActions: false,
+          openSession: vi.fn(),
+          agents: [{ id: 'CODEX', label: 'Codex' }],
+          closeCurrent: vi.fn(),
+          closeOthers: vi.fn(),
+          canSplit: true,
+          splitDown: vi.fn(),
+          splitLeft: vi.fn(),
+          splitRight: vi.fn(),
+          openNote: vi.fn(),
+          openReview: vi.fn(),
+          openTerminal: vi.fn(),
+          shells: [{ value: 'powershell.exe', label: 'PowerShell' }],
+          openBrowser,
+          pluginItems: [
+            {
+              id: 'plugin-example.tools:inspector',
+              label: 'Inspector',
+              onSelect: openCustomPlugin,
+            },
+          ],
+          sortByName: vi.fn(),
+        }
+      );
+
+      expect(items.map((item) => item.id)).toContain('new-terminal');
+      expect(items.map((item) => item.id)).toContain('new-browser');
+      expect(items.map((item) => item.id)).toContain(
+        'plugin-example.tools:inspector'
+      );
+
+      const browserItem = items.find((item) => item.id === 'new-browser');
+      expect(
+        browserItem && 'label' in browserItem ? browserItem.label : ''
+      ).toBe('浏览器');
+      if (browserItem && 'onSelect' in browserItem) {
+        browserItem.onSelect?.();
+      }
+    }
+
+    expect(openBrowser).toHaveBeenCalledTimes(3);
+  });
 });
 
 describe('useWorkspaceEditorTabMenu', () => {

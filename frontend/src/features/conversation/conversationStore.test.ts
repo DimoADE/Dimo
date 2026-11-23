@@ -4029,7 +4029,12 @@ describe('conversationStore (row-op dumb container)', () => {
   it('applies unpersisted live deltas at loadedLastSequence and ignores already-overlaid live_sequence', () => {
     const detail = emptyDetail([
       userRow('t1', 'hello', 10n),
-      assistantRow('t1', [{ type: 'text', text: 'already-' }], 10n, 'streaming'),
+      assistantRow(
+        't1',
+        [{ type: 'text', text: 'already-' }],
+        10n,
+        'streaming'
+      ),
     ]);
     detail.timeline.last_sequence = 10n;
     detail.timeline.live_sequence = 5n;

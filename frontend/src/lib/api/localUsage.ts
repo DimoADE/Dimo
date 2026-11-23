@@ -112,6 +112,7 @@ export interface GetProjectUsageStatisticsParams {
   scope: 'global' | 'project';
   projectId?: string;
   dateRange?: '7d' | '30d' | 'all';
+  forceRefresh?: boolean;
 }
 
 export const localUsageApi = {
@@ -122,6 +123,7 @@ export const localUsageApi = {
       scope: params.scope,
       projectId: params.projectId ?? null,
       dateRange: params.dateRange ?? '7d',
+      ...(params.forceRefresh ? { forceRefresh: true } : {}),
     });
   },
 };

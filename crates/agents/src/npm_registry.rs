@@ -235,7 +235,9 @@ pub async fn fetch_npm_node_engine(
     package_name: &str,
     version: &str,
 ) -> Option<String> {
-    let version_info = fetch_npm_version(fetcher, package_name, version).await.ok()?;
+    let version_info = fetch_npm_version(fetcher, package_name, version)
+        .await
+        .ok()?;
     version_info
         .engines
         .get("node")
@@ -403,7 +405,11 @@ fn npm_comparator_allows(comparator: &str, version: &str) -> bool {
     }
 
     let version_parts = semver_parts(version);
-    let raw_segments: Vec<&str> = comparator.trim().trim_start_matches('v').split('.').collect();
+    let raw_segments: Vec<&str> = comparator
+        .trim()
+        .trim_start_matches('v')
+        .split('.')
+        .collect();
     let wildcard_prefix = raw_segments
         .iter()
         .any(|segment| segment.eq_ignore_ascii_case("x") || *segment == "*");

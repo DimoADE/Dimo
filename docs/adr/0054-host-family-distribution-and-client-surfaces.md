@@ -1,129 +1,75 @@
 ---
 status: accepted
 date: 2026-08-17
-decision-makers:
-  - Dimo maintainers
+decision-makers: Dimo maintainers
 ---
 
-# Host 家族分发与三种客户端表面
+# Host 家族分发与客户端表面
 
-Dimo 只发行一个执行面：**Dimo Host**。手机 App、IM 渠道、其它桌面 Dimo
-都连接这个 Host。本机桌面可以自己就是 Host，也可以作为工作站客户端连接另一
-个 Host。插件内核只活在拥有该数据目录的 Host 上。
+## Context
 
-本决定补充
-[ADR-0033](0033-shared-application-core-and-versioned-remote-transport.md)
-的多端模型，并把 P0 的 Developer Device 升级为可配对的客户端等级。Apple
-Developer ID 与 Windows Authenticode 不是本阶段发行门槛；updater 签名与
-SHA-256 校验仍然需要。
+Dimo 只发行一个执行面：**Dimo Host**（`dimo-server`）。桌面应用、浏览器 WebUI、远程桌面工作站、原生移动端 Companion 以及 IM 聊天通道全部连接到同一个 Host 执行核心。本决定补充 [ADR-0033](0033-shared-application-core-and-versioned-remote-transport.md) 的多端共享架构，定义 Host 家族的拓扑、发行物形态与四类客户端表面的权限边界。Apple Developer ID 与 Windows Authenticode 不作为发行门槛，但 updater 签名与 SHA-256 校验必须保持强制。
 
-> **状态注记（2026-11）：** 原生 Android Companion（[ADR-0041](0041-native-kotlin-compose-android-companion.md)）与原生 SwiftUI iOS Companion（[ADR-0084](0084-native-swiftui-ios-companion.md)）均已纳入仓库 `mobile/` 目录并复用同一 Remote Protocol v1。
+## Decision
 
-## 拓扑
+### 1. 拓扑：单数据目录单 Host
 
-同一数据目录同一时刻只有一个 Host。Host 可以是 Dimo.app 或 `dimo-server`。
-Agent、Git worktree、Automation、Plugin Worker、官方 MCP 和 Chat channel
-适配器都在 Host 上运行。
+同一数据目录在同一时刻只允许一个 Dimo Host 拥有写权。Agent 进程、Git worktree、Automation 调度器、Plugin Kernel 与 Worker、官方产品 MCP 和 Chat channel 适配器全部运行在 Host 上。
 
 ```text
-手机 Companion ──┐
-IM Channel ──────┤
-其它桌面 Workstation ┤── Remote Protocol / Chat channel ── Dimo Host
-本机桌面 ────────┘         （Desktop 或 dimo-server）
+移动 Companion（iOS / Android）──┐
+IM Chat Channel ────────────────┤
+远程桌面 Workstation ────────────┼── Remote Protocol v1 / Chat Channel ──▶ Dimo Host
+本机 Electron 桌面壳 ────────────┘         （dimo-server --desktop 或独立 dimo-server）
 ```
 
-打开本机 Dimo.app 时，该进程就是 Local Host。只有需要被其它设备连接或无头
-常驻时，才打开远程监听或改跑 `dimo-server`。本机日常使用不强制 sidecar。
-同一数据目录被 `dimo-server` 占用时，本机桌面只能作为客户端连接，不能再
-启动第二份 Host。
+桌面应用采用 Electron 壳（`electron/`）托管本机 `dimo-server --desktop` sidecar（ADR-0090）；当目标数据目录已被独立运行的 `dimo-server` 占用时，桌面应用作为客户端连接该 Host，不再启动第二份 Host 进程。
 
-## 发行物
+### 2. 同版本家族发行物
 
-一次产品版本同时产出同一 semver 家族：
+每次产品版本同步产出同一 semver 家族的发行物：
 
 | 产物 | 形态 | 内容 |
 | --- | --- | --- |
-| Dimo Desktop | `.dmg` / NSIS / `.msi` / `.AppImage` / `.deb` | 壳 + Host + 前端 + `dimo-mcp` + 官方插件快照 |
-| Dimo Server | 跨平台目录 / 可选 Docker | `dimo-server`、`dimo-mcp`、`web/`、`plugins/bundled/` |
-| Dimo Companion | Android APK，后续 iOS | 薄客户端，不跑 Agent 或插件 |
+| Dimo Desktop | `.dmg` / NSIS / `.msi` / `.AppImage` / `.deb` | Electron 桌面壳 + `dimo-server` sidecar + 前端 + `dimo-mcp` + `dimo-workflow-mcp` + 官方插件快照 |
+| Dimo Server | 跨平台压缩包 / 可选 Docker | `dimo-server`、`dimo-mcp`、`dimo-workflow-mcp`、`web/`、`plugins/bundled/` |
+| Dimo Companion | 原生 Android（[ADR-0041](0041-native-kotlin-compose-android-companion.md)）与原生 iOS（[ADR-0084](0084-native-swiftui-ios-companion.md)） | 薄客户端，复用 Remote Protocol v1，不运行 Agent 或插件 |
 
-不单独发行 MCP 安装器、插件守护进程、第二套 Web 管理台或 IM 客户端。
-
-Server 目录形状：
+不单独发行独立 MCP 安装器、独立插件守护进程、第二套 Web 管理台或自研 IM 客户端。Server 发行包目录结构统一为：
 
 ```text
 dimo-server
 dimo-mcp
+dimo-workflow-mcp
 web/
 plugins/bundled/
 ```
 
-安装助手只下载写明的版本，并先验 SHA-256；若本机构有 minisign 私钥则同时
-发布 `.sig`。没有 Apple / Windows 代码签名证书时，仍可发布上述 Server 产物
-与未公证的桌面安装包。官方 Releases 必须标明签名状态。
+安装器仅下载明确指定的版本并强制校验 SHA-256（含包内 `SHA256SUMS`）；存在 minisign 私钥时同步发布 `.sig`。官方 Releases 必须如实标明安装包的代码签名状态。
 
-## 客户端表面
+### 3. 四类客户端表面与权限预设
 
-配对时选择 **Device permission preset**。预设只组织 scopes，鉴权仍认细粒度
-scope。新增 scope 不得自动进入旧预设。
+设备配对时可选择 **Device permission preset**；预设仅用于组织 scopes，鉴权始终按细粒度 scope 执行，新增 scope 不得自动加入旧预设。
 
-### 本机控制台
+- **本机控制台（Host Console）**：运行 Host 的本机环境。无需配对，可管理监听地址、TLS/Reachability、管理员 token、已配对设备、备份恢复以及任意插件与 Agent 安装。
+- **Workstation Device**：另一台电脑上的桌面客户端。几乎完整接管 Host 上的编码工作（Project / Workspace / Conversation / Turn / 文件读写 / Git 写 / 终端 / Workflow / Automation / 启用与使用插件），但不接管 Host 运维（公网监听暴露、管理员 token、撤销他人设备、备份恢复、升级 Host 二进制）。其 scope 集合为 `DEVICE_SCOPES` 加上 `application.call` 与 `plugin.write`，排除所有 Host 管理 scope。嵌入浏览器（Electron `<webview>` + `crates/browser-host`）与本机 Office 自动化留在 Host 机器，远程通过 capabilities 与 preview proxy 消费，不在客户端复制一套 runtime。
+- **Companion Device**：原生 iOS 与 Android 薄客户端（`mobile/ios`、`mobile/android`）。支持会话读写、审批、取消、纠偏、只读 Artifact、离线缓存与终态通知摘要；不包含插件写入、Workflow/Automation 写入、终端或 Git 写 scope。
+- **Chat Channel**：非 Paired device。Telegram、Discord、飞书、企业微信、微信 iLink、QQ 等适配器运行在 Host 上，仅接收授权发送者的入站命令并投递不含秘密的摘要。
 
-安装并运行 Host 的那台机器。不经配对，可改监听、TLS、token、设备列表、
-备份恢复，以及安装任意插件与 Agent。
+### 4. 插件与远程协议绑定
 
-### Workstation Device
+Plugin Kernel、Worker、App surface、Runtime lock 与 Activation Generation 归属当前数据目录所在的 Host。远程 Workstation 通过统一的 Application Core 接缝操作 Host 上的插件事实；官方插件快照随 Host 物化，第三方 `.vxp` 也仅安装在该 Host 上。
 
-其它电脑上的 Dimo.app。近乎全接管 Host 上的工作：Project / Workspace /
-Conversation / Turn / 文件读写 / Git 写 / 终端 / Workflow / Automation /
-使用并启用已安装插件。不接管 Host 运维：监听与公网暴露、管理员 token、
-撤销他人设备、备份恢复、升级 Host 二进制。CEF 与本机 Office 自动化留在
-Host 机器，远程通过 capabilities 与 preview proxy 使用，不在客户端再跑
-一套 runtime。
-
-Workstation 的 scope 集合是 `DEVICE_SCOPES` 加上 `application.call` 与
-`plugin.write`，减去一切 Host 管理 scope。
-
-### Companion Device
-
-手机薄客户端。允许会话读写、审批、取消、纠偏、只读 Artifact、离线缓存
-和终态通知摘要。不允许插件写入、Workflow/Automation 写入、终端或 Git 写。
-
-### Chat Channel
-
-不是 Paired device。Telegram / 飞书 / 微信等通道配置在 Host 上，只接受
-授权发送者的入站命令，并投递无 secret 摘要。Dimo 不发行这些 IM 的客户端。
-
-## 插件绑定
-
-Plugin Kernel、Worker、App surface、Runtime lock 与 Activation Generation
-只属于当前 Host。远程 Workstation 通过 Application Core 调用插件命令，
-改变的是 Host 事实。Companion 与 Channel 没有插件管理 scope。
-
-官方产品插件随 Host 物化到数据目录。第三方 `.vxp` 也只装到这个 Host。
-
-## 远程协议
-
-非 IM 入口共用 Remote Protocol。配对 secret 五分钟、一次兑换；长期
-device credential 进入系统凭据存储或 Android Keystore。默认 loopback；
-LAN / 公网必须二次确认，TLS 终止放在外部反代。
-
-桌面与 Server 必须同版本家族。Companion 可以旧一个次版本，靠
-capabilities 协商。缺 scope 或 capability 时 fail-closed。
+所有非 IM 客户端共用 Remote Protocol v1：一次性配对 secret 有效期 5 分钟，兑换后的长期 device credential 存入系统凭据存储（Keychain / Credential Manager / Android Keystore）。监听默认绑定 loopback；开放 LAN 或公网需显式二次确认，TLS 终止由外部反代承担。桌面与 Server 要求同版本家族；Companion 允许落后一个次版本并通过 capabilities 协商，缺 scope 或 capability 时 fail-closed。
 
 ## Consequences
 
-- `CreatePairingRequest` 携带可选 `preset`；有预设时 scopes 由预设展开。
-- 现有无预设、显式 scopes 的配对请求保持有效，但仍须是该设备等级允许的子集。
-- P0 文档中的 Developer Device 被 Workstation 取代，不再作为默认远程桌面预设。
-- Chat channel 适配器属于 Host，随 `dimo-server` 一起运行。
-- 本阶段不把缺少 Apple / Windows 身份证书当作发布失败。
+- `CreatePairingRequest` 支持可选 `preset` 参数并展开为对应 scope 集合；显式指定 scopes 的配对请求保持兼容，但必须受限于设备等级允许的子集。
+- Workstation 成为远程桌面的标准权限预设。
+- Chat channel 适配器与 Plugin Kernel 随 `dimo-server` 统一托管，客户端零双写。
+- 缺失商业代码签名证书不阻塞 Server 发行或未公证桌面安装包发布，但必须以校验和与显式状态声明保障供应链透明度。
 
 ## Considered Options
 
-- **本机也强制独立 `dimo-server` sidecar。** 否决。增加端口、配对和双进程，
-  却不改变 Local Profile 语义。
-- **把 IM 做成第四种 Paired device。** 否决。IM 没有设备凭据存储，授权发送者
-  已能表达入站信任。
-- **远程桌面复制 Host 到客户端。** 否决。双数据目录破坏 Automation lease 与
-  插件 generation。
+- **将 IM 通道建模为第四种 Paired device**：否决。IM 平台缺乏客户端设备凭据存储，授权发送者白名单足以表达入站信任。
+- **远程桌面在客户端本地复制一份 Host**：否决。双数据目录会破坏 Automation 单所有者 lease、SQLite 单写者约束与插件 activation generation 一致性。

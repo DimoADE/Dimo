@@ -1,10 +1,9 @@
 use super::{
-    HealthBody, HostClientRuntime, StoredProfile, StoredState, advertised_connect_origin,
-    collapse_provisioned_duplicates, format_ssh_host_config, host_update_available,
-    is_release_host, normalize_origin, pairing_token_from_input, parse_health,
-    resolve_connect_origin, ssh_host_alias, upsert_profile, views,
+    DeviceCredentialParts, HealthBody, HostClientRuntime, StoredProfile, StoredState,
+    advertised_connect_origin, collapse_provisioned_duplicates, format_ssh_host_config,
+    host_update_available, is_release_host, normalize_origin, pairing_token_from_input,
+    parse_health, resolve_connect_origin, ssh_host_alias, upsert_profile, views,
 };
-use super::DeviceCredentialParts;
 
 #[test]
 fn ssh_host_config_omits_secrets() {
@@ -58,12 +57,10 @@ fn omitted_health_release_is_a_published_build() {
         serde_json::from_str(r#"{"status":"ok","version":"0.2.1"}"#).expect("json");
     assert!(is_release_host(&published));
     let debug: HealthBody =
-        serde_json::from_str(r#"{"status":"ok","version":"0.2.1","release":false}"#)
-            .expect("json");
+        serde_json::from_str(r#"{"status":"ok","version":"0.2.1","release":false}"#).expect("json");
     assert!(!is_release_host(&debug));
     let family: HealthBody =
-        serde_json::from_str(r#"{"status":"ok","version":"0.2.1","release":true}"#)
-            .expect("json");
+        serde_json::from_str(r#"{"status":"ok","version":"0.2.1","release":true}"#).expect("json");
     assert!(is_release_host(&family));
 }
 

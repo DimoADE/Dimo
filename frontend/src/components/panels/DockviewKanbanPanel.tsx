@@ -31,6 +31,7 @@ import {
   OPEN_PULSE_DECK_EVENT,
   OPEN_WORKFLOW_STUDIO_EVENT,
 } from '@/components/kanban/pulseDeckEvents';
+import { scheduleIdleWork } from '@/lib/scheduleIdleWork';
 
 type LazyDefaultModule<P> = {
   default: ComponentType<P>;
@@ -54,6 +55,7 @@ function createRetryableLazyComponent<P extends object>(
   loader: () => Promise<LazyDefaultModule<P>>
 ) {
   let cached: LazyExoticComponent<ComponentType<P>> | null = null;
+  let preloaded = false;
   const getComponent = () => {
     if (!cached) {
       const next = lazy(() =>
@@ -68,10 +70,18 @@ function createRetryableLazyComponent<P extends object>(
     }
     return cached;
   };
+  const preload = () => {
+    if (preloaded) return;
+    preloaded = true;
+    void loader().catch(() => {
+      preloaded = false;
+    });
+  };
   const reset = () => {
     cached = null;
+    preloaded = false;
   };
-  return { getComponent, reset };
+  return { getComponent, preload, reset };
 }
 
 const lazyKanbanUsageDashboardEntry = createRetryableLazyComponent<
@@ -114,6 +124,15 @@ export function KanbanBoard() {
       setActiveViewId(resolvedViewId);
     }
   }, [activeViewId, resolvedViewId, setActiveViewId]);
+
+  useEffect(
+    () =>
+      scheduleIdleWork(() => {
+        lazyKanbanUsageDashboardEntry.preload();
+      }),
+    []
+  );
+
   const currentViewId = resolvedViewId ?? activeViewId;
   const currentView =
     views.find((view) => view.id === currentViewId) ?? views[0] ?? null;

@@ -103,30 +103,42 @@ function clippedBounds(scroller: HTMLElement): RectBounds {
   return { left, top, right, bottom };
 }
 
-function placeThumb(
-  thumb: HTMLElement,
+type ThumbPlacement = {
+  visible: boolean;
+  top?: number;
+  left?: number;
+  width?: number;
+  height?: number;
+};
+
+type CachedThumbStyle = {
+  visible: boolean;
+  top: string;
+  left: string;
+  width: string;
+  height: string;
+};
+
+function computeThumbPlacement(
   scroller: HTMLElement,
+  rect: DOMRect,
+  clip: RectBounds,
   axis: 'x' | 'y'
-): boolean {
-  const rect = scroller.getBoundingClientRect();
-  const clip = clippedBounds(scroller);
+): ThumbPlacement {
   if (clip.bottom - clip.top <= 1 || clip.right - clip.left <= 1) {
-    thumb.classList.remove('is-visible');
-    return false;
+    return { visible: false };
   }
   if (
     axis === 'y' &&
     (rect.right <= clip.left + THUMB_PX || rect.left >= clip.right)
   ) {
-    thumb.classList.remove('is-visible');
-    return false;
+    return { visible: false };
   }
   if (
     axis === 'x' &&
     (rect.bottom <= clip.top + THUMB_PX || rect.top >= clip.bottom)
   ) {
-    thumb.classList.remove('is-visible');
-    return false;
+    return { visible: false };
   }
   const start = axis === 'y' ? clip.top : clip.left;
   const end = axis === 'y' ? clip.bottom : clip.right;
@@ -138,24 +150,94 @@ function placeThumb(
     minThumb: MIN_THUMB,
   });
   if (!geo) {
-    thumb.classList.remove('is-visible');
-    return false;
+    return { visible: false };
   }
   if (axis === 'y') {
     const rightEdge = Math.min(rect.right, clip.right);
-    thumb.style.top = `${start + geo.offset}px`;
-    thumb.style.left = `${rightEdge - THUMB_PX - EDGE_INSET}px`;
-    thumb.style.width = `${THUMB_PX}px`;
-    thumb.style.height = `${geo.size}px`;
-  } else {
-    const bottomEdge = Math.min(rect.bottom, clip.bottom);
-    thumb.style.left = `${start + geo.offset}px`;
-    thumb.style.top = `${bottomEdge - THUMB_PX - EDGE_INSET}px`;
-    thumb.style.height = `${THUMB_PX}px`;
-    thumb.style.width = `${geo.size}px`;
+    return {
+      visible: true,
+      top: start + geo.offset,
+      left: rightEdge - THUMB_PX - EDGE_INSET,
+      width: THUMB_PX,
+      height: geo.size,
+    };
   }
-  thumb.classList.add('is-visible');
+  const bottomEdge = Math.min(rect.bottom, clip.bottom);
+  return {
+    visible: true,
+    left: start + geo.offset,
+    top: bottomEdge - THUMB_PX - EDGE_INSET,
+    height: THUMB_PX,
+    width: geo.size,
+  };
+}
+
+function applyThumbPlacement(
+  thumb: HTMLElement,
+  placement: ThumbPlacement,
+  cache: CachedThumbStyle
+): boolean {
+  if (!placement.visible) {
+    if (cache.visible) {
+      thumb.classList.remove('is-visible');
+      cache.visible = false;
+    }
+    return false;
+  }
+  const top = `${placement.top}px`;
+  const left = `${placement.left}px`;
+  const width = `${placement.width}px`;
+  const height = `${placement.height}px`;
+  if (cache.top !== top) {
+    thumb.style.top = top;
+    cache.top = top;
+  }
+  if (cache.left !== left) {
+    thumb.style.left = left;
+    cache.left = left;
+  }
+  if (cache.width !== width) {
+    thumb.style.width = width;
+    cache.width = width;
+  }
+  if (cache.height !== height) {
+    thumb.style.height = height;
+    cache.height = height;
+  }
+  if (!cache.visible) {
+    thumb.classList.add('is-visible');
+    cache.visible = true;
+  }
   return true;
+}
+
+function findAnyScroller(target: EventTarget | null): HTMLElement | null {
+  if (!(target instanceof Element) || target.closest(SKIP)) return null;
+  let horizontalMatch: HTMLElement | null = null;
+  let node: Element | null = target;
+  while (node) {
+    if (node instanceof HTMLElement) {
+      const style = getComputedStyle(node);
+      const oy = style.overflowY;
+      if (
+        (oy === 'auto' || oy === 'scroll' || oy === 'overlay') &&
+        node.scrollHeight - node.clientHeight > 1
+      ) {
+        return node;
+      }
+      if (!horizontalMatch) {
+        const ox = style.overflowX;
+        if (
+          (ox === 'auto' || ox === 'scroll' || ox === 'overlay') &&
+          node.scrollWidth - node.clientWidth > 1
+        ) {
+          horizontalMatch = node;
+        }
+      }
+    }
+    node = node.parentElement;
+  }
+  return horizontalMatch;
 }
 
 export function attachOverlayScrollbars(
@@ -167,11 +249,31 @@ export function attachOverlayScrollbars(
   let dragging: 'x' | 'y' | null = null;
   let hideTimer = 0;
   let frame = 0;
+  const verticalCache: CachedThumbStyle = {
+    visible: thumbs.vertical.classList.contains('is-visible'),
+    top: '',
+    left: '',
+    width: '',
+    height: '',
+  };
+  const horizontalCache: CachedThumbStyle = {
+    visible: thumbs.horizontal.classList.contains('is-visible'),
+    top: '',
+    left: '',
+    width: '',
+    height: '',
+  };
 
   const hideNow = () => {
     window.clearTimeout(hideTimer);
-    thumbs.vertical.classList.remove('is-visible');
-    thumbs.horizontal.classList.remove('is-visible');
+    if (verticalCache.visible) {
+      thumbs.vertical.classList.remove('is-visible');
+      verticalCache.visible = false;
+    }
+    if (horizontalCache.visible) {
+      thumbs.horizontal.classList.remove('is-visible');
+      horizontalCache.visible = false;
+    }
   };
 
   const scheduleHide = () => {
@@ -196,13 +298,31 @@ export function attachOverlayScrollbars(
       release();
       return;
     }
-    const vertical = placeThumb(thumbs.vertical, scroller, 'y');
-    const horizontal = placeThumb(thumbs.horizontal, scroller, 'x');
+    // Read all layout geometry before mutating either thumb style to avoid forced reflows.
+    const rect = scroller.getBoundingClientRect();
+    const clip = clippedBounds(scroller);
+    const verticalPlacement = computeThumbPlacement(scroller, rect, clip, 'y');
+    const horizontalPlacement = computeThumbPlacement(
+      scroller,
+      rect,
+      clip,
+      'x'
+    );
+    const vertical = applyThumbPlacement(
+      thumbs.vertical,
+      verticalPlacement,
+      verticalCache
+    );
+    const horizontal = applyThumbPlacement(
+      thumbs.horizontal,
+      horizontalPlacement,
+      horizontalCache
+    );
     if (!vertical && !horizontal) scheduleHide();
   };
 
   const schedulePlace = (scroller: HTMLElement) => {
-    window.cancelAnimationFrame(frame);
+    if (frame !== 0) return;
     frame = window.requestAnimationFrame(() => {
       frame = 0;
       if (active === scroller) place(scroller);
@@ -232,7 +352,6 @@ export function attachOverlayScrollbars(
     observer.observe(scroller, {
       childList: true,
       subtree: true,
-      characterData: true,
     });
     resizeObserver.observe(scroller);
     place(scroller);
@@ -245,9 +364,7 @@ export function attachOverlayScrollbars(
     ) {
       return;
     }
-    const vertical = findScroller(target, 'y');
-    const horizontal = findScroller(target, 'x');
-    const next = vertical ?? horizontal;
+    const next = findAnyScroller(target);
     pointerInside = inside && next !== null;
     if (next !== active) watch(next);
     else if (next) place(next);
@@ -337,10 +454,16 @@ export function attachOverlayScrollbars(
       if (active && !isShownScroller(active)) release();
     });
   };
-  root.addEventListener('pointerover', onPointer, true);
-  root.addEventListener('pointerdown', onPointerDown, true);
-  root.addEventListener('scroll', onScroll, true);
-  window.addEventListener('resize', onWindowResize);
+  root.addEventListener('pointerover', onPointer, {
+    capture: true,
+    passive: true,
+  });
+  root.addEventListener('pointerdown', onPointerDown, {
+    capture: true,
+    passive: true,
+  });
+  root.addEventListener('scroll', onScroll, { capture: true, passive: true });
+  window.addEventListener('resize', onWindowResize, { passive: true });
 
   return () => {
     window.clearTimeout(hideTimer);

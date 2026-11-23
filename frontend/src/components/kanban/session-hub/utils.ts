@@ -170,6 +170,8 @@ const FORK_SUPPORTED_AGENT_KEYS = new Set([
   'claude_code',
   'claude-code',
   'codex',
+  'muse_code',
+  'muse-code',
   'deepseek_harness',
   'deepseek-harness',
 ]);

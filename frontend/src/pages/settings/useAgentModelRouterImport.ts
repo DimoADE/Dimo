@@ -19,12 +19,13 @@ import {
   agentManagementErrorMessage as errorMessage,
 } from '@/features/agent-management';
 import {
-  ROUTER_OPENCODE_PROVIDER_ID,
-  ROUTER_PROVIDER_NAME,
   accountApi,
   dshProviderSaveRequest,
+  nextUniqueDshProviderId,
+  nextUniqueOpenCodeProviderId,
   openCodeConnectRequest,
   providerSaveRequest,
+  resolveRouterProviderName,
   type RouterProvision,
 } from '@/features/model-router';
 import { getDesktopShell } from '@/lib/desktopShell';
@@ -71,17 +72,24 @@ export function useAgentModelRouterImport({
     async (
       targetAgentId: AgentId,
       provision: RouterProvision,
-      savedProviderId: string | null
+      savedProviderId: string | null,
+      providerName: string
     ) => {
       try {
         if (targetAgentId === 'opencode' || targetAgentId === 'mimo_code') {
           await agentManagementApi.connectOpenCodeProvider(
-            openCodeConnectRequest(provision, true),
+            openCodeConnectRequest(provision, true, {
+              providerId: savedProviderId ?? undefined,
+              name: providerName,
+            }),
             targetAgentId
           );
         } else if (targetAgentId === 'deepseek_harness') {
           await agentManagementApi.saveDshProvider(
-            dshProviderSaveRequest(provision, true)
+            dshProviderSaveRequest(provision, true, {
+              id: savedProviderId ?? undefined,
+              displayName: providerName,
+            })
           );
           await agentManagementApi.setAuthMode(
             'deepseek_harness',
@@ -112,8 +120,8 @@ export function useAgentModelRouterImport({
           if (!providerId) {
             const list = await agentManagementApi.modelProviders(targetAgentId);
             providerId =
-              list.providers.find((item) => item.name === ROUTER_PROVIDER_NAME)
-                ?.id ?? null;
+              list.providers.find((item) => item.name === providerName)?.id ??
+              null;
           }
           if (!providerId) {
             throw new Error(t('settings:agents.modelRouterImportFailed'));
@@ -166,30 +174,62 @@ export function useAgentModelRouterImport({
         }
 
         let savedProviderId: string | null = null;
+        let providerName = resolveRouterProviderName(provision);
         if (targetAgentId === 'opencode' || targetAgentId === 'mimo_code') {
+          const existing =
+            await agentManagementApi.openCodeProviders(targetAgentId);
+          providerName = resolveRouterProviderName(
+            provision,
+            existing.providers.map((provider) => provider.name)
+          );
+          savedProviderId = nextUniqueOpenCodeProviderId(
+            providerName,
+            existing.providers.map((provider) => provider.provider_id)
+          );
           await agentManagementApi.connectOpenCodeProvider(
-            openCodeConnectRequest(provision, false),
+            openCodeConnectRequest(provision, false, {
+              providerId: savedProviderId,
+              name: providerName,
+            }),
             targetAgentId
           );
         } else if (targetAgentId === 'deepseek_harness') {
-          await agentManagementApi.saveDshProvider(
-            dshProviderSaveRequest(provision, false)
+          const existing = await agentManagementApi.dshProviders();
+          providerName = resolveRouterProviderName(
+            provision,
+            existing.providers.map((provider) => provider.display_name)
           );
-          savedProviderId = ROUTER_OPENCODE_PROVIDER_ID;
+          savedProviderId = nextUniqueDshProviderId(providerName, [
+            ...existing.providers.map((provider) => provider.id),
+            ...existing.catalog.map((provider) => provider.id),
+            'deepseek',
+          ]);
+          await agentManagementApi.saveDshProvider(
+            dshProviderSaveRequest(provision, false, {
+              id: savedProviderId,
+              displayName: providerName,
+            })
+          );
         } else {
           const existing =
             await agentManagementApi.modelProviders(targetAgentId);
-          const preset = existing.providers.find(
-            (provider) => provider.name === ROUTER_PROVIDER_NAME
+          providerName = resolveRouterProviderName(
+            provision,
+            existing.providers.map((provider) => provider.name)
+          );
+          const existingIds = new Set(
+            existing.providers.map((provider) => provider.id)
           );
           const saved = await agentManagementApi.saveModelProvider(
-            providerSaveRequest(provision, preset?.id ?? null)
+            providerSaveRequest(provision, null, providerName)
           );
           savedProviderId =
             saved.providers.find(
-              (provider) => provider.name === ROUTER_PROVIDER_NAME
+              (provider) =>
+                provider.name === providerName && !existingIds.has(provider.id)
             )?.id ??
-            preset?.id ??
+            saved.providers.find((provider) => provider.name === providerName)
+              ?.id ??
             null;
         }
 
@@ -200,7 +240,7 @@ export function useAgentModelRouterImport({
             '模型导入成功，是否立即启用？'
           ),
           {
-            description: `${ROUTER_PROVIDER_NAME} · ${provision.model.name}`,
+            description: `${providerName} · ${provision.model.name}`,
             duration: 15000,
             cancel: {
               label: t('common:cancel', '取消'),
@@ -212,7 +252,8 @@ export function useAgentModelRouterImport({
                 void enableImportedModelRouterProvider(
                   targetAgentId,
                   provision,
-                  savedProviderId
+                  savedProviderId,
+                  providerName
                 );
               },
             },

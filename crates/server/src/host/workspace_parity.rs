@@ -763,11 +763,13 @@ impl ServerApplicationDomains {
         let pr_number = payload.pr_number;
         tokio::task::spawn_blocking(move || {
             let gh = services::services::git_host::github::GhCli::new();
-            let repo_info = gh.get_repo_info(&remote_url, &worktree_path).map_err(|error| {
-                create_from_pr_error(CreateFromPrError::BranchFetchFailed {
-                    message: format!("Failed to get repository info: {error}"),
-                })
-            })?;
+            let repo_info = gh
+                .get_repo_info(&remote_url, &worktree_path)
+                .map_err(|error| {
+                    create_from_pr_error(CreateFromPrError::BranchFetchFailed {
+                        message: format!("Failed to get repository info: {error}"),
+                    })
+                })?;
             gh.pr_checkout(
                 &worktree_path,
                 &repo_info.owner,

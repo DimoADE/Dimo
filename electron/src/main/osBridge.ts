@@ -52,11 +52,49 @@ export const ALLOWED_EXTERNAL_SCHEMES = new Set([
   'antigravity:',
 ]);
 
+export function stripWindowsVerbatimPrefix(
+  targetPath: string,
+  platform: NodeJS.Platform = process.platform
+): string {
+  if (platform !== 'win32') {
+    return targetPath;
+  }
+  if (/^\\\\\?\\unc\\/i.test(targetPath)) {
+    return `\\\\${targetPath.slice(8)}`;
+  }
+  if (targetPath.startsWith('\\\\?\\')) {
+    return targetPath.slice(4);
+  }
+  return targetPath;
+}
+
+export function isValidAbsolutePath(
+  rawPath: string,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  if (typeof rawPath !== 'string' || rawPath.length === 0 || rawPath.includes('\0')) {
+    return false;
+  }
+  if (platform === 'win32') {
+    const stripped = stripWindowsVerbatimPrefix(rawPath, platform);
+    if (/^[A-Za-z]:[\\/]/.test(stripped)) {
+      return true;
+    }
+    if (/^(?:\\\\|\/\/)[^\\/]+[\\/][^\\/]+/.test(stripped)) {
+      return true;
+    }
+    return false;
+  }
+  return path.posix.isAbsolute(rawPath);
+}
+
 function normalizeForCompare(
   targetPath: string,
   platform: NodeJS.Platform = process.platform
 ): string {
-  const resolved = path.resolve(targetPath);
+  const stripped = stripWindowsVerbatimPrefix(targetPath, platform);
+  const pathMod = platform === 'win32' ? path.win32 : path.posix;
+  const resolved = stripWindowsVerbatimPrefix(pathMod.resolve(stripped), platform);
   return platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
@@ -87,22 +125,17 @@ function isStrictlyWithinDirectory(
   );
 }
 
-function isValidAbsolutePath(rawPath: string): boolean {
-  return (
-    typeof rawPath === 'string' &&
-    rawPath.length > 0 &&
-    !rawPath.includes('\0') &&
-    path.isAbsolute(rawPath)
-  );
-}
-
-function canonicalizeExistingPath(rawPath: string): string | null {
+function canonicalizeExistingPath(
+  rawPath: string,
+  platform: NodeJS.Platform = process.platform
+): string | null {
   const trimmed = typeof rawPath === 'string' ? rawPath.trim() : '';
-  if (!isValidAbsolutePath(trimmed)) {
+  if (!isValidAbsolutePath(trimmed, platform)) {
     return null;
   }
+  const cleaned = stripWindowsVerbatimPrefix(trimmed, platform);
   try {
-    return fsSync.realpathSync(trimmed);
+    return stripWindowsVerbatimPrefix(fsSync.realpathSync(cleaned), platform);
   } catch {
     return null;
   }
@@ -113,13 +146,19 @@ function canonicalizeExistingPath(rawPath: string): string | null {
  * may not exist yet while still resolving existing symlinks and failing closed
  * on dangling symlinks.
  */
-function canonicalizeWriteTargetPath(rawPath: string): string | null {
+function canonicalizeWriteTargetPath(
+  rawPath: string,
+  platform: NodeJS.Platform = process.platform
+): string | null {
   const trimmed = typeof rawPath === 'string' ? rawPath.trim() : '';
-  if (!isValidAbsolutePath(trimmed)) {
+  if (!isValidAbsolutePath(trimmed, platform)) {
     return null;
   }
 
-  let current = path.resolve(trimmed);
+  let current = stripWindowsVerbatimPrefix(
+    path.resolve(stripWindowsVerbatimPrefix(trimmed, platform)),
+    platform
+  );
   const trailingSegments: string[] = [];
 
   while (true) {
@@ -133,7 +172,10 @@ function canonicalizeWriteTargetPath(rawPath: string): string | null {
     if (lstat !== null) {
       let canonicalExisting: string;
       try {
-        canonicalExisting = fsSync.realpathSync(current);
+        canonicalExisting = stripWindowsVerbatimPrefix(
+          fsSync.realpathSync(current),
+          platform
+        );
       } catch {
         // Dangling symlink or unreadable ancestor — fail closed.
         return null;
@@ -173,6 +215,23 @@ export interface AuthorizedLocalPathRegistryOptions {
  * - Trusted OS file drag-and-drop extracted by preload via `webUtils.getPathForFile` -> exact file read access
  * - `extraReadPredicate` (e.g. `PreviewAssetScope`) -> read access
  */
+const MAX_AUTHORIZED_FILES = 1024;
+const MAX_AUTHORIZED_DIRECTORIES = 256;
+
+function addBoundedSetEntry(set: Set<string>, value: string, maxSize: number): void {
+  if (set.has(value)) {
+    set.delete(value);
+  }
+  set.add(value);
+  while (set.size > maxSize) {
+    const oldest = set.values().next().value;
+    if (oldest === undefined) {
+      break;
+    }
+    set.delete(oldest);
+  }
+}
+
 export class AuthorizedLocalPathRegistry {
   private readonly platform: NodeJS.Platform;
   private readonly extraReadPredicate?: (canonicalPath: string) => boolean;
@@ -187,7 +246,7 @@ export class AuthorizedLocalPathRegistry {
   }
 
   grantReadFile(filePath: string): boolean {
-    const canonical = canonicalizeExistingPath(filePath);
+    const canonical = canonicalizeExistingPath(filePath, this.platform);
     if (!canonical) {
       return false;
     }
@@ -198,7 +257,11 @@ export class AuthorizedLocalPathRegistry {
     } catch {
       return false;
     }
-    this.readFiles.add(normalizeForCompare(canonical, this.platform));
+    addBoundedSetEntry(
+      this.readFiles,
+      normalizeForCompare(canonical, this.platform),
+      MAX_AUTHORIZED_FILES
+    );
     return true;
   }
 
@@ -216,7 +279,7 @@ export class AuthorizedLocalPathRegistry {
     dirPath: string,
     options: { writable?: boolean } = {}
   ): boolean {
-    const canonical = canonicalizeExistingPath(dirPath);
+    const canonical = canonicalizeExistingPath(dirPath, this.platform);
     if (!canonical) {
       return false;
     }
@@ -227,24 +290,32 @@ export class AuthorizedLocalPathRegistry {
     } catch {
       return false;
     }
-    this.readDirectories.add(canonical);
+    addBoundedSetEntry(this.readDirectories, canonical, MAX_AUTHORIZED_DIRECTORIES);
     if (options.writable) {
-      this.writeDirectories.add(canonical);
+      addBoundedSetEntry(
+        this.writeDirectories,
+        canonical,
+        MAX_AUTHORIZED_DIRECTORIES
+      );
     }
     return true;
   }
 
   grantWriteFile(filePath: string): boolean {
-    const canonical = canonicalizeWriteTargetPath(filePath);
+    const canonical = canonicalizeWriteTargetPath(filePath, this.platform);
     if (!canonical) {
       return false;
     }
-    this.writeFiles.add(normalizeForCompare(canonical, this.platform));
+    addBoundedSetEntry(
+      this.writeFiles,
+      normalizeForCompare(canonical, this.platform),
+      MAX_AUTHORIZED_FILES
+    );
     return true;
   }
 
   resolveAuthorizedReadPath(filePath: string): string | null {
-    const canonical = canonicalizeExistingPath(filePath);
+    const canonical = canonicalizeExistingPath(filePath, this.platform);
     if (!canonical) {
       return null;
     }
@@ -268,7 +339,7 @@ export class AuthorizedLocalPathRegistry {
   }
 
   resolveAuthorizedWritePath(filePath: string): string | null {
-    const canonical = canonicalizeWriteTargetPath(filePath);
+    const canonical = canonicalizeWriteTargetPath(filePath, this.platform);
     if (!canonical) {
       return null;
     }
@@ -389,11 +460,23 @@ export async function showSaveDialog(
   return result.filePath;
 }
 
+export const MAX_LOCAL_FILE_READ_BYTES = 64 * 1024 * 1024; // 64 MiB
+
 export async function readLocalFile(
   filePath: string,
-  authorizedPaths: AuthorizedLocalPathRegistry
+  authorizedPaths: AuthorizedLocalPathRegistry,
+  maxBytes: number = MAX_LOCAL_FILE_READ_BYTES
 ): Promise<Uint8Array> {
   const canonical = authorizedPaths.assertCanRead(filePath);
+  const stat = await fs.stat(canonical);
+  if (!stat.isFile()) {
+    throw new Error(`Cannot read non-file path: ${filePath}`);
+  }
+  if (stat.size > maxBytes) {
+    throw new Error(
+      `Refused to read local file exceeding ${maxBytes} bytes (${stat.size} bytes): ${filePath}`
+    );
+  }
   const buffer = await fs.readFile(canonical);
   return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
 }
@@ -405,7 +488,7 @@ export async function writeLocalFile(
 ): Promise<void> {
   const canonical = authorizedPaths.assertCanWrite(filePath);
   await fs.mkdir(path.dirname(canonical), { recursive: true });
-  await fs.writeFile(canonical, Buffer.from(contents));
+  await fs.writeFile(canonical, contents);
 }
 
 export async function writeLocalTextFile(
@@ -422,7 +505,21 @@ export function joinLocalPath(...parts: string[]): string {
   return path.join(...parts);
 }
 
-export async function openExternalTarget(target: string): Promise<void> {
+function normalizeLocalShellPath(
+  targetPath: string,
+  platform: NodeJS.Platform = process.platform
+): string {
+  const stripped = stripWindowsVerbatimPrefix(targetPath, platform);
+  if (platform === 'win32') {
+    return path.win32.normalize(stripped);
+  }
+  return stripped;
+}
+
+export async function openExternalTarget(
+  target: string,
+  platform: NodeJS.Platform = process.platform
+): Promise<void> {
   const trimmed = target.trim();
   if (!trimmed) {
     return;
@@ -441,8 +538,9 @@ export async function openExternalTarget(target: string): Promise<void> {
   }
 
   // Allow opening local filesystem paths when an absolute path is explicitly passed.
-  if (path.isAbsolute(trimmed)) {
-    const errorMessage = await shell.openPath(trimmed);
+  if (isValidAbsolutePath(trimmed, platform)) {
+    const nativePath = normalizeLocalShellPath(trimmed, platform);
+    const errorMessage = await shell.openPath(nativePath);
     if (errorMessage) {
       throw new Error(`Failed to open path: ${errorMessage}`);
     }
@@ -452,18 +550,22 @@ export async function openExternalTarget(target: string): Promise<void> {
   throw new Error(`Refused to open unsupported external target: ${trimmed}`);
 }
 
-export async function revealInFileManager(targetPath: string): Promise<void> {
+export async function revealInFileManager(
+  targetPath: string,
+  platform: NodeJS.Platform = process.platform
+): Promise<void> {
   const trimmed = targetPath.trim();
-  if (!trimmed || !path.isAbsolute(trimmed)) {
+  if (!trimmed || !isValidAbsolutePath(trimmed, platform)) {
     throw new Error(`Path must be absolute: ${targetPath}`);
   }
-  const stat = await fs.stat(trimmed);
+  const nativePath = normalizeLocalShellPath(trimmed, platform);
+  const stat = await fs.stat(nativePath);
   if (stat.isDirectory()) {
-    const errorMessage = await shell.openPath(trimmed);
+    const errorMessage = await shell.openPath(nativePath);
     if (errorMessage) {
       throw new Error(`Failed to open directory in file manager: ${errorMessage}`);
     }
     return;
   }
-  shell.showItemInFolder(trimmed);
+  shell.showItemInFolder(nativePath);
 }

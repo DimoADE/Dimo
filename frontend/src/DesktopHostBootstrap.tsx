@@ -42,12 +42,22 @@ export function DesktopHostBootstrap({ children }: { children: ReactNode }) {
     if (!bindShell) return;
     let cancelled = false;
     let unlisten: (() => void) | undefined;
-    let boundOrigin: string | null = null;
+    let boundOrigin: string | null | undefined = undefined;
+    let activeBoundTransport: BoundHostTransport | null = null;
+    let applyEpoch = 0;
+
+    const releaseBoundTransport = () => {
+      if (activeBoundTransport) {
+        activeBoundTransport.detach();
+        activeBoundTransport = null;
+      }
+    };
 
     const apply = async () => {
+      const epoch = ++applyEpoch;
       try {
         const status = await hostClientApi.status();
-        if (cancelled) return;
+        if (cancelled || epoch !== applyEpoch) return;
         const nextOrigin =
           isHostBoundWindowLabel(currentWindowLabel()) &&
           status.connected &&
@@ -55,25 +65,32 @@ export function DesktopHostBootstrap({ children }: { children: ReactNode }) {
             ? status.profile.origin
             : null;
         if (nextOrigin === boundOrigin) return;
+        const hadPreviousOrigin = boundOrigin !== undefined;
         boundOrigin = nextOrigin;
-        queryClient.clear();
+        releaseBoundTransport();
+        if (hadPreviousOrigin || nextOrigin !== null) {
+          queryClient.clear();
+        }
         if (nextOrigin) {
           const remote = RemoteDesktopTransport.attach({
             profileId: 'active-host-client',
             baseUrl: nextOrigin,
           });
-          setTransport(new BoundHostTransport(remote));
+          const nextTransport = new BoundHostTransport(remote);
+          activeBoundTransport = nextTransport;
+          setTransport(nextTransport);
           setShellKey(`remote:${nextOrigin}`);
         } else {
           setTransport(getLocalDesktopTransport());
           setShellKey('desktop');
         }
       } catch {
-        if (!cancelled && boundOrigin == null) {
+        if (!cancelled && epoch === applyEpoch && !boundOrigin) {
           setTransport(getLocalDesktopTransport());
+          setShellKey('desktop');
         }
       } finally {
-        if (!cancelled) {
+        if (!cancelled && epoch === applyEpoch) {
           setReady(true);
         }
       }
@@ -87,14 +104,18 @@ export function DesktopHostBootstrap({ children }: { children: ReactNode }) {
       getDesktopShell().events.listen(HOST_CLIENT_CHANGED, () => {
         void apply();
       });
-    void listenPromise.then((fn) => {
-      if (cancelled) fn();
-      else unlisten = fn;
-    });
+    void listenPromise
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch(() => undefined);
 
     return () => {
       cancelled = true;
+      applyEpoch += 1;
       unlisten?.();
+      releaseBoundTransport();
     };
   }, [bindShell, queryClient]);
 

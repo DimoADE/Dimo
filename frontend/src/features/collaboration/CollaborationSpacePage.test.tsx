@@ -4778,6 +4778,9 @@ describe('CollaborationSpacePage', () => {
     expect(
       screen.queryByRole('button', { name: '跳转到第 3 条消息' })
     ).toBeNull();
+    expect(
+      screen.getByRole('button', { name: '跳转到第 2 条消息' })
+    ).toHaveAttribute('aria-current', 'true');
 
     const firstMsgEl = screen.getByTestId('collaboration-message-1');
     const scrollIntoViewSpy = vi.fn();

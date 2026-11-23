@@ -8,10 +8,7 @@ use super::{
     DEFAULT_PORT, HostClientRuntime, StoredProfile, StoredState, is_loopback_http_origin,
     normalize_origin, provision_target_key, remove_saved_ssh_host_file, write_saved_ssh_host_file,
 };
-use crate::desktop::{
-    error::DesktopError,
-    remote_desktop::RemoteDesktopRegistry,
-};
+use crate::desktop::{error::DesktopError, remote_desktop::RemoteDesktopRegistry};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

@@ -240,7 +240,7 @@ import {
   memberTabTitle,
   buildCollabDmBootstrapPrompt,
   isCollabDmBootstrapPrompt,
-  isCollaborationLimitNotice,
+  isSpaceSystemNotice,
   contactLastMessagePreview,
   isMemberWorking,
   INITIAL_SPACE_SESSION_STATE,
@@ -1159,9 +1159,7 @@ export function useCollaborationSpaceRuntime(
             scheduled: EMPTY_SCHEDULED,
           };
           const cards =
-            typeof updater === 'function'
-              ? updater(prev.cards ?? [])
-              : updater;
+            typeof updater === 'function' ? updater(prev.cards ?? []) : updater;
           return Array.isArray(cards) ? { ...prev, cards } : prev;
         }
       );
@@ -2982,7 +2980,11 @@ export function useCollaborationSpaceRuntime(
         if (cancelled) return;
         if (direct) {
           let collected = direct.messages;
-          if (incrementalDirect && direct.hasMoreBefore && collected.length > 0) {
+          if (
+            incrementalDirect &&
+            direct.hasMoreBefore &&
+            collected.length > 0
+          ) {
             const latestExistingSeq = latestMessageSeq(directExisting);
             let oldestLoadedSeq = Number(collected[0]?.seq ?? 0);
             let oldestLoadedId = collected[0]?.id;
@@ -3014,11 +3016,7 @@ export function useCollaborationSpaceRuntime(
               hasMore = Boolean(older.hasMoreBefore);
             }
           }
-          applyDirectMessages(
-            directThreadId,
-            collected,
-            incrementalDirect
-          );
+          applyDirectMessages(directThreadId, collected, incrementalDirect);
           if (Array.isArray(direct.cards)) {
             setThreadCardsFor(
               directThreadId,
@@ -4298,6 +4296,7 @@ export function useCollaborationSpaceRuntime(
           spaceId: createdSpaceId,
           conversationId: convId,
           nickname: nick,
+          duringCreate: true,
           operationId: crypto.randomUUID(),
         });
         const seatId = String(added?.member_id ?? '').trim();
@@ -6057,7 +6056,7 @@ export function useCollaborationSpaceRuntime(
     () =>
       memberMessageClusters(
         filteredMessages.map((message, index) => {
-          if (isCollaborationLimitNotice(message)) {
+          if (isSpaceSystemNotice(message)) {
             return { fromYou: false, authorKey: `system:${index}` };
           }
           const author = messageAuthor(message.envelope);
@@ -6081,6 +6080,19 @@ export function useCollaborationSpaceRuntime(
     [filteredMessages]
   );
 
+  const pinScrollTimerRef = useRef<number | null>(null);
+  const lastPinnedThreadKeyRef = useRef<string>('');
+  const hasPinnedNonEmptyThreadRef = useRef<string>('');
+
+  useEffect(() => {
+    return () => {
+      if (pinScrollTimerRef.current !== null) {
+        window.clearTimeout(pinScrollTimerRef.current);
+        pinScrollTimerRef.current = null;
+      }
+    };
+  }, []);
+
   const scrollToMessage = useCallback(
     (index: number) => {
       setActiveNavIndex(index);
@@ -6092,15 +6104,20 @@ export function useCollaborationSpaceRuntime(
         messageItemRefs.current.get(spaceMessageRefKey(target)) ??
         messageItemRefs.current.get(String(target.seq));
       if (el && typeof el.scrollIntoView === 'function') {
+        if (pinScrollTimerRef.current !== null) {
+          window.clearTimeout(pinScrollTimerRef.current);
+          pinScrollTimerRef.current = null;
+        }
+        ignoreThreadScrollRef.current = true;
         el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        pinScrollTimerRef.current = window.setTimeout(() => {
+          pinScrollTimerRef.current = null;
+          ignoreThreadScrollRef.current = false;
+        }, 360);
       }
     },
     [filteredMessages]
   );
-
-  const pinScrollTimerRef = useRef<number | null>(null);
-  const lastPinnedThreadKeyRef = useRef<string>('');
-  const hasPinnedNonEmptyThreadRef = useRef<string>('');
 
   const pinThreadLogToBottom = useCallback(
     (behavior: ScrollBehavior = 'auto') => {

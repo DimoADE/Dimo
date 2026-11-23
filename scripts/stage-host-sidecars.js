@@ -41,6 +41,23 @@ function resolveSidecarBinDir({
   };
 }
 
+const MCP_SIDECAR_BINS = [
+  "dimo-mcp",
+  "dimo-workflow-mcp",
+];
+
+const ELECTRON_SIDECAR_BINS = [
+  "dimo-server",
+  ...MCP_SIDECAR_BINS,
+];
+
+function platformForTargetTriple(triple, fallbackPlatform = process.platform) {
+  if (typeof triple === "string" && triple.length > 0) {
+    return triple.includes("windows") ? "win32" : "posix";
+  }
+  return fallbackPlatform;
+}
+
 function sidecarFileName(name, platform = process.platform) {
   return platform === "win32" ? `${name}.exe` : name;
 }
@@ -58,15 +75,17 @@ function sidecarBinsExist({
   repo,
   env = process.env,
   hostTriple,
-  platform = process.platform,
+  platform,
 } = {}) {
-  const { binDir, nativeBinDir } = resolveSidecarBinDir({
+  const { triple, binDir, nativeBinDir } = resolveSidecarBinDir({
     repo,
     env,
     hostTriple,
   });
-  return ["dimo-mcp", "dimo-workflow-mcp"].every((name) => {
-    const file = sidecarFileName(name, platform);
+  const effectivePlatform =
+    platform || platformForTargetTriple(triple, process.platform);
+  return MCP_SIDECAR_BINS.every((name) => {
+    const file = sidecarFileName(name, effectivePlatform);
     return (
       isBuiltSidecar(path.join(binDir, file)) ||
       isBuiltSidecar(path.join(nativeBinDir, file))
@@ -106,12 +125,6 @@ function sweepRetiredStagedSidecars(destinationDir, baseFileName) {
     }
   }
 }
-
-const ELECTRON_SIDECAR_BINS = [
-  "dimo-server",
-  "dimo-mcp",
-  "dimo-workflow-mcp",
-];
 
 function copyBinaryAtomic(sourcePath, destinationDir, baseFileName) {
   if (!isBuiltSidecar(sourcePath)) {
@@ -174,21 +187,24 @@ function stageElectronSidecars({
   repo,
   env = process.env,
   hostTriple,
-  platform = process.platform,
+  platform,
   destinationDir,
+  bins = ELECTRON_SIDECAR_BINS,
 } = {}) {
   const resolvedRepo = repo || path.resolve(__dirname, "..");
-  const { binDir, nativeBinDir } = resolveSidecarBinDir({
+  const { triple, binDir, nativeBinDir } = resolveSidecarBinDir({
     repo: resolvedRepo,
     env,
     hostTriple,
   });
+  const effectivePlatform =
+    platform || platformForTargetTriple(triple, process.platform);
   const targetDir =
     destinationDir || path.join(resolvedRepo, "electron", "resources", "bin");
   const staged = [];
-  for (const name of ELECTRON_SIDECAR_BINS) {
-    const src = resolveSidecarSource(name, binDir, nativeBinDir, platform);
-    staged.push(copyPlainSidecar(name, src, targetDir, platform));
+  for (const name of bins) {
+    const src = resolveSidecarSource(name, binDir, nativeBinDir, effectivePlatform);
+    staged.push(copyPlainSidecar(name, src, targetDir, effectivePlatform));
   }
   return staged;
 }
@@ -196,10 +212,13 @@ function stageElectronSidecars({
 function parseCliArgs(argv) {
   let target = null;
   let profile = null;
+  let mcpOnly = false;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--electron") {
       // Accepted for backwards compatibility; Electron staging is the default.
+    } else if (arg === "--mcp-only") {
+      mcpOnly = true;
     } else if (arg === "--target" && argv[i + 1]) {
       target = argv[i + 1];
       i += 1;
@@ -212,7 +231,7 @@ function parseCliArgs(argv) {
       profile = arg.slice("--profile=".length);
     }
   }
-  return { target, profile };
+  return { target, profile, mcpOnly };
 }
 
 function main(env = process.env, argv = process.argv.slice(2)) {
@@ -223,7 +242,8 @@ function main(env = process.env, argv = process.argv.slice(2)) {
     ...(parsed.profile ? { CARGO_PROFILE: parsed.profile } : {}),
   };
   const repo = path.resolve(__dirname, "..");
-  const staged = stageElectronSidecars({ repo, env: effectiveEnv });
+  const bins = parsed.mcpOnly ? MCP_SIDECAR_BINS : ELECTRON_SIDECAR_BINS;
+  const staged = stageElectronSidecars({ repo, env: effectiveEnv, bins });
   for (const file of staged) {
     console.log(`[stage-electron-sidecars] staged ${file}`);
   }
@@ -235,9 +255,11 @@ if (require.main === module) {
 
 module.exports = {
   ELECTRON_SIDECAR_BINS,
+  MCP_SIDECAR_BINS,
   main,
   copySidecar,
   copyPlainSidecar,
+  platformForTargetTriple,
   stageElectronSidecars,
   isBuiltSidecar,
   resolveSidecarBinDir,

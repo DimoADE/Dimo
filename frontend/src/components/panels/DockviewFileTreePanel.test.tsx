@@ -12,9 +12,7 @@ const mocks = vi.hoisted(() => ({
   renameFilePreviews: vi.fn(),
   projectState: {
     projectId: undefined as string | undefined,
-    project: undefined as
-      | { id: string; root_path?: string | null }
-      | undefined,
+    project: undefined as { id: string; root_path?: string | null } | undefined,
   },
   repos: [] as Array<{ path: string }>,
   activeWorktreeId: null as string | null,

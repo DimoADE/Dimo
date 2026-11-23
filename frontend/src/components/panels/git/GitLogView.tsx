@@ -14,16 +14,202 @@ import {
   Search,
 } from 'lucide-react';
 import { TextInput } from '@astryxdesign/core/TextInput';
-import type { GitLogEntry } from 'shared/types';
+import type { GitBranch as GitBranchType, GitLogEntry } from 'shared/types';
+import type { LogViewMode } from '@/hooks/git';
 import { toast } from '@/components/ui/toast';
 import { attemptsApi, repoApi } from '@/lib/api';
 import { writeTextToClipboard } from '@/utils/clipboard';
 import { GitContextMenu, type ContextMenuAction } from './GitContextMenu';
+import { GitLogBranchFilter } from './GitLogBranchFilter';
+import {
+  computeGitLogGraphLayout,
+  type GitLogGraphRow,
+} from './gitLogGraphLayout';
 import { useCommitDiffStore } from '@/stores/useCommitDiffStore';
 import { useOptionalPanelActionsContext } from '@/contexts/PanelActionsContext';
 import { ConfirmDialog } from '@/components/dialogs/shared/ConfirmDialog';
 import { PANEL_IDS } from '@/stores/useLayoutStore';
 import i18n from '@/i18n';
+
+const GRAPH_LANE_COLORS = [
+  'hsl(var(--primary))',
+  'hsl(var(--status-running))',
+  'hsl(var(--success))',
+  'hsl(var(--warning))',
+  'hsl(var(--destructive))',
+  'hsl(var(--muted-foreground))',
+] as const;
+
+const GRAPH_LANE_WIDTH = 12;
+const GRAPH_MAX_VISIBLE_LANES = 8;
+const GRAPH_NODE_Y = 11;
+const GRAPH_CURVE_HEIGHT = 14;
+
+function getLaneColor(colorIndex: number): string {
+  return GRAPH_LANE_COLORS[colorIndex % GRAPH_LANE_COLORS.length];
+}
+
+function getLaneX(col: number): number {
+  return (
+    Math.min(col, GRAPH_MAX_VISIBLE_LANES - 1) * GRAPH_LANE_WIDTH +
+    GRAPH_LANE_WIDTH / 2 +
+    2
+  );
+}
+
+const CommitGraphCell = memo(function CommitGraphCell({
+  row,
+  maxLanes,
+  isHead,
+}: {
+  row: GitLogGraphRow;
+  maxLanes: number;
+  isHead: boolean;
+}) {
+  const visibleLanes = Math.min(Math.max(maxLanes, 1), GRAPH_MAX_VISIBLE_LANES);
+  const svgWidth = visibleLanes * GRAPH_LANE_WIDTH + 4;
+  const nodeX = getLaneX(row.nodeCol);
+  const nodeColor = getLaneColor(row.colorIndex);
+  const curveEndY = GRAPH_NODE_Y + GRAPH_CURVE_HEIGHT;
+
+  return (
+    <div
+      data-testid="git-log-graph-cell"
+      className="relative shrink-0 self-stretch select-none"
+      style={{ width: svgWidth }}
+      aria-hidden="true"
+    >
+      <svg
+        width={svgWidth}
+        className="pointer-events-none absolute inset-0 block h-full w-full overflow-visible"
+      >
+        {/* Active lanes passing straight through from top to bottom */}
+        {row.passThroughs.map((lane) => {
+          const x = getLaneX(lane.col);
+          return (
+            <line
+              key={`pt-${lane.col}`}
+              x1={x}
+              y1="0"
+              x2={x}
+              y2="100%"
+              stroke={getLaneColor(lane.colorIndex)}
+              strokeWidth={1.75}
+              strokeLinecap="round"
+            />
+          );
+        })}
+
+        {/* Incoming straight segment from top into this commit */}
+        {row.hasIncomingTop && (
+          <line
+            x1={nodeX}
+            y1="0"
+            x2={nodeX}
+            y2={GRAPH_NODE_Y}
+            stroke={nodeColor}
+            strokeWidth={1.75}
+          />
+        )}
+
+        {/* Incoming merge curves from upper lanes converging into this commit */}
+        {row.incomingMerges.map((edge, idx) => {
+          const fromX = getLaneX(edge.fromCol);
+          const color = getLaneColor(edge.colorIndex);
+          if (fromX === nodeX) {
+            return (
+              <line
+                key={`in-${idx}`}
+                x1={fromX}
+                y1="0"
+                x2={nodeX}
+                y2={GRAPH_NODE_Y}
+                stroke={color}
+                strokeWidth={1.75}
+              />
+            );
+          }
+          const c1Y = Math.round(GRAPH_NODE_Y * 0.65);
+          const c2Y = Math.round(GRAPH_NODE_Y * 0.35);
+          return (
+            <path
+              key={`in-${idx}`}
+              d={`M ${fromX} 0 C ${fromX} ${c1Y}, ${nodeX} ${c2Y}, ${nodeX} ${GRAPH_NODE_Y}`}
+              fill="none"
+              stroke={color}
+              strokeWidth={1.75}
+              strokeLinecap="round"
+            />
+          );
+        })}
+
+        {/* Outgoing edges from this commit downward to parent lanes */}
+        {row.outgoingEdges.map((edge, idx) => {
+          const toX = getLaneX(edge.toCol);
+          const color = getLaneColor(edge.colorIndex);
+          if (toX === nodeX) {
+            return (
+              <line
+                key={`out-${idx}`}
+                x1={nodeX}
+                y1={GRAPH_NODE_Y}
+                x2={nodeX}
+                y2="100%"
+                stroke={color}
+                strokeWidth={1.75}
+              />
+            );
+          }
+          const c1Y = GRAPH_NODE_Y + Math.round(GRAPH_CURVE_HEIGHT * 0.55);
+          const c2Y = GRAPH_NODE_Y + Math.round(GRAPH_CURVE_HEIGHT * 0.45);
+          return (
+            <g key={`out-${idx}`}>
+              <path
+                d={`M ${nodeX} ${GRAPH_NODE_Y} C ${nodeX} ${c1Y}, ${toX} ${c2Y}, ${toX} ${curveEndY}`}
+                fill="none"
+                stroke={color}
+                strokeWidth={1.75}
+                strokeLinecap="round"
+              />
+              <line
+                x1={toX}
+                y1={curveEndY}
+                x2={toX}
+                y2="100%"
+                stroke={color}
+                strokeWidth={1.75}
+              />
+            </g>
+          );
+        })}
+
+        {/* Commit node circle (double ring for merge commits) */}
+        {row.isMerge ? (
+          <>
+            <circle
+              cx={nodeX}
+              cy={GRAPH_NODE_Y}
+              r={4.25}
+              fill="hsl(var(--background))"
+              stroke={nodeColor}
+              strokeWidth={1.75}
+            />
+            <circle cx={nodeX} cy={GRAPH_NODE_Y} r={1.75} fill={nodeColor} />
+          </>
+        ) : (
+          <circle
+            cx={nodeX}
+            cy={GRAPH_NODE_Y}
+            r={isHead ? 4 : 3.25}
+            fill={nodeColor}
+            stroke="hsl(var(--background))"
+            strokeWidth={1.5}
+          />
+        )}
+      </svg>
+    </div>
+  );
+});
 
 interface GitLogViewProps {
   entries: GitLogEntry[];
@@ -35,6 +221,14 @@ interface GitLogViewProps {
   loading?: boolean;
   workspaceId: string | null;
   repoId: string | null;
+  worktreePath?: string | null;
+  viewMode?: LogViewMode;
+  branches?: GitBranchType[];
+  selectedBranches?: string[];
+  defaultBranches?: string[];
+  onSelectedBranchesChange?: (branches: string[]) => void;
+  hasMore?: boolean;
+  onLoadMore?: () => void;
   onRefresh?: () => Promise<void>;
 }
 
@@ -72,6 +266,8 @@ const LogEntry = memo(function LogEntry({
   isSelected,
   isHead,
   workspaceId,
+  graphRow,
+  graphMaxLanes,
   onSelect,
   onContextMenu,
 }: {
@@ -80,6 +276,8 @@ const LogEntry = memo(function LogEntry({
   isHead: boolean;
   isPushable: boolean;
   workspaceId?: string | null;
+  graphRow?: GitLogGraphRow | null;
+  graphMaxLanes?: number;
   onSelect: (sha: string) => void;
   onContextMenu: (e: React.MouseEvent, entry: GitLogEntry) => void;
 }) {
@@ -116,10 +314,16 @@ const LogEntry = memo(function LogEntry({
   );
 
   const initial = entry.author.charAt(0).toUpperCase();
+  const isGraphMode = Boolean(graphRow);
+
   return (
     <div
       data-testid="git-log-entry"
-      className={`group mx-1.5 my-0.5 flex cursor-pointer items-start gap-2.5 rounded-md px-2.5 py-2 text-xs transition-colors hover:bg-accent/50 ${
+      className={`group flex cursor-pointer items-stretch text-xs transition-colors hover:bg-accent/50 ${
+        isGraphMode
+          ? 'mx-1.5 min-h-[34px] gap-1.5 rounded-md px-1.5 py-0'
+          : 'mx-1.5 my-0.5 items-start gap-2.5 rounded-md px-2.5 py-2'
+      } ${
         isSelected
           ? 'bg-accent/60 ring-1 ring-inset ring-ring/30'
           : isHead
@@ -131,32 +335,48 @@ const LogEntry = memo(function LogEntry({
       onClick={() => onSelect(entry.sha)}
       onContextMenu={(e) => onContextMenu(e, entry)}
     >
-      {/* Author avatar */}
-      <div className="shrink-0 self-stretch py-[1.5px] flex flex-col items-center justify-center gap-0.5">
-        <span className="w-px flex-1 min-h-0 rounded-full bg-primary/60" />
-        <div
-          className="w-[14.4px] h-[14.4px] rounded-full flex items-center justify-center bg-primary text-[8px] font-bold text-primary-foreground"
-          title={entry.author}
-        >
-          {initial}
+      {graphRow ? (
+        <CommitGraphCell
+          row={graphRow}
+          maxLanes={graphMaxLanes ?? 1}
+          isHead={isHead}
+        />
+      ) : (
+        /* Author avatar timeline rail (list mode) */
+        <div className="shrink-0 self-stretch py-[1.5px] flex flex-col items-center justify-center gap-0.5">
+          <span className="w-px flex-1 min-h-0 rounded-full bg-primary/60" />
+          <div
+            className="w-[14.4px] h-[14.4px] rounded-full flex items-center justify-center bg-primary text-[8px] font-bold text-primary-foreground"
+            title={entry.author}
+          >
+            {initial}
+          </div>
+          <span className="w-px flex-1 min-h-0 rounded-full bg-primary/60" />
         </div>
-        <span className="w-px flex-1 min-h-0 rounded-full bg-primary/60" />
-      </div>
+      )}
 
       {/* Content */}
-      <div className="flex-1 min-w-0 flex flex-col gap-0.5">
+      <div
+        className={`flex-1 min-w-0 flex flex-col gap-0.5 ${
+          isGraphMode ? 'py-1' : ''
+        }`}
+      >
         {/* Summary */}
         <span
-          className="text-foreground leading-tight break-all line-clamp-2"
+          className={
+            isGraphMode
+              ? 'truncate text-foreground leading-tight'
+              : 'text-foreground leading-tight break-all line-clamp-2'
+          }
           title={entry.summary}
         >
           {entry.summary}
         </span>
 
         {/* Refs badges */}
-        {entry.refs.length > 0 && (
-          <div className="flex flex-wrap gap-1 mt-0.5">
-            {entry.refs.map((ref) => (
+        {(entry.refs?.length ?? 0) > 0 && (
+          <div className="flex flex-wrap gap-1">
+            {(entry.refs ?? []).map((ref) => (
               <span
                 key={ref}
                 className={`inline-flex items-center gap-0.5 px-1.5 py-0 rounded text-[10px] font-medium border ${getRefBadgeStyle(ref)}`}
@@ -173,7 +393,7 @@ const LogEntry = memo(function LogEntry({
         )}
 
         {/* Meta row */}
-        <div className="flex items-center gap-2 text-[10px] mt-0.5">
+        <div className="flex items-center gap-1.5 text-[10px] leading-tight">
           <button
             className="font-mono text-primary transition-colors hover:text-primary/80 flex items-center gap-0.5"
             onClick={handleCopyClick}
@@ -183,7 +403,7 @@ const LogEntry = memo(function LogEntry({
             <Copy className="h-2.5 w-2.5 opacity-0 group-hover:opacity-60" />
           </button>
           <span className="truncate text-primary">{entry.author}</span>
-          <span className="shrink-0 text-muted-foreground">
+          <span className="shrink-0 text-muted-foreground tabular-nums">
             {formatRelativeTime(entry.timestamp)}
           </span>
         </div>
@@ -204,9 +424,26 @@ type VirtualListItem =
     }
   | { type: 'entry'; entry: GitLogEntry; isPushable: boolean };
 
+const EMPTY_VIRTUOSO_COMPONENTS = {};
+
 export const GitLogView = memo(function GitLogView(props: GitLogViewProps) {
-  const { entries, ahead, behind, loading, workspaceId, repoId, onRefresh } =
-    props;
+  const {
+    entries,
+    ahead,
+    behind,
+    loading,
+    workspaceId,
+    repoId,
+    worktreePath = null,
+    viewMode = 'list',
+    branches,
+    selectedBranches,
+    defaultBranches,
+    onSelectedBranchesChange,
+    hasMore = false,
+    onLoadMore,
+    onRefresh,
+  } = props;
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [selectedSha, setSelectedSha] = useState<string | null>(null);
@@ -225,23 +462,41 @@ export const GitLogView = memo(function GitLogView(props: GitLogViewProps) {
   const { setCommitDiff, setLoading: setCommitDiffLoading } =
     useCommitDiffStore();
 
-  const sortedEntries = useMemo(
-    () => [...entries].sort((a, b) => b.timestamp - a.timestamp),
-    [entries]
-  );
+  const isGraphActive = viewMode === 'graph' && !searchQuery.trim();
+  const isMultiBranch = (selectedBranches?.length ?? 0) > 1;
 
-  // Head SHA is the first entry (most recent commit on current branch)
-  const headSha = sortedEntries.length > 0 ? sortedEntries[0].sha : null;
+  // Preserve backend `--topo-order` in graph mode; sort by timestamp in list mode
+  const orderedEntries = useMemo(() => {
+    if (viewMode === 'graph') {
+      return entries;
+    }
+    return [...entries].sort((a, b) => b.timestamp - a.timestamp);
+  }, [entries, viewMode]);
+
+  const graphLayout = useMemo(() => {
+    if (!isGraphActive) return null;
+    return computeGitLogGraphLayout(orderedEntries);
+  }, [isGraphActive, orderedEntries]);
+
+  // Head SHA is the commit marked HEAD -> ..., or the first entry
+  const headSha = useMemo(() => {
+    const headEntry = orderedEntries.find((entry) =>
+      (entry.refs ?? []).some(
+        (ref) => ref.startsWith('HEAD ->') || ref === 'HEAD'
+      )
+    );
+    return headEntry?.sha ?? orderedEntries[0]?.sha ?? null;
+  }, [orderedEntries]);
 
   const { aheadEntries, recentEntries } = useMemo(() => {
-    if (ahead <= 0) {
-      return { aheadEntries: [], recentEntries: sortedEntries };
+    if (ahead <= 0 || isGraphActive || isMultiBranch) {
+      return { aheadEntries: [], recentEntries: orderedEntries };
     }
     return {
-      aheadEntries: sortedEntries.slice(0, ahead),
-      recentEntries: sortedEntries.slice(ahead),
+      aheadEntries: orderedEntries.slice(0, ahead),
+      recentEntries: orderedEntries.slice(ahead),
     };
-  }, [sortedEntries, ahead]);
+  }, [orderedEntries, ahead, isGraphActive, isMultiBranch]);
 
   // Filter entries by search query
   const filteredAhead = useMemo(() => {
@@ -283,10 +538,10 @@ export const GitLogView = memo(function GitLogView(props: GitLogViewProps) {
         const [detail, diffs] = await Promise.all([
           workspaceId
             ? attemptsApi.getCommitDetail(workspaceId, repoId, sha)
-            : repoApi.getCommitDetail(repoId, sha),
+            : repoApi.getCommitDetail(repoId, sha, worktreePath),
           workspaceId
             ? attemptsApi.getCommitDiffs(workspaceId, repoId, sha)
-            : repoApi.getCommitDiffs(repoId, sha),
+            : repoApi.getCommitDiffs(repoId, sha, worktreePath),
         ]);
         setCommitDiff(sha, detail, diffs);
       } catch (error) {
@@ -304,6 +559,7 @@ export const GitLogView = memo(function GitLogView(props: GitLogViewProps) {
       selectedSha,
       workspaceId,
       repoId,
+      worktreePath,
       setCommitDiff,
       setCommitDiffLoading,
       panelActions,
@@ -553,9 +809,16 @@ export const GitLogView = memo(function GitLogView(props: GitLogViewProps) {
     });
   }, []);
 
-  // Build flat virtual list items from sections
+  // Build flat virtual list items (continuous stream in graph or multi-branch mode)
   const virtualItems = useMemo<VirtualListItem[]>(() => {
     const items: VirtualListItem[] = [];
+
+    if (isGraphActive || isMultiBranch) {
+      for (const entry of filteredRecent) {
+        items.push({ type: 'entry', entry, isPushable: false });
+      }
+      return items;
+    }
 
     // "To Push" section
     if (ahead > 0 && filteredAhead.length > 0) {
@@ -606,7 +869,15 @@ export const GitLogView = memo(function GitLogView(props: GitLogViewProps) {
     }
 
     return items;
-  }, [ahead, behind, filteredAhead, filteredRecent, collapsedSections]);
+  }, [
+    ahead,
+    behind,
+    filteredAhead,
+    filteredRecent,
+    collapsedSections,
+    isGraphActive,
+    isMultiBranch,
+  ]);
 
   const sectionIcons = useMemo(
     () => ({
@@ -657,6 +928,8 @@ export const GitLogView = memo(function GitLogView(props: GitLogViewProps) {
         );
       }
 
+      const graphRow = graphLayout?.bySha.get(item.entry.sha) ?? null;
+
       return (
         <LogEntry
           entry={item.entry}
@@ -664,6 +937,8 @@ export const GitLogView = memo(function GitLogView(props: GitLogViewProps) {
           isHead={headSha === item.entry.sha}
           isPushable={item.isPushable}
           workspaceId={workspaceId}
+          graphRow={graphRow}
+          graphMaxLanes={graphLayout?.maxLanes}
           onSelect={handleSelect}
           onContextMenu={handleContextMenu}
         />
@@ -673,6 +948,7 @@ export const GitLogView = memo(function GitLogView(props: GitLogViewProps) {
       sectionIcons,
       collapsedSections,
       toggleSection,
+      graphLayout,
       selectedSha,
       headSha,
       handleSelect,
@@ -681,33 +957,65 @@ export const GitLogView = memo(function GitLogView(props: GitLogViewProps) {
     ]
   );
 
+  const virtuosoComponents = useMemo(() => {
+    if (!hasMore || !onLoadMore) return EMPTY_VIRTUOSO_COMPONENTS;
+    return {
+      Footer: () => (
+        <div className="flex justify-center py-2">
+          <button
+            type="button"
+            onClick={onLoadMore}
+            disabled={loading}
+            className="rounded-md border border-border/50 bg-muted/40 px-2.5 py-1 text-[11px] text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors disabled:opacity-40"
+          >
+            {loading ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              i18n.t('panels:ui.gitLog.loadMoreCommits')
+            )}
+          </button>
+        </div>
+      ),
+    };
+  }, [hasMore, onLoadMore, loading]);
+
   return (
     <div className="flex flex-col flex-1 min-h-0">
-      {/* Permanent search input */}
-      <div className="px-2 py-1 border-b border-border/30 shrink-0">
-        <TextInput
-          ref={searchInputRef}
-          label={i18n.t('panels:ui.gitLog.searchCommits2')}
-          isLabelHidden
-          size="sm"
-          width="100%"
-          className="git-log-search-input"
-          placeholder={i18n.t('panels:ui.gitLog.searchCommits')}
-          value={searchQuery}
-          onChange={(val) => setSearchQuery(val)}
-          hasClear
-          startIcon={
-            <button
-              type="button"
-              className="flex shrink-0 items-center justify-center rounded p-0.5 text-muted-foreground hover:text-foreground transition-colors"
-              onClick={() => searchInputRef.current?.focus()}
-              title={i18n.t('panels:ui.gitLog.searchCommits2')}
-              aria-label={i18n.t('panels:ui.gitLog.searchCommits2')}
-            >
-              <Search className="h-3 w-3" />
-            </button>
-          }
-        />
+      {/* Permanent search input + compact branch filter on the right */}
+      <div className="flex items-center gap-1.5 px-2 py-1 border-b border-border/30 shrink-0">
+        <div className="min-w-0 flex-1">
+          <TextInput
+            ref={searchInputRef}
+            label={i18n.t('panels:ui.gitLog.searchCommits2')}
+            isLabelHidden
+            size="sm"
+            width="100%"
+            className="git-log-search-input"
+            placeholder={i18n.t('panels:ui.gitLog.searchCommits')}
+            value={searchQuery}
+            onChange={(val) => setSearchQuery(val)}
+            hasClear
+            startIcon={
+              <button
+                type="button"
+                className="flex shrink-0 items-center justify-center rounded p-0.5 text-muted-foreground hover:text-foreground transition-colors"
+                onClick={() => searchInputRef.current?.focus()}
+                title={i18n.t('panels:ui.gitLog.searchCommits2')}
+                aria-label={i18n.t('panels:ui.gitLog.searchCommits2')}
+              >
+                <Search className="h-3 w-3" />
+              </button>
+            }
+          />
+        </div>
+        {branches && branches.length > 0 && onSelectedBranchesChange && (
+          <GitLogBranchFilter
+            branches={branches}
+            selectedBranches={selectedBranches ?? []}
+            defaultBranches={defaultBranches ?? []}
+            onChange={onSelectedBranchesChange}
+          />
+        )}
       </div>
 
       {/* Create branch input (shown after context menu action) */}
@@ -760,6 +1068,7 @@ export const GitLogView = memo(function GitLogView(props: GitLogViewProps) {
           <Virtuoso
             data={virtualItems}
             itemContent={renderVirtualItem}
+            components={virtuosoComponents}
             style={{ height: '100%' }}
             overscan={200}
           />

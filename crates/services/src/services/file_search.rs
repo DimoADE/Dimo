@@ -115,7 +115,9 @@ fn search_repo_blocking(
         };
         results.push(SearchResult {
             path: relative_str,
-            is_file: path.is_file(),
+            is_file: entry
+                .file_type()
+                .map_or_else(|| path.is_file(), |ft| ft.is_file()),
             match_type,
             score,
         });

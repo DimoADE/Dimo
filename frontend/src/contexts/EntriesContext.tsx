@@ -17,6 +17,12 @@ import type {
 } from 'shared/types';
 import type { ConversationSessionModesState } from '@/features/conversation/conversationStore';
 import type { ComposerSteeringTarget } from '@/components/tasks/follow-up/sessionComposerSteering';
+import { hasPendingToolApproval } from '@/components/tasks/follow-up/sessionComposerSubmit';
+import {
+  codexGoalEntriesFromConversation,
+  deriveCodexGoalState,
+  type CodexGoalState,
+} from '@/lib/codexGoalState';
 
 const EMPTY_SESSION_MODES: ConversationSessionModesState = {
   current: null,
@@ -155,11 +161,36 @@ type EntriesActionsContextType = Pick<
   | 'reset'
 >;
 
+export type EntriesMetaContextType = {
+  tokenUsageInfo: TokenUsageInfo | null;
+  sessionModes: ConversationSessionModesState;
+  sessionConfigOptions: AgentSessionConfigOption[];
+  conversationPlanEntries: PlanEntry[];
+  conversationTurnInFlight: boolean;
+  conversationSteeringTurnId: string | null;
+  conversationSteeringTarget: ComposerSteeringTarget | null;
+  conversationDeliveryChannel: DeliveryChannel;
+  userMessageHistory: string[];
+  hasPendingApproval: boolean;
+  fallbackCodexGoalState: CodexGoalState | null;
+  getEntries: () => PatchTypeWithKey[];
+};
+
+function codexGoalStatesEqual(
+  a: CodexGoalState | null,
+  b: CodexGoalState | null
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.objective === b.objective && a.status === b.status;
+}
+
 const MAX_RUNTIME_CACHE_ENTRIES = 24;
 const entriesRuntimeByKey = new Map<string, EntriesRuntimeValue>();
 const listenersByKey = new Map<string, Set<() => void>>();
 
 const EntriesContext = createContext<EntriesContextType | null>(null);
+const EntriesMetaContext = createContext<EntriesMetaContextType | null>(null);
 const EntriesActionsContext = createContext<EntriesActionsContextType | null>(
   null
 );
@@ -472,6 +503,56 @@ export const EntriesProvider = ({
     ]
   );
 
+  const getEntries = useCallback(() => localValueRef.current.entries, []);
+
+  const hasPendingApproval = useMemo(
+    () => hasPendingToolApproval(localValue.entries),
+    [localValue.entries]
+  );
+
+  const fallbackCodexGoalStateRef = useRef<CodexGoalState | null>(null);
+  const fallbackCodexGoalState = useMemo(() => {
+    const derived = deriveCodexGoalState(
+      codexGoalEntriesFromConversation(localValue.entries)
+    );
+    if (codexGoalStatesEqual(fallbackCodexGoalStateRef.current, derived)) {
+      return fallbackCodexGoalStateRef.current;
+    }
+    fallbackCodexGoalStateRef.current = derived;
+    return derived;
+  }, [localValue.entries]);
+
+  const metaValue = useMemo<EntriesMetaContextType>(
+    () => ({
+      tokenUsageInfo: localValue.tokenUsageInfo,
+      sessionModes: localValue.sessionModes,
+      sessionConfigOptions: localValue.sessionConfigOptions,
+      conversationPlanEntries: localValue.conversationPlanEntries,
+      conversationTurnInFlight: localValue.conversationTurnInFlight,
+      conversationSteeringTurnId: localValue.conversationSteeringTurnId,
+      conversationSteeringTarget: localValue.conversationSteeringTarget,
+      conversationDeliveryChannel: localValue.conversationDeliveryChannel,
+      userMessageHistory: localValue.userMessageHistory,
+      hasPendingApproval,
+      fallbackCodexGoalState,
+      getEntries,
+    }),
+    [
+      localValue.tokenUsageInfo,
+      localValue.sessionModes,
+      localValue.sessionConfigOptions,
+      localValue.conversationPlanEntries,
+      localValue.conversationTurnInFlight,
+      localValue.conversationSteeringTurnId,
+      localValue.conversationSteeringTarget,
+      localValue.conversationDeliveryChannel,
+      localValue.userMessageHistory,
+      hasPendingApproval,
+      fallbackCodexGoalState,
+      getEntries,
+    ]
+  );
+
   const value = useMemo(
     () => ({
       entries: localValue.entries,
@@ -491,9 +572,11 @@ export const EntriesProvider = ({
 
   return (
     <EntriesActionsContext.Provider value={actionsValue}>
-      <EntriesContext.Provider value={value}>
-        {children}
-      </EntriesContext.Provider>
+      <EntriesMetaContext.Provider value={metaValue}>
+        <EntriesContext.Provider value={value}>
+          {children}
+        </EntriesContext.Provider>
+      </EntriesMetaContext.Provider>
     </EntriesActionsContext.Provider>
   );
 };
@@ -506,8 +589,20 @@ export const useEntries = (): EntriesContextType => {
   return context;
 };
 
+/**
+ * Subscribe only to session metadata and derived status booleans without
+ * re-rendering on every streaming conversation entries flush.
+ */
+export const useEntriesMeta = (): EntriesMetaContextType => {
+  const context = useContext(EntriesMetaContext);
+  if (!context) {
+    throw new Error('useEntriesMeta must be used within an EntriesProvider');
+  }
+  return context;
+};
+
 export const useTokenUsage = () => {
-  const context = useContext(EntriesContext);
+  const context = useContext(EntriesMetaContext);
   if (!context) {
     throw new Error('useTokenUsage must be used within an EntriesProvider');
   }

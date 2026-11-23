@@ -4,8 +4,7 @@ const setTitle = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const getWindowLabel = vi.hoisted(() => vi.fn(() => 'settings'));
 
 vi.mock('@/lib/desktopShell', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('@/lib/desktopShell')>();
+  const actual = await importOriginal<typeof import('@/lib/desktopShell')>();
   return {
     ...actual,
     getDesktopShell: () => {

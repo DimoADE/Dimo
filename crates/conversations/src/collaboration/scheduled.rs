@@ -843,9 +843,13 @@ mod tests {
         let listed_after = list_space_scheduled_messages(&pool, &space).await.unwrap();
         assert!(listed_after.is_empty());
 
-        let messages = list_space_messages(&pool, &space, None, None, MessageAudience::User)
-            .await
-            .unwrap();
+        let messages: Vec<_> =
+            list_space_messages(&pool, &space, None, None, MessageAudience::User)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|m| m.origin != "system")
+                .collect();
         assert_eq!(messages.len(), 1);
         assert!(
             messages[0].envelope["content"]

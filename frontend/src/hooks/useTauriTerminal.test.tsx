@@ -60,16 +60,32 @@ vi.mock('@xterm/addon-web-links', () => ({
   WebLinksAddon: vi.fn(function MockWebLinksAddon() {}),
 }));
 
+vi.mock('@xterm/addon-webgl', () => ({
+  WebglAddon: vi.fn(function MockWebglAddon() {
+    return {
+      onContextLoss: vi.fn(),
+      dispose: vi.fn(),
+    };
+  }),
+}));
+
 vi.mock('@/lib/backendTransport', () => ({
   backendCall,
   backendListen,
 }));
 
-function TerminalHarness({ sessionId }: { sessionId?: string }) {
+function TerminalHarness({
+  sessionId,
+  shell,
+}: {
+  sessionId?: string;
+  shell?: string;
+}) {
   const { containerRef, error } = useTauriTerminal({
     workspaceId: 'workspace-1',
     tabId: 'terminal-1',
     sessionId,
+    shell,
   });
 
   return (
@@ -385,5 +401,140 @@ describe('useTauriTerminal', () => {
       .map(([, args]) => atob((args as { data: string }).data))
       .join('');
     expect(writtenText).toBe('cd ..');
+  });
+
+  it('caps concurrent WebGL terminal contexts at 4 and frees slots on unmount', async () => {
+    const { WebglAddon } = await import('@xterm/addon-webgl');
+    backendCall.mockResolvedValue(undefined);
+    Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({
+        width: 800,
+        height: 600,
+        top: 0,
+        right: 800,
+        bottom: 600,
+        left: 0,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+    });
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        disconnect() {}
+      }
+    );
+
+    const mounted = [
+      render(<TerminalHarness />),
+      render(<TerminalHarness />),
+      render(<TerminalHarness />),
+      render(<TerminalHarness />),
+      render(<TerminalHarness />),
+    ];
+
+    expect(vi.mocked(WebglAddon)).toHaveBeenCalledTimes(4);
+
+    mounted[0].unmount();
+    const sixth = render(<TerminalHarness />);
+    expect(vi.mocked(WebglAddon)).toHaveBeenCalledTimes(5);
+
+    sixth.unmount();
+    mounted.slice(1).forEach((entry) => entry.unmount());
+  });
+
+  it('does not clobber newer listeners or spawn a PTY when a stale initialize bails out', async () => {
+    const snapshotResolvers: Array<
+      (value: { alive: boolean; data: string; seq: number }) => void
+    > = [];
+    const outputUnlistens: Array<ReturnType<typeof vi.fn>> = [];
+    const exitUnlistens: Array<ReturnType<typeof vi.fn>> = [];
+
+    backendListen.mockImplementation((eventName: string) => {
+      if (eventName === 'theme-changed') {
+        return Promise.reject(new Error('theme listener unavailable'));
+      }
+      const unlisten = vi.fn();
+      if (eventName.startsWith('terminal-output:')) {
+        outputUnlistens.push(unlisten);
+      } else if (eventName.startsWith('terminal-exit:')) {
+        exitUnlistens.push(unlisten);
+      }
+      return Promise.resolve(unlisten);
+    });
+
+    backendCall.mockImplementation((command: string) => {
+      if (command === 'terminal_snapshot') {
+        return new Promise((resolve) => {
+          snapshotResolvers.push(resolve);
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({
+        width: 800,
+        height: 600,
+        top: 0,
+        right: 800,
+        bottom: 600,
+        left: 0,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+    });
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        disconnect() {}
+      }
+    );
+
+    const { rerender, unmount } = render(
+      <TerminalHarness sessionId="session-1" shell="bash" />
+    );
+
+    await waitFor(() => expect(snapshotResolvers).toHaveLength(1));
+
+    // Trigger a second initialization on the same hook instance before snapshot #1 settles.
+    rerender(<TerminalHarness sessionId="session-1" shell="zsh" />);
+    await waitFor(() => expect(snapshotResolvers).toHaveLength(2));
+    expect(outputUnlistens).toHaveLength(2);
+    expect(exitUnlistens).toHaveLength(2);
+
+    // Resolve the stale first snapshot; it must bail out without creating a terminal
+    // and without calling the newer initialization's unlisten callbacks.
+    await act(async () => {
+      snapshotResolvers[0]?.({ alive: false, data: '', seq: 0 });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(
+      backendCall.mock.calls.filter(
+        ([command]) => command === 'create_terminal'
+      )
+    ).toHaveLength(0);
+    expect(outputUnlistens[1]).not.toHaveBeenCalled();
+    expect(exitUnlistens[1]).not.toHaveBeenCalled();
+
+    // Resolving the current initialization's snapshot still attaches cleanly.
+    await act(async () => {
+      snapshotResolvers[1]?.({ alive: true, data: '', seq: 1 });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(backendCall).toHaveBeenCalledWith('attach_terminal', {
+      sessionId: 'session-1',
+    });
+
+    unmount();
   });
 });

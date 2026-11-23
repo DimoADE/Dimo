@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -53,6 +53,10 @@ export interface SidecarStartOptions {
 
 const DEFAULT_READY_TIMEOUT_MS = 30_000;
 const SHUTDOWN_GRACE_MS = 5_000;
+const SHUTDOWN_HTTP_TIMEOUT_MS = 1_500;
+const HEALTH_CHECK_TIMEOUT_MS = 5_000;
+const WINDOW_DESTROYED_TIMEOUT_MS = 5_000;
+const TASKKILL_TIMEOUT_MS = 5_000;
 const STDERR_RING_LIMIT = 40;
 const DEFAULT_MAX_RESTART_ATTEMPTS = 3;
 const DEFAULT_RESTART_WINDOW_MS = 60_000;
@@ -76,6 +80,67 @@ export function resolveSidecarStdio(
   return platform === 'win32'
     ? ['ignore', 'pipe', 'pipe']
     : ['pipe', 'pipe', 'pipe'];
+}
+
+/**
+ * Strips or restores AppImage-injected `LD_LIBRARY_PATH` on Linux so external
+ * editors, browsers, and terminals spawned by `dimo-server` do not load
+ * incompatible libraries from the mounted AppImage squashfs tree.
+ */
+export function sanitizeSidecarEnv(
+  baseEnv: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...baseEnv };
+  if (platform === 'linux' && baseEnv.APPIMAGE?.trim()) {
+    const origLdPath = baseEnv.APPIMAGE_ORIG_LD_LIBRARY_PATH?.trim();
+    if (origLdPath) {
+      env.LD_LIBRARY_PATH = origLdPath;
+    } else {
+      delete env.LD_LIBRARY_PATH;
+    }
+  }
+  return env;
+}
+
+async function killProcessTreeWindows(
+  pid: number,
+  timeoutMs = TASKKILL_TIMEOUT_MS
+): Promise<void> {
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+
+    let killer: ChildProcess;
+    try {
+      killer = spawn('taskkill.exe', ['/PID', String(pid), '/T', '/F'], {
+        windowsHide: true,
+        stdio: 'ignore',
+      });
+    } catch {
+      resolve();
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      try {
+        killer.kill();
+      } catch {
+        // Best-effort cleanup of timed-out taskkill process.
+      }
+      done();
+    }, timeoutMs);
+    timer.unref?.();
+
+    killer.once('error', done);
+    killer.once('exit', done);
+    killer.once('close', done);
+  });
 }
 
 export function resolveClaudeDriverScript(
@@ -358,6 +423,7 @@ export class SidecarManager {
   private readyInfo: ServerReadyMessage | null = null;
   private shuttingDown = false;
   private restarting = false;
+  private startPromise: Promise<ElectronBackendConnectionInfo> | null = null;
   private shutdownPromise: Promise<void> | null = null;
   private restartTimer: NodeJS.Timeout | null = null;
   private restartTimestamps: number[] = [];
@@ -403,11 +469,20 @@ export class SidecarManager {
     if (this.connection && this.isRunning()) {
       return this.connection;
     }
+    if (this.startPromise) {
+      return this.startPromise;
+    }
     this.cancelPendingRestart();
     this.restartTimestamps = [];
     this.restarting = false;
     this.lastStartOptions = options;
-    return this.spawnAndAwaitReady(options);
+    const promise = this.spawnAndAwaitReady(options).finally(() => {
+      if (this.startPromise === promise) {
+        this.startPromise = null;
+      }
+    });
+    this.startPromise = promise;
+    return promise;
   }
 
   private async spawnAndAwaitReady(
@@ -441,7 +516,7 @@ export class SidecarManager {
 
     const baseEnv = options.env ?? process.env;
     const childEnv: NodeJS.ProcessEnv = {
-      ...baseEnv,
+      ...sanitizeSidecarEnv(baseEnv),
       DIMO_DESKTOP_TOKEN: token,
     };
     if (options.dataDir) {
@@ -463,9 +538,16 @@ export class SidecarManager {
     const child = spawnFn(binaryPath, args, {
       env: childEnv,
       stdio: resolveSidecarStdio(),
+      detached: process.platform !== 'win32',
       windowsHide: true,
     });
     this.child = child;
+
+    // Prevent uncaught EPIPE / stream-destroyed errors if stdin is closed after
+    // the sidecar has already exited (Unix piped stdin watchdog).
+    child.stdin?.on('error', () => {
+      // Best-effort ignore; exit handling drives supervision.
+    });
 
     const stderrTail: string[] = [];
     const stderrReader = child.stderr
@@ -491,6 +573,12 @@ export class SidecarManager {
         }
       });
       child.stdout.resume();
+    };
+
+    const onPostReadyError = (error: Error) => {
+      this.logger.error(
+        `[electron:sidecar] dimo-server process error: ${error.message}`
+      );
     };
 
     const onPostReadyExit = (
@@ -538,11 +626,14 @@ export class SidecarManager {
         if (parsed && !settled) {
           settled = true;
           clearTimeout(timer);
+          // Attach persistent post-ready error/exit handlers before removing
+          // startup listeners so `child` is never left without an error handler.
+          child.on('error', onPostReadyError);
+          child.on('exit', onPostReadyExit);
           cleanupListeners();
           // Resume draining stdout synchronously so OS pipe buffers (4 KiB on Windows)
           // never stall dimo-server or inherited children even for a single tick.
           drainStdout();
-          child.on('exit', onPostReadyExit);
           resolve(parsed);
         }
       };
@@ -581,6 +672,9 @@ export class SidecarManager {
       child.on('error', onError);
       child.on('exit', onExit);
     }).catch(async (error) => {
+      // Keep an error listener attached during cleanup so force-kill never
+      // emits an unhandled 'error' event on `child`.
+      child.on('error', onPostReadyError);
       stderrReader?.close();
       await this.forceKillChild(child);
       if (this.child === child) {
@@ -589,7 +683,10 @@ export class SidecarManager {
       throw error;
     });
 
-    if (this.child !== child || child.exitCode !== null) {
+    if (this.child !== child || child.exitCode !== null || this.shuttingDown) {
+      if (this.shuttingDown && child.exitCode === null) {
+        await this.forceKillChild(child);
+      }
       return {
         baseUrl: `http://127.0.0.1:${ready.port}`,
         token,
@@ -723,6 +820,20 @@ export class SidecarManager {
     }
   }
 
+  private async withAbortTimeout<T>(
+    timeoutMs: number,
+    fn: (signal: AbortSignal) => Promise<T>
+  ): Promise<T> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    timer.unref?.();
+    try {
+      return await fn(controller.signal);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async healthCheck(): Promise<{
     status: string;
     desktop_mode: boolean;
@@ -730,66 +841,85 @@ export class SidecarManager {
     version: string;
   }> {
     const conn = this.getConnection();
-    const response = await fetch(`${conn.baseUrl}/api/v1/desktop/health`, {
-      method: 'GET',
-      headers: {
-        Authorization: `Bearer ${conn.token}`,
-      },
+    return this.withAbortTimeout(HEALTH_CHECK_TIMEOUT_MS, async (signal) => {
+      const response = await fetch(`${conn.baseUrl}/api/v1/desktop/health`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${conn.token}`,
+        },
+        signal,
+      });
+      if (!response.ok) {
+        throw new Error(
+          `Desktop health check failed with HTTP ${response.status}`
+        );
+      }
+      return (await response.json()) as {
+        status: string;
+        desktop_mode: boolean;
+        pid: number;
+        version: string;
+      };
     });
-    if (!response.ok) {
-      throw new Error(`Desktop health check failed with HTTP ${response.status}`);
-    }
-    return (await response.json()) as {
-      status: string;
-      desktop_mode: boolean;
-      pid: number;
-      version: string;
-    };
   }
 
   async invokeDesktopCommand(
     command: string,
     args: Record<string, unknown> | undefined,
-    windowLabel: string
+    windowLabel: string,
+    options?: { timeoutMs?: number }
   ): Promise<unknown> {
     const conn = this.getConnection();
-    const response = await fetch(
-      `${conn.baseUrl}/api/v1/desktop/invoke/${encodeURIComponent(command)}`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${conn.token}`,
-          'Content-Type': 'application/json',
-          'X-Dimo-Window-Label': windowLabel || 'main',
-        },
-        body: JSON.stringify(args ?? {}),
+    const run = async (signal?: AbortSignal): Promise<unknown> => {
+      const response = await fetch(
+        `${conn.baseUrl}/api/v1/desktop/invoke/${encodeURIComponent(command)}`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${conn.token}`,
+            'Content-Type': 'application/json',
+            'X-Dimo-Window-Label': windowLabel || 'main',
+          },
+          body: JSON.stringify(args ?? {}),
+          ...(signal ? { signal } : {}),
+        }
+      );
+
+      const text = await response.text();
+      let parsed: unknown = null;
+      if (text.length > 0) {
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          parsed = text;
+        }
       }
-    );
 
-    const text = await response.text();
-    let parsed: unknown = null;
-    if (text.length > 0) {
-      try {
-        parsed = JSON.parse(text);
-      } catch {
-        parsed = text;
+      if (!response.ok) {
+        const message =
+          typeof parsed === 'object' &&
+          parsed !== null &&
+          'message' in parsed &&
+          typeof (parsed as { message?: unknown }).message === 'string'
+            ? (parsed as { message: string }).message
+            : typeof parsed === 'string' && parsed.length > 0
+              ? parsed
+              : `Desktop command "${command}" failed with HTTP ${response.status}`;
+        throw new Error(message);
       }
-    }
 
-    if (!response.ok) {
-      const message =
-        typeof parsed === 'object' &&
-        parsed !== null &&
-        'message' in parsed &&
-        typeof (parsed as { message?: unknown }).message === 'string'
-          ? (parsed as { message: string }).message
-          : typeof parsed === 'string' && parsed.length > 0
-            ? parsed
-            : `Desktop command "${command}" failed with HTTP ${response.status}`;
-      throw new Error(message);
-    }
+      return parsed;
+    };
 
-    return parsed;
+    const timeoutMs = options?.timeoutMs;
+    if (
+      typeof timeoutMs === 'number' &&
+      Number.isFinite(timeoutMs) &&
+      timeoutMs > 0
+    ) {
+      return this.withAbortTimeout(timeoutMs, (signal) => run(signal));
+    }
+    return run();
   }
 
   async notifyWindowDestroyed(
@@ -799,15 +929,19 @@ export class SidecarManager {
     if (!this.connection || !this.isRunning() || this.shuttingDown) {
       return;
     }
+    const conn = this.connection;
     try {
-      await fetch(`${this.connection.baseUrl}/api/v1/desktop/window-destroyed`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${this.connection.token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ label, windowStillOpen }),
-      });
+      await this.withAbortTimeout(WINDOW_DESTROYED_TIMEOUT_MS, (signal) =>
+        fetch(`${conn.baseUrl}/api/v1/desktop/window-destroyed`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${conn.token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ label, windowStillOpen }),
+          signal,
+        })
+      );
     } catch {
       // Sidecar may already be shutting down during app quit.
     }
@@ -844,15 +978,15 @@ export class SidecarManager {
 
     if (conn) {
       try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 1500);
-        await fetch(`${conn.baseUrl}/api/v1/desktop/shutdown`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${conn.token}`,
-          },
-          signal: controller.signal,
-        }).finally(() => clearTimeout(timer));
+        await this.withAbortTimeout(SHUTDOWN_HTTP_TIMEOUT_MS, (signal) =>
+          fetch(`${conn.baseUrl}/api/v1/desktop/shutdown`, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${conn.token}`,
+            },
+            signal,
+          })
+        );
       } catch {
         // Fallback to closing stdin and signaling.
       }
@@ -866,9 +1000,10 @@ export class SidecarManager {
 
     const exitedCleanly = await Promise.race([
       exitPromise.then(() => true),
-      new Promise<boolean>((resolve) =>
-        setTimeout(() => resolve(false), SHUTDOWN_GRACE_MS)
-      ),
+      new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => resolve(false), SHUTDOWN_GRACE_MS);
+        timer.unref?.();
+      }),
     ]);
 
     if (!exitedCleanly && child.exitCode === null) {
@@ -888,25 +1023,43 @@ export class SidecarManager {
       return;
     }
     const exitPromise = new Promise<void>((resolve) => {
+      if (child.exitCode !== null) {
+        resolve();
+        return;
+      }
       child.once('exit', () => resolve());
     });
 
+    const signalUnixChild = (signal: NodeJS.Signals) => {
+      if (child.pid && child.pid > 0) {
+        try {
+          process.kill(-child.pid, signal);
+          return;
+        } catch {
+          // Child may not be a process-group leader (e.g. non-detached test mock).
+        }
+      }
+      try {
+        child.kill(signal);
+      } catch {
+        // Process already exited.
+      }
+    };
+
     try {
       if (process.platform === 'win32' && child.pid) {
-        spawnSync('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
-          windowsHide: true,
-          timeout: 5000,
-        });
+        await killProcessTreeWindows(child.pid, TASKKILL_TIMEOUT_MS);
       } else {
-        child.kill('SIGTERM');
+        signalUnixChild('SIGTERM');
         const exited = await Promise.race([
           exitPromise.then(() => true),
-          new Promise<boolean>((resolve) =>
-            setTimeout(() => resolve(false), 1500)
-          ),
+          new Promise<boolean>((resolve) => {
+            const timer = setTimeout(() => resolve(false), 1_500);
+            timer.unref?.();
+          }),
         ]);
         if (!exited && child.exitCode === null) {
-          child.kill('SIGKILL');
+          signalUnixChild('SIGKILL');
         }
       }
     } catch {
@@ -915,7 +1068,10 @@ export class SidecarManager {
 
     await Promise.race([
       exitPromise,
-      new Promise<void>((resolve) => setTimeout(resolve, 2000)),
+      new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 2_000);
+        timer.unref?.();
+      }),
     ]);
   }
 }

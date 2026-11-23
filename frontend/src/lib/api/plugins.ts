@@ -419,7 +419,7 @@ export interface PluginUpdateStatus {
   availableVersion?: string | null;
 }
 
-export type PluginCliImportEcosystem = 'codex' | 'claude_code';
+export type PluginCliImportEcosystem = 'codex' | 'claude_code' | 'muse_code';
 
 export type PluginCliImportEvent =
   | { event: 'started'; command: string }
@@ -478,7 +478,8 @@ async function loadContributionsWithFileApi(
 
   const native =
     plugin.sourceKind === 'codex_native' ||
-    plugin.sourceKind === 'claude_code_native';
+    plugin.sourceKind === 'claude_code_native' ||
+    plugin.sourceKind === 'muse_code_native';
   const mcpDocument = JSON.parse(
     (await transport.call('read_file_content', {
       path: pluginFilePath(

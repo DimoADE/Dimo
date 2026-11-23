@@ -1,144 +1,65 @@
 ---
 status: accepted
 date: 2026-09-04
-decision-makers:
-  - Dimo maintainers
+decision-makers: Dimo maintainers
 ---
 
 # Host 能力面只有一个接缝：Host Command Registry 与 Host Event Bus
 
 ## Context
 
-ADR-0033 规定桌面与 Server 共用同一 Application Core，Tauri command 与 HTTP handler
-只做认证与 DTO 转换。2026-09-04 的全局检查表明这条规则在代码里没有成立：
-
-- 前端通过 `BackendTransport` 调用 478 个后端命令；`dimo-server` 与桌面远程监听只
-  注册了 173 个。其余 354 个在 WebUI 与远程 Workstation 下返回
-  `command X is not registered`。
-- 桌面本机的 `application_call` 没有挂 `ApplicationDomainPort`，`ServerApplicationDomains`
-  是一份只服务 Server、桌面日常从不执行的平行实现。没有任何契约测试约束前端命令名
-  与 Server 注册表的关系，漂移是结构性的。
-- 会话时间线依赖 Tauri 事件 `conversation-events:{id}` 与 Tauri-only 命令
-  `conversation_detail` / `conversation_events_since`；`WebTransport.listen` 与
-  `RemoteDesktopTransport.listen` 只实现 `terminal-output:*`，其余 12 类推送事件在远程
-  环境静默失效。`RemoteDesktopTransport.subscribe` 轮询一个 Server 上不存在的
-  `conversation_attach`。
-- 9 个 `subscribe_*_stream` patch 流只有 Tauri 实现；Server WS 只有
-  `conversation` / `workflow_run` 两种订阅资源。
-- Server 的 `capabilities` 是静态列表，声明了 `workspace.write`、`git.write` 等未实现的
-  能力，前端无法据此诚实降级。
-- 项目创建、克隆、文件树、插件导入直接调用 Tauri 原生对话框；时间线图片使用
-  `convertFileSrc`。在浏览器里抛错，在远程桌面里语义错误（选的是客户端路径）。
-
-用户可见结果：连上 Host 后能看到项目列表，点进去是空的；建出会话并发送后 Agent 在
-Host 上运行，但界面永远不显示回复。
+[ADR-0033](0033-shared-application-core-and-versioned-remote-transport.md) 规定本地桌面与无头 `dimo-server` 共用同一 Application Core。若桌面壳与远程 Server 各自维护平行的命令列表或事件通道，就会导致命令覆盖率结构性漂移、推送事件在远程/WebUI 静默失效，以及 `capabilities` 宣称未实现的能力。在桌面端收敛为 Electron 壳托管本机 `dimo-server --desktop` sidecar（ADR-0090）的架构下，本 ADR 确立 **Host Command Registry** 与 **Host Event Bus** 作为所有客户端表面的唯一产品接缝。
 
 ## Decision
 
-### 1. Host 产品命令只有一份实现，位于 `crates/server::host`
+### 1. Host 产品命令只有一份实现，位于 `crates/server::host` 与 `crates/application`
 
-所有面向 Workstation / WebUI 的产品命令（Project、Repo、Workspace、Git、PR、Session、
-Task、Tag、Scratch、Image、Attention、Conversation 辅助、Agent 运行时、Agent 管理与
-供应商、Skill、Instruction、MCP、Plugin、Chat channel、Automation、Workflow、系统设置、
-日志设置等）的实现从 `src-tauri/src/commands` 移入 `crates/server/src/host/<domain>.rs`，
-以 Tauri 无关的 `HostContext` 为唯一依赖。`src-tauri` 不再保留这些实现的副本。
+所有面向本机桌面、浏览器 WebUI 与远程 Workstation 的产品命令（Project、Repo、Workspace、Git、PR、Session、Task、Tag、Scratch、Image、Attention、Conversation 辅助与控制、Agent 运行时与管理、Provider 预设与目录、Skill、Instruction、MCP、Plugin、Chat channel、Automation、Workflow、系统与日志设置等）全部由 `crates/application` 与 `crates/server/src/host/<domain>.rs` 唯一实现，依赖传输无关的 `HostContext`（持有 `LocalDeployment`、`AgentRuntime`、`ConversationContext`、Plugin 控制面与 Worker Runtime、PTY、本地历史导入、用量缓存与 `HostEventBus`）。桌面壳（`electron/`）不持有任何业务命令副本。
 
-`HostContext` 持有 Host 运行时的共享事实：`LocalDeployment`、`AgentRuntime`、
-`ConversationContext` 组件、Plugin 控制面与 Worker Runtime、PTY、Agent 管理运行时状态、
-本地历史导入运行时、用量缓存、以及 Host Event Bus。桌面 `AppState` 与
-`HeadlessServer` 都持有同一个 `Arc<HostContext>`。
+### 2. Host Command Registry 是唯一命令注册表与能力真相源
 
-### 2. Host Command Registry 是唯一注册表
+- 唯一活接缝是 `application::DomainCommand` + `RegisteredCommand`（Conversation 与 Workflow 用例由 Application Core 直接实现，其余产品域命令由 `ServerApplicationDomains` / `HOST_COMMANDS` 派发）。
+- 注册表声明每个命令的名称、所需 scope、类型化参数与处理函数，统一按 camelCase JSON 反序列化并执行，错误统一规范化为带 `code` 的 `ErrorEnvelope`。
+- `pnpm run generate-types` 从 `RegisteredCommand::host_command_names()` 生成 `shared/hostCommands.ts`，作为前端与契约测试的唯一命令清单。
+- `ServerCapabilities.capabilities` 直接由注册表 scope 加上各传输适配器真实提供的能力派生（例如 HTTP/WS 附带 `preview.proxy`、`offline.read`、`notification.summary`），严禁出现没有对应实现的静态能力字面量。
 
-活接缝是 `application::DomainCommand` + `RegisteredCommand`（Conversation / Workflow
-用例由 Application Core 直接实现，其余产品命令由 `ServerApplicationDomains` 派发）。
-`pnpm run generate-types` 从 `RegisteredCommand::host_command_names()` 写出
-`shared/hostCommands.ts`。ADR 里的 `host_commands!` / `HostContext` 名称对应同一职责，
-不另建第二份注册表。
+### 3. 桌面壳命令显式隔离且互不相交
 
-`crates/server::host` 用 `DomainCommand` 登记每个命令的名称、所需
-scope、参数结构与实现函数，并生成：
-
-- `HOST_COMMANDS: &[HostCommandDescriptor]`——命令名、scope 的静态清单；
-- `dispatch(ctx, name, args)`——JSON 参数按 camelCase 反序列化为类型化参数后调用实现。
-
-`crates/application` 不再硬编码 `DomainCommand` 枚举；`ApplicationDomainPort` 暴露自己的
-描述符清单，`CommandRegistry` 据此解析名称与 scope。Conversation / Workflow 用例仍由
-Application Core 直接实现。
-
-`ServerCapabilities.capabilities` 由注册表 scope 派生，加上各适配器真实提供的能力
-（HTTP/WS 适配器加 `preview.proxy`、`offline.read`、`notification.summary`；桌面加
-`desktop.tauri`）。不允许出现没有对应实现的能力字面量。
-
-### 3. 桌面走同一个接缝
-
-桌面 `application_call` 挂载 `HostApplicationDomains`。`TauriTransport.call` 把所有
-注册表内的命令经 `application_call` 发出；只有桌面壳命令直接 `invoke`。桌面壳命令是
-一个显式、有限的前端清单 `DESKTOP_SHELL_COMMANDS`（窗口、托盘、Toast、原生对话框、
-Inspector、外部编辑器/终端/文件管理器、更新器、本机控制台：监听、隧道、备份、设备、
-远程档案），它们只在 `desktop.tauri` 能力存在时可用，UI 据此隐藏入口。
-
-被移入注册表的命令对应的 Tauri command 与 `invoke_handler!` 条目一并删除。
+Electron 桌面应用通过 `BackendTransport` 将全部产品命令路由到本机 `dimo-server --desktop` sidecar（ADR-0090）或远程 Host 的同一注册表。仅与本机操作系统窗口/壳层强绑定的有限辅助命令（窗口与托盘管理、原生文件对话框、外部编辑器/终端/文件管理器打开、桌面自动更新、本机 Host 控制台运维）归入显式清单 `DESKTOP_SHELL_COMMANDS`，经 Electron preload IPC 执行，并受本地桌面壳 capability 门控；非桌面环境或远程连接时 UI 据此诚实隐藏或降级。
 
 ### 4. Host Event Bus 是唯一推送面
 
-Host 发出的推送事件（会话行操作批次、Agent 管理事件与失效通知、Agent 终端生命周期、
-会话注意事项、工作区会话变化、设置文件变化、日志追加、本地历史导入进度）通过
-`HostEventBus::emit(channel, payload)` 发出，不再直接调用 `AppHandle::emit`。
+Host 发出的全部实时推送（会话时间线行操作批次 `conversation-events:{id}`、Agent 管理与失效通知、Agent 终端生命周期、注意力与工作区会话变化、设置文件变化、日志追加、本地历史导入进度）统一经 `HostEventBus::emit(channel, payload)` 发布：
 
-- 桌面适配器把总线转发到 Tauri 事件，频道名不变；
-- Server WS 新增订阅资源 `host_event { channel }`，按 scope 校验频道前缀；
-- `WebTransport.listen` 与 `RemoteDesktopTransport.listen` 通过该资源实现，
-  `terminal-output:*` 保留 SSE 路径；
-- `RemoteDesktopTransport.subscribe` 与 `listen` 由 Rust 侧持有凭据的 WebSocket
-  客户端承载，凭据仍不进入 WebView。
+- Server WebSocket 提供 `host_event { channel }` 订阅资源，按 scope 校验频道前缀；`terminal-output:*` 保留 SSE 流。
+- 本机 Electron 桌面（连 `dimo-server --desktop`）、浏览器 WebUI（`WebTransport`）与远程 Workstation（`RemoteDesktopTransport`，凭据保留在受保护宿主/主进程侧）均消费同一总线契约，杜绝静默 no-op 监听。
 
-### 5. Patch 流是订阅资源
+### 5. Patch 流收敛为统一订阅资源
 
-新增订阅资源 `patch_stream { stream, args }`，覆盖原 9 个 `subscribe_*_stream`：
-`projects`、`project_workspaces`、`execution_processes`、`diff`、`file_tree`、`scratch`、
-`slash_commands`、`log`、`conversation`。生产者仍是 `deployment.events()` 中的现有流。
-WS 在附着时启动生产者、在分离时停止；桌面通过 Channel 承载同一资源。
-`useTauriPatchStream` 改为 `usePatchStream`，在所有环境只用 `transport.subscribe`。
-9 个 Tauri 命令与对应事件频道删除。
+所有状态补丁流统一经 `patch_stream { stream, args }` 订阅资源承载，覆盖 `projects`、`project_workspaces`、`execution_processes`、`diff`、`file_tree`、`scratch`、`slash_commands`、`log` 与 `conversation`。生产者直接复用 `deployment.events()`，在客户端附着时启动、分离时释放；前端统一通过 `usePatchStream` 与 `transport.subscribe` 消费。
 
-### 6. 会话时间线在所有环境使用同一路径
+### 6. 会话时间线全环境同路
 
-`conversation_detail`、`conversation_events_since`、`conversation_ensure_session_controls`
-进入注册表；实时行操作经 Host Event Bus 的 `conversation-events:{id}` 频道到达。
-原始事件的 durable attach（`conversation` 资源）继续服务 Companion 与离线缓存。
+`conversation_detail`、`conversation_events_since`、`conversation_ensure_session_controls` 等命令全部位于 Host Command Registry；实时行操作经 `HostEventBus` 的 `conversation-events:{id}` 频道送达，原始事件 durable attach（`conversation` 资源）服务移动端 Companion 与离线缓存。所有客户端共享同一 SQLite 权威投影（ADR-0091）。
 
-### 7. 主机文件系统语义
+### 7. Host 文件系统语义
 
-选择目录一律是选择 **Host** 上的目录。`pickHostDirectory()` 在 `desktop.tauri` 存在时
-使用原生对话框，否则使用基于 `list_directory` 的 `FolderPickerDialog`。时间线图片与
-本地资源通过注册表命令读取并以 Blob URL 呈现，不再使用 `convertFileSrc`。
+路径与目录选择一律针对当前绑定的 **Host** 文件系统：本地桌面连接本机 Host 时使用原生系统目录对话框，远程 Host 或浏览器 WebUI 使用基于 `list_directory` 的 `FolderPickerDialog`。时间线图片与本地附件通过 Host 注册表命令或受控 HTTP 端点读取并呈现，不假设客户端可直接访问 Host 本地文件路径。
 
-### 8. 契约测试
+### 8. 契约测试门禁
 
-- Rust：注册表命令名唯一；每个描述符可被解析并具有 scope；capabilities 与注册表一致。
-- `pnpm run generate-types` 额外生成 `shared/hostCommands.ts`（注册表命令名与 scope），
-  `generate-types:check` 检查其新鲜度。
-- 前端：扫描 `frontend/src` 中的命令字面量，每一个必须属于 `hostCommands` 或
-  `DESKTOP_SHELL_COMMANDS`；`DESKTOP_SHELL_COMMANDS` 与 `hostCommands` 不相交。
+- Rust 测试锁定注册表命令名唯一、每个描述符可解析且带明确 scope、`capabilities` 与注册表一致。
+- CI 通过 `generate-types:check` 校验 `shared/hostCommands.ts` 新鲜度。
+- 前端静态扫描锁定 `frontend/src` 中的所有命令调用必须归属 `hostCommands` 或 `DESKTOP_SHELL_COMMANDS`，且两集合严格不相交。
 
 ## Consequences
 
-- `dimo-server`、桌面作为 Host、桌面本机三种运行方式执行同一份命令实现；Server 不可能
-  再落后于桌面。
-- 桌面 IPC 的错误从 `AppError` 字符串统一为 `ErrorEnvelope`；`BackendTransport` 把它
-  规范化为带 `code` 的 `Error`，前端按 `message` 匹配的既有逻辑不变。
-- `crates/server` 体量显著增大；它是 Host 核心而非仅 HTTP 适配器，与 ADR-0033、
-  ADR-0054 对 Host 的定义一致。
-- CEF 浏览器、Office、更新器、备份、隧道与设备管理保持桌面壳 / 本机控制台专属，按
-  ADR-0054 不进入远程面，并通过 `desktop.tauri` 诚实降级。
-- ADR-0070 的 R0 与 R2 由本决定完成。
+- 本机桌面（Electron + `dimo-server --desktop`）、浏览器 WebUI、远程桌面 Workstation 与无头 `dimo-server` 执行完全同一份产品命令与事件总线代码，根除前后端和双端漂移。
+- `crates/server` 成为统一的 Host 核心装配点，与 [ADR-0033](0033-shared-application-core-and-versioned-remote-transport.md) 和 [ADR-0054](0054-host-family-distribution-and-client-surfaces.md) 对 Dimo Host 的定义完全一致。
+- 桌面专属能力（本机更新器、原生对话框、嵌入浏览器 `<webview>` 宿主、本机控制台运维）通过 capability 显式边界化，远程客户端诚实降级。
 
 ## Considered Options
 
-- **按 P0 清单把缺失命令逐个复制进 `ServerApplicationDomains`。** 否决。保留两份实现，
-  桌面日常不执行 Server 路径，漂移会再次发生。
-- **让 Axum handler 调用 Tauri command。** 否决（ADR-0033 已否决）。
-- **前端会话时间线改为消费原始事件并在前端折叠。** 否决。与"消灭双投影"决定冲突。
-- **WebUI 直接使用管理员 token 时放开所有命令，Workstation 保持子集。** 否决。能力面
-  由注册表与 scope 决定，与凭据类型无关。
+- **继续为桌面与 Server 维护两套命令处理器并按清单手工补齐**：否决。日常开发只走桌面路径时，Server 必然再次漂移。
+- **由前端各自消费原始事件并自行折叠时间线**：否决。制造前后端双投影，违背单一投影权威原则。
+- **按凭据类型而非注册表 scope 开放命令面**：否决。能力面必须由注册表与细粒度 scope 统一裁决。

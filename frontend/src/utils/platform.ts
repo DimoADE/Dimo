@@ -33,6 +33,14 @@ export function hostPlatformFromOsType(
 }
 
 export function getHostPlatform(): HostPlatform {
+  const desktopPlatform =
+    typeof window !== 'undefined'
+      ? window.dimoDesktop?.platform?.toLowerCase()
+      : undefined;
+  if (desktopPlatform === 'win32') return 'windows';
+  if (desktopPlatform === 'darwin') return 'macos';
+  if (desktopPlatform === 'linux') return 'linux';
+
   const nav = navigator as Navigator & {
     userAgentData?: { platform?: string };
   };
@@ -80,13 +88,16 @@ export function logoLeadsWindowChrome(): boolean {
 }
 
 export function usesSolidHostChrome(): boolean {
-  if (isWindows()) {
+  if (isWindows() || isLinux()) {
     return true;
   }
   if (typeof document === 'undefined') {
     return false;
   }
-  return document.documentElement.classList.contains('host-windows');
+  return (
+    document.documentElement.classList.contains('host-windows') ||
+    document.documentElement.classList.contains('host-linux')
+  );
 }
 
 export function isElectronDesktopShell(): boolean {
@@ -104,6 +115,7 @@ export function applyHostPlatformToDocument(): void {
   const electron = isElectronDesktopShell();
   document.documentElement.dataset.hostPlatform = getHostPlatform();
   document.documentElement.classList.toggle('host-windows', isWindows());
+  document.documentElement.classList.toggle('host-linux', isLinux());
   document.documentElement.classList.toggle('electron-desktop', electron);
   document.documentElement.classList.toggle('desktop-shell', electron);
 }

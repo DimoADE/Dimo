@@ -562,6 +562,27 @@ impl Session {
         Ok(())
     }
 
+    pub async fn update_workspace(
+        pool: &SqlitePool,
+        id: Uuid,
+        workspace_id: Uuid,
+        task_id: Option<Uuid>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"UPDATE sessions
+               SET workspace_id = ?,
+                   task_id = COALESCE(?, task_id),
+                   updated_at = datetime('now', 'subsec')
+               WHERE id = ?"#,
+        )
+        .bind(workspace_id)
+        .bind(task_id)
+        .bind(id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn delete(pool: &SqlitePool, id: Uuid) -> Result<u64, sqlx::Error> {
         let result = sqlx::query(r#"DELETE FROM sessions WHERE id = ?"#)
             .bind(id)
@@ -831,5 +852,29 @@ mod tests {
         let summary_ids: Vec<Uuid> = summaries.iter().map(|summary| summary.id).collect();
         assert!(summary_ids.contains(&regular_id));
         assert!(summary_ids.contains(&member_session_id));
+    }
+
+    #[tokio::test]
+    async fn update_workspace_reassigns_session_workspace_and_task() {
+        let pool = setup_pool().await;
+        let first_workspace = Uuid::new_v4();
+        let second_workspace = Uuid::new_v4();
+        let second_task = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+
+        Session::create(&pool, &sample("CODEX"), session_id, first_workspace)
+            .await
+            .expect("create session");
+
+        Session::update_workspace(&pool, session_id, second_workspace, Some(second_task))
+            .await
+            .expect("update session workspace");
+
+        let updated = Session::find_by_id(&pool, session_id)
+            .await
+            .expect("reload session")
+            .expect("session exists");
+        assert_eq!(updated.workspace_id, second_workspace);
+        assert_eq!(updated.task_id, Some(second_task));
     }
 }

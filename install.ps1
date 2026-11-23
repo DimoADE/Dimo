@@ -1,7 +1,7 @@
 # Install the Dimo Host family (dimo-server, dimo-mcp, dimo-workflow-mcp
 # and the web bundle) from a GitHub Release.
 #
-# The desktop app is not installed by this script; it ships as a Tauri
+# The desktop app is not installed by this script; it ships as an Electron
 # installer with its own updater. Coding agents are not installed either —
 # they live in your own environment (ADR-0060).
 #

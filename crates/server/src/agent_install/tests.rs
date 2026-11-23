@@ -27,6 +27,72 @@ fn raw_gzip_archive_installs_as_the_single_binary() {
 }
 
 #[test]
+fn standalone_executable_extracts_as_single_binary_for_muse_code() {
+    let pe_bytes = b"MZ\x90\x00muse-windows-payload";
+    let elf_bytes = b"\x7fELF\x02\x01\x01\x00muse-linux-payload";
+    let macho_bytes = b"\xcf\xfa\xed\xfemuse-macos-payload";
+    for (label, bytes, url, expected_name) in [
+        (
+            "pe",
+            pe_bytes.as_slice(),
+            "https://mirror.dimo-ai.com/dl/facebook/lookaside/muse/download/?channel=muse&version=1.4.25-R9361.1&file=muse-x86-windows.exe",
+            "muse-x86-windows.exe",
+        ),
+        (
+            "elf",
+            elf_bytes.as_slice(),
+            "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.25-R9361.1&file=muse-x86-linux",
+            "muse-x86-linux",
+        ),
+        (
+            "macho",
+            macho_bytes.as_slice(),
+            "https://mirror.dimo-ai.com/dl/facebook/lookaside/muse/download/?channel=muse&version=1.4.25-R9361.1&file=muse-aarch64-macos",
+            "muse-aarch64-macos",
+        ),
+    ] {
+        let destination =
+            std::env::temp_dir().join(format!("dimo-raw-{label}-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&destination).unwrap();
+        extract_archive(bytes, url, &destination).unwrap();
+        let staged = find_staged_executable(&destination, "muse").unwrap();
+        assert_eq!(
+            staged.file_name().and_then(|name| name.to_str()),
+            Some(expected_name)
+        );
+        assert_eq!(std::fs::read(&staged).unwrap(), bytes);
+        let _ = std::fs::remove_dir_all(&destination);
+    }
+
+    let catalog = BuiltInProfileCatalog::bundled();
+    let muse = catalog
+        .profile(&AgentId::parse("muse_code").unwrap())
+        .expect("muse_code profile");
+    let agents::ProfileInstallSource::Binary { artifacts, .. } = &muse.install_sources[0] else {
+        panic!("muse_code must use binary install source");
+    };
+    assert_eq!(artifacts.len(), 6);
+    for artifact in artifacts {
+        assert!(
+            artifact.sha256.is_some(),
+            "missing sha256 for {}",
+            artifact.platform
+        );
+        let direct = utils::mirror::download_url_candidates_for_proxy(artifact.archive_url, false);
+        assert!(
+            direct[0]
+                .starts_with("https://mirror.dimo-ai.com/dl/facebook/lookaside/muse/download/"),
+            "direct traffic must route muse_code through mirror.dimo-ai.com: {:?}",
+            direct
+        );
+        assert_eq!(direct[1], artifact.archive_url);
+        let proxied = utils::mirror::download_url_candidates_for_proxy(artifact.archive_url, true);
+        assert_eq!(proxied[0], artifact.archive_url);
+        assert_eq!(proxied[1], direct[0]);
+    }
+}
+
+#[test]
 fn host_install_plans_npx_without_a_system_node() {
     let platform = current_platform();
     assert!(
@@ -483,11 +549,10 @@ async fn native_engine_try_adopt_discovers_standalone_claude_and_codex_extra_dir
                 trust: agents::ArtifactTrust::EcosystemIntegrityRequired,
             }],
         };
-        let adopted =
-            try_adopt_with_options(&agent_id, &plan, &user_env, Some(home), false, None)
-                .await
-                .unwrap()
-                .unwrap_or_else(|| panic!("expected standalone {raw_id} CLI to be adopted"));
+        let adopted = try_adopt_with_options(&agent_id, &plan, &user_env, Some(home), false, None)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("expected standalone {raw_id} CLI to be adopted"));
         assert_eq!(adopted.components.len(), 1);
         assert_eq!(adopted.components[0].kind, "combined_runtime");
         assert!(adopted.launch_lock.runtime_version.contains(version));
@@ -700,14 +765,8 @@ async fn run_npm_global_install_short_circuits_on_ebusy_and_unsupported_node_eng
     ] {
         let temp = tempfile::tempdir().unwrap();
         let log_file = temp.path().join("calls.log");
-        let npm_path = write_fake_npm_script(
-            temp.path(),
-            None,
-            &log_file,
-            stderr_msg,
-            "openclaw",
-            false,
-        );
+        let npm_path =
+            write_fake_npm_script(temp.path(), None, &log_file, stderr_msg, "openclaw", false);
         let component = PlannedInstallComponent {
             component_id: "combined_runtime".into(),
             distribution_kind: PlannedDistributionKind::Npx,

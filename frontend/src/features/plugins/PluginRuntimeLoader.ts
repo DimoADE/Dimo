@@ -34,6 +34,8 @@ import {
   deactivatePluginModule,
 } from '@/lib/pluginFederation';
 
+import { loadEsmUrlModule } from './esmUrlLoader';
+
 /**
  * `conversation.draft.insert` without a conversationId targets "the composer
  * the user is working in", which only the frontend knows. Handle it here so
@@ -653,6 +655,23 @@ const activeMarkerDisposers = new Map<string, () => void>();
 const activePluginIds = new Set<string>();
 const activePluginMetadata = new Map<string, PluginRuntimeMetadata>();
 const registeredProfileEntries = new Map<string, PluginProfileEntry>();
+const loadGenerationByPluginId = new Map<string, number>();
+
+function bumpPluginLoadGeneration(pluginId: string): number {
+  const next = (loadGenerationByPluginId.get(pluginId) ?? 0) + 1;
+  loadGenerationByPluginId.set(pluginId, next);
+  return next;
+}
+
+function revokePluginBlobUrl(pluginId: string, expectedUrl?: string): void {
+  const tracked = activeBlobUrls.get(pluginId);
+  const target = expectedUrl ?? tracked;
+  if (!target) return;
+  if (tracked === target) activeBlobUrls.delete(pluginId);
+  if (typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+    URL.revokeObjectURL(target);
+  }
+}
 
 function resolvePluginMetadata(
   pluginId: string,
@@ -1009,8 +1028,10 @@ export function applyDeclarativePlugin(
   }
 
   const dispose = () => {
-    activeDeclarativeDisposers.delete(pluginId);
-    removePluginCss(pluginId);
+    if (activeDeclarativeDisposers.get(pluginId) === dispose) {
+      activeDeclarativeDisposers.delete(pluginId);
+      removePluginCss(pluginId);
+    }
     ctx.dispose();
   };
   activeDeclarativeDisposers.set(pluginId, dispose);
@@ -1202,11 +1223,7 @@ function finalizeModuleActivation(
     disposeDeclarative?.();
     disposeModule();
     removePluginCss(pluginId);
-    const blobUrl = activeBlobUrls.get(pluginId);
-    if (blobUrl && typeof URL.revokeObjectURL === 'function') {
-      URL.revokeObjectURL(blobUrl);
-      activeBlobUrls.delete(pluginId);
-    }
+    revokePluginBlobUrl(pluginId);
   };
 }
 
@@ -1217,6 +1234,7 @@ function handleLoadRuntimeError(
 ): never {
   disposeDeclarative?.();
   removePluginCss(pluginId);
+  revokePluginBlobUrl(pluginId);
   const normalized =
     error instanceof Error ? error : new Error(String(error ?? 'Load error'));
   recordPluginCrash(pluginId, normalized);
@@ -1228,6 +1246,7 @@ function loadPluginRuntimeImmediateSync(
   source: PluginRuntimeSource,
   options?: LoadPluginRuntimeOptions
 ): (() => void) | Promise<() => void> {
+  const gen = bumpPluginLoadGeneration(pluginId);
   const metadata = resolvePluginMetadata(pluginId, source, options);
 
   if (source.kind === 'declarative') {
@@ -1267,14 +1286,26 @@ function loadPluginRuntimeImmediateSync(
         typeof (maybeDispose as Promise<unknown>).then === 'function'
       ) {
         return (maybeDispose as Promise<() => void>).then(
-          (disposeModule) =>
-            finalizeModuleActivation(
+          (disposeModule) => {
+            if (loadGenerationByPluginId.get(pluginId) !== gen) {
+              disposeModule();
+              disposeDeclarative?.();
+              return () => undefined;
+            }
+            return finalizeModuleActivation(
               pluginId,
               disposeModule,
               disposeDeclarative,
               metadata
-            ),
-          (error) => handleLoadRuntimeError(pluginId, error, disposeDeclarative)
+            );
+          },
+          (error) => {
+            if (loadGenerationByPluginId.get(pluginId) !== gen) {
+              disposeDeclarative?.();
+              return () => undefined;
+            }
+            return handleLoadRuntimeError(pluginId, error, disposeDeclarative);
+          }
         );
       }
       return finalizeModuleActivation(
@@ -1290,7 +1321,8 @@ function loadPluginRuntimeImmediateSync(
       source,
       options,
       metadata,
-      disposeDeclarative
+      disposeDeclarative,
+      gen
     );
   } catch (error) {
     return handleLoadRuntimeError(pluginId, error, disposeDeclarative);
@@ -1302,40 +1334,80 @@ async function loadAsyncModuleSource(
   source: Extract<PluginRuntimeSource, { kind: 'esm-code' | 'esm-url' }>,
   options: LoadPluginRuntimeOptions | undefined,
   metadata: PluginRuntimeMetadata,
-  disposeDeclarative: (() => void) | undefined
+  disposeDeclarative: (() => void) | undefined,
+  gen: number
 ): Promise<() => void> {
+  const isStale = () => loadGenerationByPluginId.get(pluginId) !== gen;
+  let localBlobUrl: string | undefined;
   try {
     let mod: unknown;
     if (source.kind === 'esm-code') {
-      const prevBlob = activeBlobUrls.get(pluginId);
-      if (prevBlob && typeof URL.revokeObjectURL === 'function') {
-        URL.revokeObjectURL(prevBlob);
-      }
+      revokePluginBlobUrl(pluginId);
       const rewrittenCode = rewriteSharedBareImports(source.code);
       if (
         typeof URL !== 'undefined' &&
         typeof URL.createObjectURL === 'function'
       ) {
-        const blob = new Blob([rewrittenCode], { type: 'text/javascript' });
-        const blobUrl = URL.createObjectURL(blob);
+        const blobUrl = URL.createObjectURL(
+          new Blob([rewrittenCode], { type: 'text/javascript' })
+        );
+        localBlobUrl = blobUrl;
         activeBlobUrls.set(pluginId, blobUrl);
         try {
           mod = await import(/* @vite-ignore */ blobUrl);
         } catch {
           mod = undefined;
+        } finally {
+          revokePluginBlobUrl(pluginId, blobUrl);
+          if (localBlobUrl === blobUrl) localBlobUrl = undefined;
+        }
+        if (isStale()) {
+          disposeDeclarative?.();
+          return () => undefined;
         }
       }
       if (!hasPluginModuleExports(mod)) {
         mod = evaluateSingleFileEsmModule(source.code);
       }
     } else {
-      mod = await import(/* @vite-ignore */ source.entryUrl);
+      mod = await loadEsmUrlModule(source.entryUrl, {
+        rewriteBareImports: rewriteSharedBareImports,
+        registerBlobUrl: (blobUrl) => {
+          if (isStale()) {
+            revokePluginBlobUrl(pluginId, blobUrl);
+            return;
+          }
+          revokePluginBlobUrl(pluginId);
+          localBlobUrl = blobUrl;
+          activeBlobUrls.set(pluginId, blobUrl);
+        },
+        revokeBlobUrl: (blobUrl) => {
+          revokePluginBlobUrl(pluginId, blobUrl);
+          if (localBlobUrl === blobUrl) localBlobUrl = undefined;
+        },
+      });
+      if (isStale()) {
+        revokePluginBlobUrl(pluginId, localBlobUrl);
+        disposeDeclarative?.();
+        return () => undefined;
+      }
+    }
+
+    if (isStale()) {
+      revokePluginBlobUrl(pluginId, localBlobUrl);
+      disposeDeclarative?.();
+      return () => undefined;
     }
 
     const disposeModule = await activatePluginModuleSync(pluginId, mod, {
       callHost: options?.callHost ?? defaultHostTransport,
       generation: metadata.generation,
     });
+    if (isStale()) {
+      disposeModule();
+      disposeDeclarative?.();
+      return () => undefined;
+    }
     return finalizeModuleActivation(
       pluginId,
       disposeModule,
@@ -1343,6 +1415,11 @@ async function loadAsyncModuleSource(
       metadata
     );
   } catch (error) {
+    revokePluginBlobUrl(pluginId, localBlobUrl);
+    if (isStale()) {
+      disposeDeclarative?.();
+      return () => undefined;
+    }
     return handleLoadRuntimeError(pluginId, error, disposeDeclarative);
   }
 }
@@ -1374,16 +1451,13 @@ export function loadSystemBundleProfile(options?: {
 }
 
 function unloadPluginRuntimeImmediate(pluginId: string): void {
+  bumpPluginLoadGeneration(pluginId);
   activeMarkerDisposers.get(pluginId)?.();
   activeDeclarativeDisposers.get(pluginId)?.();
   activePluginMetadata.delete(pluginId);
   deactivatePluginModule(pluginId);
   removePluginCss(pluginId);
-  const blobUrl = activeBlobUrls.get(pluginId);
-  if (blobUrl && typeof URL.revokeObjectURL === 'function') {
-    URL.revokeObjectURL(blobUrl);
-    activeBlobUrls.delete(pluginId);
-  }
+  revokePluginBlobUrl(pluginId);
 }
 
 export function unloadPluginRuntime(pluginId: string): void {
@@ -1399,6 +1473,9 @@ export function unloadAllPluginRuntimes(): void {
     ...activeDependencyWatchers.keys(),
     ...activeDeclarativeDisposers.keys(),
     ...activeMarkerDisposers.keys(),
+    ...activeBlobUrls.keys(),
+    ...activeStyleNodes.keys(),
+    ...loadGenerationByPluginId.keys(),
   ]);
   for (const pluginId of allIds) {
     unloadPluginRuntime(pluginId);

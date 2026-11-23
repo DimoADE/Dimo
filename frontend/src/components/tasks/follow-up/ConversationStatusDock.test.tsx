@@ -798,4 +798,3 @@ describe('ConversationStatusDock', () => {
     expect(within(dock).queryByText('Bot Alpha')).not.toBeInTheDocument();
   });
 });
-

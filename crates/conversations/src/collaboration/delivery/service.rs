@@ -18,6 +18,10 @@ mod rounds;
 
 pub use dispatch::*;
 pub use post::*;
+pub(crate) use post::{
+    attach_provision_activity_to_latest_agent_message, insert_group_created_event,
+    post_to_space_inner_with_extra, record_member_added_event,
+};
 pub use rounds::*;
 
 pub async fn prepare_steer(

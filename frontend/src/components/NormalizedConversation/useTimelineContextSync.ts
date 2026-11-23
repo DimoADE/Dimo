@@ -66,6 +66,7 @@ export function useTimelineContextSync({
   sideRows,
   sessionBindReady,
   connecting,
+  connectingSince,
   runtimeConnection,
   runtimeRequest,
   controlsAgentId,
@@ -100,6 +101,7 @@ export function useTimelineContextSync({
   sideRows: TimelineRow[];
   sessionBindReady: boolean;
   connecting: boolean;
+  connectingSince?: string | null;
   runtimeConnection: RuntimeStatusSnapshot['connection'];
   runtimeRequest: RuntimeStatusSnapshot['request'];
   controlsAgentId: string | null;
@@ -447,6 +449,8 @@ export function useTimelineContextSync({
     () =>
       deriveInlineStreamRuntimeStatus({
         connecting,
+        connectingSince,
+        sessionBindReady,
         connection: runtimeConnection,
         request: runtimeRequest,
         reconnectNotice:
@@ -473,6 +477,7 @@ export function useTimelineContextSync({
     [
       connectErrorNoticeRow,
       connecting,
+      connectingSince,
       currentTurnId,
       hasPendingPermission,
       hasRunningTool,
@@ -486,6 +491,7 @@ export function useTimelineContextSync({
       reconnectNoticeRow,
       runtimeConnection,
       runtimeRequest,
+      sessionBindReady,
       streamingAssistantRow,
     ]
   );

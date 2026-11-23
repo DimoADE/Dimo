@@ -124,6 +124,16 @@ export const sessionsApi = {
     });
   },
 
+  updateWorkspace: async (
+    sessionId: string,
+    workspaceId: string
+  ): Promise<Session> => {
+    return backendCall<Session>('update_session_workspace', {
+      sessionId,
+      workspaceId,
+    });
+  },
+
   markViewed: async (sessionId: string): Promise<Session> => {
     return backendCall<Session>('mark_session_viewed', {
       sessionId,

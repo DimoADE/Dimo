@@ -1,9 +1,11 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   SidecarManager,
@@ -14,6 +16,7 @@ import {
   resolveDefaultDataDir,
   resolveSidecarBinaryPath,
   resolveSidecarStdio,
+  sanitizeSidecarEnv,
   serverBinaryFilename,
   type SidecarUnexpectedExitInfo,
 } from './sidecar';
@@ -300,6 +303,141 @@ describe('SidecarManager stdout draining & crash supervision', () => {
     expect(restarts).toEqual([{ port: 'http://127.0.0.1:42002', attempt: 1 }]);
     expect(manager.getStatus()).toBe('running');
     expect(manager.getConnectionOrNull()?.baseUrl).toBe('http://127.0.0.1:42002');
+  });
+
+  it('sanitizes Linux AppImage LD_LIBRARY_PATH while preserving non-AppImage and non-Linux envs', () => {
+    const stripped = sanitizeSidecarEnv(
+      {
+        APPIMAGE: '/tmp/Dimo.AppImage',
+        LD_LIBRARY_PATH: '/tmp/.mount_Dimo/usr/lib',
+        PATH: '/usr/bin',
+      },
+      'linux'
+    );
+    expect(stripped.LD_LIBRARY_PATH).toBeUndefined();
+    expect(stripped.PATH).toBe('/usr/bin');
+
+    const restored = sanitizeSidecarEnv(
+      {
+        APPIMAGE: '/tmp/Dimo.AppImage',
+        LD_LIBRARY_PATH: '/tmp/.mount_Dimo/usr/lib:/usr/local/lib',
+        APPIMAGE_ORIG_LD_LIBRARY_PATH: '/usr/local/lib',
+      },
+      'linux'
+    );
+    expect(restored.LD_LIBRARY_PATH).toBe('/usr/local/lib');
+
+    const nonAppImage = sanitizeSidecarEnv(
+      { LD_LIBRARY_PATH: '/custom/lib' },
+      'linux'
+    );
+    expect(nonAppImage.LD_LIBRARY_PATH).toBe('/custom/lib');
+
+    const nonLinux = sanitizeSidecarEnv(
+      { APPIMAGE: '/tmp/fake', LD_LIBRARY_PATH: '/custom/lib' },
+      'darwin'
+    );
+    expect(nonLinux.LD_LIBRARY_PATH).toBe('/custom/lib');
+  });
+
+  it('deduplicates concurrent start() calls, keeps persistent child/stdin error listeners, and passes AbortSignal to fetch', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dimo-dedup-'));
+    tempDirs.push(dir);
+    const fakeBin = path.join(dir, 'fake-server');
+    fs.writeFileSync(fakeBin, '', 'utf8');
+
+    let spawnCount = 0;
+    let fakeChild!: EventEmitter & {
+      pid: number;
+      exitCode: number | null;
+      stdin: PassThrough;
+      stdout: PassThrough;
+      stderr: PassThrough;
+      kill: ReturnType<typeof vi.fn>;
+    };
+
+    const manager = new SidecarManager();
+    managers.push(manager);
+
+    const startOpts = {
+      binaryPath: fakeBin,
+      appVersion: '0.5.2-test',
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      spawnProcess: (() => {
+        spawnCount += 1;
+        const emitter = new EventEmitter();
+        const stdin = new PassThrough();
+        const stdout = new PassThrough();
+        const stderr = new PassThrough();
+        fakeChild = Object.assign(emitter, {
+          pid: 55555,
+          exitCode: null as number | null,
+          stdin,
+          stdout,
+          stderr,
+          kill: vi.fn(() => {
+            fakeChild.exitCode = 0;
+            fakeChild.emit('exit', 0, null);
+            return true;
+          }),
+        });
+        setTimeout(() => {
+          stdout.write(
+            JSON.stringify({
+              type: 'dimo-server-ready',
+              listen_addr: '127.0.0.1:42111',
+              port: 42111,
+              pid: 55555,
+              protocol_version: '1.0',
+            }) + '\n'
+          );
+        }, 25);
+        return fakeChild as unknown as ChildProcess;
+      }) as unknown as typeof spawn,
+    };
+
+    const [conn1, conn2] = await Promise.all([
+      manager.start(startOpts),
+      manager.start(startOpts),
+    ]);
+    expect(spawnCount).toBe(1);
+    expect(conn1).toEqual(conn2);
+    expect(conn1.baseUrl).toBe('http://127.0.0.1:42111');
+
+    // Post-ready child 'error' and stdin 'error' must not throw unhandled errors
+    expect(() => fakeChild.emit('error', new Error('late child error'))).not.toThrow();
+    expect(() => fakeChild.stdin.emit('error', new Error('EPIPE'))).not.toThrow();
+
+    // Verify healthCheck & notifyWindowDestroyed always pass AbortSignal, while
+    // invokeDesktopCommand only applies an AbortSignal when timeoutMs is opted in.
+    const signals: Array<AbortSignal | undefined> = [];
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (_input, init) => {
+        signals.push(init?.signal ?? undefined);
+        return new Response(
+          JSON.stringify({ status: 'ok', desktop_mode: true, pid: 55555, version: '0.5.2' }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      });
+    try {
+      await manager.healthCheck();
+      await manager.invokeDesktopCommand('get_developer_mode', {}, 'main');
+      await manager.invokeDesktopCommand('get_developer_mode', {}, 'main', {
+        timeoutMs: 2500,
+      });
+      await manager.notifyWindowDestroyed('main', false);
+      expect(signals).toHaveLength(4);
+      expect(signals[0]).toBeInstanceOf(AbortSignal);
+      expect(signals[1]).toBeUndefined();
+      expect(signals[2]).toBeInstanceOf(AbortSignal);
+      expect(signals[3]).toBeInstanceOf(AbortSignal);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+
+    // Mark child exited so afterEach shutdown doesn't invoke taskkill on fake PID
+    fakeChild.exitCode = 0;
   });
 });
 

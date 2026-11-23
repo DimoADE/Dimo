@@ -114,7 +114,13 @@ describe('release workflow contract', () => {
       "needs.prepare-release.outputs.windows_signing_enabled == 'true'"
     );
     expect(workflow).toContain('windows_signing_method=evsign');
-    expect(workflow).toContain('scripts/sign-windows-evsign.ps1');
+    expect(workflow).toContain('EVSIGN_LICENSE_KEY');
+    expect(read('electron/electron-builder.yml')).toMatch(
+      /sign:\s+\.\/build\/signWindows\.js/
+    );
+    expect(read('electron/build/signWindows.js')).toContain(
+      'sign-windows-evsign.ps1'
+    );
     expect(workflow).not.toContain(
       'Require desktop release signing credentials'
     );

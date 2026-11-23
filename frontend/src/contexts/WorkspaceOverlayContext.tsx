@@ -508,7 +508,7 @@ export function NativeSurfaceOcclusionHold() {
       window.removeEventListener('resize', publish);
       setHtmlOverlayRect(id, null);
     };
-  }, [id, setHtmlOverlayRect]);
+  }, [id, isElectron, setHtmlOverlayRect]);
 
   return (
     <span

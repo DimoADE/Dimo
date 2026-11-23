@@ -1,4 +1,4 @@
-import { memo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import { NodeResizer, type Node, type NodeProps } from '@xyflow/react';
 import { Minimize2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -18,6 +18,7 @@ import { resolveBuiltinPanelTitle } from '@/lib/builtinPanelTitles';
 import { cn } from '@/lib/utils';
 import { PANEL_IDS } from '@/stores/useLayoutStore';
 import { CanvasNodeHandles } from './CanvasNodeHandles';
+import { CanvasNodeSurfaceContext } from './CanvasNodeSurfaceContext';
 import { CanvasPanelHeaderSlotContext } from './CanvasPanelHeaderSlotContext';
 import { CanvasPanelNodeBody } from './CanvasPanelNodeBody';
 import {
@@ -49,6 +50,7 @@ export const SessionCanvasDetailNode = memo(
   function SessionCanvasDetailNode({
     data,
     selected,
+    zIndex,
   }: NodeProps<SessionCanvasDetailFlowNode>) {
     const { t } = useTranslation(['tasks', 'common', 'panels']);
     const [headerSlotEl, setHeaderSlotEl] = useState<HTMLDivElement | null>(
@@ -63,6 +65,10 @@ export const SessionCanvasDetailNode = memo(
     } = useSessionCanvasView();
     const instanceId =
       data.instanceId ?? data.sessionId ?? data.panelId ?? 'detail';
+    const surfaceInfo = useMemo(
+      () => ({ instanceId, zIndex }),
+      [instanceId, zIndex]
+    );
     const session = useCanvasSession(data.sessionId);
     const { openContextMenu, contextMenuElement } = useCanvasNodeContextMenu({
       instanceId,
@@ -143,6 +149,7 @@ export const SessionCanvasDetailNode = memo(
               ) : (
                 <div className="flex min-w-0 flex-1 items-center gap-1.5">
                   <WorkspaceTabIcon
+                    className="h-3.5 w-3.5"
                     component={data.panelComponent}
                     params={(data.panelParams ?? {}) as WorkspaceTabParams}
                   />
@@ -199,18 +206,20 @@ export const SessionCanvasDetailNode = memo(
             </div>
 
             <div className="nowheel nopan canvas-session-thread min-h-0 flex-1 w-full overflow-hidden rounded-t-xl bg-background">
-              <CanvasPanelHeaderSlotContext.Provider
-                value={isCollaborationSpacePanel ? headerSlotEl : null}
-              >
-                <CanvasPanelNodeBody
-                  instanceId={instanceId}
-                  panelId={data.panelId ?? instanceId}
-                  panelComponent={data.panelComponent}
-                  panelTitle={resolvedTitle}
-                  panelParams={data.panelParams}
-                  selected={selected}
-                />
-              </CanvasPanelHeaderSlotContext.Provider>
+              <CanvasNodeSurfaceContext.Provider value={surfaceInfo}>
+                <CanvasPanelHeaderSlotContext.Provider
+                  value={isCollaborationSpacePanel ? headerSlotEl : null}
+                >
+                  <CanvasPanelNodeBody
+                    instanceId={instanceId}
+                    panelId={data.panelId ?? instanceId}
+                    panelComponent={data.panelComponent}
+                    panelTitle={resolvedTitle}
+                    panelParams={data.panelParams}
+                    selected={selected}
+                  />
+                </CanvasPanelHeaderSlotContext.Provider>
+              </CanvasNodeSurfaceContext.Provider>
             </div>
           </div>
           {contextMenuElement}
@@ -266,5 +275,6 @@ export const SessionCanvasDetailNode = memo(
     previous.data.panelComponent === next.data.panelComponent &&
     previous.data.panelTitle === next.data.panelTitle &&
     previous.data.panelParams === next.data.panelParams &&
-    previous.selected === next.selected
+    previous.selected === next.selected &&
+    previous.zIndex === next.zIndex
 );

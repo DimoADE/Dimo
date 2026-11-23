@@ -68,8 +68,8 @@ describe('KeepAliveSurface', () => {
     expect(screen.getByTestId('slot')).toBeInTheDocument();
   });
 
-  it('evicts inactive children at the 30s kanban TTL unless reactivated', () => {
-    expect(KANBAN_INACTIVE_EVICT_MS).toBe(30_000);
+  it('evicts inactive children at the 5m kanban TTL unless reactivated', () => {
+    expect(KANBAN_INACTIVE_EVICT_MS).toBe(5 * 60_000);
     vi.useFakeTimers();
     try {
       const { rerender } = render(

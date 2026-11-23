@@ -770,7 +770,10 @@ export const getToolSummary = (
             : '';
         const rawName = at.tool_name || entryType.tool_name || '';
         const readableName =
-          rawName && !/^(?:call_|fc_|tool[-_]|toolu_|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?::\d+)?$)/i.test(rawName.trim())
+          rawName &&
+          !/^(?:call_|fc_|tool[-_]|toolu_|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?::\d+)?$)/i.test(
+            rawName.trim()
+          )
             ? rawName
             : '';
         return {

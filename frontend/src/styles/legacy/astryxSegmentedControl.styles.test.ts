@@ -143,7 +143,13 @@ describe('Astryx SegmentedControl chrome', () => {
           selector.includes('button') &&
           selector.includes('[data-no-drag]') &&
           selector.includes('.desktop-window-controls') &&
-          selector.includes("[role='tab']")
+          selector.includes("[role='tab']") &&
+          selector.includes("[role='textbox']") &&
+          selector.includes('[data-floating-layer]') &&
+          selector.includes('.dialog-backdrop') &&
+          selector.includes('.collaboration-settings-modal-overlay') &&
+          selector.includes('[data-radix-popper-content-wrapper]') &&
+          selector.includes('.product-context-menu')
       )
     ).toBe(true);
   });

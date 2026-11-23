@@ -32,6 +32,10 @@ import type { KanbanProjectSessionRecord } from '@/hooks/useKanbanProjectSession
 import { useQueryClient } from '@tanstack/react-query';
 import { sessionsApi } from '@/lib/api';
 import { CollaborationCreateOverlay } from '@/features/collaboration/CollaborationCreateOverlay';
+import {
+  notifyCanvasBrowserViewportChange,
+  setCanvasBrowserInteracting,
+} from '@/features/host-browser/electronBrowserSurfaceStore';
 import { registerCanvasCreationHost } from './canvasCreationHost';
 import { useKanbanCanvasListVisible } from '@/lib/kanbanCanvasListVisible';
 import { invalidateWorkspaceSessions } from '@/lib/sessionQueryCache';
@@ -1245,8 +1249,9 @@ function SessionCanvasFlow({
     [addLinkToDocument]
   );
 
+  const isConnecting = connectingState != null;
   useEffect(() => {
-    if (!connectingState) return;
+    if (!isConnecting) return;
     const onPointerMove = (event: PointerEvent) => {
       const flowPoint = screenToFlowPosition({
         x: event.clientX,
@@ -1323,7 +1328,7 @@ function SessionCanvasFlow({
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
     };
-  }, [addLinkToDocument, connectingState, screenToFlowPosition]);
+  }, [addLinkToDocument, isConnecting, screenToFlowPosition]);
 
   const presentSessionIds = useCallback(
     () =>
@@ -1988,6 +1993,24 @@ function SessionCanvasFlow({
     removeSession,
   ]);
 
+  const focusNodeById = useCallback(
+    (instanceId: string) => {
+      const node = documentRef.current.nodes.find(
+        (item) => item.id === instanceId
+      );
+      if (!node) return;
+      setSelectedIds(new Set([node.id]));
+      focusCanvasNode(node);
+    },
+    [focusCanvasNode]
+  );
+
+  const autoArrange = useCallback(() => {
+    const moves = packLayout(documentRef.current.nodes);
+    updateNodes((items) => applyMoves(items, moves));
+    window.setTimeout(() => void fitView({ padding: 0.2, duration: 300 }), 40);
+  }, [fitView, updateNodes]);
+
   useEffect(() => {
     if (!registerWorkspaceController) {
       return undefined;
@@ -2004,13 +2027,17 @@ function SessionCanvasFlow({
         closeOtherCanvasNodes(keepInstanceId),
       closeAllNodes: () => closeAllCanvasNodes(),
       duplicateNode: (instanceId) => duplicateCanvasNode(instanceId),
+      focusNode: focusNodeById,
+      autoArrange,
     });
   }, [
+    autoArrange,
     closeAllCanvasNodes,
     closeOtherCanvasNodes,
     dropPanelAt,
     dropSessionAt,
     duplicateCanvasNode,
+    focusNodeById,
     onCreateSession,
     openOrFocusPanelNode,
     openOrFocusSessionNode,
@@ -2316,6 +2343,7 @@ function SessionCanvasFlow({
     if (!instanceId) return;
     draggedIdRef.current = instanceId;
     surfaceRef.current?.setAttribute('data-canvas-dragging', '');
+    setCanvasBrowserInteracting(true);
     setDraggedId(instanceId);
     const items = documentRef.current.nodes;
     const model = nodeById(items, instanceId);
@@ -2362,6 +2390,7 @@ function SessionCanvasFlow({
   }, []);
 
   const handleNodeDrag = useCallback((_event: unknown, dragged: Node) => {
+    notifyCanvasBrowserViewportChange(zoomRef.current);
     const instanceId = parseCanvasNodeId(dragged.id);
     if (!instanceId) return;
     const items = documentRef.current.nodes;
@@ -2404,6 +2433,8 @@ function SessionCanvasFlow({
       dragFreezeKeyRef.current = null;
       stableFlowNodesRef.current = null;
       surfaceRef.current?.removeAttribute('data-canvas-dragging');
+      setCanvasBrowserInteracting(false);
+      notifyCanvasBrowserViewportChange(zoomRef.current);
       setAlignGuides([]);
       setDropHint(null);
       setDraggedId(null);
@@ -2443,12 +2474,6 @@ function SessionCanvasFlow({
     },
     [expandCard]
   );
-
-  const autoArrange = useCallback(() => {
-    const moves = packLayout(documentRef.current.nodes);
-    updateNodes((items) => applyMoves(items, moves));
-    window.setTimeout(() => void fitView({ padding: 0.2, duration: 300 }), 40);
-  }, [fitView, updateNodes]);
 
   const flowOriginAtCanvasCenter = canvasFlowCenter;
 
@@ -2595,6 +2620,8 @@ function SessionCanvasFlow({
   const handleMove = useCallback((_event: unknown, viewport: Viewport) => {
     zoomRef.current = viewport.zoom;
     surfaceRef.current?.setAttribute('data-canvas-panning', '');
+    setCanvasBrowserInteracting(true);
+    notifyCanvasBrowserViewportChange(viewport.zoom);
   }, []);
 
   const handleMoveEnd = useCallback(
@@ -2603,6 +2630,8 @@ function SessionCanvasFlow({
       pendingViewport.current = viewport;
       pendingViewportDirtyRef.current = true;
       zoomRef.current = viewport.zoom;
+      setCanvasBrowserInteracting(false);
+      notifyCanvasBrowserViewportChange(viewport.zoom);
       if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
       saveTimer.current = window.setTimeout(() => {
         saveTimer.current = null;
@@ -2618,6 +2647,7 @@ function SessionCanvasFlow({
   useEffect(
     () => () => {
       surfaceRef.current?.removeAttribute('data-canvas-panning');
+      setCanvasBrowserInteracting(false);
       if (saveTimer.current != null) {
         window.clearTimeout(saveTimer.current);
         saveTimer.current = null;
@@ -2735,8 +2765,10 @@ function SessionCanvasFlow({
 
   const handleSelectionStart = useCallback(() => {
     marqueeSelectingRef.current = true;
+    setCanvasBrowserInteracting(true);
   }, []);
   const handleSelectionEnd = useCallback(() => {
+    setCanvasBrowserInteracting(false);
     setSelectedIds((current) =>
       expandSelectionToGroups(documentRef.current.nodes, current)
     );
@@ -2751,7 +2783,9 @@ function SessionCanvasFlow({
     []
   );
   const handleFlowInit = useCallback((instance: { getZoom: () => number }) => {
-    zoomRef.current = instance.getZoom();
+    const zoom = instance.getZoom();
+    zoomRef.current = zoom;
+    notifyCanvasBrowserViewportChange(zoom);
   }, []);
 
   const handleNativeDragOver = useCallback(

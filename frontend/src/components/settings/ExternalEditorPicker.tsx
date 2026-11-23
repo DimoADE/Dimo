@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { AlertCircle, Check } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useRegistry } from '@dimoai/plugin-sdk';
@@ -19,6 +20,8 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
+
+const EDITOR_AVAILABILITY_STALE_TIME_MS = 5 * 60 * 1000;
 
 type EditorOption = {
   value: EditorType;
@@ -49,6 +52,7 @@ export function ExternalEditorPicker({
 }) {
   const { t } = useTranslation(['settings', 'common']);
   const customEditorOpeners = useRegistry(runtimeEditorOpenerRegistry);
+  const [dropdownOpened, setDropdownOpened] = useState(false);
   const options = useMemo<EditorOption[]>(() => {
     const builtin: EditorOption[] = [
       { value: EditorType.VS_CODE, label: 'Visual Studio Code', hint: 'code' },
@@ -92,33 +96,65 @@ export function ExternalEditorPicker({
     });
     return builtin;
   }, [customEditorOpeners, t]);
-  const [availability, setAvailability] = useState<
-    Partial<Record<EditorType, boolean>>
-  >({});
 
-  useEffect(() => {
-    let active = true;
-    const editorService = getEditorOpenerService();
-    void Promise.all(
+  const checkableEditorIds = useMemo(
+    () =>
       options
         .filter((option) => option.value !== EditorType.CUSTOM)
-        .map(async (option) => {
+        .map((option) => option.value),
+    [options]
+  );
+
+  const selectedEditorType =
+    value && value.editor_type !== EditorType.CUSTOM ? value.editor_type : null;
+
+  const { data: selectedEditorAvailable } = useQuery({
+    queryKey: ['editor-availability', 'single', selectedEditorType],
+    enabled: selectedEditorType !== null,
+    staleTime: EDITOR_AVAILABILITY_STALE_TIME_MS,
+    queryFn: async () => {
+      if (!selectedEditorType) return null;
+      try {
+        return await getEditorOpenerService().checkAvailability(
+          selectedEditorType
+        );
+      } catch {
+        return false;
+      }
+    },
+  });
+
+  const { data: allAvailability } = useQuery({
+    queryKey: ['editor-availability', 'all', checkableEditorIds],
+    enabled: dropdownOpened,
+    staleTime: EDITOR_AVAILABILITY_STALE_TIME_MS,
+    queryFn: async () => {
+      const editorService = getEditorOpenerService();
+      const entries = await Promise.all(
+        checkableEditorIds.map(async (editorType) => {
           try {
-            const available = await editorService.checkAvailability(
-              option.value
-            );
-            return [option.value, available] as const;
+            const available = await editorService.checkAvailability(editorType);
+            return [editorType, available] as const;
           } catch {
-            return [option.value, false] as const;
+            return [editorType, false] as const;
           }
         })
-    ).then((entries) => {
-      if (active) setAvailability(Object.fromEntries(entries));
-    });
-    return () => {
-      active = false;
+      );
+      return Object.fromEntries(entries) as Partial<
+        Record<EditorType, boolean>
+      >;
+    },
+  });
+
+  const availability = useMemo<Partial<Record<EditorType, boolean>>>(() => {
+    const merged: Partial<Record<EditorType, boolean>> = {
+      ...allAvailability,
     };
-  }, [options]);
+    if (selectedEditorType && typeof selectedEditorAvailable === 'boolean') {
+      merged[selectedEditorType] = selectedEditorAvailable;
+    }
+    return merged;
+  }, [allAvailability, selectedEditorAvailable, selectedEditorType]);
 
   const selectedAvailability =
     !value || value.editor_type === EditorType.CUSTOM
@@ -142,6 +178,9 @@ export function ExternalEditorPicker({
         </div>
         <Select
           value={value?.editor_type ?? ''}
+          onOpenChange={(open) => {
+            if (open) setDropdownOpened(true);
+          }}
           onValueChange={(editorType) => {
             onChange({
               editor_type: editorType as EditorType,

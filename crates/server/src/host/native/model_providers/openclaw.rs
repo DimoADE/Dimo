@@ -98,13 +98,23 @@ pub(super) fn project_with_openclaw_native(
     let Some(native) = native else {
         return view;
     };
+    let url_counts: std::collections::HashMap<String, usize> =
+        view.providers
+            .iter()
+            .fold(std::collections::HashMap::new(), |mut counts, provider| {
+                if !provider.api_url.is_empty() {
+                    *counts.entry(provider.api_url.clone()).or_insert(0) += 1;
+                }
+                counts
+            });
     let mut primary_matched: Option<String> = None;
     for provider in &mut view.providers {
         let slug = openclaw_slug(&provider.name, &provider.id);
+        let unique_url = url_counts.get(&provider.api_url).copied().unwrap_or(0) == 1;
         let matched = native.providers.iter().find(|item| {
             item.source_id == provider.id
                 || item.source_id == slug
-                || (!item.api_url.is_empty() && item.api_url == provider.api_url)
+                || (unique_url && !item.api_url.is_empty() && item.api_url == provider.api_url)
         });
         let enabled = matched.is_some();
         provider.bound = enabled;
@@ -160,7 +170,11 @@ pub(super) fn openclaw_slug(name: &str, id: &str) -> String {
     }
 }
 
-fn resolve_openclaw_key(providers: &Map<String, Value>, provider: &StoredProvider) -> String {
+fn resolve_openclaw_key(
+    providers: &Map<String, Value>,
+    provider: &StoredProvider,
+    allow_url_fallback: bool,
+) -> String {
     if providers.contains_key(&provider.id) {
         return provider.id.clone();
     }
@@ -168,18 +182,20 @@ fn resolve_openclaw_key(providers: &Map<String, Value>, provider: &StoredProvide
     if providers.contains_key(&slug) {
         return slug;
     }
-    if let Some(existing) = providers.iter().find_map(|(key, value)| {
-        if key == "dimo" {
-            return None;
-        }
-        let url = value
-            .as_object()
-            .and_then(|obj| obj.get("baseUrl").or_else(|| obj.get("base_url")))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .unwrap_or("");
-        (!provider.api_url.is_empty() && url == provider.api_url).then(|| key.clone())
-    }) {
+    if allow_url_fallback
+        && let Some(existing) = providers.iter().find_map(|(key, value)| {
+            if key == "dimo" {
+                return None;
+            }
+            let url = value
+                .as_object()
+                .and_then(|obj| obj.get("baseUrl").or_else(|| obj.get("base_url")))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or("");
+            (!provider.api_url.is_empty() && url == provider.api_url).then(|| key.clone())
+        })
+    {
         return existing;
     }
     slug
@@ -188,6 +204,7 @@ fn resolve_openclaw_key(providers: &Map<String, Value>, provider: &StoredProvide
 pub(super) async fn apply_openclaw(
     openclaw_home: &Path,
     provider: &StoredProvider,
+    allow_url_fallback: bool,
 ) -> Result<(), crate::host::native::NativeError> {
     let path = openclaw_home.join("openclaw.json");
     let filesystem = TokioNativeFileSystem;
@@ -199,7 +216,7 @@ pub(super) async fn apply_openclaw(
         models.insert("mode".to_string(), Value::String("merge".to_string()));
         let providers = object_entry(models, "providers")?;
         providers.remove("dimo");
-        let key = resolve_openclaw_key(providers, provider);
+        let key = resolve_openclaw_key(providers, provider, allow_url_fallback);
         let mut entry = Map::new();
         entry.insert(
             "baseUrl".to_string(),
@@ -267,17 +284,23 @@ pub(super) async fn remove_native_openclaw_provider(
         .and_then(|models| models.get_mut("providers"))
         .and_then(Value::as_object_mut)
     {
-        if let Some(url_key) = providers.iter().find_map(|(k, v)| {
-            let url = v
-                .as_object()
-                .and_then(|o| o.get("baseUrl").or_else(|| o.get("base_url")))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .unwrap_or("");
-            (!provider.api_url.is_empty() && url == provider.api_url).then(|| k.clone())
-        }) && !removed_keys.contains(&url_key)
-        {
-            removed_keys.push(url_key);
+        let exact_present = removed_keys.iter().any(|key| providers.contains_key(key));
+        if !exact_present && !provider.api_url.is_empty() {
+            let url_matches: Vec<String> = providers
+                .iter()
+                .filter_map(|(k, v)| {
+                    let url = v
+                        .as_object()
+                        .and_then(|o| o.get("baseUrl").or_else(|| o.get("base_url")))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .unwrap_or("");
+                    (url == provider.api_url).then(|| k.clone())
+                })
+                .collect();
+            if url_matches.len() == 1 && !removed_keys.contains(&url_matches[0]) {
+                removed_keys.push(url_matches[0].clone());
+            }
         }
         for key in &removed_keys {
             if providers.remove(key).is_some() {

@@ -68,7 +68,7 @@ jobs:
         # vulnerable rsa crate has no patched release and is absent from the
         # resolved dependency graph for every target (`cargo tree --target all`).
         # `zip` advisories affect `ZipArchive::extract` / `ZipStreamReader::extract`
-        # symlink handling; Dimo does not call `extract` and `tauri-plugin-updater`
+        # symlink handling; Dimo does not call `extract`.
         # `sqlx 0.8.6` pins `libsqlite3-sys ^0.30.1` (<0.39.0), which has no
         # upstream sqlx 0.8 release bumping it yet (RUSTSEC-2026-0459).
         # `libz-sys` (from `git2`/`libgit2-sys`) has no patched release for
@@ -95,7 +95,59 @@ jobs:
         # is @dimoai/plugin-cli -> vite, which compiles developer-authored build
         # globs and does not accept remote untrusted extglob patterns.
         # Ignored via pnpm.auditConfig.ignoreGhsas until an upstream patch exists.
-        run: pnpm audit --prod --audit-level high
+        #
+        # pnpm 10.x lockfileToAuditTree also serializes workspace importers by
+        # relative directory path, causing the private `electron/` workspace
+        # package (`@dimo/electron`) to collide with the npm `electron` package
+        # at our repo version (real `electron` is devDependencies-only). Filter
+        # strictly that synthetic root importer node while failing on every real
+        # high/critical production advisory.
+        run: |
+          node -e '
+            const { spawnSync } = require("node:child_process");
+            const electronVersion = require("./electron/package.json").version;
+            const pnpmBin = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+            const res = spawnSync(
+              pnpmBin,
+              ["audit", "--prod", "--audit-level", "high", "--json"],
+              { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }
+            );
+            if (res.error) throw res.error;
+            const report = JSON.parse(res.stdout);
+            if (report.error || !report.advisories) {
+              console.error(res.stdout || res.stderr);
+              process.exit(res.status || 1);
+            }
+            const blocking = new Set(["high", "critical"]);
+            const isWorkspaceDirCollision = (adv) =>
+              adv.module_name === "electron" &&
+              Array.isArray(adv.findings) &&
+              adv.findings.length > 0 &&
+              adv.findings.every(
+                (f) =>
+                  f.version === electronVersion &&
+                  Array.isArray(f.paths) &&
+                  f.paths.length > 0 &&
+                  f.paths.every((p) => p === "electron")
+              );
+            const failures = Object.values(report.advisories).filter(
+              (adv) => blocking.has(adv.severity) && !isWorkspaceDirCollision(adv)
+            );
+            if (failures.length > 0) {
+              for (const adv of failures) {
+                console.error(
+                  `[${adv.severity}] ${adv.module_name} (${adv.github_advisory_id}): ${adv.title}`
+                );
+                for (const f of adv.findings || []) {
+                  console.error(
+                    `  version=${f.version} paths=${(f.paths || []).join(", ")}`
+                  );
+                }
+              }
+              process.exit(1);
+            }
+            console.log("No high or critical production JavaScript advisories.");
+          '
 
   frontend-build:
     runs-on: *runner_label
@@ -214,7 +266,7 @@ jobs:
         run: |
           set -x
           cargo fmt --all -- --check & pid_fmt=$!
-          cargo clippy --all --all-targets -- -D warnings
+          cargo clippy --workspace --all-targets --features qa-mode -- -D warnings
           wait $pid_fmt
 
   backend-test:
@@ -231,7 +283,7 @@ jobs:
           - group: plugins
             flags: -p plugins -p dimo-plugin-sdk
           - group: server-services
-            flags: -p remote-protocol -p review -p server -p services -p tool-runtime -p utils -p dimo -p dimo-mcp -p dimo-workflow-mcp -p workflows
+            flags: -p remote-protocol -p review -p server -p services -p tool-runtime -p utils -p dimo-mcp -p dimo-workflow-mcp -p workflows
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: "sccache"
@@ -251,6 +303,33 @@ jobs:
 
       - name: Run Cargo tests
         run: cargo nextest run ${{ matrix.flags }} --no-fail-fast --status-level slow
+
+  electron-checks:
+    runs-on: *runner_label
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - name: Setup Node
+        uses: ./.github/actions/setup-node
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check, build, and test Electron shell
+        run: |
+          pnpm run electron:check
+          pnpm run electron:build
+          pnpm run electron:test
+
+      - name: Verify desktop packaging and release scripts
+        run: |
+          pnpm run test:tauri-bridge-manifest
+          pnpm run test:app-icon
+          pnpm run test:host-family-package
+          pnpm run test:release-assets
+          node --test scripts/stage-host-sidecars.test.js scripts/watch-host-sidecars.test.js scripts/check-dependency-licenses.test.mjs
 
   backend-platform-check:
     name: cargo check ${{ matrix.name }}

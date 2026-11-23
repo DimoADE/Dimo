@@ -1,7 +1,10 @@
-import type { Dispatch, SetStateAction } from 'react';
+import { useMemo, type Dispatch, type SetStateAction } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FolderOpen, Hash, Zap } from 'lucide-react';
-import type { ProjectUsageStatistics } from '@/lib/api';
+import type {
+  ProjectUsageSessionSummary,
+  ProjectUsageStatistics,
+} from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { UsageExpandableRow } from '../UsageExpandableRow';
 import { UsageCardHeader, UsageRankingMetricPill } from './UsageCards';
@@ -14,6 +17,8 @@ import {
 } from './usageFormat';
 import { preferredTokenCounts, preferredTokenTotal } from './usageModel';
 import type { UsageTab } from './types';
+
+const EMPTY_SESSIONS: ProjectUsageSessionSummary[] = [];
 
 export function UsageDimensionPanels({
   activeTab,
@@ -42,6 +47,34 @@ export function UsageDimensionPanels({
   notProvided: string;
 }) {
   const { t } = useTranslation(['tasks', 'common']);
+
+  const { sessionsByFolder, sessionsByAgent, sessionsByModel } = useMemo(() => {
+    const byFolder = new Map<string, ProjectUsageSessionSummary[]>();
+    const byAgent = new Map<string, ProjectUsageSessionSummary[]>();
+    const byModel = new Map<string, ProjectUsageSessionSummary[]>();
+    for (const session of statistics.sessions) {
+      const folderKey = session.workspace_id;
+      const folderList = byFolder.get(folderKey);
+      if (folderList) folderList.push(session);
+      else byFolder.set(folderKey, [session]);
+
+      const agentKey = session.agent_id ?? 'unprovided';
+      const agentList = byAgent.get(agentKey);
+      if (agentList) agentList.push(session);
+      else byAgent.set(agentKey, [session]);
+
+      const modelKey = session.model ?? 'unprovided';
+      const modelList = byModel.get(modelKey);
+      if (modelList) modelList.push(session);
+      else byModel.set(modelKey, [session]);
+    }
+    return {
+      sessionsByFolder: byFolder,
+      sessionsByAgent: byAgent,
+      sessionsByModel: byModel,
+    };
+  }, [statistics.sessions]);
+
   return (
     <>
       {statistics && activeTab === 'folders' ? (
@@ -71,12 +104,10 @@ export function UsageDimensionPanels({
                   folder.workspace_id
                 );
                 const folderPath = folder.folder || folder.workspace_id;
-                const folderSessions = statistics.sessions.filter(
-                  (session) => session.workspace_id === folder.workspace_id
-                );
                 const folderBreakdown = isExpanded
                   ? buildDimensionSubBreakdown(
-                      folderSessions,
+                      sessionsByFolder.get(folder.workspace_id) ??
+                        EMPTY_SESSIONS,
                       folder.tokens,
                       folder.cost,
                       folder.session_count,
@@ -176,13 +207,9 @@ export function UsageDimensionPanels({
             <div className="space-y-2">
               {statistics.by_agent.map((agent, index) => {
                 const isExpanded = expandedAgentId === agent.agent_id;
-                const agentSessions = statistics.sessions.filter(
-                  (session) =>
-                    (session.agent_id ?? 'unprovided') === agent.agent_id
-                );
                 const agentBreakdown = isExpanded
                   ? buildDimensionSubBreakdown(
-                      agentSessions,
+                      sessionsByAgent.get(agent.agent_id) ?? EMPTY_SESSIONS,
                       agent.tokens,
                       agent.cost,
                       agent.session_count,
@@ -280,12 +307,9 @@ export function UsageDimensionPanels({
               {statistics.by_model.map((model, index) => {
                 const isExpanded = expandedModelId === model.model;
                 const modelCounts = preferredTokenCounts(model.tokens);
-                const modelSessions = statistics.sessions.filter(
-                  (session) => (session.model ?? 'unprovided') === model.model
-                );
                 const modelBreakdown = isExpanded
                   ? buildDimensionSubBreakdown(
-                      modelSessions,
+                      sessionsByModel.get(model.model) ?? EMPTY_SESSIONS,
                       model.tokens,
                       model.cost,
                       model.session_count,

@@ -1,14 +1,58 @@
 #[cfg(target_os = "windows")]
+fn is_process_still_alive_when_sync_denied(pid: u32) -> bool {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, ERROR_ACCESS_DENIED, GetLastError, STILL_ACTIVE},
+        System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+
+    // SAFETY: Querying process liveness by PID with read-only limited-information access.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if !handle.is_null() {
+            let mut exit_code: u32 = 0;
+            let ok = GetExitCodeProcess(handle, &mut exit_code);
+            let _ = CloseHandle(handle);
+            // If GetExitCodeProcess fails, assume still alive only if access wasn't lost;
+            // STILL_ACTIVE (259) means the process has not terminated.
+            return ok != 0 && exit_code == STILL_ACTIVE as u32;
+        }
+        // Even limited query can fail with ERROR_ACCESS_DENIED for elevated/protected
+        // parents while they are alive; a vanished PID returns ERROR_INVALID_PARAMETER.
+        GetLastError() == ERROR_ACCESS_DENIED
+    }
+}
+
+#[cfg(target_os = "windows")]
 pub fn wait_for_parent_exit(pid: u32) {
     use windows_sys::Win32::{
-        Foundation::CloseHandle,
+        Foundation::{CloseHandle, ERROR_ACCESS_DENIED, GetLastError},
         System::Threading::{INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
     };
+    if pid == 0 {
+        return;
+    }
+    // SAFETY: Waiting on a Win32 process handle opened for synchronization.
     unsafe {
         let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
         if !handle.is_null() {
             let _ = WaitForSingleObject(handle, INFINITE);
             let _ = CloseHandle(handle);
+            return;
+        }
+        let err = GetLastError();
+        if err != ERROR_ACCESS_DENIED {
+            return;
+        }
+    }
+
+    tracing::warn!(
+        pid,
+        "OpenProcess(PROCESS_SYNCHRONIZE) returned ERROR_ACCESS_DENIED; falling back to periodic parent-exit polling"
+    );
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if !is_process_still_alive_when_sync_denied(pid) {
+            return;
         }
     }
 }
@@ -70,5 +114,23 @@ pub fn terminate_owned_pid(pid: u32) {
                 let _ = libc::kill(raw_pid, libc::SIGTERM);
             }
         }
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_process_is_reported_alive_by_limited_query_helper() {
+        assert!(is_process_still_alive_when_sync_denied(std::process::id()));
+    }
+
+    #[test]
+    fn wait_for_parent_exit_returns_immediately_for_zero_or_missing_pid() {
+        wait_for_parent_exit(0);
+        // PID u32::MAX - 3 is never a valid Windows PID (PIDs are multiples of 4).
+        assert!(!is_process_still_alive_when_sync_denied(u32::MAX - 3));
+        wait_for_parent_exit(u32::MAX - 3);
     }
 }

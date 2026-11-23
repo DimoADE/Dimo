@@ -104,6 +104,60 @@ export function hydrateAgentSnapshot(
 }
 
 const MAX_RETAINED_WORKBENCH_ERRORS = 8;
+const MAX_RETAINED_WORKBENCH_ENTITIES = 128;
+const MAX_RETAINED_WORKBENCH_SCOPES = 128;
+
+const WORKBENCH_STATE_EVENT_KINDS = new Set<
+  AgentEventEnvelope['event']['kind']
+>([
+  'connection_status_changed',
+  'session_created',
+  'prompt_started',
+  'prompt_finished',
+  'permission_requested',
+  'permission_responded',
+  'terminal_created',
+  'session_modes',
+  'mode_changed',
+  'session_config_options',
+  'config_changed',
+  'available_commands',
+  'usage',
+  'error',
+]);
+
+/**
+ * High-frequency transcript streaming envelopes (`message_chunk`, `thought_chunk`,
+ * `tool_call_update`, etc.) are persisted into the durable conversation log and
+ * do not affect AgentWorkbench state.
+ */
+export function isWorkbenchStateEvent(
+  kind: AgentEventEnvelope['event']['kind']
+): boolean {
+  return WORKBENCH_STATE_EVENT_KINDS.has(kind);
+}
+
+function capRecord<T>(
+  record: Record<string, T>,
+  maxEntries: number,
+  isProtected?: (value: T) => boolean
+): Record<string, T> {
+  const keys = Object.keys(record);
+  if (keys.length <= maxEntries) {
+    return record;
+  }
+  let toDrop = keys.length - maxEntries;
+  const next: Record<string, T> = {};
+  for (const key of keys) {
+    const value = record[key];
+    if (toDrop > 0 && (!isProtected || !isProtected(value))) {
+      toDrop -= 1;
+      continue;
+    }
+    next[key] = value;
+  }
+  return next;
+}
 
 export function reduceAgentEvent(
   state: AgentWorkbenchState,
@@ -130,22 +184,35 @@ export function reduceAgentEvent(
 
   switch (envelope.event.kind) {
     case 'connection_status_changed':
-      next.connections = {
-        ...state.connections,
-        [envelope.event.snapshot.id]: envelope.event.snapshot,
-      };
+      next.connections = capRecord(
+        {
+          ...state.connections,
+          [envelope.event.snapshot.id]: envelope.event.snapshot,
+        },
+        MAX_RETAINED_WORKBENCH_ENTITIES,
+        (conn) => conn.status === 'connecting' || conn.status === 'ready'
+      );
       return next;
     case 'session_created':
-      next.sessions = {
-        ...state.sessions,
-        [envelope.event.snapshot.id]: envelope.event.snapshot,
-      };
+      next.sessions = capRecord(
+        {
+          ...state.sessions,
+          [envelope.event.snapshot.id]: envelope.event.snapshot,
+        },
+        MAX_RETAINED_WORKBENCH_ENTITIES,
+        (session) =>
+          session.status === 'running' || Boolean(session.active_prompt_id)
+      );
       return next;
     case 'prompt_started':
-      next.prompts = {
-        ...state.prompts,
-        [envelope.event.snapshot.id]: envelope.event.snapshot,
-      };
+      next.prompts = capRecord(
+        {
+          ...state.prompts,
+          [envelope.event.snapshot.id]: envelope.event.snapshot,
+        },
+        MAX_RETAINED_WORKBENCH_ENTITIES,
+        (prompt) => prompt.status.kind === 'running'
+      );
       next.sessions = withSessionPrompt(
         state.sessions,
         envelope.session_id,
@@ -186,36 +253,48 @@ export function reduceAgentEvent(
       return next;
     }
     case 'terminal_created':
-      next.terminals = {
-        ...state.terminals,
-        [envelope.event.terminal.id]: envelope.event.terminal,
-      };
+      next.terminals = capRecord(
+        {
+          ...state.terminals,
+          [envelope.event.terminal.id]: envelope.event.terminal,
+        },
+        MAX_RETAINED_WORKBENCH_ENTITIES
+      );
       return next;
     case 'session_modes':
-      next.sessionModesByScope = {
-        ...state.sessionModesByScope,
-        [scopeId(envelope)]: {
-          modes: envelope.event.modes,
-          current: envelope.event.current ?? null,
+      next.sessionModesByScope = capRecord(
+        {
+          ...state.sessionModesByScope,
+          [scopeId(envelope)]: {
+            modes: envelope.event.modes,
+            current: envelope.event.current ?? null,
+          },
         },
-      };
+        MAX_RETAINED_WORKBENCH_SCOPES
+      );
       return next;
     case 'mode_changed': {
       const scope = scopeId(envelope);
-      next.sessionModesByScope = {
-        ...state.sessionModesByScope,
-        [scope]: {
-          modes: state.sessionModesByScope[scope]?.modes ?? [],
-          current: envelope.event.mode_id,
+      next.sessionModesByScope = capRecord(
+        {
+          ...state.sessionModesByScope,
+          [scope]: {
+            modes: state.sessionModesByScope[scope]?.modes ?? [],
+            current: envelope.event.mode_id,
+          },
         },
-      };
+        MAX_RETAINED_WORKBENCH_SCOPES
+      );
       return next;
     }
     case 'session_config_options':
-      next.sessionConfigOptionsByScope = {
-        ...state.sessionConfigOptionsByScope,
-        [scopeId(envelope)]: envelope.event.options,
-      };
+      next.sessionConfigOptionsByScope = capRecord(
+        {
+          ...state.sessionConfigOptionsByScope,
+          [scopeId(envelope)]: envelope.event.options,
+        },
+        MAX_RETAINED_WORKBENCH_SCOPES
+      );
       return next;
     case 'config_changed': {
       const scope = scopeId(envelope);
@@ -232,26 +311,35 @@ export function reduceAgentEvent(
     case 'config_option_rejected':
       return next;
     case 'available_commands':
-      next.availableCommandsByScope = {
-        ...state.availableCommandsByScope,
-        [scopeId(envelope)]: envelope.event.commands,
-      };
+      next.availableCommandsByScope = capRecord(
+        {
+          ...state.availableCommandsByScope,
+          [scopeId(envelope)]: envelope.event.commands,
+        },
+        MAX_RETAINED_WORKBENCH_SCOPES
+      );
       return next;
     case 'usage':
-      next.usageByScope = {
-        ...state.usageByScope,
-        [scopeId(envelope)]: envelope.event.usage,
-      };
+      next.usageByScope = capRecord(
+        {
+          ...state.usageByScope,
+          [scopeId(envelope)]: envelope.event.usage,
+        },
+        MAX_RETAINED_WORKBENCH_SCOPES
+      );
       return next;
     case 'error': {
       const scope = scopeId(envelope);
       const prior = state.errorsByScope[scope] ?? [];
-      next.errorsByScope = {
-        ...state.errorsByScope,
-        [scope]: [...prior, envelope.event.error.message].slice(
-          -MAX_RETAINED_WORKBENCH_ERRORS
-        ),
-      };
+      next.errorsByScope = capRecord(
+        {
+          ...state.errorsByScope,
+          [scope]: [...prior, envelope.event.error.message].slice(
+            -MAX_RETAINED_WORKBENCH_ERRORS
+          ),
+        },
+        MAX_RETAINED_WORKBENCH_SCOPES
+      );
       next.sessions = clearSessionPrompt(state.sessions, envelope.session_id);
       return next;
     }

@@ -454,7 +454,10 @@ export const ComposerDock = memo(function ComposerDock() {
             }
             overlay={
               pendingPermissions.length > 0 || pendingQuestions.length > 0 ? (
-                <div className="space-y-2" data-testid="space-composer-overlay">
+                <div
+                  className="mb-2 space-y-2"
+                  data-testid="space-composer-overlay"
+                >
                   <PermissionRequestStack items={pendingPermissions} />
                   {pendingQuestions.map((question) => (
                     <AgentQuestionCard

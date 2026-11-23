@@ -13,6 +13,25 @@ pub async fn host_add_space_member(
     nickname: &str,
     operation_id: Uuid,
 ) -> Result<MemberRecord, CollaborationError> {
+    host_add_space_member_with_options(
+        pool,
+        space_id,
+        conversation_id,
+        nickname,
+        operation_id,
+        false,
+    )
+    .await
+}
+
+pub async fn host_add_space_member_with_options(
+    pool: &SqlitePool,
+    space_id: &str,
+    conversation_id: Uuid,
+    nickname: &str,
+    operation_id: Uuid,
+    during_create: bool,
+) -> Result<MemberRecord, CollaborationError> {
     let space = load_space_or_unassigned(pool, space_id).await?;
     let target = live_session(load_session(pool, conversation_id).await?)?;
     if target.workspace_id.to_string() != space.workspace_id {
@@ -90,7 +109,7 @@ pub async fn host_add_space_member(
                     None => false,
                 };
                 let has_messages = sqlx::query_scalar::<_, i64>(
-                    "SELECT 1 FROM collaboration_space_messages WHERE space_id = ? LIMIT 1",
+                    "SELECT 1 FROM collaboration_space_messages WHERE space_id = ? AND origin != 'system' LIMIT 1",
                 )
                 .bind(space_id)
                 .fetch_optional(pool)
@@ -102,6 +121,9 @@ pub async fn host_add_space_member(
                 }
             }
         }
+        let _ =
+            record_member_added_event(pool, space_id, None, true, &record.nickname, during_create)
+                .await;
     }
     store_operation(
         pool,
@@ -158,6 +180,35 @@ pub async fn add_space_member(
         true,
     )
     .await?;
+    if parse_unassigned_space_id(space_id).is_none()
+        && !space_id.starts_with(identity::DIRECT_PREFIX)
+    {
+        let caller_id_text = caller_id.to_string();
+        let caller_identity =
+            identity_member_id_for_conversation(pool, Some(caller_id_text.as_str()))
+                .await
+                .ok()
+                .flatten();
+        let actor_name = match caller_identity.as_deref() {
+            Some(member_id) => identity::load_member(pool, member_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|m| m.name)
+                .filter(|name| !name.trim().is_empty()),
+            None => None,
+        }
+        .or_else(|| caller.name.clone().filter(|name| !name.trim().is_empty()));
+        let _ = record_member_added_event(
+            pool,
+            space_id,
+            actor_name.as_deref(),
+            false,
+            &record.nickname,
+            false,
+        )
+        .await;
+    }
     store_operation(
         pool,
         &operation_id.to_string(),
@@ -1066,4 +1117,224 @@ async fn build_bot_agent_catalog_entry(
         "default_config_values": default_config_values,
         "config_options": snapshot.config_options,
     })
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, PartialEq, Eq)]
+pub struct ResolvedBotAgentModel {
+    pub agent_id: Option<String>,
+    pub model: Option<String>,
+    pub model_label: Option<String>,
+}
+
+struct AgentModelCatalogInfo {
+    default_model: Option<String>,
+    labels: std::collections::HashMap<String, String>,
+    labels_lower: std::collections::HashMap<String, String>,
+}
+
+impl AgentModelCatalogInfo {
+    fn resolve_label(&self, model: &str) -> String {
+        self.labels
+            .get(model)
+            .or_else(|| self.labels_lower.get(&model.to_ascii_lowercase()))
+            .cloned()
+            .unwrap_or_else(|| model.to_string())
+    }
+}
+
+async fn load_agent_model_catalog_info(
+    pool: &SqlitePool,
+    agent_id_raw: &str,
+) -> AgentModelCatalogInfo {
+    let Ok(parsed) = AgentId::parse(agent_id_raw) else {
+        return AgentModelCatalogInfo {
+            default_model: None,
+            labels: std::collections::HashMap::new(),
+            labels_lower: std::collections::HashMap::new(),
+        };
+    };
+    let snapshot = load_latest_catalog_snapshot(pool, &parsed).await;
+    let defaults = db::models::agent_management::SessionDefaultRepository::new(pool.clone())
+        .list_for_agent(&parsed)
+        .await
+        .unwrap_or_default();
+    let mut default_config_map = serde_json::Map::new();
+    for record in defaults {
+        let parsed_val = serde_json::from_str::<Value>(&record.value_json)
+            .unwrap_or_else(|_| Value::String(record.value_json.clone()));
+        if record.option_id != "mode" {
+            default_config_map.insert(record.option_id, parsed_val);
+        }
+    }
+    let (default_model_from_settings, _) =
+        extract_model_and_thinking(&Value::Object(default_config_map));
+
+    let mut labels = std::collections::HashMap::new();
+    let mut labels_lower = std::collections::HashMap::new();
+    let mut catalog_default = None;
+    if let Some(snapshot) = snapshot
+        && let Some(model_opt) = snapshot
+            .config_options
+            .iter()
+            .find(|opt| is_model_option(opt))
+    {
+        catalog_default = config_string_value(model_opt.value.as_ref());
+        for choice in &model_opt.choices {
+            let Some(val) = config_string_value(Some(&choice.value)) else {
+                continue;
+            };
+            let lbl = choice.label.trim();
+            if !val.is_empty() && !lbl.is_empty() {
+                labels.insert(val.clone(), lbl.to_string());
+                labels_lower.insert(val.to_ascii_lowercase(), lbl.to_string());
+            }
+        }
+    }
+    AgentModelCatalogInfo {
+        default_model: default_model_from_settings.or(catalog_default),
+        labels,
+        labels_lower,
+    }
+}
+
+/// Resolve `(agent_id, model, model_label)` for a batch of bots in O(distinct agents) queries.
+/// Each request item is `(member_agent_id, explicit_model, optional_conversation_id)`.
+pub async fn resolve_agent_models_batch(
+    pool: &SqlitePool,
+    requests: &[(Option<String>, Option<String>, Option<Uuid>)],
+) -> Vec<ResolvedBotAgentModel> {
+    if requests.is_empty() {
+        return Vec::new();
+    }
+
+    // Batch-fetch session agent_id and latest conversation_agent_bindings config for any
+    // item that has a conversation_id and is missing either agent_id or explicit model.
+    let mut need_conv_ids: Vec<Uuid> = Vec::new();
+    for (agent, model, conv_id) in requests {
+        let has_agent = agent.as_deref().is_some_and(|s| !s.trim().is_empty());
+        let has_model = model.as_deref().is_some_and(|s| !s.trim().is_empty());
+        if (!has_agent || !has_model)
+            && let Some(cid) = conv_id
+            && !need_conv_ids.contains(cid)
+        {
+            need_conv_ids.push(*cid);
+        }
+    }
+
+    let mut conv_fallback: std::collections::HashMap<Uuid, (Option<String>, Option<String>)> =
+        std::collections::HashMap::new();
+    if !need_conv_ids.is_empty() {
+        let placeholders = std::iter::repeat_n("?", need_conv_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            r#"SELECT s.id,
+                      s.agent_id,
+                      (
+                        SELECT b.config_selection_json
+                        FROM conversation_agent_bindings b
+                        WHERE b.conversation_id = s.id
+                          AND b.config_selection_json IS NOT NULL
+                          AND b.config_selection_json NOT IN ('', '{{}}')
+                        ORDER BY b.created_at DESC
+                        LIMIT 1
+                      ) AS config_selection_json
+               FROM sessions s
+               WHERE s.id IN ({placeholders})"#
+        );
+        let mut q = sqlx::query_as::<_, (Uuid, Option<String>, Option<String>)>(&sql);
+        for cid in &need_conv_ids {
+            q = q.bind(cid);
+        }
+        if let Ok(rows) = q.fetch_all(pool).await {
+            for (cid, sess_agent, cfg_raw) in rows {
+                let sess_model = cfg_raw
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                    .and_then(|val| extract_model_and_thinking(&val).0);
+                conv_fallback.insert(cid, (sess_agent, sess_model));
+            }
+        }
+    }
+
+    // Collect effective (agent_id, explicit_model) per request and distinct agents.
+    let mut resolved_inputs: Vec<(Option<String>, Option<String>)> =
+        Vec::with_capacity(requests.len());
+    let mut distinct_agents: Vec<String> = Vec::new();
+    for (agent, model, conv_id) in requests {
+        let fb = conv_id.and_then(|cid| conv_fallback.get(&cid));
+        let eff_agent = agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                fb.and_then(|(a, _)| a.as_deref())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            });
+        let eff_model = model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                fb.and_then(|(_, m)| m.as_deref())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            });
+        if let Some(ref a) = eff_agent
+            && !distinct_agents.iter().any(|existing| existing == a)
+        {
+            distinct_agents.push(a.clone());
+        }
+        resolved_inputs.push((eff_agent, eff_model));
+    }
+
+    let mut catalogs: std::collections::HashMap<String, AgentModelCatalogInfo> =
+        std::collections::HashMap::with_capacity(distinct_agents.len());
+    for agent_id in distinct_agents {
+        let info = load_agent_model_catalog_info(pool, &agent_id).await;
+        catalogs.insert(agent_id, info);
+    }
+
+    resolved_inputs
+        .into_iter()
+        .map(|(agent_id, explicit_model)| {
+            let catalog = agent_id.as_deref().and_then(|id| catalogs.get(id));
+            let model = explicit_model.or_else(|| catalog.and_then(|c| c.default_model.clone()));
+            let model_label = model.as_deref().map(|m| {
+                catalog
+                    .map(|c| c.resolve_label(m))
+                    .unwrap_or_else(|| m.to_string())
+            });
+            ResolvedBotAgentModel {
+                agent_id,
+                model,
+                model_label,
+            }
+        })
+        .collect()
+}
+
+pub async fn resolve_bot_agent_model(
+    pool: &SqlitePool,
+    agent_id: Option<&str>,
+    explicit_model: Option<&str>,
+    conversation_id: Option<Uuid>,
+) -> ResolvedBotAgentModel {
+    resolve_agent_models_batch(
+        pool,
+        &[(
+            agent_id.map(str::to_string),
+            explicit_model.map(str::to_string),
+            conversation_id,
+        )],
+    )
+    .await
+    .into_iter()
+    .next()
+    .unwrap_or_default()
 }

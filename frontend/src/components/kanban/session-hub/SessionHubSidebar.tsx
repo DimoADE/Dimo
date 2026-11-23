@@ -392,6 +392,7 @@ function DraggableSessionCard({
       )}
       style={{
         opacity: isDragging ? 0 : undefined,
+        contain: 'layout style',
       }}
     >
       <SessionHubListItem

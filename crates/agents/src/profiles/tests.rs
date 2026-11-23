@@ -26,6 +26,9 @@ fn flagship_profiles_resolve_native_engine_topology_first_and_honor_acp_override
     let codex = catalog
         .profile(&AgentId::parse("codex").unwrap())
         .expect("codex profile");
+    let muse = catalog
+        .profile(&AgentId::parse("muse_code").unwrap())
+        .expect("muse_code profile");
     let opencode = catalog
         .profile(&AgentId::parse("opencode").unwrap())
         .expect("opencode profile");
@@ -38,6 +41,10 @@ fn flagship_profiles_resolve_native_engine_topology_first_and_honor_acp_override
         codex.native_engine_kind(),
         Some(crate::engine::NativeEngineKind::CodexNative)
     );
+    assert_eq!(
+        muse.native_engine_kind(),
+        Some(crate::engine::NativeEngineKind::MuseNative)
+    );
     assert_eq!(opencode.native_engine_kind(), None);
 
     assert_eq!(
@@ -47,6 +54,10 @@ fn flagship_profiles_resolve_native_engine_topology_first_and_honor_acp_override
     assert_eq!(
         codex.topology,
         ProfileTopology::NativeEngine(crate::engine::NativeEngineKind::CodexNative)
+    );
+    assert_eq!(
+        muse.topology,
+        ProfileTopology::NativeEngine(crate::engine::NativeEngineKind::MuseNative)
     );
     assert_eq!(
         claude.effective_topology(crate::engine::EngineRuntimePreference::NativeFirst, None),
@@ -59,6 +70,10 @@ fn flagship_profiles_resolve_native_engine_topology_first_and_honor_acp_override
     assert_eq!(
         codex.effective_topology(crate::engine::EngineRuntimePreference::NativeFirst, None),
         ProfileTopology::NativeEngine(crate::engine::NativeEngineKind::CodexNative)
+    );
+    assert_eq!(
+        muse.effective_topology(crate::engine::EngineRuntimePreference::NativeFirst, None),
+        ProfileTopology::NativeEngine(crate::engine::NativeEngineKind::MuseNative)
     );
     assert_eq!(
         claude.effective_topology(
@@ -78,14 +93,25 @@ fn resolve_native_engine_cli_finds_standalone_install_dirs() {
     let home = tempfile::tempdir().unwrap();
     let claude_dir = home.path().join(".claude").join("local");
     let codex_dir = home.path().join("AppData/Local/Programs/OpenAI/Codex/bin");
+    let muse_dir = home.path().join("AppData/Local/Programs/muse");
     std::fs::create_dir_all(&claude_dir).unwrap();
     std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::create_dir_all(&muse_dir).unwrap();
     #[cfg(windows)]
-    let (claude_bin, codex_bin) = (claude_dir.join("claude.exe"), codex_dir.join("codex.exe"));
+    let (claude_bin, codex_bin, muse_bin) = (
+        claude_dir.join("claude.exe"),
+        codex_dir.join("codex.exe"),
+        muse_dir.join("muse.cmd"),
+    );
     #[cfg(not(windows))]
-    let (claude_bin, codex_bin) = (claude_dir.join("claude"), codex_dir.join("codex"));
+    let (claude_bin, codex_bin, muse_bin) = (
+        claude_dir.join("claude"),
+        codex_dir.join("codex"),
+        muse_dir.join("muse"),
+    );
     std::fs::write(&claude_bin, b"claude").unwrap();
     std::fs::write(&codex_bin, b"codex").unwrap();
+    std::fs::write(&muse_bin, b"muse").unwrap();
 
     assert_eq!(
         resolve_native_engine_cli("claude_code", home.path()),
@@ -94,6 +120,10 @@ fn resolve_native_engine_cli_finds_standalone_install_dirs() {
     assert_eq!(
         resolve_native_engine_cli("codex", home.path()),
         Some(codex_bin)
+    );
+    assert_eq!(
+        resolve_native_engine_cli("muse_code", home.path()),
+        Some(muse_bin)
     );
     assert_eq!(
         suppressed_registry_ids_for_built_ins(),

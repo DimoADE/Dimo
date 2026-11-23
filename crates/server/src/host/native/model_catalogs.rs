@@ -127,10 +127,35 @@ pub async fn provider(
     let base_url = validate_model_endpoint(base_url)?;
     let api_key = api_key.trim();
     let mut urls = model_catalog_urls(&base_url);
+    if agent_id.as_str() == "muse_code" {
+        let path = base_url.path().trim_end_matches('/');
+        if !path.ends_with("/models") {
+            let mut muse_relative = base_url.clone();
+            let candidate_path = if path.ends_with("/muse-code") {
+                format!("{path}/models")
+            } else {
+                format!("{path}/muse-code/models")
+            };
+            muse_relative.set_path(&candidate_path);
+            muse_relative.set_query(None);
+            muse_relative.set_fragment(None);
+            if !urls
+                .iter()
+                .any(|existing| existing.as_str() == muse_relative.as_str())
+            {
+                urls.insert(0, muse_relative);
+            }
+        }
+    }
     if urls.is_empty() {
         return Err("无法从 Provider API URL 推导模型目录地址".to_string());
     }
-    for root_candidate in ["/v1/models", "/models"] {
+    let root_candidates: &[&str] = if agent_id.as_str() == "muse_code" {
+        &["/muse-code/models", "/v1/models", "/models"]
+    } else {
+        &["/v1/models", "/models"]
+    };
+    for root_candidate in root_candidates {
         let mut fallback = base_url.clone();
         fallback.set_path(root_candidate);
         fallback.set_query(None);
@@ -1239,6 +1264,8 @@ fn parse_catalog_model(model: &Value) -> Option<AgentModelCatalogItemView> {
         Value::String(id) => id.as_str(),
         Value::Object(_) => model
             .get("id")
+            .or_else(|| model.get("model_id"))
+            .or_else(|| model.get("modelId"))
             .or_else(|| model.get("name"))
             .or_else(|| model.get("slug"))?
             .as_str()?,
@@ -1974,12 +2001,26 @@ mod tests {
     #[test]
     fn opencode_and_mimo_code_support_provider_model_detection() {
         let catalog = agents::BuiltInProfileCatalog::management();
-        for id in ["opencode", "mimo_code", "codex", "omp", "openclaw", "pi"] {
+        for id in [
+            "opencode",
+            "mimo_code",
+            "muse_code",
+            "codex",
+            "omp",
+            "openclaw",
+            "pi",
+        ] {
             let agent_id = api_types::AgentId::parse(id).unwrap();
             assert!(
                 catalog.supports_provider_model_detection(&agent_id),
                 "{id} must support /models detection"
             );
         }
+        let parsed = parse_openai_models(&serde_json::json!({
+            "models": [{"model_id": "muse-preview", "display_name": "Muse Preview"}]
+        }));
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, "muse-preview");
+        assert_eq!(parsed[0].label, "Muse Preview");
     }
 }

@@ -1,75 +1,40 @@
 ---
 status: accepted
 date: 2026-08-05
-decision-makers:
-  - Dimo maintainers
+decision-makers: Dimo maintainers
 ---
 
 # 用户声明的 ACP Agent 复用版本锁定安装管线
 
-## Context
-
-Dimo 已经通过 Built-in Agent Profile 与 ACP 官方 Registry 支持开放的
-`AgentId`、统一 membership、安装计划、Installation lock、启动前完整性校验和 ACP
-能力协商。不过 ADR-0010、ADR-0018 与 ADR-0034 暂时禁止所有用户声明来源，因此
-官方 Registry 尚未收录的内部 Agent、开发中 Agent 和 fork 无法接入。
-
-竞品 Codeg 已允许用户粘贴 ACP Registry 兼容的 `distribution` JSON，并把该定义加入
-统一 Agent 列表。这个交互值得采用，但 Dimo 不能因此绕过已经建立的 Registry
-freshness、冻结目标、安装锁和启动前校验边界。
+除 Built-in Agent Profile 与官方 ACP Registry 之外，Dimo 支持 **User-declared agent definition（用户声明 Agent 定义）** 作为第三种受控 Agent 来源，使未收录进官方 Registry 的内部 Agent、开发中 Agent 或 fork 能在同一完整性与安装锁边界内接入。
 
 ## Decision
 
-Dimo 新增 **User-declared agent definition（用户声明 Agent 定义）** 作为第三种受控
-Agent 来源。它只接受 ACP Registry `distribution` 兼容的 Binary、npx 或 uvx 声明，
-不接受任意本地启动命令、PATH 自动发现、远程 ACP URL、自定义 Registry URL 或每次
-启动临时下载执行。
+### 1. 受限的声明格式与不可变身份
 
-用户声明定义包含：
+- 仅接受符合 ACP Registry `distribution` 结构的 Binary、`npx` 或 `uvx` 声明；拒绝任意本地 shell 启动命令、PATH 自动接管、远程 ACP URL、自定义 Registry URL 以及每次启动无锁临时下载执行。
+- 每条用户声明定义包含：不可变且全局唯一的稳定 `AgentId`、显示名、简介、语义版本、明确选择的分发方式、对应 distribution 数据，以及基于规范化定义计算的 SHA-256 digest。
+- 保存定义与写入 membership 在同一数据库事务中原子完成：新 Agent 立即默认启用并进入 Agent 导航带；不得覆盖任何内置或已有 `AgentId`；安装失败、取消或中断不撤销 membership。
 
-- 不可变、全局唯一的稳定 `AgentId`；
-- 展示名、描述和语义版本；
-- 用户明确选择的分发方式；
-- 该分发方式所需的 Registry 兼容 distribution 数据；
-- 由规范化定义计算的 SHA-256 digest。
+### 2. 冻结安装计划与启动完整性
 
-保存与添加在一个数据库事务内完成。新 Agent 立即获得 membership、默认启用并进入
-Agent bar；安装失败、取消或中断不撤销 membership。Built-in 与已有 Agent id 不得被
-覆盖。
+- 安装前，Application Core 独立执行与官方 Registry 相同的结构、平台、URL、包版本与 SHA-256 校验（不信任前端单侧校验）。`npx`/`uvx` 必须锁定精确版本；Binary 优先校验声明的预期 SHA-256，缺省时沿用 TOFU 策略（见 [ADR-0017](0017-binary-integrity-has-two-trust-levels.md)）。
+- 所选分发在创建操作时冻结至 `FrozenInstallPlan` 与 `InstallationLock`（记录 `user_definition` 来源与 definition digest），不允许失败后静默切换分发方式；后续编辑定义不篡改已排队或已安装的版本。
+- 每次建立 ACP 连接均经过统一的 `LaunchGate` 与内容哈希验证（见 [ADR-0034](0034-harden-acp-registry-and-adopt-auth-status.md)）。
 
-安装前，定义必须通过与官方 Registry 相同的结构、平台、URL、包版本和 SHA-256
-校验。npx/uvx 包必须精确锁定到定义版本；Binary 使用声明的预期 SHA-256，缺失时沿用
-普通 Registry Binary 的 TOFU 策略。所选分发在创建操作时冻结，不允许失败后静默切换。
+### 3. 独立投影与诚实来源标识
 
-`FrozenInstallPlan` 与 `InstallationLock` 记录 `user_definition` 来源及 definition
-digest。执行器只消费冻结计划；定义之后被编辑不会改变已经排队或已经安装的版本。
-每次创建 ACP 连接仍执行 ADR-0034 的 LaunchGate 与内容哈希验证。
+- 官方 Registry catalog 与用户声明定义保持两个独立投影：用户声明 Agent 不写入官方 Registry snapshot，不受 Registry 在线状态或 freshness 限制，在界面中标示为“用户提供”，严禁展示“官方 Registry”或“Dimo 已验证”徽标。
+- 手动添加入口采用设置页内联表单并提供字段级可修复错误提示；Agent 导航带、详情页、状态模型与会话管线与其它 Agent 完全统一。
+- 移除用户声明 Agent 时删除 Dimo 拥有的定义记录与安装元数据，保留其创建的历史 Conversation（见 [ADR-0014](0014-built-in-agents-are-permanent-members.md)）。
 
-官方 Registry catalog 与用户声明定义保持两个独立投影：
+## Considered Options
 
-- 官方 catalog 继续只展示当前已验证的官方 snapshot，并保留 freshness/离线限制；
-- 用户声明 Agent 不伪装成 Registry entry，也不受 Registry 在线状态约束；
-- Agent bar 与详情页继续使用统一 membership、状态、安装、认证和会话管线；
-- 移除用户声明 Agent 时删除 Dimo 拥有的定义与托管产物，但保留历史 Conversation。
+- **允许任意可执行路径与命令行参数**：否决。无法形成可复现安装锁，并显著扩大 PATH 劫持与任意进程启动风险。
+- **将用户定义混入官方 Registry snapshot**：否决。破坏官方来源真实性、离线 freshness 与上游下架语义。
+- **每次启动临时运行 `npx`/`uvx` latest**：否决。破坏精确版本锁定、生态完整性与可复现修复。
 
 ## Consequences
 
-- 这项决策仅取代 ADR-0010、ADR-0018 与 ADR-0034 中“来源仅限两种”及“禁止用户声明
-  distribution”的边界；它不放宽远程 ACP、任意命令、PATH 接管或完整性要求。
-- 用户声明来源的真实性由用户负责，Dimo 只声明“用户提供”；不得显示“官方
-  Registry”或“Dimo 已验证”徽标。
-- 手动添加 UI 使用设置页内联表单，不把 Registry freshness 与用户定义的可保存性
-  混为一体；错误必须在字段旁给出可修复说明。
-- 第一阶段不提供任意图标 URL、专属原生配置适配、历史文件解析或 Agent 名称特判。
-  Agent 通过通用 ACP 事件日志保留 Dimo Conversation 历史。
-
-## Rejected alternatives
-
-- **允许任意可执行路径与参数。** 否决：无法形成可复现安装锁，也扩大了 PATH 劫持与
-  任意进程启动面。
-- **把用户定义写入 Registry snapshot。** 否决：会伪造来源、破坏离线 freshness 与
-  上游下架语义。
-- **保存后每次启动直接运行 npx/uvx latest。** 否决：破坏精确版本、生态完整性和
-  可复现修复。
-- **只在前端校验 JSON。** 否决：WebView 是不受信边界；Application Core 必须重复
-  解析、规范化、校验并原子持久化。
+- 三类受控来源（内置 Profile、官方 Registry、用户声明）共享统一的锁、校验与启动门禁，用户声明来源的真实性由用户自行负责。
+- 用户声明 Agent 通过通用 ACP 事件日志留存 Dimo Conversation 历史，不获得绕过白名单的专属账号动作或原生配置特权。

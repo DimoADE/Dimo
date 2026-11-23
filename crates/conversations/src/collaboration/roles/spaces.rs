@@ -92,6 +92,7 @@ pub async fn create_collaboration_space(
     finish_tx(&mut conn, create_outcome).await?;
     drop(conn);
     let mut lead_member_id = None;
+    let creator_display_name: Option<String>;
     if is_collab_bot {
         // The identity, not the calling session title, owns the display name:
         // the same bot must keep one name/avatar across DM and group seats.
@@ -106,6 +107,7 @@ pub async fn create_collaboration_space(
             .filter(|name| !name.trim().is_empty())
             .or_else(|| caller.name.filter(|name| !name.trim().is_empty()))
             .unwrap_or_else(|| "会话".to_string());
+        creator_display_name = Some(nickname.clone());
         let seat = insert_member_with(
             pool,
             &space_id,
@@ -119,7 +121,22 @@ pub async fn create_collaboration_space(
         // The creator owns the space it just created.
         set_space_lead(pool, &space_id, Some(&seat.member_id)).await?;
         lead_member_id = Some(seat.member_id);
+    } else {
+        creator_display_name = caller
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
     }
+    let _ = insert_group_created_event(
+        pool,
+        &space_id,
+        creator_display_name.as_deref(),
+        false,
+        &name,
+    )
+    .await;
     let record = SpaceRecord {
         space_id,
         name,
@@ -201,6 +218,7 @@ pub async fn create_workspace_space(
     .await;
     finish_tx(&mut conn, create_outcome).await?;
     drop(conn);
+    let _ = insert_group_created_event(pool, &space_id, None, true, &name).await;
     let record = SpaceRecord {
         space_id,
         name,

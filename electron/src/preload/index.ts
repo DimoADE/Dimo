@@ -1,11 +1,15 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 import {
+  GPU_MODE_CHANGED_EVENT,
   IPC_CHANNELS,
+  SIDECAR_RESTARTED_EVENT,
   convertFileSrcToAssetUrl,
   type BootstrapPayload,
+  type DesktopGpuMode,
   type DesktopUpdateCheckResult,
   type DesktopUpdateDownloadEventPayload,
+  type ElectronBackendConnectionInfo,
 } from '../shared/ipcContract';
 
 interface DragDropPosition {
@@ -23,9 +27,66 @@ interface DragDropEvent {
   payload: DragDropPayload;
 }
 
+function extractBackendConnectionInfo(
+  payload: unknown
+): ElectronBackendConnectionInfo | undefined {
+  if (!payload || typeof payload !== 'object') {
+    return undefined;
+  }
+  const candidate =
+    'backend' in payload
+      ? (payload as { backend?: unknown }).backend
+      : payload;
+  if (!candidate || typeof candidate !== 'object') {
+    return undefined;
+  }
+  const record = candidate as {
+    baseUrl?: unknown;
+    token?: unknown;
+    dataDir?: unknown;
+  };
+  if (
+    typeof record.baseUrl !== 'string' ||
+    record.baseUrl.length === 0 ||
+    typeof record.token !== 'string' ||
+    record.token.length === 0
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    baseUrl: record.baseUrl,
+    token: record.token,
+    ...(typeof record.dataDir === 'string' ? { dataDir: record.dataDir } : {}),
+  });
+}
+
 const bootstrap = ipcRenderer.sendSync(
   IPC_CHANNELS.BOOTSTRAP_SYNC
 ) as BootstrapPayload;
+
+let currentBackend: ElectronBackendConnectionInfo | undefined =
+  extractBackendConnectionInfo(bootstrap.backend);
+
+const getBackend = (): ElectronBackendConnectionInfo | undefined =>
+  currentBackend;
+
+let currentGpuMode: DesktopGpuMode = bootstrap.gpuMode ?? 'hardware';
+function applyGpuModeAttribute(mode: DesktopGpuMode): void {
+  currentGpuMode = mode;
+  if (typeof document !== 'undefined' && document.documentElement) {
+    document.documentElement.dataset.gpuMode = mode;
+  }
+}
+applyGpuModeAttribute(currentGpuMode);
+if (typeof window !== 'undefined') {
+  window.addEventListener(
+    'DOMContentLoaded',
+    () => {
+      applyGpuModeAttribute(currentGpuMode);
+    },
+    { once: true }
+  );
+}
 
 const resizeListeners = new Set<() => void>();
 ipcRenderer.on(IPC_CHANNELS.WINDOW_RESIZED, () => {
@@ -44,6 +105,18 @@ ipcRenderer.on(
   (_ipcEvent, message: { event?: string; payload?: unknown } | undefined) => {
     if (!message || typeof message.event !== 'string') {
       return;
+    }
+    if (message.event === SIDECAR_RESTARTED_EVENT) {
+      const nextBackend = extractBackendConnectionInfo(message.payload);
+      if (nextBackend) {
+        currentBackend = nextBackend;
+      }
+    }
+    if (message.event === GPU_MODE_CHANGED_EVENT) {
+      const mode = (message.payload as { mode?: unknown } | undefined)?.mode;
+      if (mode === 'software' || mode === 'hardware') {
+        applyGpuModeAttribute(mode);
+      }
     }
     const handlers = eventListeners.get(message.event);
     if (!handlers || handlers.size === 0) {
@@ -70,6 +143,7 @@ const INTERNAL_FS_AUTHORIZE_DROPPED_PATHS_CHANNEL =
 const dragDropListeners = new Set<(event: DragDropEvent) => void>();
 let dragDropWired = false;
 let dragDepth = 0;
+let pendingDropEvent: DragEvent | null = null;
 
 function extractFilePaths(dataTransfer: DataTransfer | null): string[] {
   if (!dataTransfer || !dataTransfer.files || dataTransfer.files.length === 0) {
@@ -142,14 +216,46 @@ const handleWindowDragLeave = (event: DragEvent): void => {
   }
 };
 
+const handleDocumentDropCapture = (event: DragEvent): void => {
+  if (dragDepth <= 0 && !event.dataTransfer?.types?.includes('Files')) {
+    return;
+  }
+  pendingDropEvent = event;
+  // If an inner DOM drop target calls `stopPropagation()`, the bubble-phase
+  // `handleWindowDrop` never fires; reset drag state on the next macrotask so
+  // global drag overlays never remain stuck open. A microtask would fire
+  // between capture and target/bubble listeners on native Chromium UI events.
+  setTimeout(() => {
+    if (pendingDropEvent !== event) {
+      return;
+    }
+    pendingDropEvent = null;
+    if (dragDepth > 0) {
+      dragDepth = 0;
+      dispatchDragDrop({ type: 'leave' });
+    }
+  }, 0);
+};
+
 const handleWindowDrop = (event: DragEvent): void => {
+  if (pendingDropEvent === event) {
+    pendingDropEvent = null;
+  }
+  const wasDragging = dragDepth > 0;
   dragDepth = 0;
   // Skip dispatching a duplicate host drop when a DOM drop target (e.g. the
-  // React composer) has already handled and prevented the event.
+  // React composer) has already handled and prevented the event, but still
+  // emit `leave` if a file drag was active so global drag overlays close cleanly.
   if (event.defaultPrevented) {
+    if (wasDragging) {
+      dispatchDragDrop({ type: 'leave' });
+    }
     return;
   }
   if (!event.dataTransfer?.types?.includes('Files')) {
+    if (wasDragging) {
+      dispatchDragDrop({ type: 'leave' });
+    }
     return;
   }
   event.preventDefault();
@@ -168,16 +274,32 @@ const handleWindowDrop = (event: DragEvent): void => {
   }
 };
 
+const handleWindowDragEnd = (): void => {
+  pendingDropEvent = null;
+  if (dragDepth > 0) {
+    dragDepth = 0;
+    dispatchDragDrop({ type: 'leave' });
+  }
+};
+
 function attachDragDropListeners(): void {
   if (dragDropWired || typeof window === 'undefined') {
     return;
   }
   dragDropWired = true;
   dragDepth = 0;
-  window.addEventListener('dragenter', handleWindowDragEnter);
+  pendingDropEvent = null;
+  window.addEventListener('dragenter', handleWindowDragEnter, true);
   window.addEventListener('dragover', handleWindowDragOver);
-  window.addEventListener('dragleave', handleWindowDragLeave);
+  window.addEventListener('dragleave', handleWindowDragLeave, true);
   window.addEventListener('drop', handleWindowDrop);
+  window.addEventListener('dragend', handleWindowDragEnd, true);
+  if (
+    typeof document !== 'undefined' &&
+    typeof document.addEventListener === 'function'
+  ) {
+    document.addEventListener('drop', handleDocumentDropCapture, true);
+  }
 }
 
 function detachDragDropListeners(): void {
@@ -186,15 +308,26 @@ function detachDragDropListeners(): void {
   }
   dragDropWired = false;
   dragDepth = 0;
-  window.removeEventListener('dragenter', handleWindowDragEnter);
+  pendingDropEvent = null;
+  window.removeEventListener('dragenter', handleWindowDragEnter, true);
   window.removeEventListener('dragover', handleWindowDragOver);
-  window.removeEventListener('dragleave', handleWindowDragLeave);
+  window.removeEventListener('dragleave', handleWindowDragLeave, true);
   window.removeEventListener('drop', handleWindowDrop);
+  window.removeEventListener('dragend', handleWindowDragEnd, true);
+  if (
+    typeof document !== 'undefined' &&
+    typeof document.removeEventListener === 'function'
+  ) {
+    document.removeEventListener('drop', handleDocumentDropCapture, true);
+  }
 }
 
 const dimoDesktopBridge = {
   platform: bootstrap.platform,
-  backend: bootstrap.backend ? Object.freeze({ ...bootstrap.backend }) : undefined,
+  get backend(): ElectronBackendConnectionInfo | undefined {
+    return currentBackend;
+  },
+  getBackend,
 
   getAppVersion: (): Promise<string> =>
     ipcRenderer.invoke(IPC_CHANNELS.APP_VERSION),
@@ -384,6 +517,11 @@ const dimoDesktopBridge = {
         IPC_CHANNELS.DESKTOP_TOAST_SET_IGNORE_MOUSE_EVENTS,
         Boolean(ignore)
       ),
+    setContentHeight: (height: number): Promise<void> =>
+      ipcRenderer.invoke(
+        IPC_CHANNELS.DESKTOP_TOAST_SET_CONTENT_HEIGHT,
+        Number(height)
+      ),
   },
 
   invoke: <T = unknown>(
@@ -395,4 +533,38 @@ const dimoDesktopBridge = {
       : ipcRenderer.invoke(IPC_CHANNELS.SHELL_INVOKE, cmd, args),
 };
 
-contextBridge.exposeInMainWorld('dimoDesktop', dimoDesktopBridge);
+// `contextBridge.exposeInMainWorld` evaluates getters once and freezes the
+// snapshot, so after a sidecar auto-restart `window.dimoDesktop.backend` would
+// otherwise keep returning the dead port/token. Use `executeInMainWorld` to
+// attach a live `backend` getter backed by the proxied `getBackend` function
+// while keeping `window.dimoDesktop` frozen and non-configurable.
+if (typeof contextBridge.executeInMainWorld === 'function') {
+  contextBridge.executeInMainWorld({
+    func: (
+      bridgeObj: Record<string, unknown>,
+      getBackendFn: () => ElectronBackendConnectionInfo | undefined
+    ) => {
+      const target: Record<string, unknown> = {};
+      Object.keys(bridgeObj).forEach((key) => {
+        if (key !== 'backend') {
+          target[key] = bridgeObj[key];
+        }
+      });
+      Object.defineProperty(target, 'backend', {
+        get: () => getBackendFn(),
+        enumerable: true,
+        configurable: false,
+      });
+      Object.freeze(target);
+      Object.defineProperty(globalThis, 'dimoDesktop', {
+        value: target,
+        writable: false,
+        enumerable: true,
+        configurable: false,
+      });
+    },
+    args: [dimoDesktopBridge, getBackend],
+  });
+} else {
+  contextBridge.exposeInMainWorld('dimoDesktop', dimoDesktopBridge);
+}

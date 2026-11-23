@@ -34,7 +34,12 @@ import { UserMessageMarkdown } from '@/components/NormalizedConversation/UserMes
 import { splitDisplayContentImages } from '@/components/NormalizedConversation/userMessageImages';
 
 import { collaborationCall } from './collaborationApi';
-import type { SpaceCardRecord } from './space/types';
+import type { MemberBotAvatarConfig } from './MemberBotAvatar';
+import { SupervisorProvisionCard } from './SupervisorProvisionCard';
+import type {
+  SpaceCardRecord,
+  SpaceTurnProvisionActivity,
+} from './space/types';
 import { reactionBadgeEmojis, type SpaceReaction } from './spaceReactions';
 import i18n from '@/i18n';
 
@@ -925,6 +930,9 @@ export const SpaceMessageBody = memo(function SpaceMessageBody({
   reactions,
   cards,
   streaming = false,
+  provisionActivity = null,
+  getMemberAvatar,
+  onOpenSpace,
 }: {
   fromYou: boolean;
   text: string;
@@ -935,6 +943,12 @@ export const SpaceMessageBody = memo(function SpaceMessageBody({
   reactions?: readonly SpaceReaction[] | null;
   cards?: readonly SpaceCardRecord[] | null;
   streaming?: boolean;
+  provisionActivity?: SpaceTurnProvisionActivity | null;
+  getMemberAvatar?: (
+    conversationId?: string,
+    nickname?: string
+  ) => MemberBotAvatarConfig;
+  onOpenSpace?: (spaceId: string) => void;
 }) {
   const memberMentionCtx = useCollaborationMemberMention();
   const effectiveMentionCtx = useMemo(
@@ -1057,6 +1071,14 @@ export const SpaceMessageBody = memo(function SpaceMessageBody({
       </div>
     ) : null;
 
+  const provisionCardNode = provisionActivity ? (
+    <SupervisorProvisionCard
+      activity={provisionActivity}
+      getMemberAvatar={getMemberAvatar}
+      onOpenSpace={onOpenSpace}
+    />
+  ) : null;
+
   if (hasHtmlSegment) {
     let firstMarkdownSeen = false;
     return (
@@ -1065,6 +1087,17 @@ export const SpaceMessageBody = memo(function SpaceMessageBody({
           className="collaboration-split-message-blocks"
           data-testid="collaboration-split-message-blocks"
         >
+          {provisionCardNode ? (
+            <div className="conv-entry-item conv-assistant-msg collaboration-member-msg px-4 py-1.5 text-sm">
+              <div className="collaboration-bubble-outer-row collaboration-bubble-outer-row--member">
+                <div className="collaboration-bubble-shell">
+                  <div className="conv-assistant-body collaboration-member-bubble">
+                    {provisionCardNode}
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
           {segments.map((seg, idx) => {
             const isLast = idx === segments.length - 1;
             const showTailMeta = isLast && !isStandaloneQuestionCard;
@@ -1178,7 +1211,7 @@ export const SpaceMessageBody = memo(function SpaceMessageBody({
   if (isStandaloneQuestionCard) {
     return (
       <CollaborationMemberMentionContext.Provider value={effectiveMentionCtx}>
-        {hasMemberProse ? (
+        {hasMemberProse || provisionCardNode ? (
           <div
             className="collaboration-split-message-blocks"
             data-testid="collaboration-split-message-blocks"
@@ -1190,23 +1223,26 @@ export const SpaceMessageBody = memo(function SpaceMessageBody({
                     className="conv-assistant-body collaboration-member-bubble"
                     data-testid="collaboration-member-bubble"
                   >
-                    <CollapsibleSpaceBubbleContent
-                      measureText={handoff ? text : markdownValue}
-                      streaming={streaming}
-                    >
-                      {markdownValue ? (
-                        <AstryxMarkdown
-                          value={markdownValue}
-                          workspacePath={workspacePath}
-                        />
-                      ) : null}
-                      {handoff ? (
-                        <SpaceHandoffCard
-                          handoff={handoff}
-                          workspacePath={workspacePath}
-                        />
-                      ) : null}
-                    </CollapsibleSpaceBubbleContent>
+                    {provisionCardNode}
+                    {hasMemberProse ? (
+                      <CollapsibleSpaceBubbleContent
+                        measureText={handoff ? text : markdownValue}
+                        streaming={streaming}
+                      >
+                        {markdownValue ? (
+                          <AstryxMarkdown
+                            value={markdownValue}
+                            workspacePath={workspacePath}
+                          />
+                        ) : null}
+                        {handoff ? (
+                          <SpaceHandoffCard
+                            handoff={handoff}
+                            workspacePath={workspacePath}
+                          />
+                        ) : null}
+                      </CollapsibleSpaceBubbleContent>
+                    ) : null}
                   </div>
                 </div>
               </div>
@@ -1229,6 +1265,7 @@ export const SpaceMessageBody = memo(function SpaceMessageBody({
               className="conv-assistant-body collaboration-member-bubble"
               data-testid="collaboration-member-bubble"
             >
+              {provisionCardNode}
               {hasMemberProse ? (
                 <CollapsibleSpaceBubbleContent
                   measureText={handoff ? text : markdownValue}

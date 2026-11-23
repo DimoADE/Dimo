@@ -1,57 +1,42 @@
-# Dimo Plugin Product Package v4
+# Dimo Plugin Package v4 规范
 
-## 1. 用户模型
+本文定义 Dimo Plugin Package v4 的标准目录布局、`.dimo-plugin/plugin.json` 清单格式、内容与配置模型，以及 `.vxp` 打包契约（遵循 [ADR-0047](../adr/0047-product-centric-plugin-package-and-content-model.md)、[ADR-0048](../adr/0048-full-trust-plugin-execution-model.md) 与 [ADR-0069](../adr/0069-everything-is-a-plugin-platform.md)）。
 
-Dimo Plugin 是一个可安装、可启停、可配置的产品功能单元。用户不需要理解这个功能由
-Skill、MCP、Worker、App surface 或 Runtime 中的哪一种内部机制实现。插件列表只展示名称、
-一句话简介、发布者、版本和启用状态；点击插件后进入独立详情页，通过“内容”和“配置”
-两个 Tab 使用它。
+> 所有 **23 类贡献点**的完整注册状态、宿主消费者与 155 个 `host-api` 操作的权威清单见自动生成的 [`contract-bindings.md`](contract-bindings.md)。
 
-`integrations`、运行时锁和激活代是 Host 的执行事实，不是插件详情页的信息架构。安装或启用
-package 就表示 Full Trust，不存在逐能力权限模型。
-
-## 2. 标准目录
+## 1. 标准目录布局
 
 ```text
 my-plugin/
 ├─ .dimo-plugin/
-│  ├─ plugin.json              # 身份、兼容性、执行边界与声明
-│  ├─ content.index.json       # CLI 初始化、作者维护、build 严格校验的内容目录
+│  ├─ plugin.json              # 身份、兼容性、入口与贡献声明（必填）
+│  ├─ content.index.json       # 作者维护、build 严查、Host 复验的内容索引
 │  ├─ package.lock.json        # build 生成的不可变执行内容摘要
-│  ├─ signature.json           # 可选
-│  └─ sbom.spdx.json           # 可选
-├─ README.md                    # 用户认知入口；frontmatter 只含一句话 summary
-├─ config.json                  # 用户配置的唯一真实文件
-├─ contents/                    # Agent 与用户均可查看/使用的内容
-│  ├─ skills/
-│  │  └─ example/SKILL.md
-│  ├─ mcps/
-│  │  └─ example.json
-│  ├─ hooks/
-│  │  └─ before-run.json
-│  ├─ workflows/
-│  │  └─ create-report/workflow.json
-│  └─ resources/                # 模板、示例、说明等其他用户内容
-├─ depends/                     # 插件拥有或要求的依赖描述
-│  ├─ runtimes/
-│  │  └─ example-cli.json
-│  └─ packages/
-├─ app/                         # 宿主内 / 联邦模块 App 入口（protocol: "2.0"，如 app/main.js）
-├─ runtime/                     # Worker / 独立 Surface App 源码入口，不进入发布包
-│  ├─ main.mjs
-│  └─ app.html
-└─ dist/                        # build 产生的确定性执行物
-   ├─ worker.mjs
-   └─ app/index.html
+│  ├─ signature.json           # 可选：签名证据
+│  └─ sbom.spdx.json           # 可选：SBOM
+├─ README.md                    # 根目录说明；frontmatter 提供一句话 summary（必填）
+├─ config.json                  # 用户配置的唯一事实文件（可选，存在 schema 时由 Host 原子维护）
+├─ assets/
+│  └─ icon.svg                 # 插件图标
+├─ contents/                    # 用户与 Agent 可见的内容资产
+│  ├─ skills/<name>/SKILL.md
+│  ├─ mcps/<name>.json
+│  ├─ workflows/<name>/workflow.json
+│  └─ resources/               # 模板、示例与其他只读资源
+├─ depends/
+│  └─ runtimes/<id>.json       # 声明式本地 Runtime 依赖描述
+├─ app/                         # protocol: "2.0" 联邦模块 / 宿主内 App 入口（如 app/main.js）
+├─ runtime/                     # Worker / protocol: "1.0" App 源码（不进入 .vxp 发布物）
+└─ dist/                        # build 产出的确定性执行物（如 dist/worker.mjs、dist/app/index.html）
 ```
 
-所有路径使用相对 package root 的 `/` 路径。包拒绝绝对路径、`..`、symlink/hardlink、
-大小写碰撞、重复 normalized path 和超过 Host 限额的内容。
+### 路径安全规则
 
-## 3. README 与 summary
+所有清单路径必须相对于包根目录并使用 `/` 分隔符。校验器和 Host 拒绝绝对路径、`..` 路径穿越、符号链接/硬链接逃逸、大小写碰撞、重复规范路径以及超出限额的归档条目。
 
-`README.md` 必须位于根目录，并使用与 `SKILL.md` 相同风格的 frontmatter 提供独立的
-`summary` 标签：
+## 2. `README.md` 与 `summary`
+
+根目录 `README.md` 必须通过 YAML frontmatter 提供独立的 `summary` 字段：
 
 ```markdown
 ---
@@ -60,30 +45,18 @@ summary: Preview, create, and transform Word, Excel, and PowerPoint documents.
 
 # Dimo Office
 
-这里开始才是完整 README 正文……
+完整插件说明正文……
 ```
 
-规则：
+规范要求：
 
-- `summary` 必须是一句话、非空、最多 200 个 Unicode 字符；
-- summary 不支持 Markdown，也不从第一个标题或段落推断；
-- 列表页和详情页标题区只显示 summary；
-- 内容页显示移除 frontmatter 后的完整 README；
-- README 可以说明功能、示例、使用方式、限制和隐私信息，但不承担机器执行声明。
+- `summary` 必须为单句纯文本（不支持 Markdown），非空且不超过 200 个 Unicode 字符；
+- 宿主不从 Markdown 标题或正文段落推断简介；
+- 插件目录列表与详情标题区展示 `summary`；「内容」Tab 展示去除 frontmatter 后的完整 `README.md`。
 
-## 4. 根 config.json
+## 3. 根 `config.json` 与 `config.schema`
 
-`config.json` 是插件配置的唯一真实文件。用户在插件详情的“配置”Tab 修改的就是这个文件，
-Host 不另外维护一份数据库副本。
-
-```json
-{
-  "preview": true,
-  "idleTimeoutMinutes": 10
-}
-```
-
-`plugin.json` 中的 `config.schema` 描述宿主渲染表单和写入校验：
+根 `config.json` 是插件配置的唯一事实来源，Host 不维护第二份数据库副本：
 
 ```json
 {
@@ -91,14 +64,9 @@ Host 不另外维护一份数据库副本。
     "schema": {
       "type": "object",
       "properties": {
-        "preview": {
-          "type": "boolean",
-          "title": "Document preview",
-          "default": true
-        },
         "idleTimeoutMinutes": {
           "type": "integer",
-          "title": "Idle timeout",
+          "title": "空闲后停止预览",
           "minimum": 1,
           "maximum": 60,
           "default": 10
@@ -110,54 +78,48 @@ Host 不另外维护一份数据库副本。
 }
 ```
 
-Host 必须在写入前按 schema 校验，并以同目录临时文件、`fsync`、原子替换保存。`config.json`
-是可变用户数据，因此不计入 executable package digest、签名和 activation generation；安装包
-可以携带初始值，但更新默认保留用户现有配置，并按新 schema 做迁移/兼容检查。卸载时是否
-保留 config 属于明确的数据保留选择。
+- 配置路径固定为包根目录 `config.json`，`plugin.json` 中只声明 `config.schema`；
+- 插件详情「配置」Tab 根据 `config.schema` 渲染表单，Host 写入前先按 Schema 校验，再通过同目录临时文件 + `fsync` + 原子替换落盘；
+- `config.json` 属于可变用户数据，不计入可执行包摘要（`packageDigest`）与激活代签名；更新插件时默认保留用户配置，若新 Schema 拒绝旧值则阻止升级；卸载时按用户选择保留或删除。
 
-## 5. 内容索引
-
-`.dimo-plugin/content.index.json` 是 CLI 初始化、作者维护、build 严格校验、签名覆盖且由 Host
-再次校验的结构化目录：
+## 4. 内容索引（`.dimo-plugin/content.index.json`）
 
 ```json
 {
   "schemaVersion": 1,
   "items": [
     {
-      "path": "contents/skills/office-docx/SKILL.md",
+      "path": "contents/skills/word/SKILL.md",
       "kind": "skill",
       "title": "Word documents"
     },
     {
-      "path": "contents/workflows/create-presentation/workflow.json",
+      "path": "contents/workflows/create-document/workflow.json",
       "kind": "workflow",
-      "title": "Create presentation"
+      "title": "Create document"
     }
   ]
 }
 ```
 
-UI 只读取通过 Host 验证并返回的索引与文档，不在客户端扫描任意文件系统路径。`kind` 用于图标、
-排序与文档渲染，不把产品重新切回 Skill/MCP 等固定能力统计。内容页以 README 为默认文档，
-再按 `contents/` 的结构展示索引项。
+UI 只读取经 Host 验证返回的结构化索引与文档，不在客户端任意扫描目录。索引中所有 `path` 必须存在于 `contents/` 内并通过 `dimo-plugin build` / `validate` 检查。
 
-## 6. plugin.json
+## 5. `.dimo-plugin/plugin.json` 清单规范
 
 ```json
 {
-  "$schema": "https://schemas.vibex.dev/plugin/v4/plugin.schema.json",
+  "$schema": "https://schemas.dimo-ai.com/plugin/v4/plugin.schema.json",
   "manifestVersion": 4,
   "apiVersion": "2.0",
-  "id": "office",
-  "publisher": "dimo",
-  "version": "4.0.0",
-  "name": "Dimo Office",
+  "id": "you.notes",
+  "publisher": "you",
+  "version": "1.0.0",
+  "name": "Notes",
+  "readme": "README.md",
   "engines": {
-    "dimo": ">=0.1.3 <1.0.0",
+    "dimo": ">=0.5.0 <1.0.0",
     "pluginSdk": "^2.0.0"
   },
-  "readme": "README.md",
   "content": {
     "root": "contents",
     "index": ".dimo-plugin/content.index.json"
@@ -173,7 +135,8 @@ UI 只读取通过 Host 验证并返回的索引与文档，不在客户端扫�
     "worker": {
       "path": "dist/worker.mjs",
       "runtime": "node",
-      "protocol": "1.1"
+      "protocol": "1.1",
+      "maxFrameMiB": 32
     },
     "app": {
       "entry": "app/main.js",
@@ -181,94 +144,82 @@ UI 只读取通过 Host 验证并返回的索引与文档，不在客户端扫�
     }
   },
   "dependencies": [],
-  "integrations": []
+  "integrations": [],
+  "interface": {
+    "icon": "assets/icon.svg"
+  }
 }
 ```
 
-`readme` 固定为根 `README.md`，`content.root` 固定为 `contents`；配置文件按约定固定为根
-`config.json`，`plugin.json` 中只写 `"config": { "schema": ... }`，不再提供可改路径的 `"file"` 字段。固定约定避免同一种产品概念出现多套路径配置。
+### 顶层字段要点
 
-Worker 的 `maxFrameMiB` 可选，默认单帧 `32 MiB`，可配置范围为 `1..128 MiB`；逻辑消息上限 `64 MiB`，超出单帧自动通过 `frame.chunk` 分片传输与重组。
+- **产品身份**：由 `(publisher, id)` 共同唯一确定；派生他人源码打包时必须更换新的 `(publisher, id)`，并可在清单中附加 `derivedFrom` 溯源字段。
+- **固定路径约定**：`readme` 固定为 `"README.md"`，`content.root` 固定为 `"contents"`，配置固定为根 `config.json`。
+- **至少一项贡献**：插件必须至少声明一项受宿主识别的 `integrations`（或声明式 `themes`）；App-only、Theme-only、Provider-only 与 Agent-only 包均一等合法。
+- **Full Trust 执行模型**：安装或启用即授予与 Dimo Host 一致的本机用户权限，清单无需声明 capability permissions。
 
-### App 入口的两种协议（`entrypoints.app`）
+### `entrypoints.worker`
 
-1. **`protocol: "2.0"`（宿主内 / 联邦模块 App）**：
-   ```json
-   "app": {
-     "entry": "app/main.js",
-     "protocol": "2.0"
-   }
-   ```
-   配合 `@dimoai/plugin-sdk` 的 `defineDimoPlugin((ctx) => ...)`，通过命名空间 API（`ctx.ui.*`、`ctx.hooks.*`、`ctx.services.*`、`ctx.host.*`）在宿主 React 树内直接注册 UI 槽位、命令、面板、Turn Hook 与 IoC 服务，并通过 1-hop `HostCapabilityBroker` 调用宿主能力。
-2. **`protocol: "1.0"`（独立 HTML Surface App）**：
-   ```json
-   "app": {
-     "root": "dist/app",
-     "document": "index.html",
-     "protocol": "1.0"
-   }
-   ```
-   配合 `@dimoai/plugin-sdk/app` 的 `definePluginApp(({ root, bridge, signal }) => ...)`，用于挂载独立 HTML Surface（如 `plugin.detail.panel` 与 `artifact.editor` 可编辑文件 Tab）。
+| 字段 | 说明 |
+| --- | --- |
+| `path` | Worker 可执行入口相对路径（如 `dist/worker.mjs`、Python 脚本或原生二进制）。 |
+| `runtime` | 固定为 `"node"`、`"python"` 或 `"native"`。 |
+| `protocol` | 固定为 `"1.1"`（stdio JSON-RPC 2.0，握手顺序 `initialize` → `activate`）。 |
+| `maxFrameMiB` | 可选，单帧上限整数，范围 `1..128`（默认 `32` MiB）；逻辑消息上限 `64` MiB，超单帧自动分片（`frame.chunk`）。 |
 
-### integrations
+### `entrypoints.app`（渲染三轨中的两种代码轨）
 
-`integrations` 是插件内容/代码与 Dimo 内核扩展点的机器映射，不是用户详情页章节：
+| 协议 | 清单形状 | 适用场景与 SDK 入口 |
+| --- | --- | --- |
+| `protocol: "2.0"`（Module Federation / 宿主内 App） | `{ "entry": "app/main.js", "protocol": "2.0" }` | 高频交互面板、看板视图、设置页、命令、Turn Hook 与 IoC 服务；入口导出 `defineDimoPlugin((ctx) => ...)`（`@dimoai/plugin-sdk`）。 |
+| `protocol: "1.0"`（独立 HTML Surface App） | `{ "root": "dist/app", "document": "index.html", "protocol": "1.0" }` | 文档型 / 富媒体独立页面（如 `plugin.detail.panel` 与 `artifact.editor`）；入口导出 `definePluginApp(({ root, bridge, signal }) => ...)`（`@dimoai/plugin-sdk/app`）。 |
 
-- `content.skill`：把 `contents/skills/...` 投影给受支持的 Agent；
-- `content.mcp`：插件 MCP 的 Host 接入点。资源 JSON 声明启动方式（`hostFamilyBinary` /
-  `workerHttp` / `entrypoint` / 静态 `command`+`args`）和 `tools` 目录；Host MCP 管理器登记后
-  投影给兼容 Agent。`hostFamilyBinary` 的工具目录由 Host 产品目录填充，其它形状由资源
-  `tools` 提供。
-- `workflow.binding`：把 workflow 暴露为命令、动作或自动化入口；
-- `file.opener`：声明文件类型解析，并且精确引用一个 `previewProvider`（只读预览）或
-  `editorSurface`（可编辑文件 Tab）；
-- `artifact.preview`：声明受 Broker 管理的预览 provider；
-- `app.surface`：声明 Full Trust App surface 及其生命周期入口。
+纯声明式宿主渲染槽位（如 `app.command`、`app.status`、`app.composer.slash` 等 `L1` descriptor）由宿主组件库直接渲染，无需提供 `entrypoints.app`。
 
-可编辑文本 Artifact 使用公开的 format-agnostic 契约：`file.opener.editorSurface` 引用一个
-`slot: artifact.editor` 的 App surface。Host 保留规范化文件路径，只向 App bootstrap 提供文件名、
-revision 与 `bridge.artifact.readText/writeText`。写入使用期望 revision 和原子替换，外部修改会返回
-可恢复冲突。内核不解析 Drawio、Markdown 或其他具体文件格式。
+## 6. `integrations`（23 类贡献点）
 
-每项 integration 有稳定 ID、版本、资源引用、兼容条件和可选 handler。运行时只能绑定 manifest
-已声明的 integration，不能动态制造 Host 不认识的 contribution；这属于 contract 校验，不是
-权限限制。
+每条 integration 必须声明稳定的 `id` 与宿主识别的 `kind`。运行时 Worker / App 只能绑定清单中已声明的 integration，不得动态注册未声明的 contribution（属于契约校验）。
 
-### dependencies
+23 类贡献点按层级划分为四组（各项的 `ready` / `preview` / `unimplemented` 状态与前端/Rust 消费入口以 [`contract-bindings.md`](contract-bindings.md) 为唯一权威）：
 
-`depends/` 保存依赖描述，manifest 的 `dependencies` 显式引用它们。Runtime 精确身份为
-`id + version + target + digest`，可多版本并存；下载、完整性校验、probe、引用计数和回收都由
-Host 管理。原生可执行依赖随插件启用获得 Full Trust；digest/probe 只保证版本确定性与可诊断性。
+- **L0 内容与 Agent 集成**：`content.skill`、`content.mcp`、`content.hook`（清单可校验，宿主无静态 Hook 运行时；动态 Turn Hook 请使用 `protocol: "2.0"` 的 `ctx.hooks`）、`workflow.binding`。
+- **L1 宿主渲染 UI（Descriptor 轨）**：`app.command`、`app.toolbar`、`app.status`（支持 `status.main` 与 `status.after-mcp` 槽位）、`app.composer.slash`、`app.composer.action`、`app.timeline.card`、`app.settings.section`、`app.rail.section`、`file.opener`、`artifact.preview`。
+- **L2 后台服务与 Provider 接缝**：`host.service`、`provider.model.importSource`、`provider.model.catalog`、`provider.remote.provisioner`。
+- **L3 结构面与自定义视图**：`app.panel`（Dockview 面板，支持 `multiInstance`）、`app.tab`、`app.kanban.view`、`app.settings.page`（设置侧栏整页）、`app.surface`。
 
-## 7. 构建与发布
+### 关键贡献点契约
 
-`dimo-plugin build`：
+- **`app.surface.slot`**：允许值为 `plugin.detail.panel`（插件详情页「配置」Tab 扩展面）与 `artifact.editor`（可编辑文件 Tab）。`app.timeline.card` 与 `app.settings.section` 的承载面由宿主自动合成。
+- **可编辑文件 Tab 契约**：`file.opener` 通过 `editorSurface` 指向一个 `slot: "artifact.editor"` 的 `app.surface`。宿主保留真实文件路径，向 App 提供文件名、revision 与 `bridge.artifact.readText()` / `writeText(content, expectedRevision)`，写入按期望 revision 原子替换并检测外部冲突。
+- **`icon` 约束**：宿主界面槽位的 `icon` 字段必须来自 `@dimo/plugin-contract/catalog/icons` 公开图标白名单，校验器与宿主共同验证。
+- **`content.mcp` 资源格式**：指向 `contents/mcps/*.json`，支持四种启动形状：
+  1. `managedRuntime.kind = "hostFamilyBinary"`（随 Host 分发的家族二进制 MCP，工具目录由宿主填充）；
+  2. `managedRuntime.kind = "workerHttp"`（Worker 暴露 loopback HTTP MCP，激活时返回 `{ url, headers }`）；
+  3. `managedRuntime.entrypoint`（包内 STDIO 脚本，宿主解析 Node、入口与 `host.call` 环境）；
+  4. 静态 `command` + `args`（STDIO 命令，宿主补全路径与 `cwd`）。
+  除 `hostFamilyBinary` 外，资源应声明 `tools` 列表以便状态栏在 Agent 连接前展示工具目录。
 
-1. 严格校验 README summary、config/schema、content index、integrations 和 dependencies；
-2. 将 `runtime/` 构建为 `dist/`；
-3. 校验内容索引并生成 package lock 与完整性证据；
-4. 验证所有声明引用均存在且处于允许目录。
+## 7. `dependencies`（单层扩展规则）
 
-`dimo-plugin pack` 产生确定性 `.vxp`。发布包包含 README、config 初始值、contents、depends、
-dist 和 `.dimo-plugin` 元数据，不包含作者源码、source map、developer-link、绝对路径或时间戳。
-`config.json` 随包分发但不参与 executable digest。
+`dependencies` 仅用于声明本地 **Runtime 依赖**（`kind: "runtime"`，引用 `depends/runtimes/*.json`）：
 
-## 8. UI 契约
+```json
+{
+  "dependencies": [
+    {
+      "kind": "runtime",
+      "descriptor": "depends/runtimes/officecli.json"
+    }
+  ]
+}
+```
 
-- `/plugins` 保留完整设置侧栏，主体是单列插件列表；
-- 列表行显示图标、名称、README summary、发布者/版本和启停开关；
-- 点击行进入 `/plugins/:pluginId` 独立详情页；
-- 内容 Tab 展示 README 与经过验证的结构化 `contents/`；
-- 配置 Tab 根据 `config.schema` 渲染表单并原子更新根 `config.json`；
-- 安装/启用即表示信任整个插件，不显示逐能力权限确认 Dialog；
-- 失败必须在当前页面显示 Toast，不能泄露 `plugins.loadFailed` 这类未翻译 key；
-- generation、contribution count、handler、runtime lock 等诊断证据只进入开发者/诊断工具。
+- Runtime 精确锁身份为 `id + version + target + digest`，支持多版本并存；由 Host 统一负责下载、SHA-256 校验、健康探测（probe）、引用计数与 GC。
+- 遵循单层扩展原则（[ADR-0069](../adr/0069-everything-is-a-plugin-platform.md)）：**不存在插件依赖插件**，校验器与 Host 均拒绝 `kind: "plugin"`。
 
-## 9. Office reference package
+## 8. 构建、打包与 UI 契约
 
-Dimo Office 必须只依赖公开包契约和 SDK。它的 README summary 是列表入口；Word/Excel/
-PowerPoint Skills 与 workflows 位于 `contents/`；OfficeCLI 描述位于 `depends/runtimes/`；
-Worker/App 入口位于 `runtime/` 并构建到 `dist/`；预览设置写入根 `config.json`。
-
-核心不按 Office ID、DOCX/XLSX/PPTX 扩展名或 OfficeCLI 名称做特判。禁用一个 Office 产品插件
-会撤下所有相关集成，但 UI 不把它拆成“平台扩展”和“Agent 扩展”。
+- **`dimo-plugin build`**：完整遍历并报告清单、`README.md` `summary`、`config.schema`、`content.index.json`、`integrations` 与 `dependencies` 的全部校验问题；将源码编译至 `dist/`；生成 `.dimo-plugin/package.lock.json`。
+- **`dimo-plugin pack`**：产出确定性 `.vxp` 归档并输出 `sha256:` 摘要。归档包含 `README.md`、初始 `config.json`、`contents/`、`depends/`、`assets/`、`app/`、`dist/` 与 `.dimo-plugin/` 元数据；排除 `runtime/` 源码、source map、`.git`、`node_modules`、开发链接元数据与本机绝对路径。
+- **UI 契约**：`/plugins` 展示「已安装」与「插件市场」两个 Tab；`/plugins/:pluginId` 仅展示「内容」与「配置」；操作失败以本地化 Toast 呈现；generation、handler、runtime lock 与崩溃证据收敛在诊断视图与 `dimo-plugin doctor`。
+- **参考实现**：官方 `plugins/office`（`dimo.office`）完全基于本规范与公开 SDK 构建，宿主不按插件 ID、文件扩展名或 `officecli` 名称做任何特判。

@@ -196,7 +196,8 @@ pub struct TokioNativeFileSystem;
 #[async_trait]
 impl NativeFileSystem for TokioNativeFileSystem {
     async fn read(&self, path: &Path) -> Result<Option<Vec<u8>>, BoundaryError> {
-        match tokio::fs::read(path).await {
+        let target = fs_path(path);
+        match tokio::fs::read(&target).await {
             Ok(bytes) => Ok(Some(bytes)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(BoundaryError::new(error.to_string())),
@@ -212,14 +213,16 @@ impl NativeFileSystem for TokioNativeFileSystem {
         let parent = path
             .parent()
             .ok_or_else(|| BoundaryError::new("native configuration path has no parent"))?;
-        tokio::fs::create_dir_all(parent)
+        let fs_parent = fs_path(parent);
+        tokio::fs::create_dir_all(&fs_parent)
             .await
             .map_err(|error| BoundaryError::new(error.to_string()))?;
         let file_name = path
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| BoundaryError::new("native configuration path has no file name"))?;
-        let temporary = parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
+        let temporary = fs_path(&parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4())));
+        let destination = fs_path(path);
         let mut options = tokio::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -244,9 +247,9 @@ impl NativeFileSystem for TokioNativeFileSystem {
         }
         drop(file);
         #[cfg(not(windows))]
-        let replace_result = tokio::fs::rename(&temporary, path).await;
+        let replace_result = tokio::fs::rename(&temporary, &destination).await;
         #[cfg(windows)]
-        let replace_result = replace_file_windows(&temporary, path);
+        let replace_result = replace_file_windows(&temporary, &destination);
         if let Err(error) = replace_result {
             let _ = tokio::fs::remove_file(&temporary).await;
             return Err(BoundaryError::new(error.to_string()));
@@ -255,7 +258,8 @@ impl NativeFileSystem for TokioNativeFileSystem {
     }
 
     async fn remove_file(&self, path: &Path) -> Result<(), BoundaryError> {
-        match tokio::fs::remove_file(path).await {
+        let target = fs_path(path);
+        match tokio::fs::remove_file(&target).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(BoundaryError::new(error.to_string())),
@@ -263,13 +267,54 @@ impl NativeFileSystem for TokioNativeFileSystem {
     }
 
     async fn metadata(&self, path: &Path) -> Result<Option<NativeFileMetadata>, BoundaryError> {
-        match tokio::fs::metadata(path).await {
+        let target = fs_path(path);
+        match tokio::fs::metadata(&target).await {
             Ok(metadata) => Ok(Some(NativeFileMetadata {
                 length: metadata.len(),
             })),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(BoundaryError::new(error.to_string())),
         }
+    }
+}
+
+#[cfg(not(windows))]
+fn fs_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+/// Applies the `\\?\` verbatim extended-length prefix on Windows when a path
+/// approaches or exceeds `MAX_PATH` (260 chars), avoiding `ERROR_PATH_NOT_FOUND`
+/// (`os error 3`) on machines with `LongPathsEnabled = 0`.
+#[cfg(windows)]
+fn fs_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let raw = path.as_os_str().to_string_lossy();
+    if raw.starts_with(r"\\?\") || raw.starts_with(r"\\.\") {
+        return path.to_path_buf();
+    }
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    if abs.as_os_str().len() < 240 {
+        return abs;
+    }
+    let mut normalized = PathBuf::new();
+    for component in abs.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    let normalized_str = normalized.to_string_lossy();
+    if let Some(unc) = normalized_str.strip_prefix(r"\\") {
+        PathBuf::from(format!(r"\\?\UNC\{unc}"))
+    } else if normalized.is_absolute() {
+        PathBuf::from(format!(r"\\?\{normalized_str}"))
+    } else {
+        normalized
     }
 }
 
@@ -302,5 +347,45 @@ fn replace_file_windows(temporary: &Path, destination: &Path) -> std::io::Result
         Err(std::io::Error::last_os_error())
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn tokio_native_fs_handles_long_atomic_write_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let mut deep_dir = root.path().to_path_buf();
+        while deep_dir.as_os_str().len() < 210 {
+            deep_dir = deep_dir.join("segment-0123456789abcdef0123456789");
+        }
+        let target = deep_dir.join("agent-model-providers.json");
+        assert!(
+            target.as_os_str().len() + 45 > 260,
+            "temp path should exceed Windows MAX_PATH"
+        );
+
+        let fs = TokioNativeFileSystem;
+        fs.write_atomic(&target, br#"{"providers":[]}"#, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            fs.read(&target).await.unwrap().as_deref(),
+            Some(br#"{"providers":[]}"#.as_slice())
+        );
+        assert_eq!(fs.metadata(&target).await.unwrap().unwrap().length, 16);
+
+        fs.write_atomic(&target, br#"{"providers":["ok"]}"#, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            fs.read(&target).await.unwrap().as_deref(),
+            Some(br#"{"providers":["ok"]}"#.as_slice())
+        );
+
+        fs.remove_file(&target).await.unwrap();
+        assert_eq!(fs.read(&target).await.unwrap(), None);
     }
 }

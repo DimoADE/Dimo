@@ -85,13 +85,13 @@ const STATIC_ASSET_EXTENSIONS = new Set([
  */
 export const APP_CONTENT_SECURITY_POLICY = [
   "default-src 'self' dimo-app://localhost",
-  "script-src 'self' dimo-app://localhost blob: 'wasm-unsafe-eval'",
-  "style-src 'self' dimo-app://localhost 'unsafe-inline'",
+  "script-src 'self' dimo-app://localhost dimo-asset://localhost http://127.0.0.1:* http://localhost:* blob: 'wasm-unsafe-eval'",
+  "style-src 'self' dimo-app://localhost http://127.0.0.1:* http://localhost:* 'unsafe-inline'",
   "img-src 'self' dimo-app://localhost dimo-asset://localhost http://127.0.0.1:* http://localhost:* https: http: data: blob:",
   "media-src 'self' dimo-app://localhost dimo-asset://localhost http://127.0.0.1:* http://localhost:* https: data: blob:",
-  "font-src 'self' dimo-app://localhost dimo-asset://localhost data:",
+  "font-src 'self' dimo-app://localhost dimo-asset://localhost http://127.0.0.1:* http://localhost:* data:",
   "connect-src 'self' dimo-app://localhost dimo-asset://localhost http://127.0.0.1:* ws://127.0.0.1:* http://localhost:* ws://localhost:* https: wss: http: ws: blob: data:",
-  "worker-src 'self' dimo-app://localhost blob:",
+  "worker-src 'self' dimo-app://localhost http://127.0.0.1:* http://localhost:* blob:",
   "frame-src 'self' dimo-app://localhost dimo-asset://localhost http://127.0.0.1:* http://localhost:* https: http: blob: data:",
   "object-src 'none'",
   "base-uri 'self'",
@@ -118,17 +118,59 @@ export function mimeTypeForPath(filePath: string): string {
   return MIME_TYPES[ext] ?? 'application/octet-stream';
 }
 
+export function stripWindowsVerbatimPrefix(
+  targetPath: string,
+  platform: NodeJS.Platform = process.platform
+): string {
+  if (platform !== 'win32') {
+    return targetPath;
+  }
+  if (/^\\\\\?\\unc\\/i.test(targetPath)) {
+    return `\\\\${targetPath.slice(8)}`;
+  }
+  if (targetPath.startsWith('\\\\?\\')) {
+    return targetPath.slice(4);
+  }
+  return targetPath;
+}
+
+export function isValidAbsolutePath(
+  rawPath: string,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  if (typeof rawPath !== 'string' || rawPath.length === 0 || rawPath.includes('\0')) {
+    return false;
+  }
+  if (platform === 'win32') {
+    const stripped = stripWindowsVerbatimPrefix(rawPath, platform);
+    if (/^[A-Za-z]:[\\/]/.test(stripped)) {
+      return true;
+    }
+    if (/^(?:\\\\|\/\/)[^\\/]+[\\/][^\\/]+/.test(stripped)) {
+      return true;
+    }
+    return false;
+  }
+  return path.posix.isAbsolute(rawPath);
+}
+
 function normalizeForCompare(
   targetPath: string,
   platform: NodeJS.Platform = process.platform
 ): string {
-  const resolved = path.resolve(targetPath);
+  const stripped = stripWindowsVerbatimPrefix(targetPath, platform);
+  const pathMod = platform === 'win32' ? path.win32 : path.posix;
+  const resolved = stripWindowsVerbatimPrefix(pathMod.resolve(stripped), platform);
   return platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
-function canonicalizeExisting(targetPath: string): string | null {
+function canonicalizeExisting(
+  targetPath: string,
+  platform: NodeJS.Platform = process.platform
+): string | null {
+  const cleaned = stripWindowsVerbatimPrefix(targetPath, platform);
   try {
-    return fs.realpathSync(targetPath);
+    return stripWindowsVerbatimPrefix(fs.realpathSync(cleaned), platform);
   } catch {
     return null;
   }
@@ -153,6 +195,23 @@ function isWithinDirectory(
  * Additive allow-list for `dimo-asset://` local file reads, mirroring Tauri's
  * `asset_protocol_scope()` populated by `allow_preview_asset_scope`.
  */
+const MAX_PREVIEW_ASSET_DIRECTORIES = 256;
+const MAX_PREVIEW_ASSET_FILES = 1024;
+
+function addBoundedScopeEntry(set: Set<string>, value: string, maxSize: number): void {
+  if (set.has(value)) {
+    set.delete(value);
+  }
+  set.add(value);
+  while (set.size > maxSize) {
+    const oldest = set.values().next().value;
+    if (oldest === undefined) {
+      break;
+    }
+    set.delete(oldest);
+  }
+}
+
 export class PreviewAssetScope {
   private readonly allowedDirectories = new Set<string>();
   private readonly allowedFiles = new Set<string>();
@@ -186,33 +245,68 @@ export class PreviewAssetScope {
 
   private grantRawPath(rawPath: string, requireExists: boolean): string | null {
     const trimmed = rawPath.trim();
-    if (!trimmed || trimmed.includes('\0') || !path.isAbsolute(trimmed)) {
+    if (!isValidAbsolutePath(trimmed, this.platform)) {
       throw new Error(`Invalid preview asset path: ${rawPath}`);
     }
-    if (!fs.existsSync(trimmed)) {
+    const cleaned = stripWindowsVerbatimPrefix(trimmed, this.platform);
+    if (!fs.existsSync(cleaned)) {
       if (requireExists) {
         throw new Error(`Preview asset does not exist: ${trimmed}`);
       }
       return null;
     }
-    const canonical = canonicalizeExisting(trimmed);
+    const canonical = canonicalizeExisting(cleaned, this.platform);
     if (!canonical) {
       throw new Error(`Invalid preview asset path: ${trimmed}`);
     }
     const stat = fs.statSync(canonical);
     if (stat.isDirectory()) {
-      this.allowedDirectories.add(canonical);
+      addBoundedScopeEntry(
+        this.allowedDirectories,
+        canonical,
+        MAX_PREVIEW_ASSET_DIRECTORIES
+      );
     } else {
-      this.allowedFiles.add(normalizeForCompare(canonical, this.platform));
+      addBoundedScopeEntry(
+        this.allowedFiles,
+        normalizeForCompare(canonical, this.platform),
+        MAX_PREVIEW_ASSET_FILES
+      );
     }
     return canonical;
   }
 
   isAllowed(targetPath: string): boolean {
-    const canonical = canonicalizeExisting(targetPath);
+    const trimmed = typeof targetPath === 'string' ? targetPath.trim() : '';
+    if (!isValidAbsolutePath(trimmed, this.platform)) {
+      return false;
+    }
+    const canonical = canonicalizeExisting(trimmed, this.platform);
     if (!canonical) {
       return false;
     }
+    return this.isCanonicalAllowed(canonical);
+  }
+
+  async isAllowedAsync(targetPath: string): Promise<boolean> {
+    const trimmed = typeof targetPath === 'string' ? targetPath.trim() : '';
+    if (!isValidAbsolutePath(trimmed, this.platform)) {
+      return false;
+    }
+    const cleaned = stripWindowsVerbatimPrefix(trimmed, this.platform);
+    let canonical: string;
+    try {
+      canonical = stripWindowsVerbatimPrefix(
+        await fs.promises.realpath(cleaned),
+        this.platform
+      );
+    } catch {
+      return false;
+    }
+    return this.isCanonicalAllowed(canonical);
+  }
+
+  private isCanonicalAllowed(canonical: string): boolean {
     const normalized = normalizeForCompare(canonical, this.platform);
     if (this.allowedFiles.has(normalized)) {
       return true;
@@ -294,7 +388,7 @@ export function resolveAppDistFile(
     return null;
   }
 
-  const canonicalRoot = canonicalizeExisting(distRoot);
+  const canonicalRoot = canonicalizeExisting(distRoot, platform);
   if (!canonicalRoot) {
     return null;
   }
@@ -320,7 +414,7 @@ export function resolveAppDistFile(
     return null;
   }
 
-  const canonicalCandidate = canonicalizeExisting(candidate);
+  const canonicalCandidate = canonicalizeExisting(candidate, platform);
   if (
     canonicalCandidate &&
     isWithinDirectory(canonicalCandidate, canonicalRoot, platform) &&
@@ -334,7 +428,8 @@ export function resolveAppDistFile(
   const ext = path.extname(relative).toLowerCase();
   if (!STATIC_ASSET_EXTENSIONS.has(ext)) {
     const indexPath = canonicalizeExisting(
-      path.join(canonicalRoot, 'index.html')
+      path.join(canonicalRoot, 'index.html'),
+      platform
     );
     if (
       indexPath &&
@@ -358,6 +453,9 @@ export function toSafeWebStream(
   signal?: AbortSignal
 ): ReadableStream<Uint8Array> {
   let settled = false;
+  let hasPendingError = false;
+  let pendingError: unknown = null;
+  let dataAttached = false;
   let controllerRef: ReadableStreamDefaultController<Uint8Array> | null = null;
 
   const cleanupAbort = () => {
@@ -382,6 +480,13 @@ export function toSafeWebStream(
     }
   };
 
+  // Capture streams that already errored prior to wrapping.
+  if (stream.errored) {
+    settled = true;
+    hasPendingError = true;
+    pendingError = stream.errored;
+  }
+
   // Attach immediately so early or post-cancel I/O errors are never uncaught.
   stream.on('error', (error) => {
     if (settled) {
@@ -389,28 +494,75 @@ export function toSafeWebStream(
     }
     settled = true;
     cleanupAbort();
-    try {
-      controllerRef?.error(error);
-    } catch {
-      // Ignore if controller is already closed or errored.
+    if (controllerRef) {
+      try {
+        controllerRef.error(error);
+      } catch {
+        // Ignore if controller is already closed or errored.
+      }
+    } else {
+      hasPendingError = true;
+      pendingError = error;
     }
   });
 
+  // Pause before any 'data' listener is attached so chunks do not flow ahead of pull().
+  if (!settled && !stream.destroyed) {
+    stream.pause();
+  }
+
   if (signal) {
     if (signal.aborted) {
-      settled = true;
+      if (!settled) {
+        settled = true;
+      }
       if (!stream.destroyed) {
         stream.destroy();
       }
-    } else {
+    } else if (!settled) {
       signal.addEventListener('abort', onAbort, { once: true });
     }
   }
 
+  const onData = (chunk: Buffer | string) => {
+    if (settled || !controllerRef) {
+      return;
+    }
+    const bytes =
+      typeof chunk === 'string'
+        ? Buffer.from(chunk)
+        : new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+    try {
+      controllerRef.enqueue(bytes);
+      if (
+        controllerRef.desiredSize !== null &&
+        controllerRef.desiredSize <= 0
+      ) {
+        stream.pause();
+      }
+    } catch {
+      settled = true;
+      cleanupAbort();
+      if (!stream.destroyed) {
+        stream.destroy();
+      }
+    }
+  };
+
   return new ReadableStream<Uint8Array>({
     start(controller) {
       controllerRef = controller;
-      if (settled) {
+      if (hasPendingError) {
+        try {
+          controller.error(pendingError);
+        } catch {
+          // Ignore.
+        }
+        return;
+      }
+      if (settled || stream.readableEnded || stream.destroyed) {
+        settled = true;
+        cleanupAbort();
         try {
           controller.close();
         } catch {
@@ -418,30 +570,6 @@ export function toSafeWebStream(
         }
         return;
       }
-
-      stream.pause();
-
-      stream.on('data', (chunk: Buffer | string) => {
-        if (settled) {
-          return;
-        }
-        const bytes =
-          typeof chunk === 'string'
-            ? Buffer.from(chunk)
-            : new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
-        try {
-          controller.enqueue(bytes);
-          if (controller.desiredSize !== null && controller.desiredSize <= 0) {
-            stream.pause();
-          }
-        } catch {
-          settled = true;
-          cleanupAbort();
-          if (!stream.destroyed) {
-            stream.destroy();
-          }
-        }
-      });
 
       stream.on('end', () => {
         if (settled) {
@@ -470,13 +598,21 @@ export function toSafeWebStream(
       });
     },
     pull() {
-      if (!settled && !stream.destroyed) {
-        stream.resume();
+      if (settled || stream.destroyed) {
+        return;
       }
+      if (!dataAttached) {
+        dataAttached = true;
+        stream.on('data', onData);
+      }
+      stream.resume();
     },
     cancel() {
       settled = true;
       cleanupAbort();
+      if (dataAttached) {
+        stream.removeListener('data', onData);
+      }
       if (!stream.destroyed) {
         stream.destroy();
       }
@@ -484,21 +620,13 @@ export function toSafeWebStream(
   });
 }
 
-export function createStreamingFileResponse(
+function buildStreamingFileResponse(
   filePath: string,
+  stat: fs.Stats,
   request: Request,
   options?: { extraHeaders?: Readonly<Record<string, string>> }
 ): Response {
   const extraHeaders = options?.extraHeaders;
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(filePath);
-  } catch {
-    return new Response('Not Found', {
-      status: 404,
-      ...(extraHeaders ? { headers: { ...extraHeaders } } : {}),
-    });
-  }
   if (!stat.isFile()) {
     return new Response('Not Found', {
       status: 404,
@@ -576,6 +704,155 @@ export function createStreamingFileResponse(
   });
 }
 
+export function createStreamingFileResponse(
+  filePath: string,
+  request: Request,
+  options?: { extraHeaders?: Readonly<Record<string, string>> }
+): Response {
+  const extraHeaders = options?.extraHeaders;
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(filePath);
+  } catch {
+    return new Response('Not Found', {
+      status: 404,
+      ...(extraHeaders ? { headers: { ...extraHeaders } } : {}),
+    });
+  }
+  return buildStreamingFileResponse(filePath, stat, request, options);
+}
+
+async function createStreamingFileResponseAsync(
+  filePath: string,
+  request: Request,
+  options?: { extraHeaders?: Readonly<Record<string, string>> }
+): Promise<Response> {
+  const extraHeaders = options?.extraHeaders;
+  let stat: fs.Stats;
+  try {
+    stat = await fs.promises.stat(filePath);
+  } catch {
+    return new Response('Not Found', {
+      status: 404,
+      ...(extraHeaders ? { headers: { ...extraHeaders } } : {}),
+    });
+  }
+  return buildStreamingFileResponse(filePath, stat, request, options);
+}
+
+const MAX_DIST_ROOT_CACHE_ENTRIES = 16;
+const distRootRealpathCache = new Map<string, string>();
+
+async function resolveCanonicalDistRootAsync(
+  distRoot: string,
+  platform: NodeJS.Platform = process.platform
+): Promise<string | null> {
+  const cacheKey = `${platform}\0${distRoot}`;
+  const cached = distRootRealpathCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+  try {
+    const cleaned = stripWindowsVerbatimPrefix(distRoot, platform);
+    const canonical = stripWindowsVerbatimPrefix(
+      await fs.promises.realpath(cleaned),
+      platform
+    );
+    if (distRootRealpathCache.has(cacheKey)) {
+      distRootRealpathCache.delete(cacheKey);
+    }
+    distRootRealpathCache.set(cacheKey, canonical);
+    while (distRootRealpathCache.size > MAX_DIST_ROOT_CACHE_ENTRIES) {
+      const oldest = distRootRealpathCache.keys().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      distRootRealpathCache.delete(oldest);
+    }
+    return canonical;
+  } catch {
+    return null;
+  }
+}
+
+export async function resolveAppDistFileAsync(
+  distRoot: string,
+  requestUrl: string,
+  platform: NodeJS.Platform = process.platform
+): Promise<string | null> {
+  let parsed: URL;
+  try {
+    parsed = new URL(requestUrl);
+  } catch {
+    return null;
+  }
+
+  if (parsed.hostname.toLowerCase() !== 'localhost') {
+    return null;
+  }
+
+  const canonicalRoot = await resolveCanonicalDistRootAsync(distRoot, platform);
+  if (!canonicalRoot) {
+    return null;
+  }
+
+  let pathname: string;
+  try {
+    pathname = decodeURIComponent(parsed.pathname);
+  } catch {
+    return null;
+  }
+
+  if (pathname.includes('\0')) {
+    return null;
+  }
+
+  const relative = pathname.replace(/^\/+/, '');
+  const candidate = path.resolve(
+    canonicalRoot,
+    relative.length === 0 ? 'index.html' : relative
+  );
+
+  if (!isWithinDirectory(candidate, canonicalRoot, platform)) {
+    return null;
+  }
+
+  try {
+    const canonicalCandidate = stripWindowsVerbatimPrefix(
+      await fs.promises.realpath(candidate),
+      platform
+    );
+    if (
+      isWithinDirectory(canonicalCandidate, canonicalRoot, platform) &&
+      (await fs.promises.stat(canonicalCandidate)).isFile()
+    ) {
+      return canonicalCandidate;
+    }
+  } catch {
+    // Fall through to SPA index fallback below.
+  }
+
+  const ext = path.extname(relative).toLowerCase();
+  if (!STATIC_ASSET_EXTENSIONS.has(ext)) {
+    try {
+      const indexPath = stripWindowsVerbatimPrefix(
+        await fs.promises.realpath(path.join(canonicalRoot, 'index.html')),
+        platform
+      );
+      if (
+        isWithinDirectory(indexPath, canonicalRoot, platform) &&
+        (await fs.promises.stat(indexPath)).isFile()
+      ) {
+        return indexPath;
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
 export function handleAppProtocolRequest(
   frontendDistDir: string,
   request: Request
@@ -588,6 +865,20 @@ export function handleAppProtocolRequest(
     ? { 'Content-Security-Policy': APP_CONTENT_SECURITY_POLICY }
     : undefined;
   return createStreamingFileResponse(resolved, request, { extraHeaders });
+}
+
+async function handleAppProtocolRequestAsync(
+  frontendDistDir: string,
+  request: Request
+): Promise<Response> {
+  const resolved = await resolveAppDistFileAsync(frontendDistDir, request.url);
+  if (!resolved) {
+    return new Response('Not Found', { status: 404 });
+  }
+  const extraHeaders = mimeTypeForPath(resolved).startsWith('text/html')
+    ? { 'Content-Security-Policy': APP_CONTENT_SECURITY_POLICY }
+    : undefined;
+  return createStreamingFileResponseAsync(resolved, request, { extraHeaders });
 }
 
 export function handleAssetProtocolRequest(
@@ -615,6 +906,35 @@ export function handleAssetProtocolRequest(
     });
   }
   return createStreamingFileResponse(targetPath, request, {
+    extraHeaders: ASSET_CORS_HEADERS,
+  });
+}
+
+async function handleAssetProtocolRequestAsync(
+  assetScope: PreviewAssetScope,
+  request: Request
+): Promise<Response> {
+  if (request.method.toUpperCase() === 'OPTIONS') {
+    return new Response(null, {
+      status: 204,
+      headers: ASSET_PREFLIGHT_HEADERS,
+    });
+  }
+
+  const targetPath = decodeAssetUrlPath(request.url);
+  if (!targetPath) {
+    return new Response('Bad Request', {
+      status: 400,
+      headers: ASSET_CORS_HEADERS,
+    });
+  }
+  if (!(await assetScope.isAllowedAsync(targetPath))) {
+    return new Response('Forbidden', {
+      status: 403,
+      headers: ASSET_CORS_HEADERS,
+    });
+  }
+  return createStreamingFileResponseAsync(targetPath, request, {
     extraHeaders: ASSET_CORS_HEADERS,
   });
 }
@@ -663,11 +983,11 @@ export function registerProtocolHandlers(options: {
   registeredProtocols.add(protocol);
 
   protocol.handle(DESKTOP_APP_SCHEME, (request) =>
-    handleAppProtocolRequest(frontendDistDir, request)
+    handleAppProtocolRequestAsync(frontendDistDir, request)
   );
 
   protocol.handle(DESKTOP_ASSET_SCHEME, (request) =>
-    handleAssetProtocolRequest(assetScope, request)
+    handleAssetProtocolRequestAsync(assetScope, request)
   );
 }
 

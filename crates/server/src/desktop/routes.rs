@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use deployment::Deployment;
 use axum::{
     Json, Router,
     extract::{Path, Request, State},
@@ -9,6 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use deployment::Deployment;
 use remote_protocol::{ErrorCode, ErrorEnvelope, OperationId};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -201,8 +201,10 @@ async fn window_destroyed(
     Json(json!({ "ok": true }))
 }
 
-async fn plugin_dev_connection() -> Json<PluginDevConnection> {
-    Json(PluginDevConnection::current())
+async fn plugin_dev_connection(
+    State(state): State<DesktopRuntimeState>,
+) -> Json<PluginDevConnection> {
+    Json(state.plugin_dev.clone())
 }
 
 fn window_label(headers: &HeaderMap) -> String {
@@ -469,7 +471,7 @@ async fn invoke_desktop_command(
     let args = body.map(|Json(value)| value).unwrap_or_else(|| json!({}));
     let caller = window_label(&headers);
     let result = match command.as_str() {
-        "plugin_dev_connection" => to_json(PluginDevConnection::current())?,
+        "plugin_dev_connection" => to_json(state.plugin_dev.clone())?,
 
         // Backup
         "backup_create" => {
@@ -583,6 +585,7 @@ async fn invoke_desktop_command(
             let parsed: LeaseArg = parse_args(args)?;
             to_json(host_tunnel::set_account_relay_lease(parsed.lease).await?)?
         }
+        "reconnect_host_tunnel" => to_json(host_tunnel::reconnect_active_tunnel().await?)?,
 
         // Remote desktop proxy
         "remote_desktop_connect" => {
@@ -647,17 +650,18 @@ async fn invoke_desktop_command(
                 })?
                 .unwrap_or_else(uuid::Uuid::new_v4);
             let events = state.events.clone();
-            let emitter: HostFamilyEventEmitter = Arc::new(move |window_label, channel, payload| {
-                events.emit(
-                    REMOTE_HOST_EVENT_CHANNEL,
-                    json!({
-                        "windowLabel": window_label,
-                        "targets": super::host_windows::host_family_event_labels(window_label),
-                        "channel": channel,
-                        "payload": payload,
-                    }),
-                );
-            });
+            let emitter: HostFamilyEventEmitter =
+                Arc::new(move |window_label, channel, payload| {
+                    events.emit(
+                        REMOTE_HOST_EVENT_CHANNEL,
+                        json!({
+                            "windowLabel": window_label,
+                            "targets": super::host_windows::host_family_event_labels(window_label),
+                            "channel": channel,
+                            "payload": payload,
+                        }),
+                    );
+                });
             let id = state
                 .remote_desktop
                 .listen_host_event(
@@ -706,9 +710,10 @@ async fn invoke_desktop_command(
         }
         "remote_desktop_cancel_subscription" => {
             let parsed: SubscriptionIdArg = parse_args(args)?;
-            let subscription_id = uuid::Uuid::parse_str(&parsed.subscription_id).map_err(|error| {
-                DesktopError::BadRequest(format!("invalid subscription id: {error}"))
-            })?;
+            let subscription_id =
+                uuid::Uuid::parse_str(&parsed.subscription_id).map_err(|error| {
+                    DesktopError::BadRequest(format!("invalid subscription id: {error}"))
+                })?;
             state
                 .remote_desktop
                 .cancel_subscription(subscription_id)

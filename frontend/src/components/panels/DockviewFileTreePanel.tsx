@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { IDockviewPanelProps } from 'dockview-react';
 import { FolderTree, FolderOpen } from 'lucide-react';
+import { useShallow } from 'zustand/react/shallow';
 import { useFileTreeStore } from '@/stores/useFileTreeStore';
 import { usePanelActions } from '@/hooks/usePanelActions';
 import { pickHostDirectory } from '@/lib/hostFs';
@@ -67,7 +68,15 @@ function DockviewFileTreePanel(_props: IDockviewPanelProps) {
     setRootPath,
     setSelectedFilePath,
     setDiffFilePath,
-  } = useFileTreeStore();
+  } = useFileTreeStore(
+    useShallow((state) => ({
+      rootPath: state.rootPath,
+      revealTarget: state.revealTarget,
+      setRootPath: state.setRootPath,
+      setSelectedFilePath: state.setSelectedFilePath,
+      setDiffFilePath: state.setDiffFilePath,
+    }))
+  );
   const { openFilePreview, renameFilePreviews } = usePanelActions();
   const { projectId, project } = useProject();
   const { data: repos } = useProjectRepos(projectId);

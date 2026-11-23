@@ -627,6 +627,8 @@ impl LocalContainerService {
         let exec_id = *exec_id;
         let child_store = self.child_store.clone();
         let msg_stores = self.msg_stores.clone();
+        let cancellation_tokens = self.cancellation_tokens.clone();
+        let exit_monitor_handles = self.exit_monitor_handles.clone();
         let db = self.db.clone();
         let container = self.clone();
 
@@ -739,8 +741,10 @@ impl LocalContainerService {
                 let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
             }
 
-            // Cleanup child handle
+            // Cleanup child handle and lifecycle tracking entries
             child_store.write().await.remove(&exec_id);
+            cancellation_tokens.write().await.remove(&exec_id);
+            exit_monitor_handles.write().await.remove(&exec_id);
         })
     }
 
@@ -786,11 +790,21 @@ impl LocalContainerService {
         format!("{}-{}", short_uuid(workspace_id), task_title_id)
     }
 
-    async fn track_child_msgs_in_store(&self, id: Uuid, child: &mut AsyncGroupChild) {
+    async fn track_child_msgs_in_store(
+        &self,
+        id: Uuid,
+        child: &mut AsyncGroupChild,
+    ) -> Result<(), ContainerError> {
         let store = Arc::new(MsgStore::new());
 
-        let out = child.inner().stdout.take().expect("no stdout");
-        let err = child.inner().stderr.take().expect("no stderr");
+        let out =
+            child.inner().stdout.take().ok_or_else(|| {
+                ContainerError::Other(anyhow!("spawned child missing stdout pipe"))
+            })?;
+        let err =
+            child.inner().stderr.take().ok_or_else(|| {
+                ContainerError::Other(anyhow!("spawned child missing stderr pipe"))
+            })?;
 
         // Map stdout bytes -> LogMsg::Stdout
         let out = ReaderStream::new(out)
@@ -808,6 +822,7 @@ impl LocalContainerService {
 
         let mut map = self.msg_stores().write().await;
         map.insert(id, store);
+        Ok(())
     }
 
     /// Create a live diff log stream for ongoing attempts for WebSocket
@@ -955,15 +970,24 @@ impl LocalContainerService {
         Ok(env)
     }
 
-    async fn register_spawned_execution(&self, execution_id: Uuid, spawned: SpawnedChild) {
+    async fn register_spawned_execution(
+        &self,
+        execution_id: Uuid,
+        spawned: SpawnedChild,
+    ) -> Result<(), ContainerError> {
         let SpawnedChild {
             mut child,
             exit_signal,
             cancel,
         } = spawned;
 
-        self.track_child_msgs_in_store(execution_id, &mut child)
-            .await;
+        if let Err(error) = self
+            .track_child_msgs_in_store(execution_id, &mut child)
+            .await
+        {
+            let _ = command::kill_process_group(&mut child).await;
+            return Err(error);
+        }
         self.add_child_to_store(execution_id, child).await;
 
         if let Some(cancel) = cancel {
@@ -973,6 +997,7 @@ impl LocalContainerService {
         let monitor_handle = self.spawn_exit_monitor(&execution_id, exit_signal);
         self.add_exit_monitor_handle(execution_id, monitor_handle)
             .await;
+        Ok(())
     }
 }
 
@@ -1099,7 +1124,7 @@ impl ContainerService for LocalContainerService {
         })??;
 
         self.register_spawned_execution(execution_process.id, spawned)
-            .await;
+            .await?;
 
         Ok(())
     }

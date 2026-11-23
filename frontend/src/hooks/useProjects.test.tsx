@@ -230,7 +230,7 @@ describe('useProjects and useProjectMutations in WebUI/remote mode', () => {
       expect(result.current.error).toBeNull();
 
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(1_000);
+        await vi.advanceTimersByTimeAsync(1_250);
         await Promise.resolve();
         await Promise.resolve();
       });

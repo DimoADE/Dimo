@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   GitBranch,
   History,
@@ -11,12 +11,15 @@ import {
   CircleDot,
   LayoutList,
   FolderTree,
+  GitGraph,
+  Eye,
 } from 'lucide-react';
 import { useParams } from 'react-router-dom';
 import { useWorktree } from '@/contexts/WorktreeContext';
 import { useAttemptRepo } from '@/hooks/useAttemptRepo';
 import { useAttempt } from '@/hooks/useAttempt';
 import { useProjectRepos } from '@/hooks';
+import { useProjectWorktrees } from '@/hooks/useProjectWorktrees';
 import {
   useGitStatus,
   useGitDiffs,
@@ -27,6 +30,8 @@ import {
   useGitBranches,
   useGitHubData,
   useGitPanelController,
+  useRepoWorktrees,
+  useBranchDiffs,
   type GitPanelMode,
 } from '@/hooks/git';
 import {
@@ -42,10 +47,17 @@ import { GitLogView } from './GitLogView';
 import { GitBranchList } from './GitBranchList';
 import { GitIssuesView } from './GitIssuesView';
 import { GitPRsView } from './GitPRsView';
+import {
+  GitWorktreeBranchSelector,
+  buildDirectoryBranchGroups,
+  type GitDiffTarget,
+} from './GitWorktreeBranchSelector';
+import { resolveDefaultLogBranches } from './GitLogBranchFilter';
 import { useBranchStatus } from '@/hooks/useBranchStatus';
 import { useAttemptConflicts } from '@/hooks/useAttemptConflicts';
 import { usePanelActions } from '@/hooks/usePanelActions';
 import { useGitDiffNavigationStore } from '@/stores/useGitDiffNavigationStore';
+import { useCommitDiffStore } from '@/stores/useCommitDiffStore';
 import { useAppContextMenu } from '@/components/context-menu';
 import { attemptsApi, projectsApi } from '@/lib/api';
 import { toast } from '@/components/ui/toast';
@@ -60,6 +72,8 @@ import {
 import { ShellNavPanelDragHandle } from '@/components/layout/ShellNavPanelDragHandle';
 import { PANEL_IDS } from '@/stores/useLayoutStore';
 import i18n from '@/i18n';
+
+const DEFAULT_LOG_PAGE_SIZE = 100;
 
 const GIT_PANEL_MODE_OPTIONS: SelectorOptionData[] = [
   {
@@ -120,6 +134,10 @@ export function GitPanel() {
     null
   );
   const focusDiffPath = useGitDiffNavigationStore((state) => state.focusPath);
+  const setReviewSource = useGitDiffNavigationStore(
+    (state) => state.setReviewSource
+  );
+  const clearCommitDiff = useCommitDiffStore((state) => state.clearCommitDiff);
   const { activeWorktreeId } = useWorktree();
   const { workspaceId: routeWorkspaceId, projectId } = useParams<{
     workspaceId?: string;
@@ -130,15 +148,15 @@ export function GitPanel() {
   const { selectedRepoId, isLoading: attemptRepoLoading } = useAttemptRepo(
     effectiveWorkspaceId ?? undefined
   );
-  const { data: branchStatus } = useBranchStatus(
-    effectiveWorkspaceId ?? undefined
-  );
 
   // When no workspace is active, fall back to the project's first repo
   const projectReposQuery = useProjectRepos(projectId, {
     enabled: !!projectId,
   });
-  const projectRepos = projectReposQuery.data ?? [];
+  const projectRepos = useMemo(
+    () => projectReposQuery.data ?? [],
+    [projectReposQuery.data]
+  );
   const parentHasNoGitRepo =
     projectReposQuery.isSuccess && projectRepos.length === 0;
   const { data: gitChildren = [], isLoading: gitChildrenLoading } = useQuery({
@@ -164,26 +182,152 @@ export function GitPanel() {
 
   const workspaceId = parentHasNoGitRepo ? null : effectiveWorkspaceId;
   const repoId = fallbackRepoId;
+  const activeRepo = useMemo(
+    () =>
+      (parentHasNoGitRepo ? childRepos : projectRepos).find(
+        (repo) => repo.id === repoId
+      ) ?? null,
+    [parentHasNoGitRepo, childRepos, projectRepos, repoId]
+  );
+
   const isResolvingRepo =
     !repoId &&
     (Boolean(projectId && projectReposQuery.isLoading) ||
       Boolean(effectiveWorkspaceId && attemptRepoLoading) ||
       Boolean(parentHasNoGitRepo && (gitChildrenLoading || childReposLoading)));
-  const conflictStatus = branchStatus?.find((repo) => repo.repo_id === repoId);
-  const conflictOp = conflictStatus?.conflict_op ?? null;
-  const conflictedFiles = conflictStatus?.conflicted_files ?? [];
-  const { abortConflicts } = useAttemptConflicts(
-    workspaceId ?? undefined,
-    repoId ?? undefined
-  );
+
   const {
     mode,
     setMode,
     diffListView,
     toggleDiffListView,
+    logViewMode,
+    toggleLogViewMode,
     selectedDiffPath,
     setSelectedDiffPath,
   } = useGitPanelController();
+
+  // Local Diff target selection & Log multi-branch filter state (scoped to GitPanel)
+  const [selectedTargetId, setSelectedTargetId] = useState<string | null>(null);
+  const [selectedLogBranches, setSelectedLogBranches] = useState<
+    string[] | null
+  >(null);
+  const [logMaxCount, setLogMaxCount] = useState(DEFAULT_LOG_PAGE_SIZE);
+
+  useEffect(() => {
+    setSelectedTargetId(null);
+    setSelectedLogBranches(null);
+    setLogMaxCount(DEFAULT_LOG_PAGE_SIZE);
+  }, [projectId, repoId]);
+
+  const { worktrees: projectWorktreeEntries } = useProjectWorktrees(projectId);
+  const projectWorkspaces = useMemo(
+    () => projectWorktreeEntries.map((item) => item.workspace),
+    [projectWorktreeEntries]
+  );
+
+  const {
+    worktrees: repoWorktrees,
+    isLoading: worktreesLoading,
+    refresh: refreshWorktrees,
+  } = useRepoWorktrees({
+    repoId,
+    enabled: Boolean(repoId),
+  });
+
+  // Load branches across Diff, Log, and Branches modes so selectors always have full data
+  const repoBranchesQuery = useGitBranches({
+    workspaceId: null,
+    repoId,
+    enabled:
+      Boolean(repoId) &&
+      (mode === 'diff' || mode === 'log' || mode === 'branches'),
+  });
+
+  const defaultDirLabel = i18n.t('panels:ui.git.defaultDirectory');
+  const directoryGroups = useMemo(
+    () =>
+      buildDirectoryBranchGroups({
+        worktrees: repoWorktrees,
+        branches: repoBranchesQuery.branches,
+        workspaces: projectWorkspaces,
+        fallbackCurrentBranch: workspace?.branch ?? null,
+        baseBranch: activeRepo?.default_target_branch ?? null,
+        defaultDirLabel,
+      }),
+    [
+      repoWorktrees,
+      repoBranchesQuery.branches,
+      projectWorkspaces,
+      workspace?.branch,
+      activeRepo?.default_target_branch,
+      defaultDirLabel,
+    ]
+  );
+
+  const allTargets = useMemo(
+    () => directoryGroups.flatMap((group) => group.options),
+    [directoryGroups]
+  );
+
+  const activeTarget = useMemo<GitDiffTarget | null>(() => {
+    if (selectedTargetId) {
+      const matched = allTargets.find(
+        (target) => target.id === selectedTargetId
+      );
+      if (matched) return matched;
+    }
+    if (workspaceId) {
+      const wsMatch = allTargets.find(
+        (target) =>
+          target.kind === 'worktree' && target.workspaceId === workspaceId
+      );
+      if (wsMatch) return wsMatch;
+    }
+    return (
+      allTargets.find(
+        (target) => target.kind === 'worktree' && target.isMain
+      ) ??
+      allTargets[0] ??
+      null
+    );
+  }, [allTargets, selectedTargetId, workspaceId]);
+
+  const isReadOnlyBranchTarget = activeTarget?.kind === 'branch';
+
+  const activeTargetWorkspaceId = useMemo(() => {
+    if (!activeTarget || activeTarget.kind !== 'worktree') {
+      return null;
+    }
+    if (activeTarget.workspaceId) {
+      return activeTarget.workspaceId;
+    }
+    if (activeTarget.isMain && !activeTarget.worktreePath) {
+      return workspaceId;
+    }
+    return null;
+  }, [activeTarget, workspaceId]);
+
+  const activeTargetWorktreePath = useMemo(() => {
+    if (!activeTarget || activeTarget.kind !== 'worktree') {
+      return null;
+    }
+    if (activeTargetWorkspaceId) {
+      return null;
+    }
+    return activeTarget.worktreePath;
+  }, [activeTarget, activeTargetWorkspaceId]);
+
+  const { data: branchStatus } = useBranchStatus(
+    activeTargetWorkspaceId ?? undefined
+  );
+  const conflictStatus = branchStatus?.find((repo) => repo.repo_id === repoId);
+  const conflictOp = conflictStatus?.conflict_op ?? null;
+  const conflictedFiles = conflictStatus?.conflicted_files ?? [];
+  const { abortConflicts } = useAttemptConflicts(
+    activeTargetWorkspaceId ?? undefined,
+    repoId ?? undefined
+  );
 
   const {
     branchName,
@@ -193,8 +337,41 @@ export function GitPanel() {
     totalDeletions,
     isLoading: statusLoading,
     refresh: refreshStatus,
-  } = useGitStatus({ workspaceId, repoId });
-  const displayedBranchName = workspace?.branch || branchName;
+  } = useGitStatus({
+    workspaceId: activeTargetWorkspaceId,
+    repoId,
+    worktreePath: activeTargetWorktreePath,
+    enabled: !isReadOnlyBranchTarget,
+  });
+
+  const displayedBranchName =
+    activeTarget?.branch || workspace?.branch || branchName;
+
+  const displayedTarget = useMemo<GitDiffTarget | null>(() => {
+    if (!activeTarget) return null;
+    if (
+      activeTarget.kind === 'worktree' &&
+      !activeTarget.branch &&
+      displayedBranchName
+    ) {
+      return { ...activeTarget, branch: displayedBranchName };
+    }
+    return activeTarget;
+  }, [activeTarget, displayedBranchName]);
+
+  const branchDiffs = useBranchDiffs({
+    repoId,
+    branch: isReadOnlyBranchTarget ? activeTarget.branch : null,
+    baseBranch: isReadOnlyBranchTarget ? activeTarget.baseBranch : null,
+    enabled: mode === 'diff' && isReadOnlyBranchTarget,
+  });
+
+  const handleRefreshAll = useCallback(async () => {
+    await Promise.all([
+      isReadOnlyBranchTarget ? branchDiffs.refresh() : refreshStatus(),
+      refreshWorktrees(),
+    ]);
+  }, [isReadOnlyBranchTarget, branchDiffs, refreshStatus, refreshWorktrees]);
 
   const {
     stageFile,
@@ -203,15 +380,22 @@ export function GitPanel() {
     stageAll,
     revertAll,
     error: actionError,
-  } = useGitActions({ workspaceId, repoId, onSuccess: refreshStatus });
+  } = useGitActions({
+    workspaceId: activeTargetWorkspaceId,
+    repoId,
+    worktreePath: activeTargetWorktreePath,
+    onSuccess: refreshStatus,
+  });
 
   const shouldPreloadDiffs =
     mode === 'diff' &&
+    !isReadOnlyBranchTarget &&
     stagedFiles.length > 0 &&
     shouldAutoPreloadDiffs(stagedFiles, unstagedFiles);
   const { diffs } = useGitDiffs({
-    workspaceId,
+    workspaceId: activeTargetWorkspaceId,
     repoId,
+    worktreePath: activeTargetWorktreePath,
     enabled: shouldPreloadDiffs,
   });
 
@@ -230,34 +414,80 @@ export function GitPanel() {
     onPull,
     onFetch,
   } = useGitCommit({
-    workspaceId,
+    workspaceId: activeTargetWorkspaceId,
     repoId,
-    onSuccess: refreshStatus,
+    worktreePath: activeTargetWorktreePath,
+    onSuccess: handleRefreshAll,
   });
 
+  // Default Log branch filter: default directory's current branch + origin target branch
+  const mainWorktreeBranch = useMemo(() => {
+    const mainWt = repoWorktrees.find((wt) => wt.is_main);
+    return mainWt?.branch || branchName || workspace?.branch || null;
+  }, [repoWorktrees, branchName, workspace?.branch]);
+
+  const defaultLogBranches = useMemo(
+    () =>
+      resolveDefaultLogBranches({
+        defaultCurrentBranch: mainWorktreeBranch,
+        branches: repoBranchesQuery.branches,
+        defaultTargetBranch: activeRepo?.default_target_branch,
+      }),
+    [
+      mainWorktreeBranch,
+      repoBranchesQuery.branches,
+      activeRepo?.default_target_branch,
+    ]
+  );
+
+  const effectiveLogBranches = useMemo(() => {
+    if (selectedLogBranches && selectedLogBranches.length > 0) {
+      return selectedLogBranches;
+    }
+    return defaultLogBranches;
+  }, [selectedLogBranches, defaultLogBranches]);
+
   const gitLog = useGitLog({
-    workspaceId,
+    workspaceId: mode === 'log' ? null : activeTargetWorkspaceId,
     repoId,
-    enabled: mode === 'log' || mode === 'diff',
+    worktreePath: mode === 'log' ? null : activeTargetWorktreePath,
+    branches:
+      mode === 'log' && effectiveLogBranches.length > 0
+        ? effectiveLogBranches
+        : undefined,
+    maxCount: mode === 'log' ? logMaxCount : undefined,
+    enabled: mode === 'log' || (mode === 'diff' && !isReadOnlyBranchTarget),
   });
 
   const gitBranches = useGitBranches({
-    workspaceId,
+    workspaceId: activeTargetWorkspaceId,
     repoId,
+    worktreePath: activeTargetWorktreePath,
     enabled: mode === 'branches',
   });
 
   const handleCheckoutBranch = useCallback(
     async (name: string) => {
       await gitBranches.checkoutBranch(name);
-      refreshStatus();
-      if (workspaceId) {
+      await Promise.all([
+        refreshStatus(),
+        refreshWorktrees(),
+        repoBranchesQuery.refresh(),
+      ]);
+      if (activeTargetWorkspaceId) {
         void queryClient.invalidateQueries({
-          queryKey: ['branchStatus', workspaceId],
+          queryKey: ['branchStatus', activeTargetWorkspaceId],
         });
       }
     },
-    [gitBranches, queryClient, refreshStatus, workspaceId]
+    [
+      gitBranches,
+      queryClient,
+      refreshStatus,
+      refreshWorktrees,
+      repoBranchesQuery,
+      activeTargetWorkspaceId,
+    ]
   );
 
   const gitHub = useGitHubData({
@@ -266,36 +496,151 @@ export function GitPanel() {
     enablePrs: mode === 'prs',
   });
 
-  const handleSelectFile = useCallback(
+  const buildReviewSourceForTarget = useCallback(
+    (target: GitDiffTarget | null) => {
+      if (!target || !repoId) return null;
+      if (target.kind === 'branch') {
+        return {
+          kind: 'branch' as const,
+          repoId,
+          branch: target.branch,
+          baseBranch: target.baseBranch,
+          diffs: branchDiffs.diffs,
+          isLoading: branchDiffs.isLoading,
+        };
+      }
+      return {
+        kind: 'worktree' as const,
+        repoId,
+        worktreePath: target.worktreePath,
+        workspaceId: target.workspaceId,
+        label: target.directoryLabel,
+        branch: target.branch || branchName || null,
+        isMain: target.isMain,
+      };
+    },
+    [repoId, branchDiffs.diffs, branchDiffs.isLoading, branchName]
+  );
+
+  // Keep review panel synchronized if it is currently inspecting this read-only branch
+  useEffect(() => {
+    if (!isReadOnlyBranchTarget || !repoId || !activeTarget) return;
+    const currentSource = useGitDiffNavigationStore.getState().reviewSource;
+    if (
+      currentSource?.kind === 'branch' &&
+      currentSource.repoId === repoId &&
+      currentSource.branch === activeTarget.branch
+    ) {
+      setReviewSource({
+        kind: 'branch',
+        repoId,
+        branch: activeTarget.branch,
+        baseBranch: activeTarget.baseBranch,
+        diffs: branchDiffs.diffs,
+        isLoading: branchDiffs.isLoading,
+      });
+    }
+  }, [
+    isReadOnlyBranchTarget,
+    repoId,
+    activeTarget,
+    branchDiffs.diffs,
+    branchDiffs.isLoading,
+    setReviewSource,
+  ]);
+
+  const handleSelectDiffTarget = useCallback(
+    (target: GitDiffTarget) => {
+      setSelectedTargetId(target.id);
+      setSelectedDiffPath(null);
+      const currentSource = useGitDiffNavigationStore.getState().reviewSource;
+      if (currentSource && repoId) {
+        clearCommitDiff();
+        if (target.kind === 'branch') {
+          setReviewSource({
+            kind: 'branch',
+            repoId,
+            branch: target.branch,
+            baseBranch: target.baseBranch,
+            diffs: [],
+            isLoading: true,
+          });
+        } else {
+          setReviewSource({
+            kind: 'worktree',
+            repoId,
+            worktreePath: target.worktreePath,
+            workspaceId: target.workspaceId,
+            label: target.directoryLabel,
+            branch: target.branch,
+            isMain: target.isMain,
+          });
+        }
+      }
+    },
+    [repoId, setSelectedDiffPath, clearCommitDiff, setReviewSource]
+  );
+
+  const openFileInDiffReview = useCallback(
     (path: string) => {
       setSelectedDiffPath(path);
+      clearCommitDiff();
+      const source = buildReviewSourceForTarget(displayedTarget);
+      if (source) {
+        setReviewSource(source);
+      }
       openDiffPreview();
       focusDiffPath(path);
     },
-    [focusDiffPath, openDiffPreview, setSelectedDiffPath]
+    [
+      setSelectedDiffPath,
+      clearCommitDiff,
+      buildReviewSourceForTarget,
+      displayedTarget,
+      setReviewSource,
+      openDiffPreview,
+      focusDiffPath,
+    ]
+  );
+
+  const handleSelectFile = useCallback(
+    (path: string) => {
+      openFileInDiffReview(path);
+    },
+    [openFileInDiffReview]
   );
 
   const handleDoubleClickFile = useCallback(
     (path: string) => {
-      setSelectedDiffPath(path);
-      openDiffPreview();
-      focusDiffPath(path);
+      openFileInDiffReview(path);
     },
-    [focusDiffPath, openDiffPreview, setSelectedDiffPath]
+    [openFileInDiffReview]
   );
 
   const handleRevertAll = useCallback(() => {
     revertAll();
   }, [revertAll]);
 
+  const handleLoadMoreLogs = useCallback(() => {
+    setLogMaxCount((prev) => prev + DEFAULT_LOG_PAGE_SIZE);
+  }, []);
+
   if (!repoId && !isResolvingRepo && gitChildren.length === 0) {
     return <EmptyState />;
   }
 
-  const isInitialDiffLoading =
-    (isResolvingRepo || statusLoading) &&
-    stagedFiles.length === 0 &&
-    unstagedFiles.length === 0;
+  const effectiveAdditions = isReadOnlyBranchTarget
+    ? branchDiffs.totalAdditions
+    : totalAdditions;
+  const effectiveDeletions = isReadOnlyBranchTarget
+    ? branchDiffs.totalDeletions
+    : totalDeletions;
+
+  const isInitialDiffLoading = isReadOnlyBranchTarget
+    ? branchDiffs.isLoading && branchDiffs.files.length === 0
+    : (isResolvingRepo || statusLoading) &&
+      stagedFiles.length === 0 &&
+      unstagedFiles.length === 0;
 
   return (
     <div
@@ -312,26 +657,26 @@ export function GitPanel() {
           {
             id: 'pull',
             label: 'Pull',
-            disabled: pullLoading,
+            disabled: pullLoading || isReadOnlyBranchTarget,
             onSelect: () => onPull(),
           },
           {
             id: 'push',
             label: 'Push',
-            disabled: pushLoading,
+            disabled: pushLoading || isReadOnlyBranchTarget,
             onSelect: () => onPush(),
           },
           {
             id: 'refresh',
             label: 'Refresh',
             onSelect: () => {
-              refreshStatus();
+              void handleRefreshAll();
             },
           },
         ]);
       }}
     >
-      {/* Row 1: Mode Selector + Fetch, Pull, Tree toggle (always visible) */}
+      {/* Row 1: Mode Selector + Fetch, Pull, and mode-aware view toggle */}
       <div
         data-testid="git-panel-mode-tabs"
         className="flex items-center gap-1.5 px-2 py-1 border-b border-border/30 shrink-0"
@@ -363,7 +708,7 @@ export function GitPanel() {
           />
         </div>
 
-        {/* Fetch / Pull / Flat-Tree toggle buttons */}
+        {/* Fetch / Pull / Mode-specific view toggle */}
         <div className="flex shrink-0 items-center gap-0.5">
           <button
             type="button"
@@ -381,14 +726,14 @@ export function GitPanel() {
           <button
             type="button"
             className={`p-1 rounded bg-transparent transition-colors relative disabled:opacity-40 ${
-              gitLog.behind > 0
+              !isReadOnlyBranchTarget && gitLog.behind > 0
                 ? 'text-[hsl(var(--warning))] hover:text-[hsl(var(--warning))]'
                 : 'text-muted-foreground hover:text-foreground'
             }`}
             onClick={onPull}
-            disabled={pullLoading}
+            disabled={pullLoading || isReadOnlyBranchTarget}
             title={
-              gitLog.behind > 0
+              !isReadOnlyBranchTarget && gitLog.behind > 0
                 ? `Pull ${gitLog.behind} commit${gitLog.behind > 1 ? 's' : ''}`
                 : 'Pull from remote'
             }
@@ -398,76 +743,105 @@ export function GitPanel() {
             ) : (
               <Download className="h-3 w-3" />
             )}
-            {gitLog.behind > 0 && (
-              <span className="absolute -right-1 -top-1 flex h-[14px] min-w-[14px] items-center justify-center rounded-full bg-[hsl(var(--warning))] px-0.5 text-[8px] font-bold leading-none text-background">
+            {!isReadOnlyBranchTarget && gitLog.behind > 0 && (
+              <span className="absolute -right-1 -top-1 flex h-[14px] min-w-[14px] items-center justify-center rounded-full bg-[hsl(var(--warning))] px-0.5 text-[8px] font-bold leading-none text-background tabular-nums">
                 {gitLog.behind}
               </span>
             )}
           </button>
-          <button
-            type="button"
-            className="p-1 rounded bg-transparent text-muted-foreground hover:text-foreground transition-colors"
-            onClick={toggleDiffListView}
-            title={
-              diffListView === 'flat'
-                ? 'Switch to tree view (Alt+Shift+V)'
-                : 'Switch to flat view (Alt+Shift+V)'
-            }
-          >
-            {diffListView === 'flat' ? (
-              <FolderTree className="h-3 w-3" />
-            ) : (
-              <LayoutList className="h-3 w-3" />
-            )}
-          </button>
+
+          {/* View toggle: Diff -> Flat/Tree, Log -> Graph/List, other modes -> hidden */}
+          {mode === 'diff' && (
+            <button
+              type="button"
+              data-testid="git-panel-view-toggle"
+              className="p-1 rounded bg-transparent text-muted-foreground hover:text-foreground transition-colors"
+              onClick={toggleDiffListView}
+              title={
+                diffListView === 'flat'
+                  ? i18n.t('panels:ui.git.switchToTreeView')
+                  : i18n.t('panels:ui.git.switchToFlatView')
+              }
+              aria-label={
+                diffListView === 'flat'
+                  ? i18n.t('panels:ui.git.switchToTreeView')
+                  : i18n.t('panels:ui.git.switchToFlatView')
+              }
+            >
+              {diffListView === 'flat' ? (
+                <FolderTree className="h-3 w-3" />
+              ) : (
+                <LayoutList className="h-3 w-3" />
+              )}
+            </button>
+          )}
+          {mode === 'log' && (
+            <button
+              type="button"
+              data-testid="git-panel-view-toggle"
+              className="p-1 rounded bg-transparent text-muted-foreground hover:text-foreground transition-colors"
+              onClick={toggleLogViewMode}
+              title={
+                logViewMode === 'graph'
+                  ? i18n.t('panels:ui.git.switchToListView')
+                  : i18n.t('panels:ui.git.switchToGraphView')
+              }
+              aria-label={
+                logViewMode === 'graph'
+                  ? i18n.t('panels:ui.git.switchToListView')
+                  : i18n.t('panels:ui.git.switchToGraphView')
+              }
+            >
+              {logViewMode === 'graph' ? (
+                <LayoutList className="h-3 w-3" />
+              ) : (
+                <GitGraph className="h-3 w-3" />
+              )}
+            </button>
+          )}
+
           <ShellNavPanelDragHandle panelId={PANEL_IDS.GIT} />
         </div>
       </div>
 
-      {/* Row 2: Branch info and change stats (only in Diff mode) */}
+      {/* Row 2: Worktree/Branch two-level selector + change stats (only in Diff mode) */}
       {mode === 'diff' && (
         <div
           data-testid="git-panel-branch-toolbar"
-          className="flex items-center justify-between gap-2 px-2.5 py-1.5 border-b border-border/30 shrink-0"
+          className="flex items-center justify-between gap-2 px-2 py-1.5 border-b border-border/30 shrink-0"
         >
-          {parentHasNoGitRepo && gitChildren.length > 0 ? (
-            <Select
-              value={selectedGitChildId ?? ''}
-              onValueChange={setGitChildId}
-            >
-              <SelectTrigger className="h-7 w-[140px] text-xs">
-                <SelectValue
-                  placeholder={i18n.t('panels:ui.git.gitRepository')}
-                />
-              </SelectTrigger>
-              <SelectContent>
-                {gitChildren.map((child) => (
-                  <SelectItem key={child.id} value={child.id}>
-                    {child.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          ) : (
-            <div className="flex items-center gap-1.5 text-sm text-foreground min-w-0">
-              <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-              {displayedBranchName ? (
-                <span
-                  data-testid="git-diff-branch-title"
-                  className="truncate max-w-[180px] text-sm font-bold leading-tight text-foreground"
-                >
-                  {displayedBranchName}
-                </span>
-              ) : (
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
-              )}
-            </div>
-          )}
+          <div className="flex items-center gap-1.5 min-w-0 flex-1">
+            {parentHasNoGitRepo && gitChildren.length > 0 && (
+              <Select
+                value={selectedGitChildId ?? ''}
+                onValueChange={setGitChildId}
+              >
+                <SelectTrigger className="h-7 w-[112px] shrink-0 text-xs">
+                  <SelectValue
+                    placeholder={i18n.t('panels:ui.git.gitRepository')}
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  {gitChildren.map((child) => (
+                    <SelectItem key={child.id} value={child.id}>
+                      {child.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+            <GitWorktreeBranchSelector
+              groups={directoryGroups}
+              selectedTarget={displayedTarget}
+              onSelectTarget={handleSelectDiffTarget}
+              isLoading={worktreesLoading && !displayedTarget?.branch}
+            />
+          </div>
 
-          {(totalAdditions > 0 || totalDeletions > 0) && (
+          {(effectiveAdditions > 0 || effectiveDeletions > 0) && (
             <GitChangeStats
-              additions={totalAdditions}
-              deletions={totalDeletions}
+              additions={effectiveAdditions}
+              deletions={effectiveDeletions}
               className="ml-auto shrink-0"
             />
           )}
@@ -477,19 +851,29 @@ export function GitPanel() {
       {/* Diff mode */}
       {mode === 'diff' && (
         <div className="flex flex-col flex-1 min-h-0">
-          {workspaceId && repoId && conflictOp ? (
+          {!isReadOnlyBranchTarget &&
+          activeTargetWorkspaceId &&
+          repoId &&
+          conflictOp ? (
             <GitConflictSection
               op={conflictOp}
               files={conflictedFiles}
               onOpenFile={(filePath) =>
-                openMergePanel({ workspaceId, repoId, filePath })
+                openMergePanel({
+                  workspaceId: activeTargetWorkspaceId,
+                  repoId,
+                  filePath,
+                })
               }
               onContinue={async () => {
                 setConflictBusy('continue');
                 try {
-                  await attemptsApi.continueConflicts(workspaceId, repoId);
+                  await attemptsApi.continueConflicts(
+                    activeTargetWorkspaceId,
+                    repoId
+                  );
                   await queryClient.invalidateQueries({
-                    queryKey: ['branchStatus', workspaceId],
+                    queryKey: ['branchStatus', activeTargetWorkspaceId],
                   });
                   refreshStatus();
                 } catch (error) {
@@ -523,36 +907,63 @@ export function GitPanel() {
               abortLoading={conflictBusy === 'abort'}
             />
           ) : null}
-          <GitCommitBox
-            commitMessage={commitMessage}
-            onCommitMessageChange={setCommitMessage}
-            hasStagedFiles={stagedFiles.length > 0}
-            hasUnstagedFiles={unstagedFiles.length > 0}
-            stagedFiles={stagedFiles}
-            diffs={diffs}
-            commitLoading={commitLoading}
-            pushLoading={pushLoading}
-            commitError={commitError}
-            operationError={operationError ?? actionError}
-            commitsAhead={
-              gitLog.ahead || conflictStatus?.remote_commits_ahead || 0
-            }
-            onCommit={onCommit}
-            onCommitAndPush={onCommitAndPush}
-            onPush={onPush}
-          />
+
+          {isReadOnlyBranchTarget && activeTarget ? (
+            <div
+              data-testid="git-readonly-branch-banner"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 border-b border-border/30 bg-muted/40 text-[11px] text-muted-foreground shrink-0"
+            >
+              <Eye className="h-3 w-3 shrink-0" />
+              <span className="truncate">
+                {i18n.t('panels:ui.git.comparingBranch', {
+                  branch: activeTarget.branch,
+                  base: activeTarget.baseBranch || 'HEAD',
+                })}
+              </span>
+            </div>
+          ) : (
+            <GitCommitBox
+              commitMessage={commitMessage}
+              onCommitMessageChange={setCommitMessage}
+              hasStagedFiles={stagedFiles.length > 0}
+              hasUnstagedFiles={unstagedFiles.length > 0}
+              stagedFiles={stagedFiles}
+              diffs={diffs}
+              commitLoading={commitLoading}
+              pushLoading={pushLoading}
+              commitError={commitError}
+              operationError={operationError ?? actionError}
+              commitsAhead={
+                gitLog.ahead || conflictStatus?.remote_commits_ahead || 0
+              }
+              onCommit={onCommit}
+              onCommitAndPush={onCommitAndPush}
+              onPush={onPush}
+            />
+          )}
 
           <div className="flex flex-1 min-h-0">
             <div className="w-full flex flex-col min-h-0 overflow-y-auto">
               {isInitialDiffLoading ? (
                 <LoadingState />
+              ) : isReadOnlyBranchTarget ? (
+                <GitStagingArea
+                  stagedFiles={[]}
+                  unstagedFiles={branchDiffs.files}
+                  selectedPath={selectedDiffPath}
+                  viewMode={diffListView}
+                  workspaceId={null}
+                  readOnly
+                  onSelectFile={handleSelectFile}
+                  onDoubleClickFile={handleDoubleClickFile}
+                />
               ) : (
                 <GitStagingArea
                   stagedFiles={stagedFiles}
                   unstagedFiles={unstagedFiles}
                   selectedPath={selectedDiffPath}
                   viewMode={diffListView}
-                  workspaceId={workspaceId}
+                  workspaceId={activeTargetWorkspaceId}
                   onSelectFile={handleSelectFile}
                   onDoubleClickFile={handleDoubleClickFile}
                   onStageFile={stageFile}
@@ -577,8 +988,19 @@ export function GitPanel() {
           upstream={gitLog.upstream}
           branchName={gitLog.branchName || displayedBranchName}
           loading={gitLog.isLoading}
-          workspaceId={workspaceId}
+          workspaceId={activeTargetWorkspaceId}
           repoId={repoId}
+          worktreePath={activeTargetWorktreePath}
+          viewMode={logViewMode}
+          branches={repoBranchesQuery.branches}
+          selectedBranches={effectiveLogBranches}
+          defaultBranches={defaultLogBranches}
+          onSelectedBranchesChange={(next) => {
+            setSelectedLogBranches(next);
+            setLogMaxCount(DEFAULT_LOG_PAGE_SIZE);
+          }}
+          hasMore={gitLog.entries.length >= logMaxCount}
+          onLoadMore={handleLoadMoreLogs}
           onRefresh={gitLog.refresh}
         />
       )}

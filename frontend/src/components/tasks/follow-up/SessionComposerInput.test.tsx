@@ -1683,7 +1683,11 @@ describe('SessionComposerInput (Astryx)', () => {
     let dragDropCallback:
       | ((event: {
           payload:
-            | { type: 'drop'; paths: string[]; position: { x: number; y: number } }
+            | {
+                type: 'drop';
+                paths: string[];
+                position: { x: number; y: number };
+              }
             | { type: 'leave' };
         }) => void)
       | undefined;

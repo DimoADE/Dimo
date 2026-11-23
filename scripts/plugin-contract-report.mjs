@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Generates docs/plugin-contract/bindings.md from the two binding registries,
+// Generates docs/plugins/contract-bindings.md from the two binding registries,
 // the host-api catalog, the contribution-kind catalog, and the official plugin
 // manifests. Exits 0: this is a report, not a gate.
 import fs from 'node:fs';
@@ -202,8 +202,8 @@ for (const entry of opEntries.filter((item) => apiOps.has(item.name))) {
 }
 push('');
 
-fs.mkdirSync(path.join(ROOT, 'docs/plugin-contract'), { recursive: true });
-fs.writeFileSync(path.join(ROOT, 'docs/plugin-contract/bindings.md'), lines.join('\n'));
+fs.mkdirSync(path.join(ROOT, 'docs/plugins'), { recursive: true });
+fs.writeFileSync(path.join(ROOT, 'docs/plugins/contract-bindings.md'), lines.join('\n'));
 
 console.log(`host-api ops: ${apiOps.size}`);
 console.log(`binding entries: ${entries.length} (${opEntries.length} op, ${capabilityEntries.length} capability)`);
@@ -213,4 +213,4 @@ console.log(`table 1 (unregistered but used): ${undeclared.length + unregistered
 console.log(`table 2 (registered but unused kinds): ${unusedKinds.length}`);
 console.log(`table 3 (no core reach): ${entries.filter((entry) => !entry.reaches_core).length} entries across ${byCapability.size} capabilities`);
 console.log(`unknown / untraced: ${unknownContributions.length + missingImpl.length}`);
-console.log('wrote docs/plugin-contract/bindings.md');
+console.log('wrote docs/plugins/contract-bindings.md');

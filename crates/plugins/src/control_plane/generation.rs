@@ -225,6 +225,18 @@ impl InMemoryPluginRegistry {
             .get(plugin_id)
             .cloned())
     }
+
+    pub(super) async fn quarantine_reasons(
+        &self,
+    ) -> Result<std::collections::HashMap<String, String>, PluginError> {
+        Ok(self
+            .quarantined
+            .read()
+            .map_err(lock_error)?
+            .iter()
+            .map(|(plugin_id, reason)| (plugin_id.clone(), reason.clone()))
+            .collect())
+    }
 }
 
 impl SqlitePluginRegistry {
@@ -604,5 +616,28 @@ impl SqlitePluginRegistry {
             }
             _ => Ok(None),
         }
+    }
+
+    pub(super) async fn quarantine_reasons(
+        &self,
+    ) -> Result<std::collections::HashMap<String, String>, PluginError> {
+        self.ensure_kv_table().await?;
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT plugin_id, quarantine_reason
+             FROM plugin_activation_intents_v4
+             WHERE quarantined != 0",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(registry_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|(plugin_id, reason)| {
+                (
+                    plugin_id,
+                    reason.unwrap_or_else(|| "Quarantined after repeated crashes".to_owned()),
+                )
+            })
+            .collect())
     }
 }

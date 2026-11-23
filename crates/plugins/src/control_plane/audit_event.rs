@@ -618,6 +618,12 @@ impl PluginControlPlane {
         self.registry.quarantine_reason(plugin_id).await
     }
 
+    pub async fn quarantine_reasons(
+        &self,
+    ) -> Result<std::collections::HashMap<String, String>, PluginError> {
+        self.registry.quarantine_reasons().await
+    }
+
     /// Updates the persisted package configuration in the registry and pushes a
     /// live `config.volatile-update` notification to the active Worker slot (if
     /// one is currently running) without rebuilding the plugin generation.

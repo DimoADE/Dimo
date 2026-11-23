@@ -12,6 +12,7 @@ use ts_rs::TS;
 mod cursor;
 mod deepseek;
 mod jsonl;
+mod muse;
 mod scan;
 mod sqlite;
 
@@ -194,6 +195,13 @@ pub fn default_history_sources(agent_type: AgentKind) -> Vec<AgentHistorySource>
             .into_iter()
             .flat_map(|source| codex_history_roots(source.path, agent_type))
             .collect(),
+        AgentKind::MuseCode => xdg_data_or_home_sources(agent_type, "muse")
+            .into_iter()
+            .map(|source| AgentHistorySource {
+                path: source.path.join("sessions"),
+                ..source
+            })
+            .collect(),
         AgentKind::Opencode => xdg_data_or_home_sources(agent_type, "opencode")
             .into_iter()
             .map(|source| AgentHistorySource {
@@ -292,6 +300,8 @@ pub fn configured_history_sources(
             AgentKind::ClaudeCode => configured_root(configured_env, "CLAUDE_CONFIG_DIR")
                 .map(|path| path.join("projects")),
             AgentKind::Codex => None,
+            AgentKind::MuseCode => configured_root(configured_env, "XDG_DATA_HOME")
+                .map(|path| path.join("muse").join("sessions")),
             AgentKind::Opencode => configured_root(configured_env, "XDG_DATA_HOME")
                 .map(|path| path.join("opencode").join("opencode.db")),
             AgentKind::Antigravity => configured_root(configured_env, "GEMINI_HOME")
@@ -764,6 +774,9 @@ fn is_text_history_file(agent_type: AgentKind, path: &Path) -> bool {
     if agent_type == AgentKind::DeepseekHarness {
         return name == Some("session.jsonl") || name == Some("session.jsonl.zstd");
     }
+    if agent_type == AgentKind::MuseCode {
+        return name == Some("session.jsonl");
+    }
     if agent_type == AgentKind::Antigravity {
         return name.is_some_and(|name| name.starts_with("session-"))
             && matches!(
@@ -790,6 +803,9 @@ pub(super) fn parse_history_file(
         && path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
     {
         return parse_codex_rollout(path);
+    }
+    if agent_type == AgentKind::MuseCode {
+        return muse::parse_muse_session_jsonl(path);
     }
     if agent_type == AgentKind::DeepseekHarness
         && path.file_name().and_then(|name| name.to_str()) == Some("session.jsonl.zstd")

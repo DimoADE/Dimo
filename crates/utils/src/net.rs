@@ -276,8 +276,123 @@ pub fn bind_tcp_socket_to_interface(
     }
 }
 
-/// Connect a TCP stream to `addr` with `TCP_NODELAY = true`, preferring the
-/// primary physical network interface (`IP_BOUND_IF` / `SO_BINDTODEVICE`) for
+/// Enable OS-level TCP keepalive (30s idle, 10s interval) on a connected stream
+/// so silent half-open drops after NAT idle expiry or sleep/resume fail fast.
+pub fn configure_tcp_keepalive(stream: &tokio::net::TcpStream) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawSocket;
+
+        use windows_sys::Win32::Networking::WinSock::{
+            SIO_KEEPALIVE_VALS, SO_KEEPALIVE, SOCKET, SOL_SOCKET, WSAIoctl, setsockopt,
+            tcp_keepalive,
+        };
+
+        let sock = stream.as_raw_socket() as SOCKET;
+        let enable: i32 = 1;
+        unsafe {
+            let _ = setsockopt(
+                sock,
+                SOL_SOCKET,
+                SO_KEEPALIVE,
+                (&raw const enable).cast::<u8>(),
+                std::mem::size_of::<i32>() as i32,
+            );
+            let vals = tcp_keepalive {
+                onoff: 1,
+                keepalivetime: 30_000,
+                keepaliveinterval: 10_000,
+            };
+            let mut bytes_returned: u32 = 0;
+            let _ = WSAIoctl(
+                sock,
+                SIO_KEEPALIVE_VALS,
+                (&raw const vals).cast::<std::ffi::c_void>(),
+                std::mem::size_of::<tcp_keepalive>() as u32,
+                std::ptr::null_mut(),
+                0,
+                &raw mut bytes_returned,
+                std::ptr::null_mut(),
+                None,
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+
+        let fd = stream.as_raw_fd();
+        let enable: libc::c_int = 1;
+        let idle_secs: libc::c_int = 30;
+        let interval_secs: libc::c_int = 10;
+        let probe_count: libc::c_int = 3;
+        unsafe {
+            let _ = libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_KEEPALIVE,
+                (&raw const enable).cast::<libc::c_void>(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+            #[cfg(target_os = "linux")]
+            {
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_KEEPIDLE,
+                    (&raw const idle_secs).cast::<libc::c_void>(),
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                );
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_KEEPINTVL,
+                    (&raw const interval_secs).cast::<libc::c_void>(),
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                );
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_KEEPCNT,
+                    (&raw const probe_count).cast::<libc::c_void>(),
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                );
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_KEEPALIVE,
+                    (&raw const idle_secs).cast::<libc::c_void>(),
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                );
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_KEEPINTVL,
+                    (&raw const interval_secs).cast::<libc::c_void>(),
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                );
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_TCP,
+                    libc::TCP_KEEPCNT,
+                    (&raw const probe_count).cast::<libc::c_void>(),
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                );
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            {
+                let _ = (idle_secs, interval_secs, probe_count);
+            }
+        }
+    }
+}
+
+/// Connect a TCP stream to `addr` with `TCP_NODELAY = true` and TCP keepalive enabled,
+/// preferring the primary physical network interface (`IP_BOUND_IF` / `SO_BINDTODEVICE`) for
 /// non-loopback IPv4 targets so Clash/Mihomo TUN routes are bypassed.
 pub async fn connect_tcp_bypassing_tun(addr: SocketAddr) -> std::io::Result<tokio::net::TcpStream> {
     if let SocketAddr::V4(v4_addr) = addr
@@ -291,12 +406,14 @@ pub async fn connect_tcp_bypassing_tun(addr: SocketAddr) -> std::io::Result<toki
                 tokio::time::timeout(std::time::Duration::from_secs(4), socket.connect(addr)).await
         {
             let _ = stream.set_nodelay(true);
+            configure_tcp_keepalive(&stream);
             return Ok(stream);
         }
     }
 
     let stream = tokio::net::TcpStream::connect(addr).await?;
     let _ = stream.set_nodelay(true);
+    configure_tcp_keepalive(&stream);
     Ok(stream)
 }
 

@@ -330,7 +330,7 @@ pub(super) async fn live_npm_global_prefix(node: Option<&NodeRuntime>) -> Option
     }
 }
 
-const MAX_AGENT_BINARY_BYTES: usize = 512 * 1024 * 1024;
+const MAX_AGENT_BINARY_BYTES: usize = 768 * 1024 * 1024;
 
 pub(super) async fn install_uv<F>(
     component: &PlannedInstallComponent,
@@ -418,6 +418,10 @@ where
     if is_kiro_official_installer(agent_id, &component.resolved_source) {
         on_progress(55, &format!("GET {}", component.resolved_source));
         return install_kiro_from_official_installer(component, user_env).await;
+    }
+    if is_muse_official_installer(agent_id, &component.resolved_source) {
+        on_progress(55, &format!("GET {}", component.resolved_source));
+        return install_muse_from_official_installer(component, user_env).await;
     }
     tracing::info!(
         "Downloading {} ({})",
@@ -567,6 +571,126 @@ pub(super) fn is_kiro_official_installer(agent_id: &AgentId, source: &str) -> bo
     let lower = source_path(source).to_ascii_lowercase();
     agent_id.as_str() == "kiro"
         && (lower.ends_with(".ps1") || lower.ends_with(".msi") || lower.ends_with("/install"))
+}
+
+pub(super) fn is_muse_official_installer(agent_id: &AgentId, source: &str) -> bool {
+    let lower = source_path(source).to_ascii_lowercase();
+    agent_id.as_str() == "muse_code"
+        && (lower.ends_with("/install.sh") || lower.ends_with("/install.ps1"))
+}
+
+pub(super) async fn install_muse_from_official_installer(
+    component: &PlannedInstallComponent,
+    user_env: &UserEnvironmentLayout,
+) -> anyhow::Result<PathBuf> {
+    let staging = utils::path::unique_dimo_scratch_dir("muse")?;
+    let result = install_muse_in_staging(component, user_env, &staging).await;
+    let _ = tokio::fs::remove_dir_all(&staging).await;
+    result
+}
+
+async fn install_muse_in_staging(
+    component: &PlannedInstallComponent,
+    user_env: &UserEnvironmentLayout,
+    staging: &Path,
+) -> anyhow::Result<PathBuf> {
+    tracing::info!(
+        "Running Muse Code official installer: {}",
+        component.resolved_source
+    );
+    let urls = utils::mirror::download_url_candidates(&component.resolved_source);
+    let (_, script_bytes) = download_archive_from(&urls, MAX_MANAGED_TOOL_BYTES).await?;
+    tokio::fs::create_dir_all(&user_env.user_bin).await?;
+
+    if cfg!(windows) {
+        let script_path = staging.join("install.ps1");
+        tokio::fs::write(&script_path, &script_bytes).await?;
+        let mut cmd = utils::process::new_hidden_tokio_command(
+            "powershell.exe",
+            [
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ],
+        );
+        cmd.arg(&script_path)
+            .env("MUSE_INSTALL_DIR", &user_env.user_bin)
+            .env("MUSE_NO_MODIFY_PATH", "1")
+            .env("MUSE_NO_AUTO_UPDATE", "1")
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(240),
+            run_command("powershell muse install.ps1", cmd),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Muse Code official installer timed out"))??;
+    } else {
+        let script_path = staging.join("install.sh");
+        tokio::fs::write(&script_path, &script_bytes).await?;
+        let mut cmd = utils::process::new_hidden_tokio_command("sh", std::iter::empty::<&str>());
+        cmd.arg(&script_path)
+            .env("MUSE_INSTALL_DIR", &user_env.user_bin)
+            .env("MUSE_NO_MODIFY_PATH", "1")
+            .env("MUSE_NO_AUTO_UPDATE", "1")
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(240),
+            run_command("sh muse install.sh", cmd),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Muse Code official installer timed out"))??;
+    }
+
+    resolve_installed_muse_binary(user_env)
+        .await
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Muse Code official installer completed, but `muse` was not found in {} or PATH",
+                user_env.user_bin.display()
+            )
+        })
+}
+
+async fn resolve_installed_muse_binary(user_env: &UserEnvironmentLayout) -> Option<PathBuf> {
+    let _ = utils::shell::refresh_process_path_after_install().await;
+    let mut candidates = Vec::new();
+    if cfg!(windows) {
+        candidates.push(user_env.user_bin.join("muse.exe"));
+        candidates.push(user_env.user_bin.join("muse.cmd"));
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+            let dir = local_app_data.join("Programs").join("muse");
+            candidates.push(dir.join("muse.exe"));
+            candidates.push(dir.join("muse.cmd"));
+        }
+        if let Some(home) = dirs::home_dir() {
+            candidates.push(home.join(".local").join("bin").join("muse.exe"));
+            candidates.push(home.join(".local").join("bin").join("muse.cmd"));
+        }
+    } else {
+        candidates.push(user_env.user_bin.join("muse"));
+        if let Some(home) = dirs::home_dir() {
+            candidates.push(home.join(".local").join("bin").join("muse"));
+        }
+    }
+    for candidate in candidates {
+        if candidate.is_file() {
+            if let Some(parent) = candidate.parent() {
+                utils::shell::expose_user_bin_to_process_path(parent);
+            }
+            if let Ok(canon) = tokio::fs::canonicalize(&candidate).await {
+                return Some(utils::process::prefer_direct_spawn_executable(canon));
+            }
+            return Some(candidate);
+        }
+    }
+    if let Some(found) = utils::shell::resolve_executable_path("muse").await {
+        return Some(found);
+    }
+    None
 }
 
 pub(super) fn sanitize_kiro_powershell_script(script: &str) -> String {
@@ -887,6 +1011,11 @@ pub(super) fn extract_archive(
         std::fs::write(destination.join(gzip_member_name(source)), &decoded)?;
         return Ok(());
     }
+    if !looks_like_tar(bytes) && is_standalone_executable(bytes) {
+        std::fs::create_dir_all(destination)?;
+        std::fs::write(destination.join(standalone_binary_name(source)), bytes)?;
+        return Ok(());
+    }
     extract_tar(bytes, destination)
 }
 
@@ -904,6 +1033,35 @@ pub(super) fn is_single_file_gzip(source: &str, bytes: &[u8]) -> bool {
 
 pub(super) fn looks_like_tar(bytes: &[u8]) -> bool {
     bytes.len() >= 262 && &bytes[257..262] == b"ustar"
+}
+
+pub(super) fn is_standalone_executable(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"MZ")
+        || bytes.starts_with(b"\x7fELF")
+        || bytes.starts_with(&[0xfe, 0xed, 0xfa, 0xce])
+        || bytes.starts_with(&[0xce, 0xfa, 0xed, 0xfe])
+        || bytes.starts_with(&[0xfe, 0xed, 0xfa, 0xcf])
+        || bytes.starts_with(&[0xcf, 0xfa, 0xed, 0xfe])
+        || bytes.starts_with(&[0xca, 0xfe, 0xba, 0xbe])
+        || bytes.starts_with(&[0xbe, 0xba, 0xfe, 0xca])
+}
+
+pub(super) fn standalone_binary_name(source: &str) -> String {
+    if let Ok(parsed) = reqwest::Url::parse(source)
+        && let Some((_, file_param)) = parsed.query_pairs().find(|(key, _)| key == "file")
+        && let Some(name) = Path::new(file_param.as_ref())
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty() && *value != "." && *value != "..")
+    {
+        return name.to_string();
+    }
+    let path = source_path(source);
+    path.rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+        .unwrap_or("payload")
+        .to_string()
 }
 
 pub(super) fn gzip_member_name(source: &str) -> String {
@@ -1206,12 +1364,10 @@ pub(super) async fn run_command(
     mut command: tokio::process::Command,
 ) -> anyhow::Result<()> {
     command.kill_on_drop(true);
-    let output = utils::process::run_command_output_with_timeout(
-        &mut command,
-        INSTALL_COMMAND_TIMEOUT,
-    )
-    .await
-    .map_err(|error| anyhow::anyhow!("{label} failed: {error}"))?;
+    let output =
+        utils::process::run_command_output_with_timeout(&mut command, INSTALL_COMMAND_TIMEOUT)
+            .await
+            .map_err(|error| anyhow::anyhow!("{label} failed: {error}"))?;
     if output.status.success() {
         return Ok(());
     }
@@ -1230,12 +1386,10 @@ where
     F: FnMut(u8, &str),
 {
     command.kill_on_drop(true);
-    let output = utils::process::run_command_output_with_timeout(
-        &mut command,
-        INSTALL_COMMAND_TIMEOUT,
-    )
-    .await
-    .map_err(|error| anyhow::anyhow!("{label} failed: {error}"))?;
+    let output =
+        utils::process::run_command_output_with_timeout(&mut command, INSTALL_COMMAND_TIMEOUT)
+            .await
+            .map_err(|error| anyhow::anyhow!("{label} failed: {error}"))?;
     let stdout = utils::process::decode_process_output(&output.stdout);
     let stderr = utils::process::decode_process_output(&output.stderr);
     for line in stdout

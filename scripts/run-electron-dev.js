@@ -233,7 +233,7 @@ async function main() {
     'pnpm',
     [
       '--filter',
-      'dimo',
+      './frontend',
       'run',
       'dev',
       '--',

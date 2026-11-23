@@ -28,6 +28,10 @@ pub struct SidebarMember {
     /// This member's hidden session inside the thread.
     pub conversation_id: String,
     pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_label: Option<String>,
     pub is_supervisor: bool,
 }
 
@@ -69,15 +73,21 @@ type MemberJoinRow = (
     Option<String>,
     String,
     Option<String>,
+    Option<String>,
     i64,
 );
+
+pub(super) fn extract_explicit_model_from_raw(raw: Option<&str>) -> Option<String> {
+    raw.and_then(|s| serde_json::from_str::<Value>(s).ok())
+        .and_then(|v| crate::collaboration::extract_model_and_thinking(&v).0)
+}
 
 async fn thread_members(
     pool: &SqlitePool,
     thread_id: &str,
 ) -> Result<Vec<SidebarMember>, CollaborationError> {
     let rows = sqlx::query_as::<_, MemberJoinRow>(
-        r#"SELECT m.id, m.name, m.avatar, m.color, tm.conversation_id, m.agent, m.is_supervisor
+        r#"SELECT m.id, m.name, m.avatar, m.color, tm.conversation_id, m.agent, m.config_values, m.is_supervisor
            FROM collaboration_thread_members tm
            JOIN collaboration_members m ON m.id = tm.member_id
            WHERE tm.thread_id = ? AND tm.status = 'active'
@@ -87,19 +97,34 @@ async fn thread_members(
     .fetch_all(pool)
     .await
     .map_err(db_err)?;
+    let requests: Vec<(Option<String>, Option<String>, Option<Uuid>)> = rows
+        .iter()
+        .map(|(_, _, _, _, conv_id, agent, cfg_raw, _)| {
+            (
+                agent.clone(),
+                extract_explicit_model_from_raw(cfg_raw.as_deref()),
+                Uuid::parse_str(conv_id.trim()).ok(),
+            )
+        })
+        .collect();
+    let resolved = crate::collaboration::resolve_agent_models_batch(pool, &requests).await;
     Ok(rows
         .into_iter()
+        .zip(resolved.into_iter())
         .map(
-            |(member_id, name, avatar, color, conversation_id, agent, is_supervisor)| {
-                SidebarMember {
-                    member_id,
-                    name,
-                    avatar,
-                    color,
-                    conversation_id,
-                    agent,
-                    is_supervisor: is_supervisor != 0,
-                }
+            |(
+                (member_id, name, avatar, color, conversation_id, agent, _cfg_raw, is_supervisor),
+                model_info,
+            )| SidebarMember {
+                member_id,
+                name,
+                avatar,
+                color,
+                conversation_id,
+                agent: model_info.agent_id.or(agent),
+                model: model_info.model,
+                model_label: model_info.model_label,
+                is_supervisor: is_supervisor != 0,
             },
         )
         .collect())
@@ -113,7 +138,9 @@ fn preview_text(envelope: &Value) -> Option<String> {
             .filter(|text| !text.is_empty())
             .map(str::to_string)
     };
-    let text = pick(envelope.get("summary"))
+    let summary =
+        pick(envelope.get("summary")).filter(|s| s != "space_event" && s != "collaboration_limit");
+    let text = summary
         .or_else(|| pick(envelope.get("content")))
         .or_else(|| pick(envelope.pointer("/object/content")))
         .or_else(|| pick(envelope.pointer("/content/text")))
@@ -200,6 +227,8 @@ pub struct DmMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cross_chat_received_from: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub provision_activity: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub streaming: Option<bool>,
@@ -271,6 +300,7 @@ fn dm_user_message(
         delivered: Some(delivered.to_string()),
         cross_chat_sent_to: None,
         cross_chat_received_from: None,
+        provision_activity: None,
         turn_id: None,
         streaming: None,
     }
@@ -330,6 +360,10 @@ fn dm_row_is_visible(message: &DmMessage) -> bool {
     has_visible_text
         || cross_chat_field_present(&message.cross_chat_sent_to)
         || cross_chat_field_present(&message.cross_chat_received_from)
+        || message
+            .provision_activity
+            .as_ref()
+            .is_some_and(|v| !v.is_null())
 }
 
 fn last_previewable_dm(messages: Vec<DmMessage>) -> Option<DmMessage> {
@@ -385,6 +419,9 @@ async fn overlay_dm_cross_chat(
         }
         if let Some(received) = env.get("crossChatReceivedFrom").cloned() {
             message.cross_chat_received_from = Some(received);
+        }
+        if let Some(provision) = env.get("provisionActivity").cloned() {
+            message.provision_activity = Some(provision);
         }
     }
     Ok(())
@@ -536,6 +573,7 @@ fn group_dm_rows(
                             delivered: None,
                             cross_chat_sent_to: None,
                             cross_chat_received_from: None,
+                            provision_activity: None,
                             turn_id: None,
                             streaming: None,
                         },
@@ -756,6 +794,7 @@ fn parse_space_dm_row(
         .to_string();
     let cross_chat_sent_to = envelope.get("crossChatSentTo").cloned();
     let cross_chat_received_from = envelope.get("crossChatReceivedFrom").cloned();
+    let provision_activity = envelope.get("provisionActivity").cloned();
     let text = if origin == "user" {
         match visible_user_text(&raw_content) {
             Some(t) => t,
@@ -798,6 +837,7 @@ fn parse_space_dm_row(
         delivered,
         cross_chat_sent_to,
         cross_chat_received_from,
+        provision_activity,
         turn_id,
         streaming: None,
     };
@@ -1032,9 +1072,12 @@ async fn dm_streaming_draft(
     .map_err(db_err)?;
     let draft_seq = max_seq.max(trigger_seq) + 1;
 
-    let draft_candidate: Option<(u32, String, String)> =
+    let draft_candidate: Option<(u32, String, String, Option<Value>)> =
         if let Some(step) = crate::collaboration::space_turn_streaming_step(conversation_id) {
-            Some((step.step_index, step.text, step.updated_at))
+            let provision = step
+                .provision_activity
+                .and_then(|activity| serde_json::to_value(activity).ok());
+            Some((step.step_index, step.text, step.updated_at, provision))
         } else {
             let mut from_deltas = None;
             if posted_rows.is_empty() {
@@ -1076,7 +1119,7 @@ async fn dm_streaming_draft(
                         }
                     }
                     if !text.trim().is_empty() {
-                        from_deltas = Some((0, text, created_at));
+                        from_deltas = Some((0, text, created_at, None));
                     }
                 }
             }
@@ -1117,13 +1160,13 @@ async fn dm_streaming_draft(
                         if text.trim().is_empty() {
                             None
                         } else {
-                            Some((tool_count, text, last_turn.timestamp.to_rfc3339()))
+                            Some((tool_count, text, last_turn.timestamp.to_rfc3339(), None))
                         }
                     })
             }
         };
 
-    let Some((step_index, raw_text, created_at)) = draft_candidate else {
+    let Some((step_index, raw_text, created_at, provision_activity)) = draft_candidate else {
         return Ok(None);
     };
     let nickname = identity_member_name_of_conversation(pool, conversation_id)
@@ -1132,13 +1175,21 @@ async fn dm_streaming_draft(
         .flatten()
         .unwrap_or_default();
     let text = crate::collaboration::strip_own_nickname_prefix(raw_text.trim(), &nickname);
-    if text.is_empty() || crate::collaboration::is_pass_token(&text) {
+    let has_provision = provision_activity.is_some();
+    if !has_provision && (text.is_empty() || crate::collaboration::is_pass_token(&text)) {
         return Ok(None);
     }
-    let already_posted_same = posted_rows.iter().any(|(_, raw)| {
-        let parsed = crate::collaboration::parse_space_envelope_str(raw);
-        crate::collaboration::strip_own_nickname_prefix(parsed.content.trim(), &nickname) == text
-    });
+    let effective_text = if crate::collaboration::is_pass_token(&text) {
+        String::new()
+    } else {
+        text
+    };
+    let already_posted_same = !has_provision
+        && posted_rows.iter().any(|(_, raw)| {
+            let parsed = crate::collaboration::parse_space_envelope_str(raw);
+            crate::collaboration::strip_own_nickname_prefix(parsed.content.trim(), &nickname)
+                == effective_text
+        });
     if already_posted_same {
         return Ok(None);
     }
@@ -1151,12 +1202,13 @@ async fn dm_streaming_draft(
         id,
         seq: draft_seq,
         origin: "agent".into(),
-        text,
+        text: effective_text,
         created_at,
         operation_id: None,
         delivered: None,
         cross_chat_sent_to: None,
         cross_chat_received_from: None,
+        provision_activity,
         turn_id: Some(turn_id),
         streaming: Some(true),
     }))

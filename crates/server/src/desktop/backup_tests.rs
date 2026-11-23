@@ -1,5 +1,6 @@
-use super::*;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+
+use super::*;
 
 async fn open_wal_pool(db_path: &Path) -> SqlitePool {
     SqlitePoolOptions::new()
@@ -115,7 +116,11 @@ async fn backup_restore_stages_when_pool_is_open_and_applies_atomically_after_cl
             .execute(&pool)
             .await
             .unwrap();
-        fs::write(roots.asset_dir.join("settings.json"), r#"{"theme":"backup"}"#).unwrap();
+        fs::write(
+            roots.asset_dir.join("settings.json"),
+            r#"{"theme":"backup"}"#,
+        )
+        .unwrap();
 
         let backup_file = temp.path().join("snapshot.json");
         backup_create_with_roots(
@@ -131,7 +136,10 @@ async fn backup_restore_stages_when_pool_is_open_and_applies_atomically_after_cl
 
         // 2. Mutate live DB and settings while keeping the pool actively open
         // (holds open file handles on Windows).
-        sqlx::query("DELETE FROM items").execute(&pool).await.unwrap();
+        sqlx::query("DELETE FROM items")
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO items (name) VALUES ('live-mutated')")
             .execute(&pool)
             .await

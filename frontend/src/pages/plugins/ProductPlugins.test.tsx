@@ -35,8 +35,7 @@ const dialogOpenMock = vi.hoisted(() => vi.fn());
 
 vi.mock('@/components/ui/toast', () => ({ toast: toastMock }));
 vi.mock('@/lib/desktopShell', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('@/lib/desktopShell')>();
+  const actual = await importOriginal<typeof import('@/lib/desktopShell')>();
   return {
     ...actual,
     getDesktopShell: () => {
@@ -646,6 +645,67 @@ describe('product plugin experience', () => {
       pluginId: 'drawio',
       enabled: true,
     });
+  });
+
+  it('shows the drop highlight when Electron withholds paths on dragenter and validates on drop', async () => {
+    const call = vi.fn(async (command: string) => {
+      if (command === 'plugin_control_catalog') {
+        return { plugins: [plugin], runtimes: [] };
+      }
+      if (command === 'plugin_check_updates') return [];
+      if (command === 'plugin_control_preview_import') {
+        return { plugin: drawioPlugin, conflict: null };
+      }
+      throw new Error(command);
+    });
+    renderRoute('/plugins', call, [
+      'plugin.read',
+      'plugin.write',
+      'desktop.tauri',
+    ]);
+
+    await waitFor(() => expect(webviewMock.handler).not.toBeNull());
+
+    // Chromium/Electron withholds file paths until `drop`.
+    act(() => {
+      webviewMock.handler?.({
+        payload: {
+          type: 'enter',
+          paths: [],
+          position: { x: 100, y: 100 },
+        },
+      });
+    });
+    expect(
+      screen.getByRole('status', {
+        name: /松开以安装|drop to install/i,
+      })
+    ).toBeVisible();
+
+    act(() => {
+      webviewMock.handler?.({ payload: { type: 'leave' } });
+    });
+    expect(
+      screen.queryByRole('status', {
+        name: /松开以安装|drop to install/i,
+      })
+    ).toBeNull();
+
+    // When a host supplies eager non-package paths, keep rejecting the overlay.
+    act(() => {
+      webviewMock.handler?.({
+        payload: {
+          type: 'enter',
+          paths: ['/tmp/notes.txt'],
+          position: { x: 100, y: 100 },
+        },
+      });
+    });
+    expect(
+      screen.queryByRole('status', {
+        name: /松开以安装|drop to install/i,
+      })
+    ).toBeNull();
   });
 
   it('enables a trusted product plugin without a permission gate', async () => {

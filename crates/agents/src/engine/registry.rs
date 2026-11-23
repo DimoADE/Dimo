@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use super::{
     EngineRuntimePreference, NativeEngineDriver, NativeEngineKind, claude::ClaudeNativeDriver,
-    codex::CodexNativeDriver, descriptor::effective_runtime_preference,
+    codex::CodexNativeDriver, descriptor::effective_runtime_preference, muse::MuseNativeDriver,
 };
 
 /// Ordered registry of available [`NativeEngineDriver`] implementations.
@@ -33,11 +33,12 @@ impl EngineRegistry {
     }
 
     /// Creates a registry pre-populated with Dimo's built-in first-party native drivers
-    /// (`ClaudeNativeDriver`, `CodexNativeDriver`).
+    /// (`ClaudeNativeDriver`, `CodexNativeDriver`, `MuseNativeDriver`).
     pub fn bundled() -> Self {
         Self::empty()
             .with_driver(Arc::new(ClaudeNativeDriver::new()))
             .with_driver(Arc::new(CodexNativeDriver::new()))
+            .with_driver(Arc::new(MuseNativeDriver::new()))
     }
 
     /// Registers a native driver instance. Replacing any earlier driver with the same `engine_id`.

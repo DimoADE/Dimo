@@ -483,11 +483,14 @@ export const attemptsApi = {
 
   getGitLog: async (
     workspaceId: string,
-    repoId: string
+    repoId: string,
+    options?: { branches?: string[]; maxCount?: number }
   ): Promise<GitLogStatus> => {
     return backendCall<GitLogStatus>('get_workspace_git_log', {
       workspaceId,
       repoId,
+      ...(options?.branches ? { branches: options.branches } : {}),
+      ...(options?.maxCount != null ? { maxCount: options.maxCount } : {}),
     });
   },
 

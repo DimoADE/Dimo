@@ -651,7 +651,11 @@ mod tests {
             &mut *tx,
             &CreateProject {
                 name: "Rolled Back Project".to_string(),
-                root_path: dir.path().join("rolled_back").to_string_lossy().into_owned(),
+                root_path: dir
+                    .path()
+                    .join("rolled_back")
+                    .to_string_lossy()
+                    .into_owned(),
                 ..Default::default()
             },
             rolled_back_id,

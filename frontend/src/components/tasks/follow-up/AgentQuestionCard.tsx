@@ -14,7 +14,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronUp,
-  MessageCircleQuestion,
+  CornerDownLeft,
   PenLine,
   X,
 } from 'lucide-react';
@@ -246,7 +246,20 @@ export function AgentQuestionCard({
     const id = requestAnimationFrame(() =>
       syncViewport(activeIndex, measured.current)
     );
-    return () => cancelAnimationFrame(id);
+    const activeNode = questionRefs.current[activeIndex];
+    if (!activeNode || typeof ResizeObserver !== 'function') {
+      return () => cancelAnimationFrame(id);
+    }
+    const observer = new ResizeObserver(() => {
+      syncViewport(activeIndex, false);
+    });
+    if (typeof observer.observe === 'function') {
+      observer.observe(activeNode);
+    }
+    return () => {
+      cancelAnimationFrame(id);
+      observer.disconnect();
+    };
   }, [activeIndex, mode, open, sent, localDismissed, syncViewport]);
 
   if (mode === 'readonly') {
@@ -263,6 +276,11 @@ export function AgentQuestionCard({
         data-testid="agent-question-detail"
         data-mode="readonly"
       >
+        <ReadonlyQuestionFields
+          requestId={request.question_id}
+          question={question}
+          answer={readonlyAnswers[question.id] ?? emptyQuestionAnswerState()}
+        />
         {questions.length > 1 ? (
           <div className="agent-question-detail-pager">
             <button
@@ -272,7 +290,7 @@ export function AgentQuestionCard({
               disabled={activeIndex === 0}
               onClick={() => updateReadonlyIndex(Math.max(0, activeIndex - 1))}
             >
-              <ChevronLeft className="h-4 w-4" />
+              <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
             </button>
             <span className="agent-question-card-position">
               {activeIndex + 1} / {questions.length}
@@ -288,15 +306,10 @@ export function AgentQuestionCard({
                 )
               }
             >
-              <ChevronRight className="h-4 w-4" />
+              <ChevronRight className="h-3.5 w-3.5" aria-hidden />
             </button>
           </div>
         ) : null}
-        <ReadonlyQuestionFields
-          requestId={request.question_id}
-          question={question}
-          answer={readonlyAnswers[question.id] ?? emptyQuestionAnswerState()}
-        />
       </div>
     );
   }
@@ -399,7 +412,9 @@ export function AgentQuestionCard({
       advanceTimer.current = setTimeout(() => {
         advanceTimer.current = null;
         if (!targetIsLast) {
-          setActiveIndex((idx) => Math.min(questions.length - 1, idx + 1));
+          const nextIdx = Math.min(questions.length - 1, questionIndex + 1);
+          setActiveIndex(nextIdx);
+          onQuestionIndexChange?.(nextIdx);
         } else if (allAnswered) {
           void submitState(nextState);
         }
@@ -430,40 +445,10 @@ export function AgentQuestionCard({
     });
   };
 
-  if (!open) {
-    return (
-      <div className="agent-question-collapsed-wrap">
-        <button
-          type="button"
-          data-testid="agent-question-reopen"
-          onClick={() => {
-            measured.current = false;
-            setOpen(true);
-          }}
-          className="inline-flex items-center gap-2 rounded-full border border-[var(--border-strong)] bg-[var(--surface-dialog)] px-3 py-1.5 text-[12.5px] font-medium text-[var(--text-primary)] shadow-[var(--shadow-control)] transition-colors duration-150 hover:bg-[var(--surface-control-hover)]"
-          aria-label={t('questionRequestCard.expand')}
-        >
-          {actor ? (
-            <StatusNoticeActorChip
-              actor={{ ...actor, onOpenSession: undefined }}
-            />
-          ) : null}
-          <MessageCircleQuestion className="h-3.5 w-3.5 text-[var(--text-muted)]" />
-          <span className="max-w-[16rem] truncate">
-            {activeQuestion.header || t('questionRequestCard.title')}
-          </span>
-          <span className="text-[11px] tabular-nums text-[var(--text-muted)]">
-            {activeIndex + 1} / {questions.length}
-          </span>
-        </button>
-      </div>
-    );
-  }
-
   if (sent) {
     return (
       <div
-        className="flex w-full max-w-[26rem] items-center gap-2.5"
+        className="flex w-full items-center gap-2.5"
         data-testid="agent-question-sent"
         style={{
           animation: prefersReducedMotion()
@@ -481,8 +466,60 @@ export function AgentQuestionCard({
     );
   }
 
+  if (!open) {
+    const collapsedTitle =
+      activeQuestion.question ||
+      activeQuestion.header ||
+      t('questionRequestCard.title');
+    return (
+      <div className="w-full">
+        <section
+          role="group"
+          aria-label={t('questionRequestCard.title')}
+          className="agent-question-card agent-question-card--collapsed relative overflow-hidden"
+          data-expanded="false"
+          data-testid="agent-question-card"
+        >
+          <button
+            type="button"
+            data-testid="agent-question-reopen"
+            aria-expanded={false}
+            aria-label={t('questionRequestCard.expand')}
+            title={collapsedTitle}
+            onClick={() => {
+              measured.current = false;
+              setOpen(true);
+            }}
+            className="agent-question-collapsed-bar flex w-full items-center gap-2.5 px-4 py-2.5 text-left transition-colors duration-150 hover:bg-[var(--surface-control-hover)]"
+          >
+            {actor ? (
+              <StatusNoticeActorChip
+                actor={{ ...actor, onOpenSession: undefined }}
+              />
+            ) : null}
+            <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium text-[var(--text-primary)]">
+              {collapsedTitle}
+            </span>
+            <span
+              data-testid="agent-question-position"
+              aria-label={`${activeIndex + 1} / ${questions.length}`}
+              className="agent-question-card-position shrink-0 text-[12px] font-medium tabular-nums text-[var(--text-muted)]"
+            >
+              {activeIndex + 1} / {questions.length}
+            </span>
+            <ChevronUp
+              className="h-4 w-4 shrink-0 text-[var(--text-muted)]"
+              strokeWidth={2}
+              aria-hidden
+            />
+          </button>
+        </section>
+      </div>
+    );
+  }
+
   return (
-    <div className="w-full max-w-[26rem]">
+    <div className="w-full">
       <section
         role="group"
         aria-label={t('questionRequestCard.title')}
@@ -498,18 +535,20 @@ export function AgentQuestionCard({
         <button
           type="button"
           aria-label={t('questionRequestCard.collapse')}
+          aria-expanded={true}
+          title={t('questionRequestCard.collapse')}
           onClick={() => {
             clearAdvanceTimer();
             setOpen(false);
           }}
-          className="absolute right-2.5 top-2.5 z-10 inline-flex h-6 w-6 items-center justify-center rounded-md text-[var(--text-muted)] transition-colors duration-100 hover:bg-[var(--surface-control-hover)] hover:text-[var(--text-primary)]"
+          className="absolute right-2.5 top-2.5 z-10 inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--text-muted)] transition-colors duration-100 hover:bg-[var(--surface-control-hover)] hover:text-[var(--text-primary)]"
         >
-          <X className="h-3.5 w-3.5" strokeWidth={2.2} aria-hidden />
+          <ChevronDown className="h-4 w-4" strokeWidth={2} aria-hidden />
         </button>
 
         <div className="agent-question-card-content">
           {actor ? (
-            <div className="mb-2 flex items-center pr-7">
+            <div className="mb-2 flex items-center pr-9">
               <StatusNoticeActorChip actor={actor} />
             </div>
           ) : null}
@@ -551,151 +590,150 @@ export function AgentQuestionCard({
                     aria-hidden={active ? undefined : true}
                     style={questionStyle}
                   >
-                    <div className="agent-question-card-prompt pr-7">
+                    <div className="agent-question-card-prompt pr-9">
                       {question.question}
                     </div>
                     <GlideMenu
+                      role={question.multiSelect ? 'group' : 'radiogroup'}
+                      ariaLabel={question.question}
                       className="mt-2.5 flex flex-col gap-1"
-                      highlightClassName="rounded-[var(--radius)] bg-[var(--surface-control-hover)]"
+                      highlightClassName="inset-x-0 rounded-[var(--radius)] bg-[var(--surface-control)]"
                     >
-                      <div
-                        role={question.multiSelect ? 'group' : 'radiogroup'}
-                        aria-label={question.question}
-                        className="flex flex-col gap-1"
-                      >
-                        {question.choices.map((choice, choiceIndex) => {
-                          const selected = qAnswer.selected.some(
-                            (value) => value === choice.value
-                          );
-                          const controlId = `${request.question_id}-${question.id}-${choiceIndex}`;
-                          return (
-                            <label
-                              key={`${choiceIndex}-${choice.label}`}
-                              data-menu-row
-                              htmlFor={controlId}
+                      {question.choices.map((choice, choiceIndex) => {
+                        const selected = qAnswer.selected.some(
+                          (value) => value === choice.value
+                        );
+                        const controlId = `${request.question_id}-${question.id}-${choiceIndex}`;
+                        return (
+                          <label
+                            key={`${choiceIndex}-${choice.label}`}
+                            data-menu-row
+                            htmlFor={controlId}
+                            className={cn(
+                              'agent-question-option-row relative z-10 flex cursor-pointer items-start gap-2 rounded-[var(--radius)] pl-1.5 pr-2.5 py-1.5 text-left transition-colors duration-100',
+                              selected && 'is-selected',
+                              responding && 'cursor-default opacity-60'
+                            )}
+                          >
+                            <input
+                              id={controlId}
+                              type={question.multiSelect ? 'checkbox' : 'radio'}
+                              name={`${request.question_id}-${question.id}`}
+                              value={String(choice.value)}
+                              checked={selected}
+                              disabled={responding || !active}
+                              tabIndex={active ? 0 : -1}
+                              onChange={() => {
+                                if (active) {
+                                  handleChoiceSelect(
+                                    question,
+                                    qIdx,
+                                    choice.value
+                                  );
+                                }
+                              }}
+                              className="sr-only"
+                            />
+                            <span
+                              aria-hidden
                               className={cn(
-                                'agent-question-option-row relative z-10 flex cursor-pointer items-start gap-2 rounded-[var(--radius)] px-2 py-1.5 text-left transition-colors duration-100',
-                                selected && 'is-selected',
-                                responding && 'cursor-default opacity-60'
+                                'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center transition-colors duration-200',
+                                question.multiSelect
+                                  ? 'rounded-sm'
+                                  : 'rounded-full',
+                                selected
+                                  ? 'bg-[var(--text-primary)] text-[var(--surface-dialog)]'
+                                  : 'text-transparent shadow-[inset_0_0_0_1.5px_var(--border-strong)]'
                               )}
                             >
-                              <input
-                                id={controlId}
-                                type={
-                                  question.multiSelect ? 'checkbox' : 'radio'
-                                }
-                                name={`${request.question_id}-${question.id}`}
-                                value={String(choice.value)}
-                                checked={selected}
-                                disabled={responding || !active}
-                                tabIndex={active ? 0 : -1}
-                                onChange={() => {
-                                  if (active) {
-                                    handleChoiceSelect(
-                                      question,
-                                      qIdx,
-                                      choice.value
-                                    );
-                                  }
-                                }}
-                                className="sr-only"
-                              />
+                              {question.multiSelect ? (
+                                <Check className="h-3 w-3" strokeWidth={3} />
+                              ) : (
+                                <span
+                                  className="h-1.5 w-1.5 rounded-full bg-[var(--surface-dialog)] transition-transform duration-200"
+                                  style={{
+                                    transform: selected
+                                      ? 'scale(1)'
+                                      : 'scale(0)',
+                                  }}
+                                />
+                              )}
+                            </span>
+                            <span className="agent-question-option-copy">
                               <span
-                                aria-hidden
                                 className={cn(
-                                  'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center transition-colors duration-200',
-                                  question.multiSelect
-                                    ? 'rounded-sm'
-                                    : 'rounded-full',
+                                  'agent-question-option-label text-[13px] leading-snug transition-colors duration-200',
                                   selected
-                                    ? 'bg-[var(--text-primary)] text-[var(--surface-dialog)]'
-                                    : 'text-transparent shadow-[inset_0_0_0_1.5px_var(--border-strong)]'
+                                    ? 'text-[var(--text-primary)]'
+                                    : 'text-[var(--text-secondary)]'
                                 )}
                               >
-                                {question.multiSelect ? (
-                                  <Check className="h-3 w-3" strokeWidth={3} />
-                                ) : (
-                                  <span
-                                    className="h-1.5 w-1.5 rounded-full bg-[var(--surface-dialog)] transition-transform duration-200"
-                                    style={{
-                                      transform: selected
-                                        ? 'scale(1)'
-                                        : 'scale(0)',
-                                    }}
+                                <span>{choice.label}</span>
+                                {choice.recommended ? (
+                                  <Badge
+                                    label={t('questionRequestCard.recommended')}
+                                    className="agent-question-recommended"
                                   />
-                                )}
-                              </span>
-                              <span className="agent-question-option-copy">
-                                <span className="agent-question-option-label text-[13px] leading-snug">
-                                  <span>{choice.label}</span>
-                                  {choice.recommended ? (
-                                    <Badge
-                                      label={t(
-                                        'questionRequestCard.recommended'
-                                      )}
-                                      className="agent-question-recommended"
-                                    />
-                                  ) : null}
-                                </span>
-                                {choice.description ? (
-                                  <span className="agent-question-option-description">
-                                    {choice.description}
-                                  </span>
                                 ) : null}
                               </span>
-                            </label>
-                          );
-                        })}
+                              {choice.description ? (
+                                <span className="agent-question-option-description">
+                                  {choice.description}
+                                </span>
+                              ) : null}
+                            </span>
+                          </label>
+                        );
+                      })}
 
-                        <label
-                          data-menu-row
-                          className="agent-question-option-row relative z-10 flex cursor-text items-center gap-2 rounded-[var(--radius)] px-2 py-1.5 transition-colors duration-100"
-                        >
-                          <PenLine
-                            className="h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]"
-                            aria-hidden
-                          />
-                          <input
-                            type={
-                              question.valueType === 'number' ||
-                              question.valueType === 'integer'
-                                ? 'number'
-                                : 'text'
+                      <label
+                        data-menu-row
+                        className={cn(
+                          'agent-question-custom-row relative z-10 flex cursor-text items-center rounded-[var(--radius)] px-2.5 py-2 transition-colors duration-100',
+                          question.choices.length === 0 &&
+                            'agent-question-custom-row--solo'
+                        )}
+                      >
+                        <input
+                          type={
+                            question.valueType === 'number' ||
+                            question.valueType === 'integer'
+                              ? 'number'
+                              : 'text'
+                          }
+                          tabIndex={active ? 0 : -1}
+                          disabled={responding || !active}
+                          value={qAnswer.customText}
+                          onChange={(event) => {
+                            if (active) {
+                              handleCustomTextChange(
+                                question,
+                                event.target.value
+                              );
                             }
-                            tabIndex={active ? 0 : -1}
-                            disabled={responding || !active}
-                            value={qAnswer.customText}
-                            onChange={(event) => {
-                              if (active) {
-                                handleCustomTextChange(
-                                  question,
-                                  event.target.value
-                                );
+                          }}
+                          onKeyDown={(event) => {
+                            if (
+                              event.key === 'Enter' &&
+                              !event.nativeEvent.isComposing &&
+                              active &&
+                              currentHasAnswer
+                            ) {
+                              event.preventDefault();
+                              if (isLast) {
+                                if (canSubmit) void submit();
+                              } else {
+                                goTo(activeIndex + 1);
                               }
-                            }}
-                            onKeyDown={(event) => {
-                              if (
-                                event.key === 'Enter' &&
-                                !event.nativeEvent.isComposing &&
-                                active &&
-                                currentHasAnswer
-                              ) {
-                                event.preventDefault();
-                                if (isLast) {
-                                  if (canSubmit) void submit();
-                                } else {
-                                  goTo(activeIndex + 1);
-                                }
-                              }
-                            }}
-                            placeholder={t(
-                              'questionRequestCard.customPlaceholder'
-                            )}
-                            aria-label={t('questionRequestCard.customAnswer')}
-                            className="min-w-0 flex-1 bg-transparent text-[13px] text-[var(--text-primary)] outline-none placeholder:text-[var(--text-muted)]"
-                          />
-                        </label>
-                      </div>
+                            }
+                          }}
+                          placeholder={t(
+                            'questionRequestCard.customPlaceholder'
+                          )}
+                          aria-label={t('questionRequestCard.customAnswer')}
+                          className="agent-question-custom-field min-w-0 flex-1 border-0 bg-transparent p-0 text-[13px] text-[var(--text-primary)] shadow-none outline-none focus:outline-none focus-visible:outline-none placeholder:text-[var(--text-muted)]"
+                        />
+                      </label>
                     </GlideMenu>
                   </div>
                 );
@@ -757,11 +795,9 @@ export function AgentQuestionCard({
           </div>
 
           <div className="flex items-center gap-1.5">
-            <Button
+            <button
               type="button"
-              variant="ghost"
-              size="sm"
-              className="agent-question-action agent-question-decline rounded-full px-3 text-xs"
+              className="agent-question-action agent-question-decline inline-flex cursor-pointer items-center justify-center whitespace-nowrap rounded-full px-3.5 text-xs font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:pointer-events-none disabled:opacity-50"
               disabled={responding}
               onClick={() => {
                 if (isLast) {
@@ -771,10 +807,8 @@ export function AgentQuestionCard({
                 }
               }}
             >
-              {isLast
-                ? t('questionRequestCard.decline')
-                : t('questionRequestCard.skip')}
-            </Button>
+              {t('questionRequestCard.skip')}
+            </button>
             <Button
               type="button"
               variant="default"
@@ -789,9 +823,15 @@ export function AgentQuestionCard({
                 }
               }}
             >
-              {isLast
-                ? t('questionRequestCard.submit')
-                : t('questionRequestCard.continue')}
+              <span>
+                {isLast
+                  ? t('questionRequestCard.submit')
+                  : t('questionRequestCard.continue')}
+              </span>
+              <CornerDownLeft
+                className="ml-1 h-3 w-3 opacity-75"
+                aria-hidden="true"
+              />
             </Button>
           </div>
         </footer>
@@ -826,7 +866,10 @@ function ReadonlyQuestionFields({
             <label
               key={`${choiceIndex}-${choice.label}`}
               htmlFor={controlId}
-              className={cn('agent-question-option', selected && 'is-answered')}
+              className={cn(
+                'agent-question-option agent-question-option--readonly',
+                selected && 'is-answered'
+              )}
             >
               <input
                 id={controlId}
@@ -839,13 +882,17 @@ function ReadonlyQuestionFields({
                 onChange={() => undefined}
               />
               <span className="agent-question-option-indicator" aria-hidden>
-                {question.multiSelect && selected ? (
-                  <Check className="h-3 w-3" />
+                {selected ? (
+                  question.multiSelect ? (
+                    <Check className="h-2.5 w-2.5" strokeWidth={3} />
+                  ) : (
+                    <span className="agent-question-option-radio-dot" />
+                  )
                 ) : null}
               </span>
               <span className="agent-question-option-copy">
                 <span className="agent-question-option-label">
-                  {choice.label}
+                  <span>{choice.label}</span>
                   {choice.recommended ? (
                     <Badge
                       label={t('questionRequestCard.recommended')}
@@ -859,26 +906,39 @@ function ReadonlyQuestionFields({
                   </span>
                 ) : null}
               </span>
+              {selected ? (
+                <Check
+                  className="agent-question-option-check h-3.5 w-3.5 shrink-0"
+                  strokeWidth={2.5}
+                  aria-hidden="true"
+                />
+              ) : null}
             </label>
           );
         })}
 
         {answer.customActive ? (
-          <input
-            type={
-              question.valueType === 'number' ||
-              question.valueType === 'integer'
-                ? 'number'
-                : 'text'
-            }
-            className="agent-question-custom-input"
-            aria-label={t('questionRequestCard.customAnswer')}
-            placeholder={t('questionRequestCard.customPlaceholder')}
-            disabled
-            readOnly
-            value={answer.customText}
-            onChange={() => undefined}
-          />
+          <div className="agent-question-custom-readonly is-answered">
+            <PenLine
+              className="h-3.5 w-3.5 shrink-0 text-[var(--status-success-text)]"
+              aria-hidden="true"
+            />
+            <input
+              type={
+                question.valueType === 'number' ||
+                question.valueType === 'integer'
+                  ? 'number'
+                  : 'text'
+              }
+              className="agent-question-custom-input agent-question-custom-input--readonly"
+              aria-label={t('questionRequestCard.customAnswer')}
+              placeholder={t('questionRequestCard.customPlaceholder')}
+              disabled
+              readOnly
+              value={answer.customText}
+              onChange={() => undefined}
+            />
+          </div>
         ) : null}
       </div>
     </div>

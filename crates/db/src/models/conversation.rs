@@ -875,6 +875,33 @@ impl ConversationAgentBindingRecord {
         tx.commit().await
     }
 
+    /// Lock in the conversation's initial observed mode when the active binding
+    /// has not yet recorded one (`current_mode IS NULL`). Once populated, later
+    /// changes to global `agent_session_defaults` in other conversations can no
+    /// longer silently mutate this conversation's mode on resume.
+    pub async fn backfill_initial_mode(
+        pool: &SqlitePool,
+        conversation_id: Uuid,
+        initial_mode: &str,
+    ) -> Result<(), sqlx::Error> {
+        let trimmed = initial_mode.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        sqlx::query(
+            "UPDATE conversation_agent_bindings
+             SET current_mode = COALESCE(current_mode, ?),
+                 updated_at = datetime('now', 'subsec')
+             WHERE id = (SELECT active_agent_binding_id FROM sessions WHERE id = ?)
+               AND current_mode IS NULL",
+        )
+        .bind(trimmed)
+        .bind(conversation_id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn update_negotiated_capabilities<'e, E>(
         executor: E,
@@ -1398,5 +1425,81 @@ mod tests {
             Some("这是第一条用户消息")
         );
         assert_eq!(session.name.as_deref(), Some("手动标题"));
+    }
+
+    #[tokio::test]
+    async fn backfill_initial_mode_locks_null_mode_without_overwriting_existing_selection() {
+        let pool = migrated_pool().await;
+        let conversation_id = Uuid::new_v4();
+        let claude = AgentId::parse("claude_code").unwrap();
+
+        ConversationRecord::create(
+            &pool,
+            conversation_id,
+            CreateConversationRecord {
+                workspace_id: Uuid::new_v4(),
+                task_id: None,
+                title: None,
+                initial_prompt: None,
+                status: None,
+                executor: Some("claude_code"),
+            },
+        )
+        .await
+        .expect("create conversation");
+        ConversationAgentBindingRecord::create(
+            &pool,
+            Uuid::new_v4(),
+            CreateConversationAgentBinding {
+                conversation_id,
+                agent_id: &claude,
+                working_dir: "/work",
+                acp_session_id: None,
+                continuation_key: None,
+                acp_protocol_version: None,
+                runtime_version: None,
+                acp_version: None,
+                load_supported: false,
+                resume_supported: false,
+                close_supported: false,
+                terminal_supported: false,
+                additional_directories_supported: false,
+                prompt_capabilities_json: "{}",
+                session_capabilities_json: "{}",
+                client_capabilities_json: "{}",
+                mcp_servers_json: "[]",
+                modes_json: "[]",
+                config_options_json: "[]",
+                current_mode: None,
+                config_selection_json: "{}",
+                status: BindingStatus::Ready,
+            },
+        )
+        .await
+        .expect("create binding");
+
+        ConversationAgentBindingRecord::backfill_initial_mode(
+            &pool,
+            conversation_id,
+            "acceptEdits",
+        )
+        .await
+        .expect("backfill null initial mode");
+        let after_first =
+            ConversationAgentBindingRecord::active_for_conversation(&pool, conversation_id)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(after_first.current_mode.as_deref(), Some("acceptEdits"));
+
+        ConversationAgentBindingRecord::backfill_initial_mode(&pool, conversation_id, "default")
+            .await
+            .expect("backfill must not overwrite existing mode");
+        let after_second =
+            ConversationAgentBindingRecord::active_for_conversation(&pool, conversation_id)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(after_second.current_mode.as_deref(), Some("acceptEdits"));
     }
 }

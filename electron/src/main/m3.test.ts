@@ -706,6 +706,61 @@ describe('WindowManager remediation behaviors (hidden settings exit, zoom sync, 
       })
     ).toBe(false);
   });
+
+  it('prewarms local settings window silently and promotes it immediately once painted', () => {
+    createdWindows.length = 0;
+    const manager = new WindowManager({ preloadPath: '/preload.js' });
+    manager.setTrayEnabled(false);
+
+    // Prewarm is a no-op before main window exists
+    expect(manager.prewarmSettingsWindow()).toBeUndefined();
+    expect(createdWindows).toHaveLength(0);
+
+    const mainWin = manager.createMainWindow();
+    const prewarmed = manager.prewarmSettingsWindow();
+    expect(prewarmed).toBeDefined();
+    expect(createdWindows).toHaveLength(2);
+    const settingsRecord = createdWindows[1];
+
+    // Renderer calls showWindow / focusWindow during silent boot -> suppressed
+    manager.showWindow(prewarmed!);
+    manager.focusWindow(prewarmed!);
+    expect(settingsRecord.show).not.toHaveBeenCalled();
+    expect(settingsRecord.focus).not.toHaveBeenCalled();
+
+    // User opens Settings -> reused, navigated, shown, and focused immediately without creating a new window
+    const opened = manager.openSettingsWindow('main', { path: '/settings/agents' });
+    expect(opened).toBe(prewarmed);
+    expect(createdWindows).toHaveLength(2);
+    expect(settingsRecord.show).toHaveBeenCalledTimes(1);
+    expect(settingsRecord.focus).toHaveBeenCalledTimes(1);
+
+    // Closing main without tray still cleans up settings window
+    mainWin.destroy();
+    expect(settingsRecord.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it('defers showing an in-flight prewarmed settings window until renderer paint signals showWindow', () => {
+    createdWindows.length = 0;
+    const manager = new WindowManager({ preloadPath: '/preload.js' });
+    manager.createMainWindow();
+
+    const prewarmed = manager.prewarmSettingsWindow();
+    const settingsRecord = createdWindows[1];
+    expect(prewarmed).toBeDefined();
+
+    // User opens Settings before renderer finishes initial paint
+    const opened = manager.openSettingsWindow('main', { path: '/settings/mcp' });
+    expect(opened).toBe(prewarmed);
+    expect(settingsRecord.show).not.toHaveBeenCalled();
+
+    // Once renderer finishes load and triggers showWindow/focusWindow, it shows normally
+    settingsRecord.webContentsEmitter.emit('did-finish-load');
+    manager.showWindow(prewarmed!);
+    manager.focusWindow(prewarmed!);
+    expect(settingsRecord.show).toHaveBeenCalledTimes(1);
+    expect(settingsRecord.focus).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('DesktopUpdaterManager P0-8 safeguards', () => {

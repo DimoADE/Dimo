@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { toast } from '@/components/ui/toast';
 import type { AgentSessionConfigOption, ExecutorProfileId } from 'shared/types';
 import { listenToAgentEvents } from '@/features/agents/events';
 import { conversationApi } from '@/features/conversation/conversationApi';
@@ -11,6 +12,7 @@ import {
   selectConfigOptionValue,
 } from './SessionConfigOptionSelectors';
 import type { SessionComposerImage } from './SessionComposerInput';
+import { revokeComposerImagePreviewUrl } from './sessionComposerImages';
 import {
   persistPendingSessionControls,
   resolveComposerControlScopeTransition,
@@ -23,6 +25,13 @@ export function useSessionComposerLocalState() {
   const [attachedImages, setAttachedImages] = useState<SessionComposerImage[]>(
     []
   );
+  const attachedImagesRef = useRef<SessionComposerImage[]>(attachedImages);
+  attachedImagesRef.current = attachedImages;
+  useEffect(() => {
+    return () => {
+      attachedImagesRef.current.forEach(revokeComposerImagePreviewUrl);
+    };
+  }, []);
   const attachedImagePaths = useMemo(
     () => attachedImages.map((image) => image.path),
     [attachedImages]
@@ -187,6 +196,8 @@ export function useSessionComposerControlSync({
       setSelectedConfigValues((previous) =>
         dropPendingConfigValueAfterRejection(rejection.config_id, previous)
       );
+      const label = rejection.option_name || rejection.config_id;
+      toast.warning(`${label}: ${rejection.requested} → ${rejection.actual}`);
     }).then((unsubscribe) => {
       if (!active) {
         unsubscribe();
@@ -206,7 +217,12 @@ export function useSessionComposerControlSync({
       if (!sessionId || isChangingAgent) return;
       void conversationApi
         .setSessionMode({ conversationId: sessionId, modeId })
-        .catch(() => {});
+        .catch((error: unknown) => {
+          setSelectedMode((previous) =>
+            previous === modeId ? null : previous
+          );
+          toast.error(error instanceof Error ? error.message : String(error));
+        });
     },
     [isChangingAgent, sessionId, setSelectedMode]
   );
@@ -231,7 +247,15 @@ export function useSessionComposerControlSync({
       if (!accepted || !sessionId || isChangingAgent) return;
       void conversationApi
         .setSessionConfigOption({ conversationId: sessionId, key, value })
-        .catch(() => {});
+        .catch((error: unknown) => {
+          setSelectedConfigValues((previous) => {
+            if (previous[key] !== value) return previous;
+            const restored = { ...previous };
+            delete restored[key];
+            return restored;
+          });
+          toast.error(error instanceof Error ? error.message : String(error));
+        });
     },
     [
       displaySessionConfigOptions,

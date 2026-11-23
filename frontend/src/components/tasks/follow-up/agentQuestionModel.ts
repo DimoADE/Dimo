@@ -472,6 +472,31 @@ export function answerStateFromToolResult(
   return answerStateFromLabels(questions, labelsById, '');
 }
 
+export function isQuestionDeclined(
+  response?: ConversationQuestionResponse | null,
+  result?: ToolResultBlock | null
+): boolean {
+  if (response && isDeclinedContent(response.content)) return true;
+  if (result?.output_preview) {
+    return isDeclinedContent(parseJson(result.output_preview));
+  }
+  return false;
+}
+
+export function displayAnswerLabels(
+  question: QuestionTab,
+  answer: QuestionAnswerState | undefined
+): string[] {
+  const labels = (answer?.selected ?? []).map((selected) => {
+    const choice = question.choices.find((item) => item.value === selected);
+    return choice ? choice.label : String(selected);
+  });
+  if (answer?.customActive && answer.customText.trim()) {
+    labels.push(answer.customText.trim());
+  }
+  return labels;
+}
+
 export function firstQuestionTitle(questions: QuestionTab[]): string {
   const candidate = questions[0]?.question || questions[0]?.header || '';
   return isQuestionToolName(candidate) ? '' : candidate;

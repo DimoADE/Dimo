@@ -10,6 +10,7 @@ const ALLOWED_LICENSES = new Set([
   "BSD-2-Clause",
   "BSD-3-Clause",
   "BSL-1.0",
+  "BlueOak-1.0.0",
   "CC0-1.0",
   "CDLA-Permissive-2.0",
   "ISC",
@@ -17,6 +18,8 @@ const ALLOWED_LICENSES = new Set([
   "MIT-0",
   "MPL-2.0",
   "OFL-1.1",
+  "PSF-2.0",
+  "Python-2.0",
   "Unicode-3.0",
   "Unlicense",
   "Zlib",
@@ -124,12 +127,21 @@ export function auditCargoMetadata(metadata) {
 }
 
 function run() {
-  const pnpm = JSON.parse(
-    execFileSync("pnpm", ["licenses", "list", "--json", "--prod"], {
-      encoding: "utf8",
-      maxBuffer: 32 * 1024 * 1024,
-    }),
-  );
+  const pnpmOutput =
+    process.platform === "win32"
+      ? execFileSync(
+          process.env.ComSpec || "cmd.exe",
+          ["/d", "/s", "/c", "pnpm", "licenses", "list", "--json", "--prod"],
+          {
+            encoding: "utf8",
+            maxBuffer: 32 * 1024 * 1024,
+          },
+        )
+      : execFileSync("pnpm", ["licenses", "list", "--json", "--prod"], {
+          encoding: "utf8",
+          maxBuffer: 32 * 1024 * 1024,
+        });
+  const pnpm = JSON.parse(pnpmOutput);
   const cargo = JSON.parse(
     execFileSync("cargo", ["metadata", "--format-version", "1", "--locked"], {
       encoding: "utf8",

@@ -1,12 +1,26 @@
-# 会话领域独立成 crates/conversations
+---
+status: accepted
+date: 2026-07-04
+decision-makers: Dimo maintainers
+---
 
-会话编排（turn 生命周期、启动恢复协调器）此前以 1389 行的 `conversation_service.rs` 形式住在 Tauri 二进制里，而投影折叠住在 `crates/db`（造成 db→agents 反向依赖）。我们决定新建 `crates/conversations`（依赖 agents + db）作为事件溯源会话核心的家：turn 编排、恢复协调器、以及从 db 迁入的投影折叠/快照模块都归于此；db 退回哑存储层，src-tauri 只剩薄命令委派。
+# 会话领域独立成 `crates/conversations`
+
+会话编排（Turn 生命周期、持久输入调度、启动恢复协调与时间线投影折叠）归属独立领域 crate `crates/conversations`，使存储层保持纯粹、宿主传输层保持薄委派。
+
+## Decision
+
+- `crates/conversations` 依赖 `crates/agents` 与 `crates/db`，作为事件溯源会话核心的唯一归属地。
+- Turn 编排、启动恢复协调器（见 [ADR-0001](0001-crash-recovery-semantics.md)）、持久输入队列、Turn 纠偏以及 SQLite 事件到 `conversation_timeline_rows` 的单投影折叠与快照（见 ADR-0091）全部收敛于 `crates/conversations`。
+- `crates/db` 保持纯数据访问层职责，不反向依赖 `crates/agents` 或会话业务规则。
+- `crates/application` 与 `crates/server`（含桌面模式与无头守护进程）仅通过统一 `ApplicationCore` 接缝委派，不内联会话状态机。
 
 ## Considered Options
 
-- 并入 crates/agents —— 被否决：agents 需新增对 db 的依赖，而投影搬完前 db 又依赖 agents，形成循环依赖死锁迁移顺序；且 agents 已有 manager/runtime 两个 2000+ 行编排层。
-- 并入 crates/services —— 被否决：services 已是 27 模块的大杂烩，把核心领域塞进垃圾抽屉是向错误方向加码。
+- **并入 `crates/agents`**：否决。`crates/agents` 专注 Agent 引擎适配、安装与运行时连接管理，混入会话事件溯源与时间线投影会模糊领域边界并导致模块膨胀。
+- **并入 `crates/services`**：否决。`crates/services` 负责工作区、文件与外部集成基础设施，不应承载核心会话领域状态机。
 
 ## Consequences
 
-- 投影模块的搬迁与"双投影消灭"（下发协议改为行 upsert + 文本追加操作）分为两个独立改动：先原地改协议，后搬家——避免行为变化与位置变化混在同一个 diff 里。
+- 依赖方向保持单向清晰：`server` / `application` → `conversations` → `agents` + `db`。
+- 时间线更新统一经单投影协议（行 upsert 与文本追加操作）下发到所有客户端，不存在前后端双套投影逻辑。

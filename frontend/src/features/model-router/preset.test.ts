@@ -6,9 +6,14 @@ import {
   ROUTER_OPENCODE_PROVIDER_ID,
   ROUTER_PROVIDER_NAME,
   dshProviderSaveRequest,
+  nextUniqueDshProviderId,
+  nextUniqueOpenCodeProviderId,
+  nextUniqueRouterProviderName,
   officialModelBaseUrl,
   openCodeConnectRequest,
   providerSaveRequest,
+  resolveRouterProviderName,
+  routerProviderBaseName,
   supportsModelRouter,
 } from './preset';
 
@@ -215,6 +220,76 @@ describe('officialModelBaseUrl', () => {
     );
     expect(custom.id).toBe('user-preset');
     expect(custom.api_url).toBe('https://gateway.example/v1');
+  });
+});
+
+describe('group-based provider naming and deduplication', () => {
+  it('derives the base provider name from provision.group and falls back cleanly', () => {
+    expect(routerProviderBaseName({ group: 'Dimo-GPT' })).toBe('Dimo-GPT');
+    expect(
+      routerProviderBaseName({
+        group: 'auto',
+        groups: ['Dimo-GPT', 'Dimo-Claude'],
+      })
+    ).toBe('Dimo-GPT+Dimo-Claude');
+    expect(
+      routerProviderBaseName({
+        group: 'auto',
+        groups: ['Dimo-GPT'],
+      })
+    ).toBe('Dimo-GPT');
+    expect(routerProviderBaseName({})).toBe(ROUTER_PROVIDER_NAME);
+  });
+
+  it('appends _1, _2 suffixes when importing multiple keys in the same group', () => {
+    expect(nextUniqueRouterProviderName('Dimo-GPT', [])).toBe('Dimo-GPT');
+    expect(nextUniqueRouterProviderName('Dimo-GPT', ['Dimo-Claude'])).toBe(
+      'Dimo-GPT'
+    );
+    expect(nextUniqueRouterProviderName('Dimo-GPT', ['Dimo-GPT'])).toBe(
+      'Dimo-GPT_1'
+    );
+    expect(
+      nextUniqueRouterProviderName('Dimo-GPT', ['dimo-gpt', 'Dimo-GPT_1'])
+    ).toBe('Dimo-GPT_2');
+    expect(resolveRouterProviderName({ group: 'Dimo-GPT' }, ['Dimo-GPT'])).toBe(
+      'Dimo-GPT_1'
+    );
+  });
+
+  it('uses the group name in provider, OpenCode, and DSH save requests', () => {
+    const prov = provision({ group: 'Dimo-GPT' });
+    expect(providerSaveRequest(prov, null).name).toBe('Dimo-GPT');
+    expect(providerSaveRequest(prov, null, 'Dimo-GPT_1').name).toBe(
+      'Dimo-GPT_1'
+    );
+
+    const oc = openCodeConnectRequest(prov, false, {
+      providerId: nextUniqueOpenCodeProviderId('Dimo-GPT_1', ['dimo-gpt']),
+      name: 'Dimo-GPT_1',
+    });
+    expect(oc.provider_id).toBe('dimo-gpt_1');
+    expect(oc.name).toBe('Dimo-GPT_1');
+
+    const dsh = dshProviderSaveRequest(prov, false, {
+      id: nextUniqueDshProviderId('Dimo-GPT_1', ['dimo-gpt', 'deepseek']),
+      displayName: 'Dimo-GPT_1',
+    });
+    expect(dsh.id).toBe('dimo-gpt-1');
+    expect(dsh.display_name).toBe('Dimo-GPT_1');
+  });
+
+  it('produces valid unique OpenCode and DSH provider IDs for collisions and reserved names', () => {
+    expect(nextUniqueOpenCodeProviderId('Dimo-GPT', ['dimo-gpt'])).toBe(
+      'dimo-gpt_1'
+    );
+    expect(nextUniqueOpenCodeProviderId('默认分组', [])).toBe(
+      ROUTER_OPENCODE_PROVIDER_ID
+    );
+    expect(nextUniqueDshProviderId('openai', ['openai', 'deepseek'])).toBe(
+      'openai-1'
+    );
+    expect(nextUniqueDshProviderId('123组', [])).toBe('dimo-123');
   });
 });
 

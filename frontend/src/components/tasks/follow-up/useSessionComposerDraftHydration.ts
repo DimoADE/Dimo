@@ -29,6 +29,7 @@ export function useSessionComposerDraftHydration({
   setAttachedImages,
   setSelectedMode,
   setSelectedConfigValues,
+  allowSessionControlsHydration = true,
   cancelDebouncedSave,
   deleteScratch,
   savedRevision,
@@ -47,6 +48,12 @@ export function useSessionComposerDraftHydration({
   setSelectedMode?: Dispatch<SetStateAction<string | null>>;
   /** Pending ACP config-option state, seeded from a create-form preset. */
   setSelectedConfigValues?: Dispatch<SetStateAction<Record<string, string>>>;
+  /**
+   * Only hydrate mode/config overrides from draft scratch for pre-creation or
+   * brand-new sessions without live/persisted controls. Once a session has live
+   * controls or prior turns, the backend binding is the sole authority.
+   */
+  allowSessionControlsHydration?: boolean;
   cancelDebouncedSave: () => void;
   deleteScratch: () => Promise<void>;
   savedRevision?: number | null;
@@ -90,11 +97,13 @@ export function useSessionComposerDraftHydration({
       prev.forEach(revokeComposerImagePreviewUrl);
       return hydration.imagePaths.map(imageAttachmentFromPath);
     });
-    if (hydration.modeOverride !== null) {
-      setSelectedMode?.(hydration.modeOverride);
-    }
-    if (Object.keys(hydration.configOverrides).length > 0) {
-      setSelectedConfigValues?.(hydration.configOverrides);
+    if (allowSessionControlsHydration) {
+      if (hydration.modeOverride !== null) {
+        setSelectedMode?.(hydration.modeOverride);
+      }
+      if (Object.keys(hydration.configOverrides).length > 0) {
+        setSelectedConfigValues?.(hydration.configOverrides);
+      }
     }
     const scratchMessage =
       typeof scratchData?.message === 'string' ? scratchData.message : '';
@@ -102,6 +111,7 @@ export function useSessionComposerDraftHydration({
       queuedDraftSuppressedRef.current?.();
     }
   }, [
+    allowSessionControlsHydration,
     isScratchLoading,
     localMessage,
     queuedMessageTexts,

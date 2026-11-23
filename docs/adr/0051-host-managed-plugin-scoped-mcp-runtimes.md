@@ -1,53 +1,34 @@
 ---
 status: accepted
 date: 2026-08-14
-decision-makers:
-  - Dimo maintainers
+decision-makers: Dimo maintainers
 ---
 
 # Host 托管的插件域 MCP Runtime
 
 ## Context
 
-当前 `content.mcp` 只保存并投影静态 MCP 配置，不能引用 Plugin managed Runtime、获得按会话短期
-凭据或绑定 Workspace。现有 `dimo-mcp` 是平台内置的多 Agent 协作 companion；把 Workflow 工具
-继续加入其中会把两个可独立安装、启停和演进的产品绑定成平台基础能力。
-
-Workflow Creator 需要一个本地 MCP，而多 Agent 协作未来也要迁移为独立插件。因此平台需要的是
-通用 MCP Runtime 托管 seam，不是另一个内置业务 MCP。协作与会话增强的产品拆分、凭据寿命和
-`dimo-mcp` 退场已由 [ADR-0057](0057-session-enhance-and-multi-agent-plugins.md) 落地。
+静态 `content.mcp` 配置仅能投影外部 MCP 描述，无法引用插件托管的本地 Runtime、注入按作用域隔离的 Host 凭据或绑定当前 Workspace 与父 Conversation。与此同时，协作空间（内置宿主能力，由 `dimo-mcp` 支撑）、Workflow Creator（`dimo-workflow-mcp`）、会话增强（`dimo.session-enhance`）以及第三方插件拥有各自独立的发布周期与工具目录，平台需要统一的 Host 托管 MCP Runtime seam，而非将所有产品工具堆入单一内置 MCP。
 
 ## Decision
 
-1. 每个产品 Plugin 独立拥有 MCP identity、tool catalog、protocol compatibility、Runtime 和 Agent
-   binding。Workflow Creator 使用 `dimo-workflow-mcp`；未来协作插件使用独立 MCP。
-2. Plugin manifest 的 `content.mcp` 扩展为可以引用 managed Runtime、声明 STDIO transport、支持的
-   MCP protocol revisions 与所需 Host scopes。
-3. Host 解析并按 Agent session 启动 Runtime，注入绑定 Workspace 与 Plugin generation 的
-   连接上下文（至少包含父 Conversation 与 workspace）。Plugin 不持久保存 Server URL、主
-   token 或 device credential。凭据默认按会话、最小 scope；会话增强与多智能体协同改用
-   插件启用期间的长驻、按插件拆开的 scope，见 ADR-0057。
-4. 新 MCP 以 protocol revision `2026-07-28` 为主，实现 `server/discover`、逐请求版本声明与不支持
-   版本错误；同时按协商兼容 Host SDK 支持的旧 revision。
-5. 长操作立即返回稳定业务 ID；客户端协商 Tasks extension 时同时提供 task handle，否则使用普通
-   tools/read/wait 轮询。MCP Tasks 不是 Workflow 运行事实源。
-6. 默认 Agent binding 是“所有当前及未来兼容 Agent，减去显式排除项”。插件设置与 MCP 设置编辑
-   同一 binding intent。
-7. 不支持 MCP 或无法协商协议的 Agent 显示为 incompatible，不能伪装成已配置。
-8. Plugin SDK、CLI validator、Host parser、Runtime resolver、Agent projection 与 testing harness 必须
-   同时支持该 contribution，不能由插件直接调用内部 Tauri/Axum API 绕过。
+1. **插件域独立身份**：每个携带 MCP 的产品插件独立拥有 MCP identity、tool catalog、protocol compatibility、Runtime 与 Agent binding（例如 `dimo.workflow-creator` 拥有 `dimo-workflow-mcp`）。协作空间与官方插件 MCP 的激活边界遵循 [ADR-0055](0055-official-product-mcp-activation.md)。
+2. **Manifest 显式声明**：Plugin manifest 的 `content.mcp` 区分 `static` 与 `managed` 两类明确 descriptor；managed descriptor 可引用插件托管 Runtime 或官方 `hostFamilyBinary`，并声明 STDIO transport、支持的 MCP protocol revisions 与所需 Host scopes。
+3. **Host 托管启动与连接上下文注入**：Host 解析 Runtime 锁并按 Agent session 启动 MCP 进程，注入绑定 Workspace、父 Conversation 与 Plugin generation 的连接上下文。插件不得持久保存 Server URL、管理员 token 或 device credential。凭据默认采用按会话最小 scope；面向宿主协作或会话增强等长驻产品 MCP，按启用生命周期签发独立拆分的最小 scope 凭据（见 [ADR-0055](0055-official-product-mcp-activation.md)）。
+4. **协议版本协商**：Host 托管的新 MCP 以 protocol revision `2026-07-28` 为主，实现 `server/discover`、逐请求版本声明与不支持版本错误，并按协商兼容 Host SDK 支持的旧 revision。
+5. **长操作契约**：长耗时操作立即返回稳定业务 ID；客户端协商 Tasks extension 时同时提供 task handle，否则使用常规 `tools/read/wait` 轮询。MCP Tasks 不是 Workflow 运行事实源。
+6. **默认全 Agent 绑定意图**：默认 Agent binding 为「所有当前及未来兼容 Agent，减去显式排除项」。插件设置页与 Agent/MCP 设置页编辑同一份 binding 事实。
+7. **不兼容诚实呈现**：不支持 MCP 或无法协商协议的 Agent 显示为 incompatible，不得伪装为已配置。
+8. **全链路统一通道**：Plugin SDK、CLI validator、Host parser、Runtime resolver、Agent projection 与 testing harness 统一支持该 contribution；插件不得直接调用未公开的内部 Host HTTP/IPC 接口绕过该 seam。
 
 ## Consequences
 
-- `content.mcp` 需要 managed/static 两种明确 descriptor，而不是靠 resource JSON 猜测。
-- 现有会话通常不能动态增加 STDIO MCP；binding 变化后 Host 必须提示重新建立 Agent session。
-- 平台 `dimo-mcp` 在 ADR-0057 落地的同一版本删除注入；Workflow 交付不依赖该迁移。
-- Full Trust 允许 Runtime 执行，但动态身份与 generation lifecycle 仍由 Host 管理以保证正确性。
+- `content.mcp` 使用 `managed` / `static` 显式判别结构，避免靠启发式猜测资源 JSON。
+- 现有活跃会话不能热挂载 STDIO MCP；binding 或启停变化只作用于新建或重新绑定的 Agent session，Host 向用户提示重建会话。
+- Full Trust（[ADR-0048](0048-full-trust-plugin-execution-model.md)）决定执行信任模型，但动态身份、短期凭据与 activation generation 生命周期仍由 Host 统一托管以保证正确性与可撤销性。
 
-## Considered options
+## Considered Options
 
-- **扩展现有 `dimo-mcp`。** 否决。它把多 Agent 协作和 Workflow Creator 变成不可独立演进的单一
-  产品。
-- **插件保存 Server URL/token。** 否决。凭据生命周期、撤销与 Workspace scope 无法可靠管理。
-- **只提供远程 HTTP MCP。** 否决。首要场景是随本地 App 生命周期工作的 Agent STDIO MCP。
-
+- **将所有产品工具并入单一内置 `dimo-mcp`**：否决。会使独立产品插件的生命周期、版本演进与工具目录强耦合。
+- **由插件自行持久保存 Server URL 与 token**：否决。无法可靠管理凭据寿命、撤销与 Workspace scope 隔离。
+- **仅提供远程 HTTP MCP**：否决。本地桌面与无头 Host 的首要场景是随 Agent session 生命周期管理的 STDIO MCP。

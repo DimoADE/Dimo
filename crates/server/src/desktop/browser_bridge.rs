@@ -81,7 +81,9 @@ impl ElectronBrowserBridge {
 
     fn clear_connection_if_matches(&self, tx: &mpsc::UnboundedSender<String>) {
         let mut slot = self.active_tx.lock().unwrap_or_else(|p| p.into_inner());
-        let matches = slot.as_ref().is_some_and(|current| current.same_channel(tx));
+        let matches = slot
+            .as_ref()
+            .is_some_and(|current| current.same_channel(tx));
         if matches {
             slot.take();
             drop(slot);
@@ -169,10 +171,7 @@ impl ElectronBrowserBridge {
                 proxy_capability,
             } => {
                 if let Some(dir) = downloads_dir.filter(|value| !value.trim().is_empty()) {
-                    *self
-                        .downloads_dir
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner()) = Some(dir);
+                    *self.downloads_dir.lock().unwrap_or_else(|p| p.into_inner()) = Some(dir);
                 }
                 if let Some(cap) = proxy_capability {
                     *self
@@ -370,20 +369,14 @@ impl NativeTabs for ElectronBrowserBridge {
             return Ok(());
         }
         let _ = self
-            .rpc(
-                "set_bounds",
-                json!({ "tabId": tab_id, "bounds": bounds }),
-            )
+            .rpc("set_bounds", json!({ "tabId": tab_id, "bounds": bounds }))
             .await;
         Ok(())
     }
 
     async fn eval(&self, tab_id: &str, expression: &str) -> Result<String, BrowserHostError> {
         let value = self
-            .rpc(
-                "eval",
-                json!({ "tabId": tab_id, "expression": expression }),
-            )
+            .rpc("eval", json!({ "tabId": tab_id, "expression": expression }))
             .await?;
         match value {
             Value::String(text) => Ok(text),
@@ -393,13 +386,8 @@ impl NativeTabs for ElectronBrowserBridge {
     }
 
     async fn current_url(&self, tab_id: &str) -> Result<String, BrowserHostError> {
-        let value = self
-            .rpc("current_url", json!({ "tabId": tab_id }))
-            .await?;
-        Ok(value
-            .as_str()
-            .unwrap_or("about:blank")
-            .to_owned())
+        let value = self.rpc("current_url", json!({ "tabId": tab_id })).await?;
+        Ok(value.as_str().unwrap_or("about:blank").to_owned())
     }
 
     async fn go_back(&self, tab_id: &str) -> Result<(), BrowserHostError> {
@@ -446,22 +434,21 @@ impl NativeTabs for ElectronBrowserBridge {
     }
 
     async fn freeze_frame(&self, tab_id: &str) -> Result<Option<FrozenFrame>, BrowserHostError> {
-        let value = self
-            .rpc("freeze_frame", json!({ "tabId": tab_id }))
-            .await?;
+        let value = self.rpc("freeze_frame", json!({ "tabId": tab_id })).await?;
         if value.is_null() {
             return Ok(None);
         }
         let frame: FrozenFrame = serde_json::from_value(value).map_err(|error| {
-            BrowserHostError::new("browser_read_failed", format!("invalid freeze frame: {error}"))
+            BrowserHostError::new(
+                "browser_read_failed",
+                format!("invalid freeze frame: {error}"),
+            )
         })?;
         Ok(Some(frame))
     }
 
     async fn capture_png(&self, tab_id: &str) -> Result<Vec<u8>, BrowserHostError> {
-        let value = self
-            .rpc("capture_png", json!({ "tabId": tab_id }))
-            .await?;
+        let value = self.rpc("capture_png", json!({ "tabId": tab_id })).await?;
         let b64 = value
             .as_str()
             .or_else(|| value.get("data").and_then(Value::as_str))
@@ -605,8 +592,9 @@ fn map_rpc_error_code(raw: Option<&str>) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use browser_host::GrantLevel;
+
+    use super::*;
 
     #[tokio::test]
     async fn rpc_round_trip_and_capture_png_decoding() {

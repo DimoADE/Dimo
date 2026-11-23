@@ -10,11 +10,13 @@ import type {
 
 const PROTOCOL_VERSION = '1.0';
 export const WEB_SOCKET_KEEPALIVE_MS = 15_000;
+export const CONTROL_REQUEST_TIMEOUT_MS = 30_000;
 
 export interface WebTransportOptions {
   baseUrl: string;
   token: string;
   onAuthError?: (error: WebTransportError) => void;
+  requestTimeoutMs?: number;
 }
 
 type CommandResponse = {
@@ -70,14 +72,28 @@ type WireServerMessage =
   | { type: 'pong' }
   | { type: 'error'; error: unknown; subscription_id?: string };
 
+const MAX_ASYNC_EVENT_QUEUE_SIZE = 4096;
+
 class AsyncEventQueue {
-  private readonly values: RemoteEvent[] = [];
+  private values: Array<RemoteEvent | undefined> = [];
+  private head = 0;
   private readonly waiters: Array<{
     resolve: (result: IteratorResult<RemoteEvent>) => void;
     reject: (error: unknown) => void;
   }> = [];
   private ended = false;
   private failure: unknown = null;
+
+  private compactIfNeeded(): void {
+    if (this.head === 0) return;
+    if (this.head >= this.values.length) {
+      this.values.length = 0;
+      this.head = 0;
+    } else if (this.head >= 256 && this.head * 2 >= this.values.length) {
+      this.values = this.values.slice(this.head);
+      this.head = 0;
+    }
+  }
 
   push(value: RemoteEvent): void {
     if (this.ended || this.failure !== null) {
@@ -86,14 +102,22 @@ class AsyncEventQueue {
     const waiter = this.waiters.shift();
     if (waiter) {
       waiter.resolve({ done: false, value });
-    } else {
-      this.values.push(value);
+      return;
     }
+    if (this.values.length - this.head >= MAX_ASYNC_EVENT_QUEUE_SIZE) {
+      this.values[this.head] = undefined;
+      this.head += 1;
+      this.compactIfNeeded();
+    }
+    this.values.push(value);
   }
 
   next(): Promise<IteratorResult<RemoteEvent>> {
-    const value = this.values.shift();
-    if (value) {
+    if (this.head < this.values.length) {
+      const value = this.values[this.head]!;
+      this.values[this.head] = undefined;
+      this.head += 1;
+      this.compactIfNeeded();
       return Promise.resolve({ done: false, value });
     }
     if (this.failure !== null) {
@@ -128,6 +152,8 @@ class AsyncEventQueue {
 
   close(): void {
     this.ended = true;
+    this.values.length = 0;
+    this.head = 0;
     for (const waiter of this.waiters.splice(0)) {
       waiter.resolve({ done: true, value: undefined });
     }
@@ -142,9 +168,10 @@ type ActiveSubscription = {
 
 export class WebTransport implements BackendTransport {
   readonly environment = 'web' as const;
-  private readonly baseUrl: string;
-  private readonly token: string;
+  private baseUrl: string;
+  private token: string;
   private readonly onAuthError?: (error: WebTransportError) => void;
+  private readonly requestTimeoutMs: number | null;
   private socket: WebSocket | undefined;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private pingTimer: ReturnType<typeof setInterval> | undefined;
@@ -155,15 +182,52 @@ export class WebTransport implements BackendTransport {
   private onlineListener: (() => void) | undefined;
   private readonly subscriptions = new Map<string, ActiveSubscription>();
   private readonly readyResolvers = new Map<string, () => void>();
+  private capabilitiesCache: ServerCapabilities | undefined;
+  private capabilitiesPromise: Promise<ServerCapabilities> | undefined;
 
   constructor(options: WebTransportOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
     this.token = options.token;
     this.onAuthError = options.onAuthError;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? null;
   }
 
   get origin(): string {
     return this.baseUrl;
+  }
+
+  reconfigure(options: { baseUrl: string; token: string }): void {
+    if (this.destroyed) {
+      return;
+    }
+    const nextBaseUrl = options.baseUrl.replace(/\/+$/, '');
+    const nextToken = options.token;
+    if (!nextBaseUrl || !nextToken) {
+      return;
+    }
+    this.baseUrl = nextBaseUrl;
+    this.token = nextToken;
+    this.capabilitiesCache = undefined;
+    this.capabilitiesPromise = undefined;
+    this.reconnectAttempts = 0;
+    this.stopKeepalive();
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+    if (this.socket) {
+      const staleSocket = this.socket;
+      this.socket = undefined;
+      this.detachSocketHandlers(staleSocket);
+      try {
+        staleSocket.close();
+      } catch {
+        // Ignore errors closing an already dead socket.
+      }
+    }
+    if (this.subscriptions.size > 0) {
+      this.connectSocket();
+    }
   }
 
   async call(
@@ -186,8 +250,33 @@ export class WebTransport implements BackendTransport {
   }
 
   async capabilities(): Promise<ServerCapabilities> {
-    const response = await this.request('/api/v1/capabilities');
-    return response.json() as Promise<ServerCapabilities>;
+    if (this.capabilitiesCache) {
+      return this.capabilitiesCache;
+    }
+    if (this.capabilitiesPromise) {
+      return this.capabilitiesPromise;
+    }
+    const pending = this.request(
+      '/api/v1/capabilities',
+      {},
+      this.requestTimeoutMs ?? CONTROL_REQUEST_TIMEOUT_MS
+    )
+      .then((response) => response.json() as Promise<ServerCapabilities>)
+      .then((caps) => {
+        if (this.capabilitiesPromise === pending) {
+          this.capabilitiesCache = caps;
+          this.capabilitiesPromise = undefined;
+        }
+        return caps;
+      })
+      .catch((error) => {
+        if (this.capabilitiesPromise === pending) {
+          this.capabilitiesPromise = undefined;
+        }
+        throw error;
+      });
+    this.capabilitiesPromise = pending;
+    return pending;
   }
 
   async listen<T>(
@@ -200,10 +289,14 @@ export class WebTransport implements BackendTransport {
   async createDevicePairing(
     request: CreateDevicePairingRequest
   ): Promise<DevicePairingChallenge> {
-    const response = await this.request('/api/v1/auth/pairings', {
-      method: 'POST',
-      body: JSON.stringify(request),
-    });
+    const response = await this.request(
+      '/api/v1/auth/pairings',
+      {
+        method: 'POST',
+        body: JSON.stringify(request),
+      },
+      this.requestTimeoutMs ?? CONTROL_REQUEST_TIMEOUT_MS
+    );
     return response.json() as Promise<DevicePairingChallenge>;
   }
 
@@ -232,14 +325,13 @@ export class WebTransport implements BackendTransport {
             this.subscriptions.get(request.subscription_id) === subscription
           ) {
             this.subscriptions.delete(request.subscription_id);
-            if (this.socket?.readyState === WebSocket.OPEN) {
-              this.socket.send(
-                JSON.stringify({
-                  type: 'detach',
-                  subscription_id: request.subscription_id,
-                })
-              );
-            }
+            this.safeSend(
+              this.socket,
+              JSON.stringify({
+                type: 'detach',
+                subscription_id: request.subscription_id,
+              })
+            );
           }
         };
 
@@ -295,9 +387,14 @@ export class WebTransport implements BackendTransport {
       this.reconnectTimer = undefined;
     }
     if (this.socket) {
-      this.detachSocketHandlers(this.socket);
-      this.socket.close();
+      const socket = this.socket;
       this.socket = undefined;
+      this.detachSocketHandlers(socket);
+      try {
+        socket.close();
+      } catch {
+        // Ignore errors closing an already dead socket.
+      }
     }
     for (const resolve of this.readyResolvers.values()) {
       resolve();
@@ -319,16 +416,66 @@ export class WebTransport implements BackendTransport {
 
   private async request(
     path: string,
-    init: Omit<RequestInit, 'headers'> = {}
+    init: Omit<RequestInit, 'headers'> = {},
+    timeoutMs: number | null = this.requestTimeoutMs
   ): Promise<Response> {
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      ...init,
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        'Content-Type': 'application/json',
-        'X-Dimo-Protocol-Version': PROTOCOL_VERSION,
-      },
-    });
+    const effectiveTimeoutMs =
+      typeof timeoutMs === 'number' &&
+      Number.isFinite(timeoutMs) &&
+      timeoutMs > 0
+        ? timeoutMs
+        : null;
+    const controller = new AbortController();
+    const externalSignal = init.signal;
+    let onExternalAbort: (() => void) | undefined;
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        controller.abort(externalSignal.reason);
+      } else {
+        onExternalAbort = () => controller.abort(externalSignal.reason);
+        externalSignal.addEventListener('abort', onExternalAbort, {
+          once: true,
+        });
+      }
+    }
+    let timedOut = false;
+    const timeoutTimer =
+      effectiveTimeoutMs !== null
+        ? setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+          }, effectiveTimeoutMs)
+        : undefined;
+
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}${path}`, {
+        ...init,
+        signal: controller.signal,
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          'Content-Type': 'application/json',
+          'X-Dimo-Protocol-Version': PROTOCOL_VERSION,
+        },
+      });
+    } catch (err) {
+      if (timedOut) {
+        throw new WebTransportError(
+          `Dimo Server request timed out after ${effectiveTimeoutMs}ms`,
+          'request_timeout',
+          true
+        );
+      }
+      throw err;
+    } finally {
+      if (timeoutTimer !== undefined) {
+        clearTimeout(timeoutTimer);
+      }
+      if (externalSignal && onExternalAbort) {
+        externalSignal.removeEventListener('abort', onExternalAbort);
+      }
+    }
+
     if (!response.ok) {
       let envelope: ErrorEnvelope = {};
       try {
@@ -390,7 +537,13 @@ export class WebTransport implements BackendTransport {
         // Unknown or malformed frames are ignored without damaging siblings.
       }
     };
-    socket.onerror = () => socket.close();
+    socket.onerror = () => {
+      try {
+        socket.close();
+      } catch {
+        this.handleBrokenSocket(socket);
+      }
+    };
     socket.onclose = () => {
       if (this.socket !== socket) {
         return;
@@ -404,7 +557,8 @@ export class WebTransport implements BackendTransport {
   }
 
   private sendAttach(subscription: ActiveSubscription): void {
-    this.socket?.send(
+    this.safeSend(
+      this.socket,
       JSON.stringify({
         type: 'attach',
         request: {
@@ -594,7 +748,8 @@ export class WebTransport implements BackendTransport {
           if (isNonRetriableError(err)) {
             return;
           }
-          const delay = Math.min(500 * 2 ** retryAttempts, 8_000);
+          const baseDelay = Math.min(500 * 2 ** retryAttempts, 8_000);
+          const delay = applyBackoffJitter(baseDelay);
           retryAttempts += 1;
           await new Promise<void>((resolve) => {
             retryTimer = setTimeout(() => {
@@ -630,11 +785,15 @@ export class WebTransport implements BackendTransport {
         return;
       }
       if (this.awaitingPong) {
-        socket.close();
+        try {
+          socket.close();
+        } catch {
+          this.handleBrokenSocket(socket);
+        }
         return;
       }
       this.awaitingPong = true;
-      socket.send(JSON.stringify({ type: 'ping' }));
+      this.safeSend(socket, JSON.stringify({ type: 'ping' }));
     }, WEB_SOCKET_KEEPALIVE_MS);
   }
 
@@ -678,11 +837,18 @@ export class WebTransport implements BackendTransport {
     }
     const socket = this.socket;
     if (socket?.readyState === WebSocket.OPEN) {
+      // Restart the keepalive interval before marking awaitingPong so an
+      // imminent timer tick cannot mistake this fresh probe for a missed pong.
+      this.startKeepalive();
       this.awaitingPong = true;
-      socket.send(JSON.stringify({ type: 'ping' }));
+      this.safeSend(socket, JSON.stringify({ type: 'ping' }));
       return;
     }
     if (!socket) {
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = undefined;
+      }
       this.connectSocket();
     }
   }
@@ -691,12 +857,48 @@ export class WebTransport implements BackendTransport {
     if (this.reconnectTimer) {
       return;
     }
-    const delay = Math.min(250 * 2 ** this.reconnectAttempts, 8_000);
+    const baseDelay = Math.min(250 * 2 ** this.reconnectAttempts, 8_000);
+    const delay = applyBackoffJitter(baseDelay);
     this.reconnectAttempts += 1;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined;
       this.connectSocket();
     }, delay);
+  }
+
+  private safeSend(socket: WebSocket | undefined, payload: string): boolean {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    try {
+      socket.send(payload);
+      return true;
+    } catch {
+      this.handleBrokenSocket(socket);
+      return false;
+    }
+  }
+
+  private handleBrokenSocket(socket: WebSocket): void {
+    if (this.socket !== socket) {
+      try {
+        socket.close();
+      } catch {
+        // Ignore secondary close errors on a stale socket.
+      }
+      return;
+    }
+    this.stopKeepalive();
+    this.socket = undefined;
+    this.detachSocketHandlers(socket);
+    try {
+      socket.close();
+    } catch {
+      // Ignore secondary close errors on a broken socket.
+    }
+    if (!this.destroyed && this.subscriptions.size > 0) {
+      this.scheduleReconnect();
+    }
   }
 
   private detachSocketHandlers(socket: WebSocket): void {
@@ -709,6 +911,11 @@ export class WebTransport implements BackendTransport {
   private webSocketUrl(): string {
     return `${this.baseUrl.replace(/^http/, 'ws')}/api/v1/ws`;
   }
+}
+
+function applyBackoffJitter(baseDelayMs: number): number {
+  const jitterFactor = 0.75 + Math.random() * 0.5;
+  return Math.max(1, Math.round(baseDelayMs * jitterFactor));
 }
 
 function sequenceToWire(sequence: bigint): number {

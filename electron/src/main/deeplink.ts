@@ -135,7 +135,9 @@ export class DeepLinkManager {
   private nextImportId = 1;
   private pendingImport: PendingModelRouterImport | null = null;
   private pendingSessionActivation: ParsedSessionActivation | null = null;
+  private pendingSessionBroadcasted = false;
   private mainWindowReady = false;
+  private rendererSessionActivationReady = false;
   private readonly coldStartUrls: string[] = [];
   private readonly pendingActions: PendingProcessAction[] = [];
   private handlers: DeepLinkRoutingHandlers | null = null;
@@ -173,15 +175,27 @@ export class DeepLinkManager {
 
   markMainWindowReady(): void {
     this.mainWindowReady = true;
-    if (this.pendingSessionActivation && this.handlers) {
-      const pending = this.pendingSessionActivation;
-      this.pendingSessionActivation = null;
-      this.handlers.broadcastEvent(DESKTOP_TOAST_ACTIVATED_EVENT, pending);
+    if (
+      this.pendingSessionActivation &&
+      !this.pendingSessionBroadcasted &&
+      this.handlers
+    ) {
+      // Broadcast for any listener already attached, but keep
+      // `pendingSessionActivation` stored until explicitly drained via
+      // `takePendingSessionActivation()` because `did-finish-load` fires
+      // before async `i18nReady` + React mount completes.
+      this.pendingSessionBroadcasted = true;
+      this.handlers.broadcastEvent(
+        DESKTOP_TOAST_ACTIVATED_EVENT,
+        this.pendingSessionActivation
+      );
     }
   }
 
   resetMainWindowReady(): void {
     this.mainWindowReady = false;
+    this.pendingSessionBroadcasted = false;
+    this.rendererSessionActivationReady = false;
   }
 
   takePendingModelRouterImport(): PendingModelRouterImport | null {
@@ -191,8 +205,10 @@ export class DeepLinkManager {
   }
 
   takePendingSessionActivation(): ParsedSessionActivation | null {
+    this.rendererSessionActivationReady = true;
     const value = this.pendingSessionActivation;
     this.pendingSessionActivation = null;
+    this.pendingSessionBroadcasted = false;
     return value;
   }
 
@@ -278,9 +294,14 @@ export class DeepLinkManager {
     const session = parseSessionActivation(rawUrl);
     if (session) {
       if (this.mainWindowReady) {
+        if (!this.rendererSessionActivationReady) {
+          this.pendingSessionActivation = session;
+          this.pendingSessionBroadcasted = true;
+        }
         handlers.broadcastEvent(DESKTOP_TOAST_ACTIVATED_EVENT, session);
       } else {
         this.pendingSessionActivation = session;
+        this.pendingSessionBroadcasted = false;
       }
     }
   }

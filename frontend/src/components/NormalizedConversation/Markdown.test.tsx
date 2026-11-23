@@ -113,8 +113,7 @@ vi.mock('mermaid', () => ({
 }));
 
 vi.mock('@/lib/desktopShell', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('@/lib/desktopShell')>();
+  const actual = await importOriginal<typeof import('@/lib/desktopShell')>();
   return {
     ...actual,
     getDesktopShell: () => {
@@ -178,6 +177,7 @@ function renderMarkdown(
 
 describe('Markdown', () => {
   beforeEach(() => {
+    resetMarkdownBlockElementCache();
     hostAssetMock.hostFileSrc.mockReset();
     hostAssetMock.hostFileSrc.mockImplementation(
       async (path: string) => `asset://${path}`

@@ -270,7 +270,7 @@ function isOwnUi(node) {
 
 function titlebarBottom() {
   let bottom = 0;
-  for (const node of document.querySelectorAll('[data-tauri-drag-region]')) {
+  for (const node of document.querySelectorAll('[data-window-drag-region], [data-tauri-drag-region]')) {
     if (isOwnUi(node)) continue;
     const r = node.getBoundingClientRect();
     if (r.top <= 4 && r.height > 0 && r.height < 80) bottom = Math.max(bottom, r.bottom);
@@ -327,7 +327,9 @@ export function isMainWindow({ label, pathname } = {}) {
 function currentWindowInfo() {
   const g = globalThis;
   return {
-    label: g.__TAURI_INTERNALS__?.metadata?.currentWindow?.label,
+    label:
+      g.dimoDesktop?.getWindowLabel?.() ??
+      g.__TAURI_INTERNALS__?.metadata?.currentWindow?.label,
     pathname: g.location?.pathname,
   };
 }
@@ -427,7 +429,7 @@ function createDebugger(ctx) {
   root.id = 'vx-tauri-ui-debugger-root';
   const ball = el('button', 'vx-dbg-ball', {
     type: 'button',
-    'aria-label': 'TauriUI调试器：选择元素',
+    'aria-label': 'UI 调试器：选择元素',
     'aria-pressed': 'false',
   });
   ball.innerHTML = ICON;
@@ -1004,7 +1006,7 @@ export default {
     const instance = createDebugger(ctx);
     const disposeCommand = ctx.ui?.registerCommand?.({
       id: 'select-element',
-      title: 'TauriUI调试器：选择界面元素',
+      title: 'UI 调试器：选择界面元素',
       category: 'Developer',
       icon: 'mouse-pointer-click',
       handler: () => instance.enterSelection(),

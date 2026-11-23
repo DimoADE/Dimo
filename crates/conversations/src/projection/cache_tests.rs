@@ -418,12 +418,11 @@ async fn successful_load_clears_the_recoverable_load_failure_notice() {
     let recovered_timeline = ConversationProjector::project(&pool, conversation_id)
         .await
         .expect("project successful load");
-    assert!(
-        recovered_timeline
-            .rows
-            .iter()
-            .all(|row| !matches!(row.row, ConversationTimelineRow::SessionNotice { .. }))
-    );
+    assert!(recovered_timeline.rows.iter().all(|row| {
+        row.row_id != AGENT_BINDING_LOAD_FAILURE_NOTICE_ROW_ID
+            && (!matches!(row.row, ConversationTimelineRow::SessionNotice { .. })
+                || row.row_id == crate::projection::runtime_status::CONNECTION_STATUS_ROW_ID)
+    }));
 }
 
 #[tokio::test]

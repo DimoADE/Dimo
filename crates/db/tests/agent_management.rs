@@ -682,6 +682,7 @@ async fn migration_seeds_and_promotes_the_current_built_in_agent_catalog() {
         [
             ("claude_code", true),
             ("codex", false),
+            ("muse_code", true),
             ("pi", true),
             ("opencode", true),
             ("grok", true),
@@ -717,6 +718,7 @@ async fn migration_seeds_and_promotes_the_current_built_in_agent_catalog() {
     for agent_id in [
         "claude_code",
         "codex",
+        "muse_code",
         "antigravity",
         "openclaw",
         "opencode",
@@ -852,6 +854,7 @@ async fn migration_rewrites_the_previous_default_agent_bar_order() {
         [
             "claude_code",
             "codex",
+            "muse_code",
             "pi",
             "opencode",
             "grok",
@@ -1166,7 +1169,8 @@ async fn shared_resource_lease_serializes_different_agents() {
 }
 
 #[tokio::test]
-async fn recover_interrupted_clears_dangling_active_operation_and_persist_installation_clears_active_fields() {
+async fn recover_interrupted_clears_dangling_active_operation_and_persist_installation_clears_active_fields()
+ {
     let pool = migrated_pool().await;
     let agent_id = AgentId::parse("codex").unwrap();
     AgentMembershipRepository::new(pool.clone())

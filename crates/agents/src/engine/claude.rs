@@ -921,6 +921,18 @@ impl NativeEngineDriver for ClaudeNativeDriver {
         Ok(())
     }
 
+    async fn set_permission_mode(
+        &self,
+        handle: &EngineHandle,
+        mode: &str,
+    ) -> Result<(), EngineError> {
+        let sidecar = self.ensure_sidecar(handle).await?;
+        let _ = sidecar
+            .request("session/set_mode", json!({ "permissionMode": mode }))
+            .await?;
+        Ok(())
+    }
+
     async fn fork_session(
         &self,
         handle: &EngineHandle,

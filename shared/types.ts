@@ -1205,22 +1205,17 @@ export type GitFileDiffEntry = {
   is_image: boolean;
 };
 
-export type GitLogEntry = {
-  sha: string;
-  summary: string;
-  author: string;
-  timestamp: number;
-  refs: string[];
-};
+export type GitLogEntry = { sha: string,
+/**
+ * Parent commit full SHAs in git order (first parent is mainline).
+ */
+parents: Array<string>, summary: string, author: string, timestamp: number,
+/**
+ * Branch/tag refs pointing at this commit (e.g. "master", "origin/main", "v1.0").
+ */
+refs: Array<string>, };
 
-export type GitLogStatus = {
-  entries: GitLogEntry[];
-  total: number;
-  ahead: number;
-  behind: number;
-  upstream: string | null;
-  branch_name: string;
-};
+export type GitLogStatus = { entries: Array<GitLogEntry>, total: number, ahead: number, behind: number, upstream: string | null, branch_name: string, };
 
 export type CommitFileEntry = {
   path: string;
@@ -1893,7 +1888,7 @@ export type OfficePluginReadiness = { enabled: boolean, dependency: OfficeCompon
 
 export type OfficePromptBlock = { type: string, text: string, };
 
-export type AgentKind = "claude_code" | "codex" | "opencode" | "antigravity" | "openclaw" | "cline" | "hermes" | "codebuddy" | "kimi_code" | "pi" | "grok" | "cursor" | "deepseek_harness" | "qoder" | "kiro" | "auggie" | "trae" | "command_code" | "zcode" | "omp" | "qa_mock";
+export type AgentKind = "claude_code" | "codex" | "opencode" | "antigravity" | "openclaw" | "cline" | "hermes" | "codebuddy" | "kimi_code" | "pi" | "grok" | "cursor" | "deepseek_harness" | "qoder" | "kiro" | "auggie" | "trae" | "command_code" | "zcode" | "omp" | "muse_code" | "qa_mock";
 
 export type AgentDiagnosticView = { id: string, agent_id: AgentId, operation_kind: string, severity: string, message: string, redacted_output: string | null, created_at: string, read: boolean, };
 
@@ -2107,7 +2102,7 @@ export type PiRuntimeSaveRequest = { mode: string, command: string, config_dir: 
 
 export type AgentNativeConfigFileWriteRequest = { agent_id: AgentId, path: string, base_revision: string, content: string, };
 
-export type AgentSettingsFeature = "authentication_mode" | "model_catalog" | "reusable_model_providers" | "codex_model_catalog" | "pi_configuration" | "open_code_providers" | "open_code_plugins" | "dsh_providers" | "dsh_plugins" | "grok_plugins" | "pi_plugins" | "native_mcp" | "native_skills";
+export type AgentSettingsFeature = "authentication_mode" | "model_catalog" | "reusable_model_providers" | "codex_model_catalog" | "pi_configuration" | "open_code_providers" | "open_code_plugins" | "dsh_providers" | "dsh_plugins" | "grok_plugins" | "pi_plugins" | "muse_plugins" | "native_mcp" | "native_skills";
 
 export type DshProviderKind = "official" | "catalog" | "custom";
 
@@ -2558,3 +2553,9 @@ export type PulseTaskLifecycleState = "editing" | "pending_test" | "publishing" 
 export type PulseTaskMeta = { taskKind: PulseTaskKind | null, lifecycleState: PulseTaskLifecycleState | null, boundRuleTemplateId: string | null, lastTestedAt: string | null, lastTestPassed: boolean | null, lastRunAt: string | null, lastRunStatus: string | null, lastRunSummary: string | null, };
 
 export type SessionCollaborationMemberRef = { member_id: string, name: string, conversation_id: string, };
+
+export type GitWorktreeInfo = { path: string, branch: string | null, head_sha: string | null, is_main: boolean, is_detached: boolean, is_bare: boolean, };
+
+export type MusePluginSummaryView = { home: string, plugins: Array<MusePluginView>, };
+
+export type MusePluginView = { id: string, name: string, version: string | null, status: string, enabled: boolean, approved: boolean, path: string | null, source: string | null, marketplace: string | null, };

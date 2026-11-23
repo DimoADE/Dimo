@@ -659,7 +659,8 @@ export function TurnActivity({
       const editStats =
         action.action === 'file_edit'
           ? countFileChangesStats(
-              entry.fileEdits?.flatMap((edit) => edit.changes) ?? action.changes,
+              entry.fileEdits?.flatMap((edit) => edit.changes) ??
+                action.changes,
               entry.toolArguments
             )
           : { additions: undefined, deletions: undefined };

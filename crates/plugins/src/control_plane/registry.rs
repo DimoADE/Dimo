@@ -539,6 +539,9 @@ pub trait PluginRegistry: Send + Sync {
     }
     async fn quarantine_plugin(&self, plugin_id: &str, reason: &str) -> Result<(), PluginError>;
     async fn quarantine_reason(&self, plugin_id: &str) -> Result<Option<String>, PluginError>;
+    async fn quarantine_reasons(
+        &self,
+    ) -> Result<std::collections::HashMap<String, String>, PluginError>;
 }
 
 macro_rules! impl_plugin_registry {
@@ -785,6 +788,11 @@ macro_rules! impl_plugin_registry {
                 plugin_id: &str,
             ) -> Result<Option<String>, PluginError> {
                 <$ty>::quarantine_reason(self, plugin_id).await
+            }
+            async fn quarantine_reasons(
+                &self,
+            ) -> Result<std::collections::HashMap<String, String>, PluginError> {
+                <$ty>::quarantine_reasons(self).await
             }
         }
     };

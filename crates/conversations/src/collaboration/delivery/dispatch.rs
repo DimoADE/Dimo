@@ -908,7 +908,7 @@ async fn fetch_missed_group_lines(
         .flatten();
     let rows = sqlx::query_as::<_, (i64, String)>(
         r#"SELECT seq, envelope_json FROM collaboration_space_messages
-           WHERE space_id = ? AND seq > ? AND seq != ?
+           WHERE space_id = ? AND seq > ? AND seq != ? AND origin != 'system'
            ORDER BY seq DESC LIMIT ?"#,
     )
     .bind(space_id)

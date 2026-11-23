@@ -2,7 +2,7 @@
 
 **状态:** Accepted & Normative（v2.0 — 插件化统一原生引擎架构）  
 **日期:** 2026-11-15  
-**关联决策:** [ADR-0087](../adr/0087-dedicated-agent-engine-first-acp-fallback.md)（独立引擎优先、ACP 次选）、[ADR-0058](../adr/0058-session-auxiliary-capability-honesty.md)（辅助能力诚实原则）、[ADR-0082](../adr/0082-jsonl-transcript-window.md)、[ADR-0086](../adr/0086-conversation-binding-generations-and-history-segments.md)  
+**关联决策:** [ADR-0087](../adr/0087-dedicated-agent-engine-first-acp-fallback.md)（独立引擎优先、ACP 次选）、[ADR-0058](../adr/0058-session-auxiliary-capability-honesty.md)（辅助能力诚实原则）、[ADR-0091](../adr/0091-sqlite-single-authority-conversation-projection.md)（SQLite 单一权威与会话投影）、[ADR-0089](../adr/0089-conversation-binding-generations-and-history-segments.md)（会话绑定代次与历史片段）  
 **适用范围:** `crates/agents`、`crates/conversations`、`crates/application`、`crates/server`、`crates/utils`、`scripts/claude-native-*.mjs`、`frontend` 会话控制与渲染管线
 
 ---
@@ -190,7 +190,7 @@ Dimo **MUST** 保持唯一的运行时控制面与领域接缝，禁止出现“
    - 将新驱动注册进 `EngineRegistry::bundled()`；
    - 更新对应 `BuiltInProfile` / `resolve_native_engine_kind_with_env`（或 `EngineRegistry` 路由解析），确保 `DIMO_ENGINE_MODE=acp` 仍支持灰度回退（仅当独立 ACP 二进制存在时）。
 3. **打包与部署一致性（MUST）**：
-   - 若新引擎依赖外部或随包分发的辅助脚本（如 Node sidecar），**必须**同步更新 `src-tauri/tauri.conf.json` 与 `scripts/package-host-family.js` 及其测试，保持开发环境与打包产物完全一致。
+   - 若新引擎依赖随包分发的辅助脚本或二进制（如 Node sidecar），**必须**同步更新 `electron/electron-builder.yml`（含 `resources/bin/` 与 `extraResources` 脚本映射）与 `scripts/package-host-family.js` 及其测试，保持开发环境与打包产物完全一致。
 4. **配置指纹与缓存联动（MUST）**：
    - 明确声明驱动依赖的原生配置路径（同步更新 `capability_catalog.rs` 指纹与驱动 `invalidate_caches()`）；
    - 若涉及长驻进程池，必须在缓存键中包含配置指纹，避免切换配置后继续命中旧连接。
@@ -202,13 +202,3 @@ Dimo **MUST** 保持唯一的运行时控制面与领域接缝，禁止出现“
      - `steer` / `interrupt` / `fork_session` / `revert_to`；
      - 子进程异常退出时的 `stderr` 脱敏与 64 KiB 封顶，以及配置变更后的缓存失效。
    - **全量报告约束**：静态检查、夹具校验或结构验证工具发现多个违规时必须单次遍历并汇总输出全部缺陷，禁止 fail-fast。
-
----
-
-## 9. 架构演进路线（Roadmap）
-
-| 阶段 | 核心交付物 | 状态 |
-| --- | --- | --- |
-| **Phase 1–3：旗舰双原生引擎接线、安全加固与契约底座** | 1. `ClaudeNativeDriver` 与 `CodexNativeDriver` 正式接入 `AgentRuntime`；<br>2. 双向 JSON-RPC 2.0 帧路由、无损 MPSC `TurnEventRouter`、Win32 子 JobObject、进程内 DPAPI 与写时 `StderrTail`；<br>3. 修复多账号隔离目录、自定义网关模型发现、别名一致性核验、Codex 配置指纹失效与目录残留清理。 | 已完成 |
-| **Phase 4：零分支控制面与可插拔 `EngineRegistry` 收口** | 1. 将 `modes` / `effort` / `commands` / `normalize_mode` / `resolve_default_model` / `resolve_auth` / `prepare_launch_env` / `classify_tool_call` / `encode_question_answers` / `model_aliases` / `invalidate_caches` 下沉为 `NativeEngineDriver` 标准契约；<br>2. 新增 `EngineRegistry` 统一注册与按 `agent_id` 广播失效；<br>3. 清除 `manager/runner/**` 与 `runtime.rs` 内所有供应商硬编码分支。 | 已完成 |
-| **Phase 5：逐个 Agent 原生化迁移与 `GenericAcpAdapter` 收敛** | 1. 按收益优先级将 `opencode`（`opencode serve`）与 `pi`（`pi --mode rpc`）迁入 `EngineRegistry`；<br>2. 将 `run_acp` 及 `vendor.rs` 方言补丁收敛为 `GenericAcpAdapter`，使原生引擎与长尾 ACP 在同一运行时适配器接口下彻底合流。 | 规划演进 |

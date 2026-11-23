@@ -203,23 +203,59 @@ pub fn prepare_instance_isolation_env_for_keys(
 }
 
 /// Allocates isolated per-`provider_instance_id` temp directories (`0o700` on Unix)
-/// and, when `spec.isolate_profile` is `true`, isolated `CODEX_HOME` / `CLAUDE_CONFIG_DIR`
-/// directories if the caller has not explicitly overridden them in `spec.env`.
+/// and, when `spec.isolate_profile` is `true`, isolated `CODEX_HOME` / `CLAUDE_CONFIG_DIR` /
+/// `XDG_CONFIG_HOME`+`XDG_DATA_HOME` directories if not explicitly overridden in `spec.env`.
 pub fn prepare_instance_isolation_env(
     spec: &EngineStartSpec,
     kind: NativeEngineKind,
 ) -> std::io::Result<HashMap<String, String>> {
-    let keys = match kind {
-        NativeEngineKind::CodexNative => Some(("CODEX_HOME", "codex-home")),
-        NativeEngineKind::ClaudeNative => Some(("CLAUDE_CONFIG_DIR", "claude-config")),
-    };
-    prepare_instance_isolation_env_for_keys(spec, keys)
+    match kind {
+        NativeEngineKind::CodexNative => {
+            prepare_instance_isolation_env_for_keys(spec, Some(("CODEX_HOME", "codex-home")))
+        }
+        NativeEngineKind::ClaudeNative => prepare_instance_isolation_env_for_keys(
+            spec,
+            Some(("CLAUDE_CONFIG_DIR", "claude-config")),
+        ),
+        NativeEngineKind::MuseNative => {
+            let mut isolated = prepare_instance_isolation_env_for_keys(
+                spec,
+                Some(("XDG_CONFIG_HOME", "muse-config")),
+            )?;
+            if spec.isolate_profile
+                && !spec.env.contains_key("XDG_DATA_HOME")
+                && let Some(instance_id) = spec
+                    .provider_instance_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            {
+                let root_base = spec
+                    .env
+                    .get("DIMO_PROVIDER_INSTANCES_ROOT")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| std::env::temp_dir().join("dimo-provider-instances"));
+                let data_dir = root_base
+                    .join(sanitize_instance_dir_segment(instance_id))
+                    .join("muse-data");
+                create_private_dir_all(&data_dir)?;
+                isolated.insert(
+                    "XDG_DATA_HOME".to_string(),
+                    data_dir.to_string_lossy().into_owned(),
+                );
+            }
+            Ok(isolated)
+        }
+    }
 }
 
 #[derive(Clone)]
 pub enum TurnRouteFilter {
     CodexThread {
         thread_id: String,
+    },
+    MuseSession {
+        session_id: String,
     },
     ClaudePrompt {
         prompt_id: String,
@@ -232,7 +268,12 @@ impl TurnRouteFilter {
     /// delivered to this subscriber.
     fn matches(&self, event: &EngineEvent) -> bool {
         match self {
-            TurnRouteFilter::CodexThread { thread_id } => match event {
+            TurnRouteFilter::CodexThread {
+                thread_id: target_session_id,
+            }
+            | TurnRouteFilter::MuseSession {
+                session_id: target_session_id,
+            } => match event {
                 EngineEvent::SessionInitialized { session_id, .. }
                 | EngineEvent::TurnStarted { session_id, .. }
                 | EngineEvent::AssistantTextDelta { session_id, .. }
@@ -254,9 +295,9 @@ impl TurnRouteFilter {
                 | EngineEvent::AutoCompactionChanged { session_id, .. }
                 | EngineEvent::TurnCompleted { session_id, .. }
                 | EngineEvent::TurnInterrupted { session_id, .. }
-                | EngineEvent::TurnError { session_id, .. } => {
-                    session_id.as_deref().is_none_or(|sid| sid == thread_id)
-                }
+                | EngineEvent::TurnError { session_id, .. } => session_id
+                    .as_deref()
+                    .is_none_or(|sid| sid == target_session_id),
                 _ => true,
             },
             TurnRouteFilter::ClaudePrompt { prompt_id, .. } => match event {
@@ -316,6 +357,7 @@ impl TurnRouteFilter {
     fn fallback_ids(&self) -> (Option<String>, Option<String>) {
         match self {
             TurnRouteFilter::CodexThread { thread_id } => (None, Some(thread_id.clone())),
+            TurnRouteFilter::MuseSession { session_id } => (None, Some(session_id.clone())),
             TurnRouteFilter::ClaudePrompt { prompt_id, handle } => {
                 (Some(prompt_id.clone()), handle.external_session_id())
             }

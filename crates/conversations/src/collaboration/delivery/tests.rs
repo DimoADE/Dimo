@@ -1428,7 +1428,7 @@ async fn missed_context_keeps_last_15_and_collapses_older_into_one_line() {
     for i in 1..=25 {
         post_as(&pool, None, &space, &format!("@小C 第{i:02}条"), &[]).await;
     }
-    post_as(&pool, None, &space, "@小B 你来总结", &[]).await;
+    let trigger = post_as(&pool, None, &space, "@小B 你来总结", &[]).await;
     let to_b = inputs_of(&pool, b).await;
     let packed: Value = serde_json::from_str(to_b.last().unwrap()).unwrap();
     let packed = packed["text"].as_str().unwrap();
@@ -1439,7 +1439,7 @@ async fn missed_context_keeps_last_15_and_collapses_older_into_one_line() {
     assert!(packed.contains("第11条"), "{packed}");
     assert!(packed.contains("第25条"), "{packed}");
     assert!(!packed.contains("第06条"), "{packed}");
-    let helper = missed_group_context(&pool, &space, b, 0, 26)
+    let helper = missed_group_context(&pool, &space, b, 0, trigger.seq)
         .await
         .unwrap()
         .expect("helper still renders a backlog");
@@ -1609,9 +1609,13 @@ async fn agent_projection_hides_the_user_actor() {
     assert!(!agent_json.contains("/user"));
     assert_eq!(agent_messages[0].envelope["sender"], json!("user"));
     assert!(agent_messages[0].envelope.get("actor").is_none());
-    let user_messages = list_space_messages(&pool, &space, None, None, MessageAudience::User)
-        .await
-        .unwrap();
+    let user_messages: Vec<_> =
+        list_space_messages(&pool, &space, None, None, MessageAudience::User)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.origin != "system")
+            .collect();
     assert_eq!(user_messages[0].envelope["sender"], json!("Person"));
     assert!(user_messages[0].envelope.get("actor").is_none());
 }
@@ -1667,12 +1671,13 @@ async fn space_replay_requires_membership_and_the_same_request() {
     wrong_space.space_id = other.space_id.clone();
     let missing = post_to_space(&pool, wrong_space).await.unwrap_err();
     assert_eq!(missing.code, "invalid_origin_space");
-    let leaked: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM collaboration_space_messages WHERE space_id = ?")
-            .bind(&other.space_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let leaked: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM collaboration_space_messages WHERE space_id = ? AND origin != 'system'",
+    )
+    .bind(&other.space_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(leaked, 0);
 }
 
@@ -1808,7 +1813,7 @@ async fn space_delivery_strips_mention_for_display_and_embeds_protocol_context()
     let a = Uuid::new_v4();
     create_session(&pool, a, workspace, Some("小A")).await;
     let space = space_of(&pool, a).await;
-    post_to_space(
+    let first = post_to_space(
         &pool,
         PostToSpace {
             caller_id: None,
@@ -1874,7 +1879,7 @@ async fn space_delivery_strips_mention_for_display_and_embeds_protocol_context()
     )
     .await
     .unwrap();
-    assert_eq!(reply.seq, 2);
+    assert_eq!(reply.seq, first.seq + 1);
     assert!(reply.receipts.is_empty());
 
     let spaces_view = list_collaboration_spaces_for_caller(&pool, a)
@@ -2169,9 +2174,12 @@ async fn finalize_space_turn_deliveries_posts_fallback_reply_and_clears_processi
     assert_eq!(b_after.state, "replied");
 
     // And the fallback message was posted to the space for User
-    let messages = list_space_messages(&pool, &space, None, None, MessageAudience::User)
+    let messages: Vec<_> = list_space_messages(&pool, &space, None, None, MessageAudience::User)
         .await
-        .unwrap();
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.origin != "system")
+        .collect();
     assert_eq!(messages.len(), 2);
     let fallback = &messages[1];
     assert_eq!(fallback.origin, "agent");
@@ -2387,9 +2395,12 @@ async fn finalize_empty_assistant_text_passes() {
     let turn = open_turn(&pool, &posted.message_id, a).await.unwrap();
     assert_eq!(turn.1, "finished");
     assert_eq!(turn.2.as_deref(), Some("pass"));
-    let messages = list_space_messages(&pool, &space, None, None, MessageAudience::User)
+    let messages: Vec<_> = list_space_messages(&pool, &space, None, None, MessageAudience::User)
         .await
-        .unwrap();
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.origin != "system")
+        .collect();
     assert_eq!(messages.len(), 1);
 }
 
@@ -2410,9 +2421,12 @@ async fn finalize_polite_ack_only_passes() {
         .unwrap();
     assert_eq!(receipts[0].state, "passed");
     assert_eq!(receipts[0].outcome.as_deref(), Some("pass"));
-    let messages = list_space_messages(&pool, &space, None, None, MessageAudience::User)
+    let messages: Vec<_> = list_space_messages(&pool, &space, None, None, MessageAudience::User)
         .await
-        .unwrap();
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.origin != "system")
+        .collect();
     assert_eq!(messages.len(), 1, "polite ack must not fallback-post");
 }
 
@@ -3267,9 +3281,12 @@ async fn finalize_pass_token_does_not_post() {
         assert_eq!(receipts[0].state, "passed");
         assert_eq!(receipts[0].outcome.as_deref(), Some("pass"));
     }
-    let messages = list_space_messages(&pool, &space, None, None, MessageAudience::User)
+    let messages: Vec<_> = list_space_messages(&pool, &space, None, None, MessageAudience::User)
         .await
-        .unwrap();
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.origin != "system")
+        .collect();
     assert_eq!(messages.len(), 3);
     assert!(messages.iter().all(|m| m.origin == "user"));
 }
@@ -4370,16 +4387,16 @@ async fn sequential_round_packs_peer_reply_after_trigger_and_advances_completed_
     let first_payload: Value = serde_json::from_str(&coder_inputs[0]).unwrap();
     let first_text = first_payload["text"].as_str().unwrap();
 
-    // The root trigger message #1 must appear BEFORE Docu's reply #2 in chronological order.
+    // The root trigger message must appear BEFORE Docu's reply in chronological order.
     let trigger_pos = first_text
         .find("请排查超时配置")
         .expect("root trigger message in envelope");
     let peer_reply_pos = first_text
-        .find("[#2] Docu: 文档里定义的字段名是 timeout_ms。")
+        .find("] Docu: 文档里定义的字段名是 timeout_ms。")
         .expect("Docu's round reply packed in envelope");
     assert!(
         trigger_pos < peer_reply_pos,
-        "round peer reply #2 must appear chronologically after root trigger #1:\n{first_text}"
+        "round peer reply must appear chronologically after root trigger:\n{first_text}"
     );
 
     // Coder finishes slot 2, posting #3.
@@ -4960,5 +4977,191 @@ async fn consecutive_post_to_space_reusing_operation_id_succeeds_and_projects_cr
     assert!(
         contents.iter().any(|c| c.contains("收到，已排期 T110")),
         "lead reply must be in group: {contents:?}"
+    );
+}
+
+#[tokio::test]
+async fn group_creation_and_member_invitation_emit_coalesced_and_follow_up_system_events() {
+    let pool = setup_pool().await;
+    let workspace = Uuid::new_v4();
+    let arch = Uuid::new_v4();
+    let backend = Uuid::new_v4();
+    let lead = Uuid::new_v4();
+    sqlx::query("INSERT INTO workspaces (id, task_id, branch) VALUES (?, ?, 'main')")
+        .bind(workspace)
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .unwrap();
+    create_session(&pool, arch, workspace, Some("Architect")).await;
+    create_session(&pool, backend, workspace, Some("Backend")).await;
+    create_session(&pool, lead, workspace, Some("Tech Lead")).await;
+
+    let created = create_workspace_space(&pool, workspace, "Dimo Dev Team", Uuid::new_v4())
+        .await
+        .unwrap();
+    host_add_space_member_with_options(
+        &pool,
+        &created.space_id,
+        arch,
+        "Architect",
+        Uuid::new_v4(),
+        true,
+    )
+    .await
+    .unwrap();
+    host_add_space_member_with_options(
+        &pool,
+        &created.space_id,
+        backend,
+        "Backend",
+        Uuid::new_v4(),
+        true,
+    )
+    .await
+    .unwrap();
+
+    // Coalesced into a single seq=1 group_created event containing both initial members.
+    let initial_messages =
+        list_space_messages(&pool, &created.space_id, None, None, MessageAudience::User)
+            .await
+            .unwrap();
+    assert_eq!(initial_messages.len(), 1);
+    assert_eq!(initial_messages[0].origin, "system");
+    assert_eq!(
+        initial_messages[0].envelope["summary"],
+        json!("space_event")
+    );
+    assert_eq!(
+        initial_messages[0].envelope["spaceEvent"]["kind"],
+        json!("group_created")
+    );
+    assert_eq!(
+        initial_messages[0].envelope["spaceEvent"]["actorIsUser"],
+        json!(true)
+    );
+    assert_eq!(
+        initial_messages[0].envelope["spaceEvent"]["groupName"],
+        json!("Dimo Dev Team")
+    );
+    assert_eq!(
+        initial_messages[0].envelope["spaceEvent"]["members"],
+        json!(["Architect", "Backend"])
+    );
+
+    // After a regular chat message, inviting another member emits a separate member_invited event.
+    post_as(&pool, None, &created.space_id, "@Architect hello", &[]).await;
+    host_add_space_member(&pool, &created.space_id, lead, "Tech Lead", Uuid::new_v4())
+        .await
+        .unwrap();
+
+    let all_user = list_space_messages(&pool, &created.space_id, None, None, MessageAudience::User)
+        .await
+        .unwrap();
+    let system_events: Vec<_> = all_user.iter().filter(|m| m.origin == "system").collect();
+    assert_eq!(system_events.len(), 2);
+    assert_eq!(
+        system_events[1].envelope["spaceEvent"]["kind"],
+        json!("member_invited")
+    );
+    assert_eq!(
+        system_events[1].envelope["spaceEvent"]["memberName"],
+        json!("Tech Lead")
+    );
+
+    // Agent audience must not see spaceEvent system notices.
+    let agent_view =
+        list_space_messages(&pool, &created.space_id, None, None, MessageAudience::Agent)
+            .await
+            .unwrap();
+    assert!(agent_view.iter().all(|m| m.origin != "system"));
+}
+
+#[tokio::test]
+async fn supervisor_provision_activity_streams_live_and_persists_on_finalize() {
+    let pool = setup_pool().await;
+    let workspace = Uuid::new_v4();
+    let master = Uuid::new_v4();
+    create_session(&pool, master, workspace, Some("Master")).await;
+    let space = space_of(&pool, master).await;
+
+    let posted = post_as(&pool, None, &space, "@Master create a dev team", &[]).await;
+    mark_processing(&pool, &posted.message_id, master).await;
+
+    record_space_turn_provision_bot(
+        master,
+        ProvisionedBotEntry {
+            nickname: "Architect".to_string(),
+            identity_member_id: Some("mem-arch".to_string()),
+            conversation_id: None,
+            agent_id: Some("claude-code".to_string()),
+            model: Some("claude-opus-5-5".to_string()),
+            model_label: Some("Opus 5.5".to_string()),
+            avatar: None,
+            color: Some("#1584ff".to_string()),
+            status: "ready".to_string(),
+        },
+    );
+    record_space_turn_provision_group(
+        master,
+        ProvisionedGroupEntry {
+            space_id: "space-dev-team".to_string(),
+            name: "Dimo Dev Team".to_string(),
+            member_count: 1,
+            members: vec![ProvisionedGroupMemberSummary {
+                nickname: "Architect".to_string(),
+                identity_member_id: Some("mem-arch".to_string()),
+                avatar: None,
+                color: Some("#1584ff".to_string()),
+            }],
+            status: "ready".to_string(),
+        },
+    );
+
+    // Live streaming draft must appear with provisionActivity even when text is empty.
+    let live = list_space_messages_window(
+        &pool,
+        &space,
+        None,
+        None,
+        false,
+        Some(20),
+        MessageAudience::User,
+    )
+    .await
+    .unwrap();
+    let streaming_draft = live
+        .messages
+        .iter()
+        .find(|m| m.envelope.get("provisionActivity").is_some())
+        .expect("live streaming draft with provisionActivity");
+    assert_eq!(
+        streaming_draft.envelope["provisionActivity"]["bots"][0]["nickname"],
+        json!("Architect")
+    );
+    assert_eq!(
+        streaming_draft.envelope["provisionActivity"]["groups"][0]["name"],
+        json!("Dimo Dev Team")
+    );
+
+    // Finalizing with empty text must still persist the card-only message.
+    finalize_space_turn_deliveries(&pool, master, "", &DeliveryContext::default())
+        .await
+        .unwrap();
+
+    let persisted = list_space_messages(&pool, &space, None, None, MessageAudience::User)
+        .await
+        .unwrap();
+    let card_msg = persisted
+        .iter()
+        .find(|m| m.origin == "agent")
+        .expect("persisted agent message carrying provisionActivity");
+    assert_eq!(
+        card_msg.envelope["provisionActivity"]["bots"][0]["modelLabel"],
+        json!("Opus 5.5")
+    );
+    assert_eq!(
+        card_msg.envelope["provisionActivity"]["groups"][0]["spaceId"],
+        json!("space-dev-team")
     );
 }

@@ -26,6 +26,26 @@ vi.mock('./CanvasPanelNodeBody', () => ({
 const resizeCard = vi.fn();
 const resetCardSize = vi.fn();
 const collapseCard = vi.fn();
+const openOrFocusPanelNode = vi.fn();
+
+const mockPluginPanels = vi.hoisted(() =>
+  vi.fn<
+    () => Array<{
+      pluginId: string;
+      id: string;
+      kind: 'app_panel';
+      label: string;
+      generation: number;
+      metadata?: Record<string, unknown>;
+    }>
+  >(() => [])
+);
+
+vi.mock('@/hooks/usePluginHostContributions', () => ({
+  usePluginHostContributions: () => mockPluginPanels(),
+  contributionMetadata: (item: { metadata?: Record<string, unknown> }) =>
+    item.metadata ?? {},
+}));
 
 const sessionsById = vi.hoisted(
   () =>
@@ -55,6 +75,7 @@ vi.mock('./CanvasViewContext', () => ({
     resetCardSize,
     renameGroup: vi.fn(),
     toggleGroupShowAll: vi.fn(),
+    openOrFocusPanelNode,
   }),
   useCanvasSession: (sessionId: string) => sessionsById.get(sessionId),
 }));
@@ -103,12 +124,18 @@ vi.mock('@xyflow/react', () => ({
 vi.mock('@/components/kanban/session-hub/SessionMonitorCard', () => ({
   SessionMonitorCard: ({
     onZoom,
+    onHeaderContextMenu,
     selected,
   }: {
     onZoom?: (session: { id: string }) => void;
+    onHeaderContextMenu?: (event: React.MouseEvent<HTMLDivElement>) => void;
     selected?: boolean;
   }) => (
     <div>
+      <div
+        data-testid="mock-session-header"
+        onContextMenu={onHeaderContextMenu}
+      />
       <span data-testid="window-selected">{String(!!selected)}</span>
       <button type="button" onClick={() => onZoom?.({ id: 'session-1' })}>
         reset-size
@@ -225,5 +252,114 @@ describe('SessionCanvasDetailNode', () => {
       screen.getByTestId('portaled-space-member-bar')
     );
     expect(screen.queryByText('设计协作群')).not.toBeInTheDocument();
+  });
+
+  it('exposes terminal and installed browser items in session node header context menu', () => {
+    openOrFocusPanelNode.mockClear();
+    mockPluginPanels.mockReturnValue([
+      {
+        pluginId: 'example.browser',
+        id: 'browser',
+        kind: 'app_panel',
+        label: 'Browser',
+        generation: 1,
+        metadata: {
+          engine: 'host-browser',
+          icon: 'globe',
+          multiInstance: true,
+        },
+      },
+    ]);
+
+    render(
+      <SessionCanvasDetailNode
+        id="session-session-1"
+        data={{ sessionId: 'session-1', instanceId: 'session-1' }}
+        selected
+        type="sessionDetail"
+        dragging={false}
+        draggable
+        selectable
+        deletable
+        zIndex={1}
+        isConnectable={false}
+        positionAbsoluteX={0}
+        positionAbsoluteY={0}
+      />
+    );
+
+    fireEvent.contextMenu(screen.getByTestId('mock-session-header'));
+    expect(screen.getByRole('menuitem', { name: '终端' })).toBeInTheDocument();
+    const browserItem = screen.getByRole('menuitem', { name: '浏览器' });
+    fireEvent.click(browserItem);
+
+    expect(openOrFocusPanelNode).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: expect.stringMatching(/^plugin:example\.browser\/browser:/),
+        component: 'plugin-panel',
+        title: 'Browser',
+        expanded: true,
+        parentNodeId: 'session-1',
+        params: {
+          pluginId: 'example.browser',
+          contributionId: 'browser',
+          icon: 'globe',
+        },
+      })
+    );
+
+    openOrFocusPanelNode.mockClear();
+    fireEvent.contextMenu(screen.getByTestId('mock-session-header'));
+    fireEvent.click(screen.getByRole('menuitem', { name: '终端' }));
+    expect(openOrFocusPanelNode).toHaveBeenCalledWith(
+      expect.objectContaining({
+        component: 'terminal',
+        expanded: true,
+        parentNodeId: 'session-1',
+        params: expect.objectContaining({
+          surface: 'editor',
+          tabId: expect.any(String),
+          shell: expect.any(String),
+        }),
+      })
+    );
+  });
+
+  it('constrains browser website favicon size in the panel node header', () => {
+    render(
+      <TooltipProvider>
+        <SessionCanvasDetailNode
+          id="panel-browser-1"
+          data={{
+            sessionId: '',
+            instanceId: 'browser-1',
+            panelId: 'plugin:example.browser/browser:1',
+            panelComponent: 'plugin-panel',
+            panelTitle: 'github.com',
+            panelParams: {
+              pluginId: 'example.browser',
+              contributionId: 'browser',
+              faviconUrl: 'https://github.com/favicon.ico',
+              requestedUrl: 'https://github.com/',
+            },
+          }}
+          selected
+          type="sessionDetail"
+          dragging={false}
+          draggable
+          selectable
+          deletable
+          zIndex={1}
+          isConnectable={false}
+          positionAbsoluteX={0}
+          positionAbsoluteY={0}
+        />
+      </TooltipProvider>
+    );
+
+    const iconWrapper = screen.getByTestId('workspace-tab-icon');
+    const favicon = screen.getByTestId('workspace-tab-favicon');
+    expect(iconWrapper).toHaveClass('h-3.5', 'w-3.5', 'shrink-0');
+    expect(favicon).toHaveClass('h-full', 'w-full', 'object-contain');
   });
 });

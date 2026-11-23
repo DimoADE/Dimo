@@ -50,6 +50,7 @@ const BUILT_IN_AGENTS = [
   ['command_code', 'Command Code'],
   ['zcode', 'ZCode'],
   ['mimo_code', 'MiMo Code'],
+  ['muse_code', 'Muse Code'],
 ] as const;
 
 describe('AgentManagementIcon', () => {

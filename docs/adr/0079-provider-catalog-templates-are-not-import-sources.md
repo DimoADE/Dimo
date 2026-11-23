@@ -1,189 +1,67 @@
 ---
-status: superseded in part by ADR-0088
+status: accepted
 date: 2026-09-13
-decision-makers:
-  - Dimo maintainers
+decision-makers: Dimo maintainers
 ---
 
-# 供应商预置目录是插件贡献的模板，不是导入源，也不是 CC-Switch
-
-> §3、§4、§10 已由 [ADR-0088](0088-built-in-provider-presets.md) 取代：预置内置在
-> Host 并默认可用，`dimo.provider-switch` 已删除；插件仍可经 `provider.model.catalog`
-> 追加模板。其余决定不变。
-
-设置 → Agent → 鉴权 → 供应商的新建表单需要一份**无密钥填表模板**，而不是再做
-一个 CC-Switch，也不是把 `provider.model.importSource` 扩成目录。插件经新贡献点
-`provider.model.catalog` 提供模板；Host 聚合并渲染；点选只填充该表面草稿；用户
-补密钥并保存后，才成为该表面自己的已保存连接。保存之前，模板不是 Model
-Provider preset，也不是导入候选项。
-
-Runtime 权威仍是 Agent 原生配置（[ADR-0022](0022-agent-native-configuration-is-authoritative.md)、
-[ADR-0063](0063-model-provider-presets-not-cc-switch.md)）。本决定不引入本地协议
-转换代理、不全量覆盖原生快照、不成为配置权威。
-
-本 ADR **不修订** ADR-0063 的导入语义：导入仍是「收成已有连接」。本 ADR **不修订**
-[ADR-0069](0069-everything-is-a-plugin-platform.md) §8 能力等价白名单；不得把
-ProviderSwitch 写进并不存在的自动启用列表。
+# 供应商预置目录是无密钥填表模板，不是导入源
 
 ## Context
 
-供应商模式下，可复用 Model Provider 与 DeepSeek Harness 自定义的新建表单是空白
-的。用户必须自己知道各中转的端点与模型 id。OpenCode / MiMo 的供应商表面已经有
-`models.dev` 列表，但覆盖的是官方/目录内 Provider，不是按 Agent 整理的中转模板。
+设置 → Agent → 鉴权 → 供应商的新建表单提供按 Agent 整理的无密钥填表模板：内置预置随 Host 开箱可用（[ADR-0088](0088-built-in-provider-presets.md)），第三方插件可通过 `provider.model.catalog` 贡献点追加额外模板。用户点选模板仅填充表单草稿，补齐密钥并保存后才成为该表面的已保存连接。Runtime 权威仍是 Agent 原生配置（[ADR-0022](0022-agent-native-configuration-is-authoritative.md)、[ADR-0063](0063-model-provider-presets-not-cc-switch.md)），Dimo 不引入本地协议转换代理或全量覆盖原生快照。
 
-CC-Switch 用预置网格解决了「空白表单」：第一格永远是 Custom，其余是无密钥模板，
-点选填表、用户补 Key、保存后才出现卡片，「Enable」再写入该 App 的原生配置。Dimo
-要的是这个**填表**动词，不是 CC-Switch 的本地代理、协议转换、Universal Provider
-跨 App 同步，也不是赞助商促销文案、心形/星标徽章或尊享/赞助商分组标题。
-
-既有「导入」不能承担这个动词。[ADR-0063](0063-model-provider-presets-not-cc-switch.md)
-经 [ADR-0069](0069-everything-is-a-plugin-platform.md) 把导入来源改成
-`provider.model.importSource`：handler 返回**已经配好的连接**；缺 Key 的项列出但
-禁止勾选；确认导入即保存为 preset，且不绑定。把无密钥模板塞进同一 kind，会弄坏
-这条回归，并在同一菜单里混两个动作。
-
-既有两个带 *catalog* 的 Host 命令也不是本目录：
-
-| 命令 | 做什么 |
-| --- | --- |
-| `agent_model_provider_catalog` | 对**已填** url/key 探测 `/models` |
-| `opencode_provider_catalog` | `models.dev` Provider 目录 |
-
-三者不得共用客户端，也不得让「catalog」一词在设置面撞车。
+本 ADR 划定无密钥模板目录与外部导入源（`provider.model.importSource`）的边界，并固定目录 DTO、聚合、过滤与排序不变量。
 
 ## Decision
 
-### 1. 新贡献点 `provider.model.catalog`，不复用导入源
+### 1. 独立贡献点 `provider.model.catalog`，永不复用导入源
 
-导入源的产品动词是「收成已有连接」；目录的产品动词是「用模板填空白表单」。二者
-的返回值、缺 Key 语义、UI 入口都冲突。**永不**复用或扩展
-`provider.model.importSource` 来承载模板目录。
+`provider.model.importSource` 的产品动词是「收成已有连接」（含密钥、缺 Key 禁止勾选、导入即保存但不绑定，见 [ADR-0063](0063-model-provider-presets-not-cc-switch.md)）；`provider.model.catalog` 的产品动词是「用无密钥模板填充空白新建表单」。两者语义互斥，永不复用或扩展 `provider.model.importSource` 承载模板目录。
 
-### 2. Host 渲染 descriptor，插件不替换新建表单
+同时与既有探测/目录命令保持清晰区分，避免客户端或设置面撞名：
 
-卡片列表、保存、绑定、测连、投影已是 Host 闭环。目录只是表单的数据。高频表单走
-iframe / federation 会造出第二条保存路径。渲染三轨里这属于宿主渲染 descriptor。
+- `provider_catalog_list`（scope `plugin.read`，挂在插件控制面 API）：列出插件贡献的模板目录；
+- `agent_model_provider_catalog`：对已填 URL/Key 探测 `/models`；
+- `opencode_provider_catalog`：`models.dev` 官方 Provider 目录。
 
-### 3. 目录数据放在插件里，不放进 Host
+### 2. Host 拥有表单与保存链路，插件只提供静态 descriptor
 
-预置供应商会过时，并带第三方商标与许可，且不是 L0。Host 只拥有聚合、校验、按
-Agent 过滤、启停原子性。官方目录随 ProviderSwitch 版本更新。
+卡片列表、保存、绑定、测连与原生投影全部由 Host 闭环完成；插件通过静态 `resource` 贡献目录数据（v1 不声明 Worker `handler`），Host 原生渲染 descriptor，插件不替换新建表单，也不调用 `provider.presets.save` / `bind`。
 
-### 4. ProviderSwitch 是普通官方市场插件，默认禁用，不是能力等价插件
+### 3. Catalog DTO 按表面判别联合，已保存预设保持精简
 
-ADR-0069 §8 的自动启用白名单只适用于「从内置迁出」的能力。这份目录是新能力，
-不是迁出。不得发明一份自动启用白名单，也不得把 `dimo.provider-switch` 写进
-§8。随 Host family 提供 bundled 快照，可从官方分类安装；安装后默认禁用，启用
-即出现网格。Host **不得**按插件 ID `dimo.provider-switch` 特判。
+目录模板按目标表面采用判别联合 `reusable | opencode | dsh`，仅携带该表面保存时认识的字段。可复用 Model Provider 的持久化存储维持名称、端点、模型映射与凭据；官网链接、候选 URL 与密钥提示字段仅在填表期展示，不写入已保存预设。OpenCode / MiMo 保留模型列表，DeepSeek Harness 自定义保留备注。
 
-### 5. Catalog DTO 按表面判别联合；已保存连接仍瘦
+### 4. 「自定义」固定由 Host 所有
 
-模板按表面判别为 `reusable` | `opencode` | `dsh`，各带该表面保存时已认识的字段。
-可复用 Model Provider 的存储仍是名称、端点、模型映射和凭据；网站、候选 URL、
-密钥字段名只在填表期展示，不扩已保存预设。OpenCode / MiMo 的模型列表保存。
-DeepSeek Harness 自定义的备注保存。各表面自己把模板映射进草稿；共享选择器不写
-任一表面的字段。
+可复用 Model Provider 与 DeepSeek Harness 新建子页列表顶部永远固定 Host 的「自定义」入口；OpenCode / MiMo 的空白连接表单即为自定义。任何插件不得移除或隐藏「自定义」。
 
-### 6. v1 只接受静态 resource，不声明 handler
+### 5. 按规范 `AgentKind` ID 严格分区
 
-官方 ProviderSwitch 无 Worker。动态目录没有第一个官方消费者，按 ADR-0069 原则 3
-不把未验收的 handler 写进稳定契约。出现 `handler` 则校验失败、不发布该条。
+每份目录按 Dimo 规范 Agent ID 精确匹配过滤，禁止别名猜测或特判（例如 Gemini 相关目录显式声明 `antigravity` 而非 `gemini`）。不支持供应商模式的 Agent 返回空列表而不报错；无法解析的未知 Agent ID 返回错误。
 
-本 kind 与官方消费者 ProviderSwitch **同批**完成 ADR-0066 稳定面四项（CLI
-validate、Host inspect、真实 UI 消费、作者文档）之前，保持 preview，**不得**写入
-稳定面叙述或 `init` 模板。kind 成为 ready 的同一批次必须带上 ProviderSwitch。
+### 6. 模板清洗与可投影性契约
 
-### 7. Custom 是 Host 所有，不是目录条目
+从外部预置源（如 CC-Switch 固定快照，见 [ADR-0088](0088-built-in-provider-presets.md)）转换模板时，只保留能够投影到对应 Agent 已适配原生字段的条目；剥离 affiliate 参数、OAuth 与本地协议转换字段、赞助商促销文案与徽章；官方订阅与官方 API 预置不进入第三方供应商目录。
 
-可复用 Model Provider 与 DeepSeek Harness 自定义新建子页的第一格永远是 Host 的
-「自定义」。OpenCode / MiMo 的空白连接表单就是 Custom，不另做第一格。插件不能
-移除 Custom。
+### 7. 合并聚合、去重与 OpenCode 表面规则
 
-### 8. 按 Dimo 规范 Agent id 分目录
+- **内置优先、插件追加、不去重**：Host 内置预置排在前面（[ADR-0088](0088-built-in-provider-presets.md)），所有已启用插件贡献的模板按来源标注追加其后；名称或 URL 相同亦并列保留，不按安装顺序静默覆盖，用户通过启停插件自主取舍。插件目录加载失败不影响内置预置正常展示。
+- **OpenCode / MiMo 合并进 `models.dev` 列表**：插件模板直接追加在现有 `models.dev` 列表之后并标注来源，不另开第二套选择器，不替换同名 `models.dev` 条目。
 
-每份目录对应一个规范 Agent id。Gemini 目录只贡献 `antigravity`，**永不**
-发射 `gemini`：后者是另一字符串，Host 按字符串相等过滤，不得为匹配去特判
-Antigravity（那是导入源的动词）。Claude Desktop 丢弃。没有供应商模式的 Agent
-（Cursor / CodeBuddy / Qoder）上的贡献被过滤；列出它们时返回空列表，不报错。
+### 8. 分档枚举与默认排序
 
-### 9. CC-Switch 数据是整理后的版本化快照，不直播抓取
-
-来源许可与归属必须清晰。去掉 affiliate 参数、OAuth / 协议转换字段、赞助商文案
-与徽章。官方订阅 / 官方 API 预置不进供应商目录。赞助商层次只作为转换输入，映射
-到 `category` 之后不得出现在输出里。
-
-### 10. 官方插件身份是 `dimo.provider-switch`
-
-它是官方产品包：进 bundled 发行物与官方分类，不是导入源那种 authoring sample。
-优先独立仓库以 submodule 挂入（ADR-0069 §8）；仓库未就绪时可先 in-tree，行为与
-其它官方产品插件相同。
-
-### 11. 保存永远走现有 Host IPC，插件不拥有卡片
-
-用户在 Host 表单点保存。ProviderSwitch **不**调用 `provider.presets.save` /
-`bind`。`provider.presets.*` 维持给「插件自己写 preset」的场景（导入源、未来的
-App surface），本产品不用。
-
-### 12. 多插件聚合：并列展示，不去重删除
-
-可聚合缝（ADR-0069 §11）。URL 与名称相同的两条都保留，用插件来源标注区分。安装
-顺序不决定输赢；用户用禁用插件来做替换。`category` 为
-`"official" | "prime" | "partner" | "community"`；缺省、省略、任何未知值都归为
-`"community"`。第三方 catalog 插件可写这四档；Host 不按官方插件 ID 特判。
-
-### 13. OpenCode / MiMo 把插件行合并进现有 `models.dev` 列表
-
-该表面已经有可搜索、点选即填的 `opencode_provider_catalog` 列表。再挂一张模板
-网格会变成三种发现 UI。插件模板追加在现有 `models.dev` 块之后并标注来源，不替换
-`models.dev`，不另开第二选择器，不占用今天的可见条数窗口。插件 `provider_id` 与
-某条 `models.dev` id 相同则两行都保留。禁用插件后，该列表与今天一致。
-
-### 14. 列出目录的 Host 命令是 `provider_catalog_list`，scope 为 `plugin.read`
-
-它与 `plugin_contribution_catalog` 同级（只读目录）。`plugin.surface` 留给打开
-surface / 调用贡献。客户端只挂在插件控制面 API 上，**不得**与
-`agent_model_provider_catalog`、`opencode_provider_catalog` 并排，以免「catalog」
-撞名。无模板且 Agent 已知时返回空列表；无法解析的 Agent id 报错。
-
-### 15. 从 CC-Switch 到可投影模板的转换是产品
-
-只保留能投影到该 Agent 已适配原生字段的条目。依赖协议转换或无法投影的预置在
-转换期丢弃，Host 不弹实现向提示。转换规则是产品契约，后续实现不得另发明编码。
-
-### 16. Host 默认排序为官方 → 尊享 → 赞助商 → 其余按显示名
-
-前三组是分区拼接，保持各贡献源数组顺序，**不**按名称重排；community 按显示名
-（锁定 `en` locale）。层次编码为 `category`，不输出赞助商布尔、不画心形/星标
-徽章、不画尊享/赞助商分组标题、不写促销文案。按名称打平只属于可复用 / DSH 的
-选择器，且可关闭后恢复 Host 默认；OpenCode / MiMo 没有这一开关。
+模板层次编码为 `category`: `"official" | "prime" | "partner" | "community"`（省略或未知值统一归为 `"community"`），不输出赞助商布尔或促销视觉徽章。Host 默认排序为：`official` → `prime` → `partner`（前三档各自保持源数组顺序，不按名称重排）→ `community`（按 `en` locale 显示名排序）。可复用与 DSH 选择器支持切换按名称打平排序，并可恢复默认排序。
 
 ## Consequences
 
-- 启用带 `provider.model.catalog` 的插件后，对应 Agent 的供应商新建表单可以使用
-  无密钥模板；禁用或卸载后模板原子消失，已保存连接与绑定不受影响。
-- 导入菜单、`provider.model.importSource`、导入不绑定，全部保持 ADR-0063 / 0069
-  原样。
-- 可复用预设存储不膨胀；各表面继续走自己的保存与投影。
-- 官方目录默认不出现。用户没启用 ProviderSwitch 时，空白自定义表单与 OpenCode
-  `models.dev` 列表与今天一致。
-- [ADR-0069](0069-everything-is-a-plugin-platform.md) §4 接管面总表增加 preview
-  行；在 ProviderSwitch 同批验收之前，该行不是稳定面。
-- 目录规模的约数不是本 ADR 契约，随来源版本变化，实现与文档都不得把它写成限额。
+- Host 内置预置与插件追加模板共享同一判别联合 DTO、排序规则与填表体验，禁用或卸载插件后其模板原子消失，已保存连接与绑定不受影响。
+- `provider.model.importSource` 保持纯粹的「导入已有连接」语义，与无密钥模板互不干扰。
+- 已保存预设存储与原生投影保持精简，不会因填表辅助元数据膨胀。
 
 ## Considered Options
 
-- **复用或扩展 `provider.model.importSource`。** 否决。缺 Key 在导入里是禁止勾选；
-  在目录里是期望状态。硬塞进一个 kind 等于两个产品挤在一个名字里。
-- **插件 App surface 替换新建表单。** 否决。会造出第二条保存/绑定路径，禁用时还
-  要把表单所有权交还 Host。
-- **把预置 JSON 放进 Host。** 否决。更新、许可与第三方商标会迫使 Host 发版，且
-  无法原子撤下。
-- **按能力等价插件自动安装并默认启用。** 否决。今天没有网格，无所谓「迁出后消失」；
-  未同意就把数十个中转推进设置是推广，不是连续性。
-- **全量移植 CC-Switch（含 OAuth/代理字段），或只用 `models.dev`。** 否决。离开
-  本地代理许多条目不能用；`models.dev` 不够覆盖中转模板。采用整理后的可投影快照；
-  OpenCode 表面把插件行合并进已有列表。
-- **扩展已保存预设，或用单一 `model` + extras 袋子填三表面。** 否决。OpenCode 的
-  模型列表与 DSH 的备注装不进瘦预设；extras 会弄脏投影面。判别联合、各 store 仍瘦。
-- **先按 vendor/community、组内按名称排序。** 否决。采用官方 → 尊享 → 赞助商 →
-  community 按名称；前三组保源数组顺序。只排序，不搬促销 UI。
+- **复用 `provider.model.importSource` 承载无密钥模板**：否决。缺密钥在导入中是禁用项，在模板中是正常态，二者语义冲突。
+- **允许插件以 App surface 替换供应商新建表单**：否决。会制造第二条保存/绑定路径并破坏卸载回退一致性。
+- **保留 CC-Switch 的 OAuth / 协议转换与赞助商促销字段**：否决。脱离本地代理无法工作，且破坏设置面克制与诚实原则。
+- **对所有分档统一按名称排序**：否决。前三档按源顺序分区拼接、仅 `community` 按名称排序，既保结构化优先级又不引入促销分组 UI。

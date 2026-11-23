@@ -108,6 +108,7 @@ export interface InstallCrashHandlersOptions {
   sidecar: SidecarManager;
   appVersion: string;
   getDataDir: () => string | undefined;
+  onGpuProcessGone?: (details: Electron.Details) => void;
 }
 
 export type CrashRecorder = (
@@ -188,13 +189,36 @@ export function installCrashHandlers(
     recordCrash('electron-renderer:render-process-gone', message);
   };
 
+  const onChildProcessGone = (
+    _event: Electron.Event,
+    details: Electron.Details
+  ) => {
+    if (details.reason === 'clean-exit') {
+      return;
+    }
+    if (details.type === 'GPU') {
+      let featureSummary = '';
+      try {
+        featureSummary = ` gpuFeatureStatus=${JSON.stringify(app.getGPUFeatureStatus())}`;
+      } catch {
+        featureSummary = '';
+      }
+      const message = `GPU process gone: reason=${details.reason}, exitCode=${details.exitCode}${featureSummary}`;
+      console.error('[electron:crash]', message);
+      recordCrash('electron-gpu:child-process-gone', message);
+      options.onGpuProcessGone?.(details);
+    }
+  };
+
   process.on('uncaughtException', onUncaughtException);
   process.on('unhandledRejection', onUnhandledRejection);
   app.on('render-process-gone', onRenderProcessGone);
+  app.on('child-process-gone', onChildProcessGone);
 
   return () => {
     process.off('uncaughtException', onUncaughtException);
     process.off('unhandledRejection', onUnhandledRejection);
     app.off('render-process-gone', onRenderProcessGone);
+    app.off('child-process-gone', onChildProcessGone);
   };
 }

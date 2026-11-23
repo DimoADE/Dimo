@@ -175,37 +175,37 @@ export function WorkspaceZeroProjectStage() {
 
     void getDesktopShell()
       .window.onDragDropEvent((event) => {
-          const payload = event.payload;
-          if (payload.type === 'enter' || payload.type === 'over') {
-            setDropActive(true);
-            return;
-          }
-          if (payload.type === 'leave') {
-            setDropActive(false);
-            return;
-          }
-          if (payload.type !== 'drop') return;
-
+        const payload = event.payload;
+        if (payload.type === 'enter' || payload.type === 'over') {
+          setDropActive(true);
+          return;
+        }
+        if (payload.type === 'leave') {
           setDropActive(false);
-          const droppedPaths = payload.paths;
-          void (async () => {
-            const resolved = await resolveDroppedProjectFolder(
-              droppedPaths,
-              fileSystemApi.list
-            );
-            if (resolved.ok === false) {
-              toast.error(t('app:welcomePage.dropFolderInvalid'));
-              return;
-            }
-            if (openingDroppedFolderRef.current) return;
-            openingDroppedFolderRef.current = true;
-            try {
-              await openExistingFolder(resolved.path);
-            } finally {
-              openingDroppedFolderRef.current = false;
-            }
-          })();
-        })
+          return;
+        }
+        if (payload.type !== 'drop') return;
+
+        setDropActive(false);
+        const droppedPaths = payload.paths;
+        void (async () => {
+          const resolved = await resolveDroppedProjectFolder(
+            droppedPaths,
+            fileSystemApi.list
+          );
+          if (resolved.ok === false) {
+            toast.error(t('app:welcomePage.dropFolderInvalid'));
+            return;
+          }
+          if (openingDroppedFolderRef.current) return;
+          openingDroppedFolderRef.current = true;
+          try {
+            await openExistingFolder(resolved.path);
+          } finally {
+            openingDroppedFolderRef.current = false;
+          }
+        })();
+      })
       .then((stopListening) => {
         if (disposed) stopListening();
         else unlisten = stopListening;

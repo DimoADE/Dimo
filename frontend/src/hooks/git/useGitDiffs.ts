@@ -27,6 +27,7 @@ const SKIP_PATH_PATTERNS = [
 interface UseGitDiffsOptions {
   workspaceId: string | null;
   repoId: string | null;
+  worktreePath?: string | null;
   enabled?: boolean;
 }
 
@@ -69,12 +70,13 @@ export function shouldAutoPreloadDiffs(
 export function useGitDiffs({
   workspaceId,
   repoId,
+  worktreePath = null,
   enabled = true,
 }: UseGitDiffsOptions): UseGitDiffsReturn {
   const queryClient = useQueryClient();
   const queryKey = useMemo(
-    () => ['gitDiffs', workspaceId, repoId],
-    [workspaceId, repoId]
+    () => ['gitDiffs', workspaceId, repoId, worktreePath],
+    [workspaceId, repoId, worktreePath]
   );
 
   const {
@@ -84,6 +86,9 @@ export function useGitDiffs({
   } = useQuery<GitFileDiffEntry[]>({
     queryKey,
     queryFn: async () => {
+      if (worktreePath) {
+        return await repoApi.getFileDiffs(repoId!, worktreePath);
+      }
       return workspaceId
         ? await attemptsApi.getFileDiffs(workspaceId, repoId!)
         : await repoApi.getFileDiffs(repoId!);

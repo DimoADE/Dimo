@@ -1,50 +1,43 @@
-# Repository Guidelines
+# Dimo Agent Guidelines
 
-## Required Context Bootstrap
+Lean guidance for coding agents working in Dimo. Keep context light: read deeper docs **on demand** for the branch you touch rather than front-loading everything.
 
-Before planning, searching, editing files, or running commands:
+## On-Demand Context Pointers
 
-1. Read root [`CONTEXT.md`](CONTEXT.md) for Ubiquitous Language and [`docs/architecture.md`](docs/architecture.md) for system boundaries.
-2. Read every ADR in [`docs/adr/`](docs/adr/) relevant to the task.
-3. Fully read [`maiden-skill`](.agents/skills/maiden-skill/SKILL.md) and apply it on every task.
-4. For any user-visible UI work, read [`DESIGN.md`](DESIGN.md) and [`frontend/CLAUDE.md`](frontend/CLAUDE.md) first.
-5. Match the task against repository skills under `.agents/skills/` and fully read the smallest set of directly applicable `SKILL.md` files before taking action.
+- **Find any doc or ADR**: [`docs/INDEX.md`](docs/INDEX.md) (directory map, task routing table, all active ADRs).
+- **System boundaries & 26-crate map**: [`docs/architecture.md`](docs/architecture.md).
+- **Domain terminology**: [`CONTEXT.md`](CONTEXT.md).
+- **Frontend UI, tokens & styling**: [`DESIGN.md`](DESIGN.md) and [`frontend/CLAUDE.md`](frontend/CLAUDE.md) (read when touching user-visible UI).
+- **Engineering discipline & complex tasks**: [`maiden-skill`](.agents/skills/maiden-skill/SKILL.md) and task-matching skills under `.agents/skills/`.
 
-## Project Structure & Module Organization
+## Core Architectural Invariants
 
-Dimo is an all-in-one **Agent-Native Development Platform & Vibe Coding Toolkit** built around a Single-Seam Rust Host (`dimo` Tauri desktop app + `dimo-server` headless daemon):
+1. **Single-Seam Rust Host + Electron Thin Shell** ([ADR-0078](docs/adr/0078-host-command-registry-single-seam.md), [ADR-0090](docs/adr/0090-electron-thin-shell-and-desktop-sidecar.md)): Product commands register once in `HostCommandRegistry` (`crates/application`, mirrored in `shared/hostCommands.ts`) and push updates flow through `HostEventBus`. `electron/` (`@dimo/electron`) is a thin shell spawning `dimo-server --desktop`; UI components talk through `BackendTransport` (`frontend/src/lib/transport/`), keeping Electron Desktop and headless `dimo-server` identical.
+2. **Agent Integration** ([ADR-0087](docs/adr/0087-dedicated-agent-engine-first-acp-fallback.md)): Route all coding agents through `crates/agents` + `crates/conversations`, prioritizing **dedicated native Agent engine adapters** first and **ACP (v1/v2 + Registry)** as compatibility fallback. Reserve `crates/executors` strictly for workspace shell scripts and shared log/identity types.
+3. **SQLite Single-Authority Conversations** ([ADR-0091](docs/adr/0091-sqlite-single-authority-conversation-projection.md)): `conversation_events` and `conversation_timeline_rows` on `WritePool(1)` / `ReadPool(4)` are the sole authority for conversation history and timeline projections.
+4. **Full-Trust v4 Plugins with Zero Host Privilege** ([ADR-0048](docs/adr/0048-full-trust-plugin-execution-model.md), [ADR-0069](docs/adr/0069-everything-is-a-plugin-platform.md)): Official plugins in `plugins/*` use the exact same public contract as third-party plugins—no plugin-ID special cases in Host code.
 
-- `frontend/src/` — React + TypeScript workbench (`Dockview` IDE stage + `@xyflow/react` Spatial Canvas, `BackendTransport` over Tauri / HTTP+WS / WebRTC E2EE).
-- `src-tauri/` — Native Tauri v2 desktop shell, multi-window host, CEF integration, and IPC adapter over `HostRuntime`.
-- `crates/` — 25 Tauri-agnostic Rust workspace crates (`application`, `server`, `remote-protocol`, `agents`, `conversations`, `delegation`, `delegation-proto`, `dimo-mcp`, `workflows`, `dimo-workflow-mcp`, `automation`, `plugins`, `plugin-sdk`, `tool-runtime`, `artifacts`, `browser-host`, `git`, `services`, `db`, `deployment`, `local-deployment`, `executors`, `review`, `api-types`, `utils`). **Agent integration rule ([ADR-0087](docs/adr/0087-dedicated-agent-engine-first-acp-fallback.md))**: inside `crates/agents`, prioritize **dedicated native Agent engine adapters** (official SDKs / native `app-server` protocols & native state/auth) first; treat **ACP (v1/v2 + Registry)** as the secondary compatibility fallback. Never run coding agents through `crates/executors`.
-- `shared/` — Generated Rust→TS contracts (`shared/types.ts`) and Host command definitions (`shared/hostCommands.ts`).
-- `packages/` & `plugins/` — `@dimoai/plugin-sdk`, `dimo-plugin` CLI, `@dimo/plugin-contract`, Python Worker SDK, and 16 official full-trust v4 plugins.
-- `npx-cli/` & `mobile/` — `@omnione/dimo` CLI (`serve`, `list/install`, headless control, `plugin`) and native iOS (`mobile/ios`) & Android (`mobile/android`) Companion apps.
-- `docs/` — Consolidated documentation (`docs/README.md`), protocol schemas (`docs/protocol/v1/`), specs (`docs/specs/`), and ADRs (`docs/adr/`).
+## Essential Commands & Generated Artifacts
 
-## Build, Test, and Development Commands
+Full scripts live in [`package.json`](package.json):
 
-- `pnpm install`: install JavaScript workspace dependencies.
-- `pnpm run dev`: launch the Tauri desktop app with Vite HMR.
-- `pnpm run check`: run frontend `tsc --noEmit` and `cargo check`.
-- `pnpm run lint`: run frontend ESLint (`--max-warnings 0`) and `cargo clippy --workspace --all-targets --features qa-mode -- -D warnings`.
-- `pnpm run format`: run `cargo fmt --all` and Prettier.
-- `pnpm --filter ./frontend test`: run Vitest unit tests.
-- `cargo test --workspace`: run all Rust tests.
-- `pnpm run generate-types`: refresh `shared/types.ts` after Rust `#[derive(TS)]` changes (`generate-types:check` in CI).
-- `pnpm run prepare-db`: refresh `crates/db/.sqlx` offline query metadata (`prepare-db:check` in CI).
-- `pnpm run remote-protocol-schema:check`: verify `docs/protocol/v1/` schemas match `crates/remote-protocol`.
-- `pnpm run arch:check` & `pnpm run plugin:no-privilege`: verify architectural invariants and zero official-plugin privilege.
+- `pnpm run dev` — Launch Electron desktop app + Vite HMR + `dimo-server --desktop` sidecar.
+- `pnpm run check` / `pnpm run lint` / `pnpm run format` — Typecheck, lint (`--max-warnings 0`, clippy `-D warnings`), and format.
+- `pnpm --filter ./frontend test` / `pnpm run electron:test` / `cargo test --workspace` — Unit and integration tests (run targeted tests first).
+- `pnpm run arch:check` & `pnpm run plugin:no-privilege` — Verify architecture invariants and zero plugin privilege.
 
-## Coding Style & Naming Conventions
+Regenerate derived artifacts via scripts instead of editing them by hand:
 
-Frontend formatting uses Prettier (2 spaces, semicolons, single quotes, ES5 trailing commas, 80-column print width). ESLint enforces no unused imports, exhaustive switches, and file naming: React `.tsx` components are `PascalCase`, hooks start with `use`, and utility/config files are `camelCase`. Rust uses edition 2024 with `rustfmt.toml`. Never hand-edit generated files such as `shared/types.ts` or `docs/protocol/v1/*.json`.
+- `shared/types.ts` → register new `#[derive(TS)]` types in [`generate_types.rs`](crates/server/src/bin/generate_types.rs) and run `pnpm run generate-types`.
+- `crates/db/.sqlx/` → run `pnpm run prepare-db` after SQLx query or migration changes.
+- `docs/protocol/v1/` → run `pnpm run remote-protocol-schema` (checked via `remote-protocol-schema:check`).
+- `docs/plugins/contract-bindings.md` → run `node scripts/plugin-contract-report.mjs`.
 
-## Testing & Documentation Hygiene
+## Documentation Authoring Standards
 
-- Place frontend unit tests beside source files (`*.test.ts`, `*.test.tsx`); Vitest runs them in `jsdom`. Rust integration tests live under each crate's `tests/` directory. Prefer targeted runs first, then run relevant full checks before submitting.
-- Keep `docs/` evergreen: domain terms go in `CONTEXT.md`, permanent decisions in `docs/adr/`, architecture in `docs/architecture.md`. `docs/plans/` holds active WIP plans only — delete finished plans once merged and never commit QA screenshot dumps or temporary audit logs into `docs/`.
+Every document in this repository must stay accurate, concise, and easy to index:
 
-## Commit, PR & Security Guidelines
-
-Use Conventional Commits (`feat:`, `fix(scope):`, `refactor(scope):`, `docs(scope):`, `chore(scope):`). Keep secrets in local `.env` files only; `.dev-ports.json` and `src-tauri/tauri.dev.generated.conf.json` are local runtime artifacts. Mention regenerated `shared/types.ts`, `.sqlx`, or protocol schemas explicitly in PR summaries.
+1. **Write current truth in place**: When behavior or architecture changes, edit the existing section directly. Never append revision banners (`状态注记`), `## Amendment` sections, or "previously A, updated to B" change histories.
+2. **Keep prose high-signal and brief**: Record durable contracts, boundaries, and key trade-offs. Compress historical background to 2–3 sentences; omit sprint logs, PR checklists, debugging diaries, and implementation blow-by-blows.
+3. **Delete obsolete docs cleanly**: Once a plan lands or a spec/ADR is replaced, fold durable contracts into the canonical doc and delete the obsolete file. Never commit completed plans, temporary audits, scratch todos, or screenshot dumps into `docs/`.
+4. **Follow canonical paths, naming, and indexing**: Place each doc in its designated directory per [`docs/INDEX.md`](docs/INDEX.md) using lowercase ASCII `kebab-case.md` (ADRs: `docs/adr/NNNN-kebab-case.md` with `status: accepted` frontmatter). Update [`docs/INDEX.md`](docs/INDEX.md) in the same change whenever adding, moving, renaming, or deleting a doc.

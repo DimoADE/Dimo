@@ -42,16 +42,20 @@ function declarationsMatching(fragment: string) {
 }
 
 describe('desktop window chrome insets', () => {
-  it('reserves macOS traffic-light and Windows control space on overlay chrome', () => {
+  it('reserves macOS traffic-light and Windows/Linux control space on overlay chrome', () => {
     const macos = declarationsFor(
       "html.electron-desktop[data-host-platform='macos'] .window-chrome"
     );
     const windows = declarationsFor(
       'html.electron-desktop.host-windows .window-chrome'
     );
+    const linux = declarationsFor(
+      "html.electron-desktop[data-host-platform='linux'] .window-chrome"
+    );
 
     expect(macos.get('padding-left')).toBe('4.75rem');
     expect(windows.get('padding-right')).toBe('6.5rem');
+    expect(linux.get('padding-right')).toBe('6.5rem');
   });
 
   it('uses Electron CSS app-region on drag regions and disables image drag', () => {

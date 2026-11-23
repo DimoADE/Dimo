@@ -75,31 +75,66 @@ pub fn asserted_from_preferred(
         .collect()
 }
 
-/// Compare a push against establishment-time confirmed values. Each drifted
-/// id is removed from the ledger so it is re-asserted at most once. Model
-/// options are returned first so effort hanging off a model switch is not
-/// spent before the model is restored.
-pub fn take_asserted_config_drift(
+/// Maximum number of times a single drifted config key will be re-asserted
+/// within one turn / user selection before accepting the agent's forced value.
+pub const MAX_CONFIG_DRIFT_RETRIES: u8 = 2;
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ConfigDriftCheck {
+    /// `(config_id, desired_value)` pairs still within retry budget, ordered
+    /// model-first so effort hanging off a model switch is restored after model.
+    pub reassert: Vec<(String, String)>,
+    /// Keys that drifted past `MAX_CONFIG_DRIFT_RETRIES`. Already removed from
+    /// `asserted` and `retry_counts` so the host accepts the agent's forced
+    /// value and surfaces a clear rejection notice instead of looping forever.
+    pub exhausted: Vec<ConfigOptionRejection>,
+}
+
+/// Compare an unsolicited agent push against the session's confirmed desired
+/// values. Unlike a one-shot ledger, desired values persist across pushes and
+/// turns; each drifted key is re-asserted up to `MAX_CONFIG_DRIFT_RETRIES`
+/// times before being treated as a forced clamp/rejection.
+pub fn check_asserted_config_drift(
     asserted: &mut BTreeMap<String, String>,
+    retry_counts: &mut BTreeMap<String, u8>,
     pushed: &[AgentSessionConfigOption],
-) -> Vec<(String, String)> {
+) -> ConfigDriftCheck {
     if asserted.is_empty() {
-        return Vec::new();
+        return ConfigDriftCheck::default();
     }
     let pushed_values = select_currents(pushed);
-    let drifted: BTreeMap<String, String> = asserted
-        .iter()
-        .filter(|(config_id, asserted_value)| {
-            pushed_values
-                .get(*config_id)
-                .is_some_and(|pushed| pushed != *asserted_value)
-        })
-        .map(|(config_id, value)| (config_id.clone(), value.clone()))
-        .collect();
-    for config_id in drifted.keys() {
-        asserted.remove(config_id);
+    let mut to_reassert = BTreeMap::new();
+    let mut exhausted_keys = Vec::new();
+    let mut exhausted = Vec::new();
+
+    for (config_id, desired_value) in asserted.iter() {
+        let Some(pushed_value) = pushed_values.get(config_id) else {
+            continue;
+        };
+        if pushed_value == desired_value {
+            continue;
+        }
+        let retries = retry_counts.get(config_id).copied().unwrap_or(0);
+        if retries < MAX_CONFIG_DRIFT_RETRIES {
+            retry_counts.insert(config_id.clone(), retries + 1);
+            to_reassert.insert(config_id.clone(), desired_value.clone());
+        } else {
+            exhausted_keys.push(config_id.clone());
+            if let Some(rejection) = config_option_rejection(pushed, config_id, desired_value) {
+                exhausted.push(rejection);
+            }
+        }
     }
-    order_model_first(pushed, &drifted)
+
+    for config_id in exhausted_keys {
+        asserted.remove(&config_id);
+        retry_counts.remove(&config_id);
+    }
+
+    ConfigDriftCheck {
+        reassert: order_model_first(pushed, &to_reassert),
+        exhausted,
+    }
 }
 
 pub fn config_option_rejection(
@@ -300,10 +335,11 @@ mod tests {
     }
 
     #[test]
-    fn a_push_that_reverts_establishment_values_is_reasserted_once_model_first() {
+    fn a_push_that_reverts_establishment_values_is_reasserted_up_to_budget_model_first() {
         let mut asserted = BTreeMap::new();
         asserted.insert("model".into(), "grok-4.7".into());
         asserted.insert("effort".into(), "high".into());
+        let mut retries = BTreeMap::new();
         let pushed = vec![
             select_option(
                 "effort",
@@ -318,22 +354,40 @@ mod tests {
                 &[("grok-4.6", "Grok 4.6"), ("grok-4.7", "Grok 4.7")],
             ),
         ];
-        let drift = take_asserted_config_drift(&mut asserted, &pushed);
-        assert_eq!(
-            drift,
-            vec![
-                ("model".into(), "grok-4.7".into()),
-                ("effort".into(), "high".into()),
-            ]
-        );
+
+        for attempt in 1..=MAX_CONFIG_DRIFT_RETRIES {
+            let check = check_asserted_config_drift(&mut asserted, &mut retries, &pushed);
+            assert_eq!(
+                check.reassert,
+                vec![
+                    ("model".into(), "grok-4.7".into()),
+                    ("effort".into(), "high".into()),
+                ],
+                "attempt {attempt} should re-assert model first"
+            );
+            assert!(check.exhausted.is_empty());
+            // Desired values remain preserved across pushes until budget exhausts.
+            assert_eq!(asserted.get("model").map(String::as_str), Some("grok-4.7"));
+            assert_eq!(asserted.get("effort").map(String::as_str), Some("high"));
+        }
+
+        // Next drift past MAX_CONFIG_DRIFT_RETRIES exhausts the budget, clears
+        // the guarded keys, and emits rejections instead of looping forever.
+        let exhausted = check_asserted_config_drift(&mut asserted, &mut retries, &pushed);
+        assert!(exhausted.reassert.is_empty());
+        assert_eq!(exhausted.exhausted.len(), 2);
         assert!(asserted.is_empty());
-        assert!(take_asserted_config_drift(&mut asserted, &pushed).is_empty());
+        assert!(retries.is_empty());
+        let after = check_asserted_config_drift(&mut asserted, &mut retries, &pushed);
+        assert!(after.reassert.is_empty());
+        assert!(after.exhausted.is_empty());
     }
 
     #[test]
     fn an_agreeing_push_does_not_spend_the_ledger() {
         let mut asserted = BTreeMap::new();
         asserted.insert("mode".into(), "agent-full-access".into());
+        let mut retries = BTreeMap::new();
         let pushed = vec![select_option(
             "mode",
             "mode",
@@ -343,7 +397,10 @@ mod tests {
                 ("agent-full-access", "Agent (full access)"),
             ],
         )];
-        assert!(take_asserted_config_drift(&mut asserted, &pushed).is_empty());
+        let check = check_asserted_config_drift(&mut asserted, &mut retries, &pushed);
+        assert!(check.reassert.is_empty());
+        assert!(check.exhausted.is_empty());
+        assert!(retries.is_empty());
         assert_eq!(
             asserted.get("mode").map(String::as_str),
             Some("agent-full-access")

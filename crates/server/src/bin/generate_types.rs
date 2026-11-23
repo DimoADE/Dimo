@@ -77,16 +77,17 @@ use api_types::{
     DshCatalogProviderView, DshExtensionKind, DshPluginSummaryView, DshPluginView,
     DshProviderDiscoverRequest, DshProviderKind, DshProviderModelView, DshProviderSaveRequest,
     DshProviderView, DshProvidersView, GrokPluginSummaryView, GrokPluginView,
-    OpenCodeCatalogModelView, OpenCodeCatalogProviderView, OpenCodePluginStatus,
-    OpenCodePluginSummaryView, OpenCodePluginView, OpenCodeProviderCatalogSource,
-    OpenCodeProviderCatalogView, OpenCodeProviderConnectRequest, OpenCodeProviderConnectionView,
-    OpenCodeProviderConnectionsView, OpenCodeProviderModelRequest, OpenCodeProviderModelView,
-    PiCommandValidationView, PiConfigurationView, PiCredentialsSaveRequest, PiCustomModelView,
-    PiCustomProviderView, PiModelReasoningSpec, PiPluginSummaryView, PiPluginView,
-    PiProjectResourceView, PiProjectTrustStateView, PiRuntimeConfigurationView,
-    PiRuntimeSaveRequest, PiTrustEntryView, PiTrustSetRequest, PiTrustWorkspaceRequest,
-    UserAgentDefinitionRequest, UserAgentDefinitionView, UserAgentDistributionKind,
-    UserAgentDistributionView, UserAgentEnvironmentVariableView, UserAgentIntegrityKind,
+    MusePluginSummaryView, MusePluginView, OpenCodeCatalogModelView, OpenCodeCatalogProviderView,
+    OpenCodePluginStatus, OpenCodePluginSummaryView, OpenCodePluginView,
+    OpenCodeProviderCatalogSource, OpenCodeProviderCatalogView, OpenCodeProviderConnectRequest,
+    OpenCodeProviderConnectionView, OpenCodeProviderConnectionsView, OpenCodeProviderModelRequest,
+    OpenCodeProviderModelView, PiCommandValidationView, PiConfigurationView,
+    PiCredentialsSaveRequest, PiCustomModelView, PiCustomProviderView, PiModelReasoningSpec,
+    PiPluginSummaryView, PiPluginView, PiProjectResourceView, PiProjectTrustStateView,
+    PiRuntimeConfigurationView, PiRuntimeSaveRequest, PiTrustEntryView, PiTrustSetRequest,
+    PiTrustWorkspaceRequest, UserAgentDefinitionRequest, UserAgentDefinitionView,
+    UserAgentDistributionKind, UserAgentDistributionView, UserAgentEnvironmentVariableView,
+    UserAgentIntegrityKind,
     pulse::{
         ApprovalOptionSpec, BotConversationScope, BotMailboxPolicy, EventActor, EventEnvelope,
         EventSourceKind, EventSourceMeta, EventTrace, EventTrustLevel, GateFilterAst,
@@ -119,12 +120,6 @@ use db::models::{
     workspace::{Workspace, WorkspaceWithStatus},
     workspace_repo::{RepoWithTargetBranch, WorkspaceRepo},
 };
-use server::dto::{
-    ArtifactPreviewLeaseDto, AttentionInbox, AttentionItem, AttentionItemKind,
-    ConversationActiveBinding, ConversationCurrentTurn, CrashReportMeta, CrashReportsInfo,
-    DbConversationDetail, SessionCollaborationMemberRef, SessionCollaborationRef,
-    SessionContinuityMode, SessionSummary,
-};
 use executors::{
     actions::{ExecutorAction, ExecutorActionType},
     executors::{CodingAgent, SlashCommandDescription, SlashCommandKind, codex::ReasoningEffort},
@@ -132,13 +127,19 @@ use executors::{
     profile::ExecutorProfileId,
 };
 use git::{
-    ConflictFileDetail, ConflictHunk, ConflictStageContent, GitBranch, StashEntry,
-    WriteConflictResolutionResult,
+    ConflictFileDetail, ConflictHunk, ConflictStageContent, GitBranch, GitLogEntry, GitLogStatus,
+    GitWorktreeInfo, StashEntry, WriteConflictResolutionResult,
 };
 use remote_protocol::{
     CapabilityId, ConversationId, ErrorCode, ErrorEnvelope, EventDurability, OperationId,
     ReachabilityOrigin, RemoteEvent, ServerCapabilities, SubscriptionBootstrap, SubscriptionId,
     SubscriptionRequest, SubscriptionResource, SubscriptionSnapshot,
+};
+use server::dto::{
+    ArtifactPreviewLeaseDto, AttentionInbox, AttentionItem, AttentionItemKind,
+    ConversationActiveBinding, ConversationCurrentTurn, CrashReportMeta, CrashReportsInfo,
+    DbConversationDetail, SessionCollaborationMemberRef, SessionCollaborationRef,
+    SessionContinuityMode, SessionSummary,
 };
 use services::services::{
     config::{
@@ -402,6 +403,7 @@ const DESKTOP_SHELL_COMMANDS: &[&str] = &[
     "open_settings_window",
     "open_workspace_in_editor",
     "probe_web_service_port",
+    "reconnect_host_tunnel",
     "remove_saved_host_tunnel",
     "respond_host_connect_request",
     "reveal_in_file_manager",
@@ -410,7 +412,9 @@ const DESKTOP_SHELL_COMMANDS: &[&str] = &[
     "set_account_relay_lease",
     "set_host_tunnel_enabled",
     "start_create_host_tunnel",
+    "take_pending_desktop_toast_activation",
     "take_pending_model_router_import",
+    "record_shell_crash",
     "update_web_service_config",
     "get_developer_mode",
     "set_developer_mode",
@@ -680,6 +684,8 @@ fn replacement_declarations() -> BTreeMap<String, String> {
     insert_declaration::<DshPluginSummaryView>(&mut decls);
     insert_declaration::<GrokPluginView>(&mut decls);
     insert_declaration::<GrokPluginSummaryView>(&mut decls);
+    insert_declaration::<MusePluginView>(&mut decls);
+    insert_declaration::<MusePluginSummaryView>(&mut decls);
     insert_declaration::<PiPluginView>(&mut decls);
     insert_declaration::<PiPluginSummaryView>(&mut decls);
     insert_declaration::<AgentAuthModeKind>(&mut decls);
@@ -721,6 +727,9 @@ fn replacement_declarations() -> BTreeMap<String, String> {
     insert_declaration::<WorkspaceRepo>(&mut decls);
     insert_declaration::<RepoWithTargetBranch>(&mut decls);
     insert_declaration::<GitBranch>(&mut decls);
+    insert_declaration::<GitWorktreeInfo>(&mut decls);
+    insert_declaration::<GitLogEntry>(&mut decls);
+    insert_declaration::<GitLogStatus>(&mut decls);
     insert_declaration::<StashEntry>(&mut decls);
     insert_declaration::<ConflictStageContent>(&mut decls);
     insert_declaration::<ConflictHunk>(&mut decls);
