@@ -268,6 +268,7 @@ impl AgentConnectionRunner {
         // This is a Dimo-side policy toggle, not an environment variable Pi
         // or pi-acp should observe.
         command.env_remove(PI_TRUST_WORKSPACE_ENV);
+        workspace_utils::process::scrub_host_secret_env_tokio(&mut command);
         // The child inherits the full parent env. A blank `OPENAI_API_KEY=""`
         // (or `OPENAI_BASE_URL=""`) leaked from the shell that launched Dimo
         // makes codex think an API key is present but empty, derailing its
@@ -549,6 +550,10 @@ impl AgentConnectionRunner {
         }
         launch_env.remove(PI_TRUST_WORKSPACE_ENV);
         scrubbed_keys.push(PI_TRUST_WORKSPACE_ENV.to_string());
+        for key in workspace_utils::process::HOST_SECRET_ENV_KEYS {
+            launch_env.remove(key);
+            scrubbed_keys.push(key.to_string());
+        }
 
         driver.prepare_launch_env(
             &launch_lock.absolute_acp_program,

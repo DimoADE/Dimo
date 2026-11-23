@@ -256,20 +256,29 @@ impl ServerApplicationDomains {
 
     async fn subscribe_file_tree_stream(&self, args: Value) -> Result<Value, ApplicationError> {
         let args: FileTreeStreamArgs = parse(args)?;
-        let canonical_root = std::fs::canonicalize(&args.root_path).map_err(|error| {
-            ApplicationError::bad_request(format!(
-                "Invalid file tree root '{}': {error}",
-                args.root_path
-            ))
-        })?;
+        let root_path_arg = args.root_path.clone();
+        let canonical_root =
+            tokio::task::spawn_blocking(move || std::fs::canonicalize(&root_path_arg))
+                .await
+                .map_err(internal_error)?
+                .map_err(|error| {
+                    ApplicationError::bad_request(format!(
+                        "Invalid file tree root '{}': {error}",
+                        args.root_path
+                    ))
+                })?;
         let canonical_root_str = canonical_root.to_string_lossy().to_string();
         let host_events = self.events.clone();
         let channel = format!("file-tree-stream:{canonical_root_str}");
         let task_key = format!("file-tree:{canonical_root_str}");
         self.events.ensure_stream_task(task_key, || {
             tokio::spawn(async move {
-                match services::services::filesystem_watcher::async_watcher(canonical_root) {
-                    Ok((_watcher, mut receiver, normalized_root)) => {
+                let watcher_result = tokio::task::spawn_blocking(move || {
+                    services::services::filesystem_watcher::async_watcher(canonical_root)
+                })
+                .await;
+                match watcher_result {
+                    Ok(Ok((_watcher, mut receiver, normalized_root))) => {
                         let normalized_root_str = normalized_root.to_string_lossy().to_string();
                         while let Some(result) = receiver.next().await {
                             match result {
@@ -296,8 +305,11 @@ impl ServerApplicationDomains {
                             }
                         }
                     }
-                    Err(error) => tracing::error!(
+                    Ok(Err(error)) => tracing::error!(
                         "failed to start file tree watcher for {canonical_root_str}: {error}"
+                    ),
+                    Err(error) => tracing::error!(
+                        "file tree watcher task panicked for {canonical_root_str}: {error}"
                     ),
                 }
             })

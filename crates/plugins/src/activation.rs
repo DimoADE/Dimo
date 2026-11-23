@@ -86,6 +86,10 @@ impl ActivationLease {
     }
 
     pub async fn update_config(&self, config: Value) -> Result<bool, WorkerHostError> {
+        if self.host.is_reentrant_lock_held() {
+            self.host.defer_config_update(config);
+            return Ok(true);
+        }
         self.host.update_config(config).await
     }
 
@@ -320,10 +324,24 @@ impl ActivationManager {
             .remove(plugin_id)
             .unwrap_or_default();
         for old in draining {
-            let _ = old.dispose("plugin disabled").await;
+            if old.is_reentrant_lock_held() {
+                old.mark_terminal();
+                tokio::spawn(async move {
+                    let _ = old.dispose("plugin disabled").await;
+                });
+            } else {
+                let _ = old.dispose("plugin disabled").await;
+            }
         }
         if let Some(previous) = previous {
-            previous.dispose("plugin disabled").await?;
+            if previous.is_reentrant_lock_held() {
+                previous.mark_terminal();
+                tokio::spawn(async move {
+                    let _ = previous.dispose("plugin disabled").await;
+                });
+            } else {
+                previous.dispose("plugin disabled").await?;
+            }
             Ok(true)
         } else {
             Ok(false)

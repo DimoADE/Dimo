@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { invokeAsResult } from '@/lib/api/base';
 import { mountBackendTransport } from './transportRegistry';
 import {
+  MAX_CONCURRENT_PLUGIN_CALLS,
   WEB_SOCKET_KEEPALIVE_MS,
   WebTransport,
   WebTransportError,
@@ -869,5 +870,113 @@ describe('WebTransport', () => {
     });
     await transport.capabilities();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('caps concurrent plugin RPC calls without blocking capabilities or core commands', async () => {
+    const pluginResolvers: Array<(value: unknown) => void> = [];
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith('/api/v1/capabilities')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            protocol_version: '1.0',
+            capabilities: ['desktop.electron'],
+          }),
+        });
+      }
+      if (url.endsWith('/api/v1/call/conversation_list')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            operation_id: 'op-core',
+            data: [{ id: 'conv-1' }],
+          }),
+        });
+      }
+      return new Promise((resolve) => {
+        pluginResolvers.push(resolve);
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const transport = new WebTransport({
+      baseUrl: 'http://127.0.0.1:17891',
+      token: 'secret-1',
+    });
+
+    // Fire 6 hanging plugin calls simultaneously (Chromium HTTP/1.1 per-origin limit).
+    const pluginPromises = Array.from({ length: 6 }, (_, idx) =>
+      transport.call('plugin_invoke_contribution', {
+        pluginId: 'dimo.browser',
+        idx,
+      })
+    );
+    await Promise.resolve();
+
+    // Only MAX_CONCURRENT_PLUGIN_CALLS sockets are consumed by plugin RPCs.
+    expect(pluginResolvers).toHaveLength(MAX_CONCURRENT_PLUGIN_CALLS);
+
+    // Core capabilities and conversation_list execute immediately without waiting.
+    await expect(transport.capabilities()).resolves.toMatchObject({
+      capabilities: ['desktop.electron'],
+    });
+    await expect(
+      transport.call('conversation_list', { workspaceId: 'ws-1' })
+    ).resolves.toEqual([{ id: 'conv-1' }]);
+
+    // Resolve each active plugin RPC and verify the queued calls drain cleanly.
+    for (let idx = 0; idx < 6; idx += 1) {
+      while (pluginResolvers.length <= idx) {
+        await Promise.resolve();
+      }
+      pluginResolvers[idx]!({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          operation_id: `op-plugin-${idx}`,
+          data: { idx },
+        }),
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+
+    await expect(Promise.all(pluginPromises)).resolves.toEqual([
+      { idx: 0 },
+      { idx: 1 },
+      { idx: 2 },
+      { idx: 3 },
+      { idx: 4 },
+      { idx: 5 },
+    ]);
+  });
+
+  it('rejects queued plugin RPC calls when transport is destroyed', async () => {
+    const fetchMock = vi.fn(() => new Promise(() => {}));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const transport = new WebTransport({
+      baseUrl: 'http://127.0.0.1:17891',
+      token: 'secret-1',
+    });
+
+    // Saturate the plugin bulkhead slots.
+    for (let idx = 0; idx < MAX_CONCURRENT_PLUGIN_CALLS; idx += 1) {
+      void transport.call('plugin_command_invoke', { idx });
+    }
+    const queued = transport.call('plugin_invoke_contribution', {
+      queued: true,
+    });
+    await Promise.resolve();
+
+    transport.destroy();
+
+    await expect(queued).rejects.toMatchObject({
+      name: 'WebTransportError',
+      code: 'transport_closed',
+      retryable: true,
+    });
   });
 });

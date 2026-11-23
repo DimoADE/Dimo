@@ -105,6 +105,7 @@ impl ConversationAgentBindingRecord {
                 .execute(&mut *conn)
                 .await?;
         }
+        super::conversation::bump_active_binding_mutation_epoch();
         Ok(())
     }
 
@@ -119,7 +120,9 @@ impl ConversationAgentBindingRecord {
             .bind(reason).bind(conversation_id).execute(&mut *tx).await?;
         sqlx::query("UPDATE sessions SET external_session_id = NULL, binding_revision = binding_revision + 1 WHERE id = ?")
             .bind(conversation_id).execute(&mut *tx).await?;
-        tx.commit().await
+        tx.commit().await?;
+        super::conversation::bump_active_binding_mutation_epoch();
+        Ok(())
     }
 
     /// A reconnect keeps its generation; a new native identity creates a new row.
@@ -134,7 +137,9 @@ impl ConversationAgentBindingRecord {
             .bind(conversation_id).bind(conversation_id).bind(connection_id).execute(&mut *tx).await?;
         sqlx::query("UPDATE conversation_agent_bindings SET resume_allowed = 0, invalidated_reason = ?, connection_id = NULL, status = 'recovering' WHERE conversation_id = ? AND connection_id = ? AND resume_allowed = 1")
             .bind(reason).bind(conversation_id).bind(connection_id).execute(&mut *tx).await?;
-        tx.commit().await
+        tx.commit().await?;
+        super::conversation::bump_active_binding_mutation_epoch();
+        Ok(())
     }
 
     /// A reconnect keeps its generation; a new native identity creates a new row.
@@ -376,6 +381,7 @@ impl ConversationAgentBindingRecord {
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
+        super::conversation::bump_active_binding_mutation_epoch();
         Ok(result)
     }
 }

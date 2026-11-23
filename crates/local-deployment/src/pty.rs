@@ -214,6 +214,7 @@ struct PtySession {
     input_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
     master: SharedMasterPty,
     child: SharedPtyChild,
+    process_job: Option<utils::process::ProcessTreeJob>,
     scrollback: Arc<Mutex<Scrollback>>,
     subscribers: Arc<Mutex<Vec<TerminalOutputTx>>>,
     _input_handle: thread::JoinHandle<()>,
@@ -296,6 +297,9 @@ impl PtyService {
 
             let mut cmd = CommandBuilder::new(&shell);
             cmd.cwd(&working_dir);
+            for key in utils::process::HOST_SECRET_ENV_KEYS {
+                cmd.env_remove(key);
+            }
             configure_shell_command(
                 &mut cmd,
                 &shell.to_string_lossy(),
@@ -306,10 +310,12 @@ impl PtyService {
                 .slave
                 .spawn_command(cmd)
                 .map_err(|e| PtyError::CreateFailed(e.to_string()))?;
+            let child_pid = child.process_id();
             #[cfg(windows)]
-            if let Some(pid) = child.process_id() {
+            if let Some(pid) = child_pid {
                 let _ = utils::process::assign_pid_to_guardian_job(pid);
             }
+            let process_job = child_pid.map(utils::process::ProcessTreeJob::create_and_assign);
             drop(pty_pair.slave);
 
             let writer = pty_pair
@@ -323,12 +329,20 @@ impl PtyService {
             let (input_tx, input_rx) =
                 tokio::sync::mpsc::channel::<Vec<u8>>(PTY_INPUT_CHANNEL_CAPACITY);
 
-            Ok::<_, PtyError>((pty_pair.master, child, writer, reader, input_tx, input_rx))
+            Ok::<_, PtyError>((
+                pty_pair.master,
+                child,
+                process_job,
+                writer,
+                reader,
+                input_tx,
+                input_rx,
+            ))
         })
         .await
         .map_err(|e| PtyError::CreateFailed(e.to_string()))??;
 
-        let (master, child, mut writer, mut reader, input_tx, mut input_rx) = result;
+        let (master, child, process_job, mut writer, mut reader, input_tx, mut input_rx) = result;
 
         let input_handle = thread::Builder::new()
             .name(format!("pty-writer-{short_id}"))
@@ -354,6 +368,7 @@ impl PtyService {
             input_tx,
             master: Arc::new(Mutex::new(master)),
             child: Arc::new(Mutex::new(child)),
+            process_job,
             scrollback,
             subscribers,
             _input_handle: input_handle,
@@ -367,7 +382,11 @@ impl PtyService {
                 .map_err(|e| PtyError::CreateFailed(e.to_string()))?;
             if sessions.contains_key(&session_id) {
                 let child = Arc::clone(&session.child);
+                let process_job = session.process_job.clone();
                 tokio::task::spawn_blocking(move || {
+                    if let Some(job) = process_job {
+                        let _ = job.terminate();
+                    }
                     if let Ok(mut child) = child.lock() {
                         let _ = child.kill();
                         let _ = child.wait();
@@ -421,6 +440,9 @@ impl PtyService {
                         for subscriber in subscribers.drain(..) {
                             subscriber.close();
                         }
+                    }
+                    if let Some(job) = session.process_job.take() {
+                        job.terminate();
                     }
                     if let Ok(mut child) = session.child.lock() {
                         let _ = child.kill();
@@ -552,6 +574,9 @@ impl PtyService {
                 }
             }
             let _ = tokio::task::spawn_blocking(move || {
+                if let Some(job) = session.process_job.take() {
+                    let _ = job.terminate();
+                }
                 if let Ok(mut child) = session.child.lock() {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -581,6 +606,9 @@ impl PtyService {
                 }
             }
             tokio::task::spawn_blocking(move || {
+                if let Some(job) = session.process_job.take() {
+                    let _ = job.terminate();
+                }
                 if let Ok(mut child) = session.child.lock() {
                     let _ = child.kill();
                     let _ = child.wait();

@@ -776,20 +776,35 @@ fn render_shim(
 ) -> String {
     match format {
         ShellFamily::Windows => {
+            let normalized_exe =
+                workspace_utils::path::normalize_windows_extended_path_prefix(runtime_executable);
+            let escaped_exe = escape_windows_batch_value(&normalized_exe.to_string_lossy());
+            let mut needs_utf8_cp = !escaped_exe.is_ascii();
             let path_binding = if runtime_path_entries.is_empty() {
                 String::new()
             } else {
                 let prefix = runtime_path_entries
                     .iter()
-                    .map(|entry| escape_windows_batch_value(&entry.to_string_lossy()))
+                    .map(|entry| {
+                        let normalized =
+                            workspace_utils::path::normalize_windows_extended_path_prefix(entry);
+                        escape_windows_batch_value(&normalized.to_string_lossy())
+                    })
                     .collect::<Vec<_>>()
                     .join(";");
+                if !prefix.is_ascii() {
+                    needs_utf8_cp = true;
+                }
                 format!("set \"PATH={prefix};%PATH%\"\r\n")
             };
+            let codepage_line = if needs_utf8_cp {
+                "chcp 65001 >nul\r\n"
+            } else {
+                ""
+            };
             format!(
-                "@echo off\r\nsetlocal DisableDelayedExpansion\r\n{WINDOWS_SHIM_MARKER_PREFIX}{}\r\n{path_binding}\"{}\" %*\r\nexit /b %ERRORLEVEL%\r\n",
+                "@echo off\r\nsetlocal DisableDelayedExpansion\r\n{WINDOWS_SHIM_MARKER_PREFIX}{}\r\n{codepage_line}{path_binding}\"{escaped_exe}\" %*\r\nexit /b %ERRORLEVEL%\r\n",
                 agent_id.as_str(),
-                escape_windows_batch_value(&runtime_executable.to_string_lossy())
             )
         }
         ShellFamily::Zsh | ShellFamily::Bash | ShellFamily::Fish | ShellFamily::Posix => {
@@ -891,10 +906,19 @@ fn render_toolchain_shim(
 ) -> String {
     match format {
         ShellFamily::Windows => {
+            let normalized_dir =
+                workspace_utils::path::normalize_windows_extended_path_prefix(toolchain_bin_dir);
+            let normalized_exe =
+                workspace_utils::path::normalize_windows_extended_path_prefix(runtime_executable);
+            let escaped_dir = escape_windows_batch_value(&normalized_dir.to_string_lossy());
+            let escaped_exe = escape_windows_batch_value(&normalized_exe.to_string_lossy());
+            let codepage_line = if !escaped_dir.is_ascii() || !escaped_exe.is_ascii() {
+                "chcp 65001 >nul\r\n"
+            } else {
+                ""
+            };
             format!(
-                "@echo off\r\nsetlocal DisableDelayedExpansion\r\n{WINDOWS_TOOLCHAIN_SHIM_MARKER_PREFIX}{command_name}\r\nset \"PATH={};%PATH%\"\r\n\"{}\" %*\r\nexit /b %ERRORLEVEL%\r\n",
-                escape_windows_batch_value(&toolchain_bin_dir.to_string_lossy()),
-                escape_windows_batch_value(&runtime_executable.to_string_lossy())
+                "@echo off\r\nsetlocal DisableDelayedExpansion\r\n{WINDOWS_TOOLCHAIN_SHIM_MARKER_PREFIX}{command_name}\r\n{codepage_line}set \"PATH={escaped_dir};%PATH%\"\r\n\"{escaped_exe}\" %*\r\nexit /b %ERRORLEVEL%\r\n",
             )
         }
         ShellFamily::Zsh | ShellFamily::Bash | ShellFamily::Fish | ShellFamily::Posix => {
@@ -1978,6 +2002,36 @@ mod tests {
         fs::write(&user_node, "@echo off\r\necho v22.22.3\r\n").unwrap();
         assert!(!path_is_dimo_toolchain_shim(&user_node));
         assert!(!path_is_dimo_toolchain_shim(&temp.path().join("missing")));
+    }
+
+    #[test]
+    fn windows_shim_emits_utf8_codepage_only_for_non_ascii_paths() {
+        let agent_id = AgentId::parse("claude-code").unwrap();
+        let ascii_exe = Path::new(r"C:\Users\alice\.dimo\bin\claude.exe");
+        let ascii_dir = PathBuf::from(r"C:\Users\alice\.dimo\bin");
+        let ascii_shim = render_shim(
+            ShellFamily::Windows,
+            &agent_id,
+            ascii_exe,
+            std::slice::from_ref(&ascii_dir),
+        );
+        assert!(!ascii_shim.contains("chcp 65001"));
+
+        let cjk_exe = Path::new(r"C:\Users\测试用户\.dimo\bin\claude.exe");
+        let cjk_dir = PathBuf::from(r"C:\Users\测试用户\.dimo\bin");
+        let cjk_shim = render_shim(
+            ShellFamily::Windows,
+            &agent_id,
+            cjk_exe,
+            std::slice::from_ref(&cjk_dir),
+        );
+        assert!(cjk_shim.contains("chcp 65001 >nul\r\n"));
+
+        let ascii_tc = render_toolchain_shim(ShellFamily::Windows, "node", ascii_exe, &ascii_dir);
+        assert!(!ascii_tc.contains("chcp 65001"));
+
+        let cjk_tc = render_toolchain_shim(ShellFamily::Windows, "node", cjk_exe, &cjk_dir);
+        assert!(cjk_tc.contains("chcp 65001 >nul\r\n"));
     }
 
     fn host_shell_for_test() -> ShellFamily {

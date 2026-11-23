@@ -87,10 +87,68 @@ impl ServerApplicationDomains {
             interval.tick().await;
             let mut after_turn_rx = conversations::subscribe_after_turn_events();
             let mut drain_pending = true;
+            let mut crash_recovered = false;
             loop {
                 let woken = pulse_outbox_wake().notified();
                 tokio::pin!(woken);
                 woken.as_mut().enable();
+
+                if !crash_recovered {
+                    if let Some(host) = weak.upgrade() {
+                        if host.automation_ownership.current()
+                            && let Ok(engine) = host.ensure_pulse_ready().await
+                        {
+                            let now_iso = Utc::now().to_rfc3339();
+                            let outbox_ok = match engine
+                                .store()
+                                .recover_in_flight_outbox(&now_iso)
+                                .await
+                            {
+                                Ok(count) => {
+                                    if count > 0 {
+                                        tracing::warn!(
+                                            recovered = count,
+                                            "Recovered crash-stuck in_flight Pulse outbox rows back to pending"
+                                        );
+                                        drain_pending = true;
+                                    }
+                                    true
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        "Failed to recover in_flight Pulse outbox rows on startup"
+                                    );
+                                    false
+                                }
+                            };
+                            let turns_ok = match engine.store().recover_claimed_bot_turns().await {
+                                Ok(count) => {
+                                    if count > 0 {
+                                        tracing::warn!(
+                                            recovered = count,
+                                            "Recovered crash-stuck claimed Pulse bot mailbox rows back to queued"
+                                        );
+                                        host.drain_all_queued_bot_mailboxes().await;
+                                    }
+                                    true
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        "Failed to recover claimed Pulse bot mailbox rows on startup"
+                                    );
+                                    false
+                                }
+                            };
+                            if outbox_ok && turns_ok {
+                                crash_recovered = true;
+                            }
+                        }
+                    } else {
+                        break;
+                    }
+                }
 
                 if drain_pending {
                     drain_pending = false;

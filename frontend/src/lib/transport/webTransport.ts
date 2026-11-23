@@ -11,6 +11,12 @@ import type {
 const PROTOCOL_VERSION = '1.0';
 export const WEB_SOCKET_KEEPALIVE_MS = 15_000;
 export const CONTROL_REQUEST_TIMEOUT_MS = 30_000;
+export const MAX_CONCURRENT_PLUGIN_CALLS = 2;
+
+const PLUGIN_ISOLATED_COMMANDS = new Set([
+  'plugin_invoke_contribution',
+  'plugin_command_invoke',
+]);
 
 export interface WebTransportOptions {
   baseUrl: string;
@@ -184,6 +190,11 @@ export class WebTransport implements BackendTransport {
   private readonly readyResolvers = new Map<string, () => void>();
   private capabilitiesCache: ServerCapabilities | undefined;
   private capabilitiesPromise: Promise<ServerCapabilities> | undefined;
+  private activePluginCalls = 0;
+  private readonly pluginCallWaiters: Array<{
+    resolve: () => void;
+    reject: (error: unknown) => void;
+  }> = [];
 
   constructor(options: WebTransportOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
@@ -230,23 +241,57 @@ export class WebTransport implements BackendTransport {
     }
   }
 
+  private acquirePluginCallSlot(): Promise<void> {
+    if (this.destroyed) {
+      return Promise.reject(
+        new WebTransportError('transport destroyed', 'transport_closed', true)
+      );
+    }
+    if (this.activePluginCalls < MAX_CONCURRENT_PLUGIN_CALLS) {
+      this.activePluginCalls += 1;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve, reject) => {
+      this.pluginCallWaiters.push({ resolve, reject });
+    });
+  }
+
+  private releasePluginCallSlot(): void {
+    const next = this.pluginCallWaiters.shift();
+    if (next) {
+      next.resolve();
+      return;
+    }
+    this.activePluginCalls = Math.max(0, this.activePluginCalls - 1);
+  }
+
   async call(
     command: string,
     args?: Record<string, unknown>,
     options?: { operationId?: string }
   ): Promise<unknown> {
-    const response = await this.request(
-      `/api/v1/call/${encodeURIComponent(command)}`,
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          operation_id: options?.operationId ?? randomUUID(),
-          args: args ?? {},
-        }),
+    const isolated = PLUGIN_ISOLATED_COMMANDS.has(command);
+    if (isolated) {
+      await this.acquirePluginCallSlot();
+    }
+    try {
+      const response = await this.request(
+        `/api/v1/call/${encodeURIComponent(command)}`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            operation_id: options?.operationId ?? randomUUID(),
+            args: args ?? {},
+          }),
+        }
+      );
+      const envelope = (await response.json()) as CommandResponse;
+      return envelope.data;
+    } finally {
+      if (isolated) {
+        this.releasePluginCallSlot();
       }
-    );
-    const envelope = (await response.json()) as CommandResponse;
-    return envelope.data;
+    }
   }
 
   async capabilities(): Promise<ServerCapabilities> {
@@ -395,6 +440,11 @@ export class WebTransport implements BackendTransport {
       } catch {
         // Ignore errors closing an already dead socket.
       }
+    }
+    for (const waiter of this.pluginCallWaiters.splice(0)) {
+      waiter.reject(
+        new WebTransportError('transport destroyed', 'transport_closed', true)
+      );
     }
     for (const resolve of this.readyResolvers.values()) {
       resolve();

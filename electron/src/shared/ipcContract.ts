@@ -2,19 +2,24 @@ export const DESKTOP_APP_SCHEME = 'dimo-app';
 export const DESKTOP_ASSET_SCHEME = 'dimo-asset';
 export const DESKTOP_APP_ORIGIN = `${DESKTOP_APP_SCHEME}://localhost`;
 export const DEFAULT_APP_USER_MODEL_ID = 'com.dimo.app';
+export const SIDECAR_READY_EVENT = 'sidecar-ready';
 export const SIDECAR_EXITED_EVENT = 'sidecar-exited';
 export const SIDECAR_RESTARTED_EVENT = 'sidecar-restarted';
 export const GPU_MODE_CHANGED_EVENT = 'gpu-mode-changed';
 export const DEVELOPER_MODE_CHANGED_EVENT = 'developer-mode-changed';
 export const SYSTEM_POWER_RESUMED_EVENT = 'system-power-resumed';
 
-export type SidecarRuntimeStatus = 'running' | 'restarting' | 'stopped';
+export type SidecarRuntimeStatus = 'starting' | 'running' | 'restarting' | 'stopped';
 export type DesktopGpuMode = 'hardware' | 'software';
 
 export interface ElectronBackendConnectionInfo {
   baseUrl: string;
   token: string;
   dataDir?: string;
+}
+
+export interface SidecarReadyPayload {
+  backend: ElectronBackendConnectionInfo;
 }
 
 export interface SidecarRestartedPayload {

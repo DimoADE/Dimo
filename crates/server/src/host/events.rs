@@ -612,15 +612,60 @@ impl TerminalBridgeRegistry {
         let channel = terminal_output_channel(session_id);
         let exit_channel = terminal_exit_channel(session_id);
         let task = tokio::spawn(async move {
+            const PTY_COALESCE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+            const PTY_COALESCE_MAX_BYTES: usize = 32 * 1024;
+
             let mut output_rx = output_rx;
-            while let Some(chunk) = output_rx.recv().await {
+            let mut pending_bytes: Vec<u8> = Vec::new();
+            let mut latest_seq: u64 = 0;
+            let mut flush_deadline: Option<tokio::time::Instant> = None;
+
+            let emit_batch = |bytes: &mut Vec<u8>, seq: u64| {
+                if bytes.is_empty() {
+                    return;
+                }
                 bus.emit(
                     &channel,
                     TerminalOutputEvent {
-                        data: BASE64.encode(&chunk.data),
-                        seq: chunk.seq,
+                        data: BASE64.encode(&*bytes),
+                        seq,
                     },
                 );
+                bytes.clear();
+            };
+
+            loop {
+                let next = if let Some(deadline) = flush_deadline {
+                    tokio::select! {
+                        biased;
+                        chunk = output_rx.recv() => Some(chunk),
+                        _ = tokio::time::sleep_until(deadline) => None,
+                    }
+                } else {
+                    Some(output_rx.recv().await)
+                };
+
+                match next {
+                    None => {
+                        flush_deadline = None;
+                        emit_batch(&mut pending_bytes, latest_seq);
+                    }
+                    Some(Some(chunk)) => {
+                        latest_seq = chunk.seq;
+                        pending_bytes.extend_from_slice(&chunk.data);
+                        if pending_bytes.len() >= PTY_COALESCE_MAX_BYTES {
+                            flush_deadline = None;
+                            emit_batch(&mut pending_bytes, latest_seq);
+                        } else if flush_deadline.is_none() {
+                            flush_deadline =
+                                Some(tokio::time::Instant::now() + PTY_COALESCE_INTERVAL);
+                        }
+                    }
+                    Some(None) => {
+                        emit_batch(&mut pending_bytes, latest_seq);
+                        break;
+                    }
+                }
             }
             bus.emit(&exit_channel, session_id);
         });

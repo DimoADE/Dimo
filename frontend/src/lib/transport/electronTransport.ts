@@ -22,12 +22,15 @@ import { WebTransport } from './webTransport';
 
 const HOST_COMMAND_SET = new Set<string>(HOST_COMMANDS);
 const DESKTOP_SHELL_COMMAND_SET = new Set<string>(DESKTOP_SHELL_COMMANDS);
+const SIDECAR_READY_EVENT = 'sidecar-ready';
+const SIDECAR_EXITED_EVENT = 'sidecar-exited';
 const SIDECAR_RESTARTED_EVENT = 'sidecar-restarted';
 const SHELL_ONLY_EVENTS = new Set<string>([
   'desktop-toast',
   'desktop-toast-activated',
   'dimo://modelrouter-import',
-  'sidecar-exited',
+  SIDECAR_READY_EVENT,
+  SIDECAR_EXITED_EVENT,
   SIDECAR_RESTARTED_EVENT,
   'system-power-resumed',
 ]);
@@ -42,6 +45,10 @@ type ElectronDesktopBridgeWithGetBackend = NonNullable<
 type SidecarRestartedEventPayload = {
   backend?: Partial<ElectronBackendConnectionInfo> | null;
   attempt?: number;
+};
+
+type SidecarExitedEventPayload = {
+  willRestart?: boolean;
 };
 
 function isValidBackendConnectionInfo(
@@ -71,6 +78,18 @@ function readCurrentElectronBackend():
       ? desktop.getBackend()
       : desktop.backend;
   return isValidBackendConnectionInfo(candidate) ? candidate : undefined;
+}
+
+function isElectronSidecarStarting(): boolean {
+  if (typeof window === 'undefined' || !window.dimoDesktop) {
+    return false;
+  }
+  const desktop = window.dimoDesktop;
+  const status =
+    typeof desktop.getSidecarStatus === 'function'
+      ? desktop.getSidecarStatus()
+      : desktop.sidecarStatus;
+  return status === 'starting' || status === 'restarting';
 }
 
 function extractBackendFromRestartPayload(
@@ -105,7 +124,7 @@ function isServerHostEvent(event: string): boolean {
 }
 
 export interface ElectronTransportOptions {
-  backend: ElectronBackendConnectionInfo;
+  backend?: ElectronBackendConnectionInfo | null;
   webTransport?: WebTransport;
   shell?: ReturnType<typeof getDesktopShell>;
   onReconfigure?: (backend: ElectronBackendConnectionInfo) => void;
@@ -116,48 +135,55 @@ export interface ElectronTransportOptions {
  *
  * - `HOST_COMMANDS` and durable/patch/host-event subscriptions go directly to
  *   the co-spawned `dimo-server --desktop` process over loopback HTTP/WS via
- *   `WebTransport`.
+ *   `WebTransport`. During parallel desktop startup before `sidecar-ready`
+ *   fires, these calls seamlessly await sidecar readiness.
  * - `DESKTOP_SHELL_COMMANDS` go through `window.dimoDesktop.invoke`, which
- *   handles native GUI operations in Electron Main and proxies migrated
- *   desktop business commands to `dimo-server /api/v1/desktop/invoke/*`.
+ *   handles native GUI operations in Electron Main immediately and proxies
+ *   migrated desktop business commands to `dimo-server /api/v1/desktop/invoke/*`.
  */
 export class ElectronTransport implements BackendTransport {
   readonly environment = 'desktop' as const;
-  private readonly web: WebTransport;
+  private web: WebTransport | null;
   private readonly shellOverride?: ReturnType<typeof getDesktopShell>;
   private readonly onReconfigure?: (
     backend: ElectronBackendConnectionInfo
   ) => void;
   private destroyed = false;
-  private unlistenSidecarRestarted: (() => void) | undefined;
+  private readonly unlistenSidecarEvents: Array<() => void> = [];
+  private readonly readyWaiters: Array<{
+    resolve: (web: WebTransport) => void;
+    reject: (error: Error) => void;
+  }> = [];
 
-  constructor(options: ElectronTransportOptions) {
-    this.web =
-      options.webTransport ??
-      new WebTransport({
+  constructor(options: ElectronTransportOptions = {}) {
+    if (options.webTransport) {
+      this.web = options.webTransport;
+    } else if (isValidBackendConnectionInfo(options.backend)) {
+      this.web = new WebTransport({
         baseUrl: options.backend.baseUrl,
         token: options.backend.token,
       });
+    } else {
+      const liveBackend = readCurrentElectronBackend();
+      this.web = liveBackend
+        ? new WebTransport({
+            baseUrl: liveBackend.baseUrl,
+            token: liveBackend.token,
+          })
+        : null;
+    }
     this.shellOverride = options.shell;
     this.onReconfigure = options.onReconfigure;
-    this.subscribeToSidecarRestart();
+    this.subscribeToSidecarLifecycle();
   }
 
-  private subscribeToSidecarRestart(): void {
+  private registerSidecarEvent(
+    event: string,
+    handler: (payload: unknown) => void,
+    afterAttached?: () => void
+  ): void {
     const shell = this.getShell();
-    const listenPromise = shell?.events?.listen?.<unknown>(
-      SIDECAR_RESTARTED_EVENT,
-      (payload) => {
-        if (this.destroyed) {
-          return;
-        }
-        const nextBackend = extractBackendFromRestartPayload(payload);
-        if (!nextBackend) {
-          return;
-        }
-        this.reconfigure(nextBackend);
-      }
-    );
+    const listenPromise = shell?.events?.listen?.<unknown>(event, handler);
     if (!listenPromise) {
       return;
     }
@@ -166,7 +192,8 @@ export class ElectronTransport implements BackendTransport {
         if (this.destroyed) {
           unlisten();
         } else {
-          this.unlistenSidecarRestarted = unlisten;
+          this.unlistenSidecarEvents.push(unlisten);
+          afterAttached?.();
         }
       })
       .catch(() => {
@@ -174,8 +201,95 @@ export class ElectronTransport implements BackendTransport {
       });
   }
 
+  private subscribeToSidecarLifecycle(): void {
+    const handleBackendUpdate = (payload: unknown) => {
+      if (this.destroyed) {
+        return;
+      }
+      const nextBackend = extractBackendFromRestartPayload(payload);
+      if (!nextBackend) {
+        return;
+      }
+      this.applyBackend(nextBackend);
+    };
+
+    this.registerSidecarEvent(SIDECAR_READY_EVENT, handleBackendUpdate, () => {
+      if (!this.web && !this.destroyed) {
+        const liveBackend = readCurrentElectronBackend();
+        if (liveBackend) {
+          this.applyBackend(liveBackend);
+        }
+      }
+    });
+    this.registerSidecarEvent(SIDECAR_RESTARTED_EVENT, handleBackendUpdate);
+    this.registerSidecarEvent(SIDECAR_EXITED_EVENT, (payload) => {
+      if (this.destroyed || this.web) {
+        return;
+      }
+      const willRestart = Boolean(
+        (payload as SidecarExitedEventPayload | undefined)?.willRestart
+      );
+      if (!willRestart) {
+        this.rejectReadyWaiters(
+          new Error('dimo-server sidecar exited before becoming ready')
+        );
+      }
+    });
+  }
+
+  private resolveReadyWaiters(web: WebTransport): void {
+    const waiters = this.readyWaiters.splice(0, this.readyWaiters.length);
+    for (const waiter of waiters) {
+      waiter.resolve(web);
+    }
+  }
+
+  private rejectReadyWaiters(error: Error): void {
+    const waiters = this.readyWaiters.splice(0, this.readyWaiters.length);
+    for (const waiter of waiters) {
+      waiter.reject(error);
+    }
+  }
+
+  private applyBackend(backend: ElectronBackendConnectionInfo): WebTransport {
+    if (!this.web) {
+      const created = new WebTransport({
+        baseUrl: backend.baseUrl,
+        token: backend.token,
+      });
+      this.web = created;
+      this.onReconfigure?.(backend);
+      this.resolveReadyWaiters(created);
+      return created;
+    }
+    this.reconfigure(backend);
+    return this.web;
+  }
+
+  private ensureWebTransport(): Promise<WebTransport> {
+    if (this.web) {
+      return Promise.resolve(this.web);
+    }
+    if (this.destroyed) {
+      return Promise.reject(
+        new Error('ElectronTransport was destroyed before sidecar became ready')
+      );
+    }
+    const liveBackend = readCurrentElectronBackend();
+    if (liveBackend) {
+      return Promise.resolve(this.applyBackend(liveBackend));
+    }
+    return new Promise<WebTransport>((resolve, reject) => {
+      this.readyWaiters.push({ resolve, reject });
+    });
+  }
+
   reconfigure(backend: ElectronBackendConnectionInfo): void {
     if (this.destroyed) {
+      return;
+    }
+    if (!this.web) {
+      this.applyBackend(backend);
       return;
     }
     if (typeof this.web.reconfigure === 'function') {
@@ -198,7 +312,10 @@ export class ElectronTransport implements BackendTransport {
   }
 
   get origin(): string {
-    return this.web.origin;
+    if (this.web) {
+      return this.web.origin;
+    }
+    return readCurrentElectronBackend()?.baseUrl ?? '';
   }
 
   async call(
@@ -207,7 +324,8 @@ export class ElectronTransport implements BackendTransport {
     options?: { operationId?: string }
   ): Promise<unknown> {
     if (this.isServerHostCommand(command)) {
-      return this.web.call(command, args, options);
+      const web = await this.ensureWebTransport();
+      return web.call(command, args, options);
     }
     return this.getShell().invoke(command, args);
   }
@@ -217,9 +335,12 @@ export class ElectronTransport implements BackendTransport {
     args: Record<string, unknown>,
     onMessage: (message: unknown) => void
   ): Promise<T> {
-    const webStream = (this.web as BackendTransport).stream;
-    if (this.isServerHostCommand(command) && typeof webStream === 'function') {
-      return webStream.call(this.web, command, args, onMessage) as Promise<T>;
+    if (this.isServerHostCommand(command)) {
+      const web = await this.ensureWebTransport();
+      const webStream = (web as BackendTransport).stream;
+      if (typeof webStream === 'function') {
+        return webStream.call(web, command, args, onMessage) as Promise<T>;
+      }
     }
     const result = await this.call(command, args);
     if (result && typeof result === 'object' && 'events' in result) {
@@ -234,7 +355,8 @@ export class ElectronTransport implements BackendTransport {
   }
 
   async capabilities(): Promise<ServerCapabilities> {
-    const serverCaps = await this.web.capabilities();
+    const web = await this.ensureWebTransport();
+    const serverCaps = await web.capabilities();
     const capabilities = serverCaps.capabilities.includes('desktop.electron')
       ? serverCaps.capabilities
       : [...serverCaps.capabilities, 'desktop.electron'];
@@ -254,7 +376,16 @@ export class ElectronTransport implements BackendTransport {
   }
 
   subscribe(request: SubscriptionRequest): AsyncIterable<RemoteEvent> {
-    return this.web.subscribe(request);
+    if (this.web) {
+      return this.web.subscribe(request);
+    }
+    const ensure = () => this.ensureWebTransport();
+    return {
+      async *[Symbol.asyncIterator]() {
+        const web = await ensure();
+        yield* web.subscribe(request);
+      },
+    };
   }
 
   async listen<T>(
@@ -262,17 +393,45 @@ export class ElectronTransport implements BackendTransport {
     handler: (payload: T) => void
   ): Promise<() => void> {
     if (DUAL_BUS_EVENTS.has(event)) {
-      const [unlistenShell, unlistenWeb] = await Promise.all([
-        this.getShell().events.listen<T>(event, handler),
-        this.web.listen<T>(event, handler).catch(() => () => undefined),
-      ]);
+      let unsubscribed = false;
+      const unlistenShell = await this.getShell().events.listen<T>(
+        event,
+        handler
+      );
+      let unlistenWeb: (() => void) | undefined;
+      if (this.web) {
+        unlistenWeb = await this.web
+          .listen<T>(event, handler)
+          .catch(() => undefined);
+      } else {
+        void this.ensureWebTransport()
+          .then(async (web) => {
+            if (unsubscribed || this.destroyed) {
+              return;
+            }
+            const detach = await web
+              .listen<T>(event, handler)
+              .catch(() => undefined);
+            if (unsubscribed || this.destroyed) {
+              detach?.();
+            } else {
+              unlistenWeb = detach;
+            }
+          })
+          .catch(() => undefined);
+      }
       return () => {
+        unsubscribed = true;
         unlistenShell();
-        unlistenWeb();
+        unlistenWeb?.();
       };
     }
     if (isServerHostEvent(event)) {
-      return this.web.listen<T>(event, handler);
+      const web = await this.ensureWebTransport();
+      if (this.destroyed) {
+        return () => undefined;
+      }
+      return web.listen<T>(event, handler);
     }
     return this.getShell().events.listen<T>(event, handler);
   }
@@ -286,7 +445,14 @@ export class ElectronTransport implements BackendTransport {
     capabilityToken: string;
     loopbackPort?: number;
   }): string {
-    return this.web.artifactPreviewUrl(lease);
+    if (this.web) {
+      return this.web.artifactPreviewUrl(lease);
+    }
+    const liveBackend = readCurrentElectronBackend();
+    if (liveBackend) {
+      return this.applyBackend(liveBackend).artifactPreviewUrl(lease);
+    }
+    throw new Error('Electron backend connection is still starting');
   }
 
   destroy(): void {
@@ -294,10 +460,17 @@ export class ElectronTransport implements BackendTransport {
       return;
     }
     this.destroyed = true;
-    const unlisten = this.unlistenSidecarRestarted;
-    this.unlistenSidecarRestarted = undefined;
-    unlisten?.();
-    this.web.destroy();
+    const listeners = this.unlistenSidecarEvents.splice(
+      0,
+      this.unlistenSidecarEvents.length
+    );
+    for (const unlisten of listeners) {
+      unlisten();
+    }
+    this.rejectReadyWaiters(
+      new Error('ElectronTransport was destroyed before sidecar became ready')
+    );
+    this.web?.destroy();
   }
 }
 
@@ -346,11 +519,29 @@ export function getElectronBackendTransport(): ElectronTransport {
   if (testTransportOverride) {
     return testTransportOverride;
   }
-  const backend = readCurrentElectronBackend();
-  if (!hasElectronDesktopRuntime() || !backend) {
+  if (!hasElectronDesktopRuntime()) {
     throw new Error(
       'Electron backend connection info is unavailable on window.dimoDesktop'
     );
+  }
+  const backend = readCurrentElectronBackend();
+  if (!backend) {
+    if (!isElectronSidecarStarting()) {
+      throw new Error(
+        'Electron backend connection info is unavailable on window.dimoDesktop'
+      );
+    }
+    if (cachedTransport) {
+      return cachedTransport;
+    }
+    cachedBackendKey = null;
+    cachedTransport = new ElectronTransport({
+      onReconfigure: (nextBackend) => {
+        cachedBackendKey = `${nextBackend.baseUrl}|${nextBackend.token}`;
+      },
+    });
+    attachUnloadTeardown();
+    return cachedTransport;
   }
   const key = `${backend.baseUrl}|${backend.token}`;
   if (cachedTransport) {

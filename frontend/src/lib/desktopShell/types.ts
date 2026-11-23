@@ -150,6 +150,12 @@ export interface ElectronBackendConnectionInfo {
   dataDir?: string;
 }
 
+export type ElectronSidecarStatus =
+  | 'starting'
+  | 'running'
+  | 'restarting'
+  | 'stopped';
+
 /**
  * Preload API exposed by Electron's `contextBridge.exposeInMainWorld('dimoDesktop', ...)`.
  */
@@ -158,6 +164,9 @@ export interface ElectronDesktopBridge {
   readonly isDev?: boolean;
   isDeveloperMode?: () => boolean;
   readonly backend?: ElectronBackendConnectionInfo;
+  getBackend?: () => ElectronBackendConnectionInfo | undefined;
+  readonly sidecarStatus?: ElectronSidecarStatus;
+  getSidecarStatus?: () => ElectronSidecarStatus;
   getAppVersion(): Promise<string>;
   getWindowLabel(): string;
   readonly window: Omit<DesktopShellWindowApi, 'getLabel'> & {

@@ -121,6 +121,7 @@ const fn default_retain_data() -> bool {
 /// Persist the loopback Plugin Dev connection JSON (`0o600` on Unix) so local developer
 /// tooling can discover the running Host's control endpoint without reading the main bearer.
 pub fn persist_connection(path: &Path, connection: &PluginDevConnection) -> std::io::Result<()> {
+    use std::io::Write;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -129,7 +130,16 @@ pub fn persist_connection(path: &Path, connection: &PluginDevConnection) -> std:
         "token": connection.token,
         "protocolVersion": connection.protocol_version,
     });
-    std::fs::write(path, format!("{body}\n"))?;
+    let mut open = std::fs::OpenOptions::new();
+    open.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.mode(0o600);
+    }
+    let mut file = open.open(path)?;
+    file.write_all(format!("{body}\n").as_bytes())?;
+    file.sync_all()?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

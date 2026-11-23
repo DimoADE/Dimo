@@ -441,12 +441,25 @@ export class SidecarManager {
     return this.isRunning() ? this.connection : null;
   }
 
+  async waitForReady(): Promise<ElectronBackendConnectionInfo> {
+    if (this.connection && this.isRunning()) {
+      return this.connection;
+    }
+    if (this.startPromise) {
+      return this.startPromise;
+    }
+    throw new Error('dimo-server sidecar has not started yet');
+  }
+
   getStatus(): SidecarRuntimeStatus {
     if (this.isRunning() && this.connection) {
       return 'running';
     }
     if (this.restarting) {
       return 'restarting';
+    }
+    if (this.startPromise) {
+      return 'starting';
     }
     return 'stopped';
   }
@@ -840,7 +853,7 @@ export class SidecarManager {
     pid: number;
     version: string;
   }> {
-    const conn = this.getConnection();
+    const conn = await this.waitForReady();
     return this.withAbortTimeout(HEALTH_CHECK_TIMEOUT_MS, async (signal) => {
       const response = await fetch(`${conn.baseUrl}/api/v1/desktop/health`, {
         method: 'GET',
@@ -869,7 +882,7 @@ export class SidecarManager {
     windowLabel: string,
     options?: { timeoutMs?: number }
   ): Promise<unknown> {
-    const conn = this.getConnection();
+    const conn = await this.waitForReady();
     const run = async (signal?: AbortSignal): Promise<unknown> => {
       const response = await fetch(
         `${conn.baseUrl}/api/v1/desktop/invoke/${encodeURIComponent(command)}`,

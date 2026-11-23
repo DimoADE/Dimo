@@ -54,12 +54,15 @@ use crate::{
 /// Transport-neutral recorder used by all application hosts.
 pub struct ConversationAgentEventRecorder {
     pool: SqlitePool,
+    read_pool: SqlitePool,
     deployment: Option<Arc<dyn Deployment>>,
     conversation_context: Option<ConversationContext>,
     event_publisher: Option<Arc<dyn ConversationEventPublisher>>,
     coalescer: StreamingThrottleCoalescer,
     active_turn_cache: HashMap<Uuid, Option<Uuid>>,
     cached_turn_epoch: u64,
+    active_binding_cache: HashMap<Uuid, Option<ConversationAgentBindingRecord>>,
+    cached_binding_epoch: u64,
     pending_step_text: HashMap<Uuid, String>,
     turn_had_tool_call: HashSet<Uuid>,
     #[cfg(test)]
@@ -111,14 +114,18 @@ impl PendingBatchEntry {
 
 impl ConversationAgentEventRecorder {
     pub fn new(pool: SqlitePool, deployment: Arc<dyn Deployment>) -> Self {
+        let read_pool = deployment.db().reader().as_pool().clone();
         Self {
             pool,
+            read_pool,
             deployment: Some(deployment),
             conversation_context: None,
             event_publisher: None,
             coalescer: StreamingThrottleCoalescer::new(),
             active_turn_cache: HashMap::new(),
             cached_turn_epoch: db::models::conversation::active_turn_mutation_epoch(),
+            active_binding_cache: HashMap::new(),
+            cached_binding_epoch: db::models::conversation::active_binding_mutation_epoch(),
             pending_step_text: HashMap::new(),
             turn_had_tool_call: HashSet::new(),
             #[cfg(test)]
@@ -129,12 +136,15 @@ impl ConversationAgentEventRecorder {
     pub fn with_context(context: ConversationContext) -> Self {
         Self {
             pool: context.deployment.db().pool.clone(),
+            read_pool: context.deployment.db().reader().as_pool().clone(),
             deployment: Some(context.deployment.clone()),
             event_publisher: Some(context.event_publisher.clone()),
             conversation_context: Some(context),
             coalescer: StreamingThrottleCoalescer::new(),
             active_turn_cache: HashMap::new(),
             cached_turn_epoch: db::models::conversation::active_turn_mutation_epoch(),
+            active_binding_cache: HashMap::new(),
+            cached_binding_epoch: db::models::conversation::active_binding_mutation_epoch(),
             pending_step_text: HashMap::new(),
             turn_had_tool_call: HashSet::new(),
             #[cfg(test)]
@@ -197,6 +207,31 @@ impl ConversationAgentEventRecorder {
         self.append_records(records).await
     }
 
+    async fn active_binding_cached(
+        &mut self,
+        conversation_id: Uuid,
+    ) -> Result<Option<ConversationAgentBindingRecord>, sqlx::Error> {
+        let current_epoch = db::models::conversation::active_binding_mutation_epoch();
+        if current_epoch != self.cached_binding_epoch {
+            self.active_binding_cache.clear();
+            self.cached_binding_epoch = current_epoch;
+        }
+        if let Some(cached) = self.active_binding_cache.get(&conversation_id) {
+            return Ok(cached.clone());
+        }
+        let fetched = ConversationAgentBindingRecord::active_for_conversation(
+            &self.read_pool,
+            conversation_id,
+        )
+        .await?;
+        if self.active_binding_cache.len() >= 512 {
+            self.active_binding_cache.clear();
+        }
+        self.active_binding_cache
+            .insert(conversation_id, fetched.clone());
+        Ok(fetched)
+    }
+
     async fn map_record(
         &mut self,
         envelope: &AgentEventEnvelope,
@@ -213,14 +248,13 @@ impl ConversationAgentEventRecorder {
                 reason,
             )
             .await?;
+            self.active_binding_cache.remove(&conversation_id);
             return Ok(None);
         }
         if agents::transcript_target::is_retired(envelope.connection_id) {
             return Ok(None);
         }
-        let active_binding =
-            ConversationAgentBindingRecord::active_for_conversation(&self.pool, conversation_id)
-                .await?;
+        let active_binding = self.active_binding_cached(conversation_id).await?;
         let connection = envelope.connection_id.to_string();
         if self.conversation_context.is_some()
             && matches!(envelope.event, AgentEvent::SessionLinked { .. })

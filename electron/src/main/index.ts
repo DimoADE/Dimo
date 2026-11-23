@@ -5,8 +5,10 @@ import { app, powerMonitor, protocol, session } from 'electron';
 
 import {
   DEFAULT_APP_USER_MODEL_ID,
+  DEVELOPER_MODE_CHANGED_EVENT,
   GPU_MODE_CHANGED_EVENT,
   SIDECAR_EXITED_EVENT,
+  SIDECAR_READY_EVENT,
   SIDECAR_RESTARTED_EVENT,
   SYSTEM_POWER_RESUMED_EVENT,
   isHostWindowLabel,
@@ -345,7 +347,7 @@ if (!gotLock) {
         assetScope,
       });
 
-      await sidecar.start({
+      const sidecarStartPromise = sidecar.start({
         repoRoot,
         resourcesDir,
         dataDir: activeDataDir,
@@ -358,6 +360,7 @@ if (!gotLock) {
         onRestarted: (connection, attempt) => {
           activeDataDir =
             sidecar.getDataDir() ?? activeDataDir ?? resolveCurrentDefaultDataDir(repoRoot);
+          chrome?.setDataDir(activeDataDir);
           browserRpc?.stop();
           browserRpc?.start();
           windows?.broadcastEvent(SIDECAR_RESTARTED_EVENT, {
@@ -383,11 +386,8 @@ if (!gotLock) {
           }
         },
       });
-      activeDataDir =
-        sidecar.getDataDir() ?? activeDataDir ?? resolveCurrentDefaultDataDir(repoRoot);
 
-      browserRpc?.start();
-
+      const initialDataDir = activeDataDir ?? resolveCurrentDefaultDataDir(repoRoot);
       const iconPath = resolveDefaultIconPath({ resourcesDir, repoRoot });
       windows = new WindowManager({
         preloadPath,
@@ -447,7 +447,7 @@ if (!gotLock) {
         windows,
         resourcesDir,
         repoRoot,
-        dataDir: activeDataDir,
+        dataDir: initialDataDir,
         defaultIconPath: iconPath,
         onExitRequested: gracefulExit,
       });
@@ -458,14 +458,6 @@ if (!gotLock) {
         deferInstall: true,
         beforeQuitForUpdate: prepareForUpdateInstall,
       });
-
-      // Hydrate persisted developer_mode from shared settings.json.
-      const savedDeveloperMode = Boolean(
-        await sidecar
-          .invokeDesktopCommand('get_developer_mode', {}, 'main')
-          .catch(() => false)
-      );
-      windows.applyDeveloperMode(savedDeveloperMode);
 
       registerIpcHandlers({
         appVersion,
@@ -510,11 +502,60 @@ if (!gotLock) {
       });
       deeplinks.handleProcessArgs(process.argv, { isStartup: true });
 
+      const sidecarReadyHandled = sidecarStartPromise
+        .then(async (connection) => {
+          if (isQuitting) {
+            return;
+          }
+          activeDataDir =
+            sidecar.getDataDir() ?? activeDataDir ?? resolveCurrentDefaultDataDir(repoRoot);
+          chrome?.setDataDir(activeDataDir);
+          browserRpc?.start();
+          windows?.broadcastEvent(SIDECAR_READY_EVENT, {
+            backend: connection,
+          });
+          // Hydrate persisted developer_mode asynchronously once sidecar is ready.
+          const savedDeveloperMode = Boolean(
+            await sidecar
+              .invokeDesktopCommand('get_developer_mode', {}, 'main')
+              .catch(() => false)
+          );
+          if (!isQuitting && windows) {
+            windows.applyDeveloperMode(savedDeveloperMode);
+            windows.broadcastEvent(DEVELOPER_MODE_CHANGED_EVENT, {
+              enabled: savedDeveloperMode,
+            });
+          }
+        })
+        .catch(async (error) => {
+          if (isQuitting) {
+            return;
+          }
+          const err = error instanceof Error ? error : new Error(String(error));
+          console.error('[electron:main] sidecar startup failed:', err);
+          recordCrash('electron-sidecar:startup-failed', err.message, err.stack);
+          windows?.broadcastEvent(SIDECAR_EXITED_EVENT, {
+            code: null,
+            signal: null,
+            willRestart: false,
+            attempt: 0,
+            maxAttempts: 0,
+            exhausted: true,
+          });
+          browserRpc?.stop();
+          browser.destroy();
+          toast?.destroy();
+          chrome?.destroy();
+          await sidecar.shutdown();
+          app.exit(1);
+        });
+
       // Optional smoke-test hook: exits cleanly once the renderer boots and proves bridge + backend + M3/M4 IPC & browser connectivity.
       if (smokeMode) {
         mainWin.webContents.once('did-finish-load', () => {
           void (async () => {
             try {
+              await sidecarReadyHandled;
               const bridgeConnected =
                 (await browserRpc?.waitUntilConnected(3_000)) ?? false;
 

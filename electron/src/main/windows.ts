@@ -1,5 +1,5 @@
-import fs from 'node:fs';
-import path from 'node:path';
+import fs from "node:fs";
+import path from "node:path";
 
 import {
   BrowserWindow,
@@ -12,7 +12,7 @@ import {
   type Session,
   type WebContents,
   shell,
-} from 'electron';
+} from "electron";
 
 import {
   DEFAULT_APP_USER_MODEL_ID,
@@ -26,20 +26,20 @@ import {
   isLocalDesktopWindowLabel,
   settingsWindowLabelForCaller,
   type HostClientProfileView,
-} from '../shared/ipcContract';
+} from "../shared/ipcContract";
 
-const MAIN_WINDOW_LABEL = 'main';
-const DESKTOP_TOAST_WINDOW_LABEL = 'desktop-toast';
+const MAIN_WINDOW_LABEL = "main";
+const DESKTOP_TOAST_WINDOW_LABEL = "desktop-toast";
 const REVEAL_FALLBACK_MS = 2_500;
-const ALLOWED_EXTERNAL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:']);
+const ALLOWED_EXTERNAL_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
 const SAFE_APP_PERMISSIONS = new Set([
-  'clipboard-read',
-  'clipboard-sanitized-write',
-  'fullscreen',
-  'notifications',
-  'media',
-  'pointerLock',
-  'window-management',
+  "clipboard-read",
+  "clipboard-sanitized-write",
+  "fullscreen",
+  "notifications",
+  "media",
+  "pointerLock",
+  "window-management",
 ]);
 const PERMISSION_HOOKED_SESSIONS = new WeakSet<Session>();
 
@@ -65,7 +65,7 @@ export interface OpenSettingsWindowOptions {
 function normalizeUrlOrigin(rawUrl: string): string | null {
   try {
     const parsed = new URL(rawUrl);
-    if (parsed.origin && parsed.origin !== 'null') {
+    if (parsed.origin && parsed.origin !== "null") {
       return parsed.origin;
     }
     if (parsed.protocol && parsed.host) {
@@ -101,7 +101,7 @@ export function evaluatePermissionRequest(params: {
 export function installSessionPermissionHandlers(
   targetSession: Session,
   allowedAppOrigin: string,
-  options: { isWebviewSession?: boolean } = {}
+  options: { isWebviewSession?: boolean } = {},
 ): void {
   if (PERMISSION_HOOKED_SESSIONS.has(targetSession)) {
     return;
@@ -111,47 +111,47 @@ export function installSessionPermissionHandlers(
   targetSession.setPermissionRequestHandler?.(
     (webContents, permission, callback, details) => {
       const isWebview = Boolean(
-        options.isWebviewSession || webContents?.getType?.() === 'webview'
+        options.isWebviewSession || webContents?.getType?.() === "webview",
       );
-      const origin = details?.requestingUrl || webContents?.getURL?.() || '';
+      const origin = details?.requestingUrl || webContents?.getURL?.() || "";
       callback(
         evaluatePermissionRequest({
           origin,
           allowedAppOrigin,
           permission,
           isWebview,
-        })
+        }),
       );
-    }
+    },
   );
 
   targetSession.setPermissionCheckHandler?.(
     (webContents, permission, requestingOrigin) => {
       const isWebview = Boolean(
-        options.isWebviewSession || webContents?.getType?.() === 'webview'
+        options.isWebviewSession || webContents?.getType?.() === "webview",
       );
-      const origin = requestingOrigin || webContents?.getURL?.() || '';
+      const origin = requestingOrigin || webContents?.getURL?.() || "";
       return evaluatePermissionRequest({
         origin,
         allowedAppOrigin,
         permission,
         isWebview,
       });
-    }
+    },
   );
 }
 
 function normalizeSettingsPath(rawPath?: string | null): string {
-  const trimmed = (rawPath ?? '/settings').trim();
+  const trimmed = (rawPath ?? "/settings").trim();
   if (
-    trimmed === '/settings' ||
-    trimmed.startsWith('/settings/') ||
-    trimmed === '/plugins' ||
-    trimmed.startsWith('/plugins/')
+    trimmed === "/settings" ||
+    trimmed.startsWith("/settings/") ||
+    trimmed === "/plugins" ||
+    trimmed.startsWith("/plugins/")
   ) {
     return trimmed;
   }
-  return '/settings';
+  return "/settings";
 }
 
 function isSafeExternalUrl(rawUrl: string): boolean {
@@ -164,14 +164,24 @@ function isSafeExternalUrl(rawUrl: string): boolean {
 }
 
 export function isDevToolsShortcut(
-  input: Pick<Input, 'type' | 'key' | 'code' | 'control' | 'shift' | 'alt' | 'meta' | 'isAutoRepeat'>,
-  platform: NodeJS.Platform = process.platform
+  input: Pick<
+    Input,
+    | "type"
+    | "key"
+    | "code"
+    | "control"
+    | "shift"
+    | "alt"
+    | "meta"
+    | "isAutoRepeat"
+  >,
+  platform: NodeJS.Platform = process.platform,
 ): boolean {
-  if (input.type !== 'keyDown' || input.isAutoRepeat) {
+  if (input.type !== "keyDown" || input.isAutoRepeat) {
     return false;
   }
   const f12 =
-    (input.key === 'F12' || input.code === 'F12') &&
+    (input.key === "F12" || input.code === "F12") &&
     !input.control &&
     !input.shift &&
     !input.alt &&
@@ -179,12 +189,11 @@ export function isDevToolsShortcut(
   if (f12) {
     return true;
   }
-  const isKeyI =
-    input.code === 'KeyI' || input.key.toLowerCase() === 'i';
+  const isKeyI = input.code === "KeyI" || input.key.toLowerCase() === "i";
   if (!isKeyI) {
     return false;
   }
-  if (platform === 'darwin') {
+  if (platform === "darwin") {
     return input.meta && input.alt && !input.control && !input.shift;
   }
   return input.control && input.shift && !input.alt && !input.meta;
@@ -193,29 +202,36 @@ export function isDevToolsShortcut(
 export function matchReloadShortcut(
   input: Pick<
     Input,
-    'type' | 'key' | 'code' | 'control' | 'shift' | 'alt' | 'meta' | 'isAutoRepeat'
+    | "type"
+    | "key"
+    | "code"
+    | "control"
+    | "shift"
+    | "alt"
+    | "meta"
+    | "isAutoRepeat"
   >,
-  platform: NodeJS.Platform = process.platform
-): 'reload' | 'force-reload' | null {
-  if (input.type !== 'keyDown' || input.isAutoRepeat) {
+  platform: NodeJS.Platform = process.platform,
+): "reload" | "force-reload" | null {
+  if (input.type !== "keyDown" || input.isAutoRepeat) {
     return null;
   }
-  const isF5 = input.key === 'F5' || input.code === 'F5';
+  const isF5 = input.key === "F5" || input.code === "F5";
   if (isF5 && !input.alt && !input.meta) {
-    return input.control || input.shift ? 'force-reload' : 'reload';
+    return input.control || input.shift ? "force-reload" : "reload";
   }
-  const isKeyR = input.code === 'KeyR' || input.key.toLowerCase() === 'r';
+  const isKeyR = input.code === "KeyR" || input.key.toLowerCase() === "r";
   if (!isKeyR) {
     return null;
   }
-  if (platform === 'darwin') {
+  if (platform === "darwin") {
     if (input.meta && !input.control && !input.alt) {
-      return input.shift ? 'force-reload' : 'reload';
+      return input.shift ? "force-reload" : "reload";
     }
     return null;
   }
   if (input.control && input.shift && !input.alt && !input.meta) {
-    return 'force-reload';
+    return "force-reload";
   }
   return null;
 }
@@ -265,7 +281,11 @@ export class WindowManager {
     this.clearHiddenIdleTimer(label);
     const timer = setTimeout(() => {
       this.hiddenIdleTimers.delete(label);
-      if (this.windows.get(label) !== win || win.isDestroyed() || win.isVisible()) {
+      if (
+        this.windows.get(label) !== win ||
+        win.isDestroyed() ||
+        win.isVisible()
+      ) {
         return;
       }
       win.destroy();
@@ -313,7 +333,7 @@ export class WindowManager {
     if (win.isDestroyed()) {
       return;
     }
-    if (this.platform === 'darwin' && win.isFullScreen?.()) {
+    if (this.platform === "darwin" && win.isFullScreen?.()) {
       if (this.pendingFullscreenHide.has(win)) {
         return;
       }
@@ -326,10 +346,10 @@ export class WindowManager {
       };
       this.pendingFullscreenHide.set(win, () => {
         if (!win.isDestroyed()) {
-          win.removeListener('leave-full-screen', handleLeaveFullScreen);
+          win.removeListener("leave-full-screen", handleLeaveFullScreen);
         }
       });
-      win.once('leave-full-screen', handleLeaveFullScreen);
+      win.once("leave-full-screen", handleLeaveFullScreen);
       win.setFullScreen(false);
       return;
     }
@@ -375,7 +395,7 @@ export class WindowManager {
   registerAuxiliaryWebContents(webContents: WebContents, label: string): void {
     this.labelsByWebContents.set(webContents, label);
     this.auxiliaryWebContents.add(webContents);
-    webContents.once?.('destroyed', () => {
+    webContents.once?.("destroyed", () => {
       this.auxiliaryWebContents.delete(webContents);
     });
   }
@@ -462,16 +482,17 @@ export class WindowManager {
   }
 
   applyWindowsAppDetails(win: BrowserWindow, icoPath?: string): void {
-    if (process.platform !== 'win32' || win.isDestroyed()) {
+    if (process.platform !== "win32" || win.isDestroyed()) {
       return;
     }
     const candidateIco =
       icoPath && fs.existsSync(icoPath)
         ? icoPath
-        : this.currentAppIconIcoPath && fs.existsSync(this.currentAppIconIcoPath)
+        : this.currentAppIconIcoPath &&
+            fs.existsSync(this.currentAppIconIcoPath)
           ? this.currentAppIconIcoPath
           : this.options.iconPath &&
-              this.options.iconPath.toLowerCase().endsWith('.ico') &&
+              this.options.iconPath.toLowerCase().endsWith(".ico") &&
               fs.existsSync(this.options.iconPath)
             ? this.options.iconPath
             : undefined;
@@ -479,7 +500,7 @@ export class WindowManager {
       win.setAppDetails({
         appId: this.options.appUserModelId ?? DEFAULT_APP_USER_MODEL_ID,
         ...(candidateIco ? { appIconPath: candidateIco, appIconIndex: 0 } : {}),
-        relaunchDisplayName: this.options.devUrl ? 'Dimo Dev' : 'Dimo',
+        relaunchDisplayName: this.options.devUrl ? "Dimo Dev" : "Dimo",
       });
     } catch {
       // Ignore on environments where setAppDetails is unavailable.
@@ -491,7 +512,7 @@ export class WindowManager {
     if (icoPath) {
       this.currentAppIconIcoPath = icoPath;
     }
-    if (process.platform === 'darwin') {
+    if (process.platform === "darwin") {
       return;
     }
     for (const [label, win] of this.windows.entries()) {
@@ -502,10 +523,10 @@ export class WindowManager {
     }
   }
 
-  resolveAppUrl(routePath = '/'): string {
-    const cleanPath = routePath.startsWith('/') ? routePath : `/${routePath}`;
+  resolveAppUrl(routePath = "/"): string {
+    const cleanPath = routePath.startsWith("/") ? routePath : `/${routePath}`;
     if (this.options.devUrl) {
-      const base = this.options.devUrl.replace(/\/+$/, '');
+      const base = this.options.devUrl.replace(/\/+$/, "");
       return `${base}${cleanPath}`;
     }
     return `${DESKTOP_APP_ORIGIN}${cleanPath}`;
@@ -537,22 +558,22 @@ export class WindowManager {
   }
 
   private baseChromeOptions(
-    label: string
+    label: string,
   ): Partial<BrowserWindowConstructorOptions> {
     const icon = this.resolveWindowIcon(label);
 
-    if (process.platform === 'darwin') {
+    if (process.platform === "darwin") {
       return {
-        titleBarStyle: 'hiddenInset',
+        titleBarStyle: "hiddenInset",
         trafficLightPosition: { x: 14, y: 14 },
-        backgroundColor: '#121316',
+        backgroundColor: "#121316",
         ...(icon ? { icon } : {}),
       };
     }
 
     return {
       frame: false,
-      backgroundColor: '#121316',
+      backgroundColor: "#121316",
       ...(icon ? { icon } : {}),
     };
   }
@@ -570,13 +591,13 @@ export class WindowManager {
     }
 
     const win = this.createWindowInternal(MAIN_WINDOW_LABEL, {
-      title: this.options.devUrl ? 'Dimo Dev' : 'Dimo',
+      title: this.options.devUrl ? "Dimo Dev" : "Dimo",
       width: 1400,
       height: 900,
       minWidth: 960,
       minHeight: 600,
-      routePath: '/',
-      hideOnClose: 'when-tray-enabled',
+      routePath: "/",
+      hideOnClose: "when-tray-enabled",
     });
 
     this.scheduleRevealFallback(win);
@@ -592,13 +613,13 @@ export class WindowManager {
     this.appWindowCounter += 1;
 
     const win = this.createWindowInternal(label, {
-      title: this.options.devUrl ? 'Dimo Dev' : 'Dimo',
+      title: this.options.devUrl ? "Dimo Dev" : "Dimo",
       width: 1400,
       height: 900,
       minWidth: 960,
       minHeight: 600,
-      routePath: '/',
-      hideOnClose: 'never',
+      routePath: "/",
+      hideOnClose: "never",
     });
     this.scheduleRevealFallback(win);
     return label;
@@ -625,8 +646,8 @@ export class WindowManager {
       height: 900,
       minWidth: 800,
       minHeight: 600,
-      routePath: '/',
-      hideOnClose: 'never',
+      routePath: "/",
+      hideOnClose: "never",
       partition: `persist:${label}`,
     });
     this.scheduleRevealFallback(win);
@@ -651,22 +672,22 @@ export class WindowManager {
     if (this.quitting || this.options.smokeMode || !this.getMainWindow()) {
       return undefined;
     }
-    const existing = this.getWindow('settings');
+    const existing = this.getWindow("settings");
     if (existing) {
       return existing;
     }
 
-    const win = this.createWindowInternal('settings', {
-      title: 'Settings',
+    const win = this.createWindowInternal("settings", {
+      title: "Settings",
       width: 1100,
       height: 800,
       minWidth: 800,
       minHeight: 600,
-      routePath: '/settings',
-      hideOnClose: 'always',
+      routePath: "/settings",
+      hideOnClose: "always",
     });
     this.prewarmingWindows.add(win);
-    win.webContents.once('did-finish-load', () => {
+    win.webContents.once("did-finish-load", () => {
       if (win.isDestroyed()) {
         return;
       }
@@ -676,27 +697,28 @@ export class WindowManager {
         this.navigateSettingsWindow(win, pendingRoute);
       }
     });
+    this.scheduleHiddenIdleDestroy("settings", win);
     return win;
   }
 
   openSettingsWindow(
     callerLabel: string,
-    options: OpenSettingsWindowOptions = {}
+    options: OpenSettingsWindowOptions = {},
   ): BrowserWindow {
     const label = settingsWindowLabelForCaller(callerLabel);
     const hostLabel = hostAppWindowLabel(label);
-    let defaultTitle = 'Settings';
+    let defaultTitle = "Settings";
     if (hostLabel) {
       const hostWin = this.getWindow(hostLabel);
-      const hostTitle = hostWin?.getTitle()?.trim() ?? '';
-      const hostName = hostTitle.startsWith('Dimo — ')
-        ? hostTitle.slice('Dimo — '.length).trim()
-        : '';
+      const hostTitle = hostWin?.getTitle()?.trim() ?? "";
+      const hostName = hostTitle.startsWith("Dimo — ")
+        ? hostTitle.slice("Dimo — ".length).trim()
+        : "";
       if (hostName.length > 0) {
         defaultTitle = `Settings — ${hostName}`;
       }
     }
-    const title = (options.title ?? '').trim() || defaultTitle;
+    const title = (options.title ?? "").trim() || defaultTitle;
     const routePath = normalizeSettingsPath(options.path);
 
     const existing = this.getWindow(label);
@@ -708,7 +730,7 @@ export class WindowManager {
       existing.setTitle(title);
 
       if (wasPrewarming && !isPrewarmedReady) {
-        if (routePath !== '/settings') {
+        if (routePath !== "/settings") {
           this.pendingSettingsRoutes.set(existing, routePath);
           this.navigateSettingsWindow(existing, routePath);
         }
@@ -734,7 +756,7 @@ export class WindowManager {
       minWidth: 800,
       minHeight: 600,
       routePath,
-      hideOnClose: 'always',
+      hideOnClose: "always",
       ...(hostLabel ? { partition: `persist:${hostLabel}` } : {}),
     });
     this.scheduleRevealFallback(win);
@@ -770,7 +792,7 @@ export class WindowManager {
   broadcastEvent(
     event: string,
     payload?: unknown,
-    excludeWebContentsId?: number
+    excludeWebContentsId?: number,
   ): void {
     const sentWebContentsIds = new Set<number>();
     for (const win of this.windows.values()) {
@@ -794,7 +816,8 @@ export class WindowManager {
         continue;
       }
       if (
-        (excludeWebContentsId !== undefined && wc.id === excludeWebContentsId) ||
+        (excludeWebContentsId !== undefined &&
+          wc.id === excludeWebContentsId) ||
         sentWebContentsIds.has(wc.id)
       ) {
         continue;
@@ -805,7 +828,9 @@ export class WindowManager {
   }
 
   allWindows(): BrowserWindow[] {
-    return Array.from(this.windows.values()).filter((win) => !win.isDestroyed());
+    return Array.from(this.windows.values()).filter(
+      (win) => !win.isDestroyed(),
+    );
   }
 
   private createWindowInternal(
@@ -817,9 +842,9 @@ export class WindowManager {
       minWidth: number;
       minHeight: number;
       routePath: string;
-      hideOnClose: 'never' | 'always' | 'when-tray-enabled';
+      hideOnClose: "never" | "always" | "when-tray-enabled";
       partition?: string;
-    }
+    },
   ): BrowserWindow {
     const allowedOrigin = this.getAllowedAppOrigin();
     if (config.partition) {
@@ -857,7 +882,7 @@ export class WindowManager {
     }
 
     if (label === MAIN_WINDOW_LABEL) {
-      win.webContents.once('did-finish-load', () => {
+      win.webContents.once("did-finish-load", () => {
         this.options.onMainWindowLoaded?.();
       });
     }
@@ -886,30 +911,34 @@ export class WindowManager {
         }
       }, RESIZE_NOTIFY_COALESCE_MS);
     };
-    win.on('resize', notifyResizedCoalesced);
-    win.on('maximize', notifyResizedImmediate);
-    win.on('unmaximize', notifyResizedImmediate);
-    win.on('enter-full-screen', notifyResizedImmediate);
-    win.on('leave-full-screen', notifyResizedImmediate);
-    win.on('show', () => {
+    win.on("resize", notifyResizedCoalesced);
+    win.on("maximize", notifyResizedImmediate);
+    win.on("unmaximize", notifyResizedImmediate);
+    win.on("enter-full-screen", notifyResizedImmediate);
+    win.on("leave-full-screen", notifyResizedImmediate);
+    win.on("show", () => {
       this.clearHiddenIdleTimer(label);
     });
 
-    if (config.hideOnClose !== 'never') {
-      win.on('close', (event) => {
+    if (config.hideOnClose !== "never") {
+      win.on("close", (event) => {
         if (this.quitting || this.options.smokeMode) {
           return;
         }
-        if (label === 'settings' && !this.trayEnabled && !this.getMainWindow()) {
+        if (
+          label === "settings" &&
+          !this.trayEnabled &&
+          !this.getMainWindow()
+        ) {
           return;
         }
         if (
-          config.hideOnClose === 'always' ||
-          (config.hideOnClose === 'when-tray-enabled' && this.trayEnabled)
+          config.hideOnClose === "always" ||
+          (config.hideOnClose === "when-tray-enabled" && this.trayEnabled)
         ) {
           event.preventDefault();
           this.hideWindowSafely(win, () => {
-            if (config.hideOnClose === 'always') {
+            if (config.hideOnClose === "always") {
               this.scheduleHiddenIdleDestroy(label, win);
             }
           });
@@ -917,7 +946,7 @@ export class WindowManager {
       });
     }
 
-    win.on('closed', () => {
+    win.on("closed", () => {
       clearResizeNotifyTimer();
       this.clearHiddenIdleTimer(label);
       if (this.windows.get(label) === win) {
@@ -926,7 +955,7 @@ export class WindowManager {
       if (label === MAIN_WINDOW_LABEL) {
         this.options.onMainWindowClosed?.();
         if (!this.trayEnabled) {
-          const localSettings = this.getWindow('settings');
+          const localSettings = this.getWindow("settings");
           if (localSettings && !localSettings.isDestroyed()) {
             localSettings.destroy();
           }
@@ -946,7 +975,7 @@ export class WindowManager {
     });
 
     // Gate DevTools & reload shortcuts on Dev desktop or developer mode.
-    win.webContents.on('before-input-event', (event, input) => {
+    win.webContents.on("before-input-event", (event, input) => {
       if (isDevToolsShortcut(input, this.platform)) {
         event.preventDefault();
         if (!this.isDeveloperContextEnabled()) {
@@ -955,7 +984,7 @@ export class WindowManager {
         if (win.webContents.isDevToolsOpened()) {
           win.webContents.closeDevTools();
         } else {
-          win.webContents.openDevTools({ mode: 'detach' });
+          win.webContents.openDevTools({ mode: "detach" });
         }
         return;
       }
@@ -966,7 +995,7 @@ export class WindowManager {
         if (!this.isDeveloperContextEnabled()) {
           return;
         }
-        if (reloadKind === 'force-reload') {
+        if (reloadKind === "force-reload") {
           win.webContents.reloadIgnoringCache();
         } else {
           win.webContents.reload();
@@ -976,13 +1005,13 @@ export class WindowManager {
 
     // Fallback native developer context menu when the renderer does not intercept
     // `contextmenu` (e.g., blank error screen or crashed Vite dev bundle).
-    win.webContents.on('context-menu', (_event, params) => {
+    win.webContents.on("context-menu", (_event, params) => {
       if (!this.isDeveloperContextEnabled()) {
         return;
       }
       const menu = Menu?.buildFromTemplate?.([
         {
-          label: 'Reload',
+          label: "Reload",
           click: () => {
             if (!win.isDestroyed()) {
               win.webContents.reload();
@@ -990,16 +1019,16 @@ export class WindowManager {
           },
         },
         {
-          label: 'Force Reload',
+          label: "Force Reload",
           click: () => {
             if (!win.isDestroyed()) {
               win.webContents.reloadIgnoringCache();
             }
           },
         },
-        { type: 'separator' },
+        { type: "separator" },
         {
-          label: 'Inspect Element',
+          label: "Inspect Element",
           click: () => {
             if (!win.isDestroyed()) {
               win.webContents.inspectElement(params.x, params.y);
@@ -1007,13 +1036,13 @@ export class WindowManager {
           },
         },
         {
-          label: 'Toggle Developer Tools',
+          label: "Toggle Developer Tools",
           click: () => {
             if (win.isDestroyed()) return;
             if (win.webContents.isDevToolsOpened()) {
               win.webContents.closeDevTools();
             } else {
-              win.webContents.openDevTools({ mode: 'detach' });
+              win.webContents.openDevTools({ mode: "detach" });
             }
           },
         },
@@ -1026,10 +1055,10 @@ export class WindowManager {
       if (isSafeExternalUrl(url)) {
         void shell.openExternal(url);
       }
-      return { action: 'deny' };
+      return { action: "deny" };
     });
 
-    win.webContents.on('will-navigate', (event, targetUrl) => {
+    win.webContents.on("will-navigate", (event, targetUrl) => {
       const targetOrigin = normalizeUrlOrigin(targetUrl);
       const expectedOrigin = normalizeUrlOrigin(allowedOrigin);
       if (targetOrigin && expectedOrigin && targetOrigin === expectedOrigin) {
@@ -1052,8 +1081,8 @@ export class WindowManager {
         win.focus();
       }
     }, REVEAL_FALLBACK_MS);
-    win.once('show', () => clearTimeout(timer));
-    win.once('closed', () => clearTimeout(timer));
+    win.once("show", () => clearTimeout(timer));
+    win.once("closed", () => clearTimeout(timer));
   }
 
   private navigateSettingsWindow(win: BrowserWindow, routePath: string): void {
@@ -1076,20 +1105,24 @@ export function resolveDefaultIconPath(options: {
   repoRoot?: string;
 }): string | undefined {
   const filename =
-    process.platform === 'win32'
-      ? 'icon.ico'
-      : process.platform === 'darwin'
-        ? 'icon.icns'
-        : 'icon.png';
+    process.platform === "win32"
+      ? "icon.ico"
+      : process.platform === "darwin"
+        ? "icon.icns"
+        : "icon.png";
 
   const candidates: string[] = [];
   if (options.resourcesDir) {
-    candidates.push(path.join(options.resourcesDir, 'icons', filename));
+    candidates.push(path.join(options.resourcesDir, "icons", filename));
     candidates.push(path.join(options.resourcesDir, filename));
   }
   if (options.repoRoot) {
-    candidates.push(path.join(options.repoRoot, 'electron', 'build', 'icons', filename));
-    candidates.push(path.join(options.repoRoot, 'electron', 'build', 'icons', 'icon.png'));
+    candidates.push(
+      path.join(options.repoRoot, "electron", "build", "icons", filename),
+    );
+    candidates.push(
+      path.join(options.repoRoot, "electron", "build", "icons", "icon.png"),
+    );
   }
 
   return candidates.find((candidate) => fs.existsSync(candidate));

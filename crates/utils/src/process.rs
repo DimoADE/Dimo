@@ -45,6 +45,28 @@ pub fn configure_tokio_command_no_window(
     command
 }
 
+/// Host authentication secrets that must never leak to spawned agents,
+/// terminals, plugins, or preview child processes.
+pub const HOST_SECRET_ENV_KEYS: [&str; 2] = ["DIMO_DESKTOP_TOKEN", "DIMO_SERVER_TOKEN"];
+
+pub fn scrub_host_secret_env_std(
+    command: &mut std::process::Command,
+) -> &mut std::process::Command {
+    for key in HOST_SECRET_ENV_KEYS {
+        command.env_remove(key);
+    }
+    command
+}
+
+pub fn scrub_host_secret_env_tokio(
+    command: &mut tokio::process::Command,
+) -> &mut tokio::process::Command {
+    for key in HOST_SECRET_ENV_KEYS {
+        command.env_remove(key);
+    }
+    command
+}
+
 /// npm global shims on Windows are `.cmd` / `.bat`. Node's `spawn` without
 /// `shell: true` rejects those extensions (EINVAL after CVE-2024-27980).
 pub fn is_windows_batch_script(path: &Path) -> bool {

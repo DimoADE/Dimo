@@ -105,6 +105,42 @@ pub fn refresh_auto_proxy_env() {
     sync_env_proxy_vars(live_url.as_deref());
 }
 
+const ENV_NO_PROXY_KEYS: [&str; 2] = ["NO_PROXY", "no_proxy"];
+const LOOPBACK_NO_PROXY_ENTRIES: [&str; 3] = ["127.0.0.1", "localhost", "::1"];
+
+fn merge_loopback_no_proxy(existing: Option<&str>) -> String {
+    let mut entries: Vec<String> = existing
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect();
+    for loopback in LOOPBACK_NO_PROXY_ENTRIES {
+        if !entries
+            .iter()
+            .any(|entry| entry.eq_ignore_ascii_case(loopback))
+        {
+            entries.push(loopback.to_string());
+        }
+    }
+    entries.join(",")
+}
+
+fn ensure_loopback_no_proxy_env() {
+    let existing = ENV_NO_PROXY_KEYS
+        .iter()
+        .find_map(|key| std::env::var(key).ok())
+        .filter(|value| !value.trim().is_empty());
+    let merged = merge_loopback_no_proxy(existing.as_deref());
+    for key in ENV_NO_PROXY_KEYS {
+        let already_set = std::env::var(key).ok().as_deref() == Some(merged.as_str());
+        if !already_set {
+            unsafe { std::env::set_var(key, &merged) };
+        }
+    }
+}
+
 fn sync_env_proxy_vars(target: Option<&str>) {
     match target {
         Some(url) => {
@@ -114,6 +150,7 @@ fn sync_env_proxy_vars(target: Option<&str>) {
                     unsafe { std::env::set_var(key, url) };
                 }
             }
+            ensure_loopback_no_proxy_env();
         }
         None => {
             for key in ENV_PROXY_KEYS {
@@ -641,5 +678,17 @@ mod tests {
             *mode = ProcessProxyMode::Unmanaged;
         }
         super::sync_env_proxy_vars(expected_inherited.as_deref());
+    }
+
+    #[test]
+    fn merge_loopback_no_proxy_preserves_existing_and_adds_loopback() {
+        assert_eq!(
+            super::merge_loopback_no_proxy(None),
+            "127.0.0.1,localhost,::1"
+        );
+        assert_eq!(
+            super::merge_loopback_no_proxy(Some("corp.internal, LOCALHOST")),
+            "corp.internal,LOCALHOST,127.0.0.1,::1"
+        );
     }
 }

@@ -18,6 +18,7 @@ use uuid::Uuid;
 use super::session::SessionStatus;
 
 static ACTIVE_TURN_MUTATION_EPOCH: AtomicU64 = AtomicU64::new(1);
+static ACTIVE_BINDING_MUTATION_EPOCH: AtomicU64 = AtomicU64::new(1);
 
 pub fn bump_active_turn_mutation_epoch() {
     ACTIVE_TURN_MUTATION_EPOCH.fetch_add(1, Ordering::Release);
@@ -25,6 +26,14 @@ pub fn bump_active_turn_mutation_epoch() {
 
 pub fn active_turn_mutation_epoch() -> u64 {
     ACTIVE_TURN_MUTATION_EPOCH.load(Ordering::Acquire)
+}
+
+pub fn bump_active_binding_mutation_epoch() {
+    ACTIVE_BINDING_MUTATION_EPOCH.fetch_add(1, Ordering::Release);
+}
+
+pub fn active_binding_mutation_epoch() -> u64 {
+    ACTIVE_BINDING_MUTATION_EPOCH.load(Ordering::Acquire)
 }
 
 /// Legacy summary shape used by existing Tauri commands while the workbench
@@ -730,6 +739,7 @@ impl ConversationAgentBindingRecord {
         let mut tx = pool.begin().await?;
         let binding = Self::create_on_connection(&mut tx, id, input).await?;
         tx.commit().await?;
+        bump_active_binding_mutation_epoch();
         Ok(binding)
     }
 
@@ -741,6 +751,7 @@ impl ConversationAgentBindingRecord {
         let conversation_id = input.conversation_id;
         let binding = Self::insert_on_connection(conn, id, input).await?;
         Self::activate_on_connection(conn, conversation_id, id).await?;
+        bump_active_binding_mutation_epoch();
         Ok(binding)
     }
 
@@ -790,6 +801,7 @@ impl ConversationAgentBindingRecord {
         .bind(input.status.as_str())
         .fetch_one(&mut *conn)
         .await?;
+        bump_active_binding_mutation_epoch();
         Ok(binding)
     }
 
@@ -852,6 +864,7 @@ impl ConversationAgentBindingRecord {
                 "native binding identity cannot be replaced".into(),
             ));
         }
+        bump_active_binding_mutation_epoch();
         Ok(())
     }
 
@@ -872,7 +885,9 @@ impl ConversationAgentBindingRecord {
             sqlx::query("UPDATE conversation_agent_bindings SET current_mode = COALESCE(?, current_mode), config_selection_json = COALESCE(?, config_selection_json), updated_at = datetime('now', 'subsec') WHERE id = ?")
                 .bind(current_mode).bind(merged).bind(binding.id).execute(&mut *tx).await?;
         }
-        tx.commit().await
+        tx.commit().await?;
+        bump_active_binding_mutation_epoch();
+        Ok(())
     }
 
     /// Lock in the conversation's initial observed mode when the active binding
@@ -899,6 +914,7 @@ impl ConversationAgentBindingRecord {
         .bind(conversation_id)
         .execute(pool)
         .await?;
+        bump_active_binding_mutation_epoch();
         Ok(())
     }
 
@@ -943,6 +959,7 @@ impl ConversationAgentBindingRecord {
         .bind(conversation_id)
         .execute(executor)
         .await?;
+        bump_active_binding_mutation_epoch();
         Ok(())
     }
 }

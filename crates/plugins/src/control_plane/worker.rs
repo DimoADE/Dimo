@@ -106,6 +106,41 @@ impl PluginControlPlane {
         }
     }
 
+    async fn resolve_worker_restore(&self) -> Option<WorkerRestore> {
+        if let Some(restore) = self.worker_restore.read().await.clone() {
+            return Some(restore);
+        }
+        let lazy = self.lazy_worker_runtime.read().await.clone()?;
+        let node_executable = match lazy.worker_runtime.resolve().await {
+            Ok(node) => node,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "on-demand Plugin Worker Runtime resolution failed"
+                );
+                return None;
+            }
+        };
+        let restore = WorkerRestore {
+            node_executable,
+            candidate_root: lazy.candidate_root,
+            broker: lazy.broker,
+        };
+        *self.worker_restore.write().await = Some(restore.clone());
+        Some(restore)
+    }
+
+    async fn resolve_capability_broker(&self) -> Option<Arc<dyn CapabilityBroker>> {
+        if let Some(restore) = self.worker_restore.read().await.as_ref() {
+            return Some(restore.broker.clone());
+        }
+        self.lazy_worker_runtime
+            .read()
+            .await
+            .as_ref()
+            .map(|lazy| lazy.broker.clone())
+    }
+
     pub async fn activation_lease(&self, plugin_id: &str) -> Option<ActivationLease> {
         if let Some(lease) = self.activations.lease(plugin_id).await
             && !lease.is_terminal().await
@@ -118,9 +153,8 @@ impl PluginControlPlane {
         {
             return Some(lease);
         }
-        let restore = self.worker_restore.read().await.clone()?;
         let plugin = self.registry.plugin(plugin_id).await.ok().flatten()?;
-        if plugin.activation != PluginActivation::Enabled || plugin.entrypoints.worker.is_none() {
+        if plugin.activation != PluginActivation::Enabled {
             return None;
         }
         let generation = self
@@ -129,6 +163,18 @@ impl PluginControlPlane {
             .await
             .ok()
             .flatten()?;
+        if plugin.entrypoints.worker.is_none() {
+            let broker = self.resolve_capability_broker().await?;
+            let grants = candidate_capability_grants(&plugin.package, &[], &[]).ok()?;
+            let candidate = self
+                .activations
+                .prepare_lightweight_candidate_at(generation, &plugin.package, &grants, broker)
+                .ok()?;
+            let drain = self.activations.commit(candidate).await;
+            self.retire_after_drain(plugin_id.to_owned(), drain);
+            return self.activations.lease(plugin_id).await;
+        }
+        let restore = self.resolve_worker_restore().await?;
         if let Err(error) = self.ensure_plugin_dependencies(&plugin.package).await {
             tracing::warn!(
                 plugin_id = %plugin_id,
@@ -209,6 +255,11 @@ impl PluginControlPlane {
             }
             if plugin.entrypoints.worker.is_none() {
                 if let Some(generation) = self.registry.active_generation(plugin.id()).await?
+                    && self
+                        .activations
+                        .lease(plugin.id())
+                        .await
+                        .is_none_or(|lease| lease.activation().generation != generation)
                     && let Ok(grants) = candidate_capability_grants(&plugin.package, &[], &[])
                     && let Ok(candidate) = self.activations.prepare_lightweight_candidate_at(
                         generation,
@@ -240,9 +291,11 @@ impl PluginControlPlane {
                         ));
                     }
                     let digest =
-                        crate::package_content_digest(&plugin.source.path).map_err(|error| {
-                            WorkerHostError::external("plugin_source_invalid", error)
-                        })?;
+                        crate::digest::package_content_digest_async(plugin.source.path.clone())
+                            .await
+                            .map_err(|error| {
+                                WorkerHostError::external("plugin_source_invalid", error)
+                            })?;
                     package
                         .freeze_execution_root(candidate_root, &digest)
                         .map_err(|error| {
@@ -276,19 +329,33 @@ impl PluginControlPlane {
                 self.ensure_runtime_readiness(plugin.id(), &plugin.package)
                     .await?;
                 if eager_workers || !plugin.package.app.host_services.is_empty() {
-                    let candidate = self
-                        .activations
-                        .prepare_candidate_at(
-                            generation,
-                            node_executable,
-                            &plugin.package,
-                            &grants,
-                            broker.clone(),
-                        )
-                        .await?;
-                    let drain = self.activations.commit(candidate).await;
-                    self.retire_after_drain(plugin.id().to_owned(), drain);
-                    if let Some(lease) = self.activations.lease(plugin.id()).await {
+                    let already_active = match self.activations.lease(plugin.id()).await {
+                        Some(existing)
+                            if existing.activation().generation == generation
+                                && !existing.is_terminal().await =>
+                        {
+                            Some(existing)
+                        }
+                        _ => None,
+                    };
+                    let lease = if let Some(existing) = already_active {
+                        Some(existing)
+                    } else {
+                        let candidate = self
+                            .activations
+                            .prepare_candidate_at(
+                                generation,
+                                node_executable,
+                                &plugin.package,
+                                &grants,
+                                broker.clone(),
+                            )
+                            .await?;
+                        let drain = self.activations.commit(candidate).await;
+                        self.retire_after_drain(plugin.id().to_owned(), drain);
+                        self.activations.lease(plugin.id()).await
+                    };
+                    if let Some(lease) = lease {
                         self.host_services
                             .start(plugin.id(), lease, &plugin.package);
                     }

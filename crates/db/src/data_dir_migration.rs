@@ -1,6 +1,6 @@
 use std::{
     path::{Path, PathBuf},
-    str::FromStr,
+    time::Duration,
 };
 
 use serde_json::Value;
@@ -26,9 +26,10 @@ pub async fn remap_sqlite_file_data_dir_paths(
     old_dir: &Path,
     new_dir: &Path,
 ) -> Result<(), Error> {
-    let options =
-        SqliteConnectOptions::from_str(&format!("sqlite://{}", db_file.to_string_lossy()))?
-            .create_if_missing(false);
+    let options = SqliteConnectOptions::new()
+        .filename(db_file)
+        .create_if_missing(false)
+        .busy_timeout(Duration::from_secs(15));
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(options)
@@ -63,7 +64,8 @@ pub async fn inspect_sqlite_content_summary(db_file: &Path) -> Option<DbContentS
     let options = SqliteConnectOptions::new()
         .filename(db_file)
         .create_if_missing(false)
-        .read_only(true);
+        .read_only(true)
+        .busy_timeout(std::time::Duration::from_secs(5));
     let pool = match SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(options)
@@ -86,10 +88,18 @@ pub async fn inspect_sqlite_content_summary(db_file: &Path) -> Option<DbContentS
         }
     };
 
-    let conversation_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM conversations")
+    // Canonical Dimo schema stores conversations in `sessions` (with fallback
+    // to legacy `conversations` table if an older database schema is inspected).
+    let conversation_count = match sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sessions")
         .fetch_one(&pool)
         .await
-        .unwrap_or(0);
+    {
+        Ok(count) => count,
+        Err(_) => sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM conversations")
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(0),
+    };
     let project_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM projects")
         .fetch_one(&pool)
         .await
@@ -303,16 +313,87 @@ fn infer_old_data_dir_from_plugin_source_path(
     None
 }
 
+const DATA_DIR_RECONCILIATION_SCHEMA_VERSION: i64 = 1;
+
+fn normalized_data_dir_key(dir: &Path) -> String {
+    let normalized = utils::path::normalize_windows_extended_path_prefix(dir);
+    let slash = normalized.to_string_lossy().replace('\\', "/");
+    let trimmed = slash.trim_end_matches('/');
+    if cfg!(windows) {
+        trimmed.to_ascii_lowercase()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+async fn load_reconciled_data_dir_keys(
+    conn: &mut SqliteConnection,
+    new_key: &str,
+) -> Result<std::collections::HashSet<String>, Error> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS data_dir_path_reconciliations (
+            old_dir TEXT NOT NULL,
+            new_dir TEXT NOT NULL,
+            schema_version INTEGER NOT NULL,
+            reconciled_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (old_dir, new_dir, schema_version)
+        )",
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT old_dir FROM data_dir_path_reconciliations
+         WHERE new_dir = ?1 AND schema_version = ?2",
+    )
+    .bind(new_key)
+    .bind(DATA_DIR_RECONCILIATION_SCHEMA_VERSION)
+    .fetch_all(&mut *conn)
+    .await?;
+
+    Ok(rows.into_iter().collect())
+}
+
+async fn record_reconciled_data_dir_key(
+    pool: &SqlitePool,
+    old_key: &str,
+    new_key: &str,
+) -> Result<(), Error> {
+    sqlx::query(
+        "INSERT OR REPLACE INTO data_dir_path_reconciliations
+            (old_dir, new_dir, schema_version, reconciled_at)
+         VALUES (?1, ?2, ?3, datetime('now'))",
+    )
+    .bind(old_key)
+    .bind(new_key)
+    .bind(DATA_DIR_RECONCILIATION_SCHEMA_VERSION)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Reconciles paths in `pool` for databases already moved or copied into
 /// `data_dir` by an earlier version of Dimo before plugin/runtime/Windows-verbatim
 /// remapping existed.
+///
+/// Previously reconciled `(old_dir, new_dir)` pairs recorded in
+/// `.adopted-legacy-source` are skipped on subsequent startups unless live
+/// stale plugin rows are still detected in SQLite.
 pub async fn reconcile_migrated_data_dir_paths(
     pool: &SqlitePool,
     data_dir: &Path,
 ) -> Result<Vec<PathBuf>, Error> {
+    let new_key = normalized_data_dir_key(data_dir);
+    let mut conn = pool.acquire().await?;
+    let already_reconciled = load_reconciled_data_dir_keys(&mut conn, &new_key).await?;
+
     let mut candidates = Vec::<PathBuf>::new();
-    let mut push_candidate = |dir: PathBuf| {
+    let mut push_candidate = |dir: PathBuf, force: bool| {
         if utils::assets::same_data_dir(&dir, data_dir) {
+            return;
+        }
+        let key = normalized_data_dir_key(&dir);
+        if key.is_empty() || (!force && already_reconciled.contains(&key)) {
             return;
         }
         if !candidates
@@ -324,10 +405,9 @@ pub async fn reconcile_migrated_data_dir_paths(
     };
 
     for recorded in utils::assets::read_adopted_legacy_sources(data_dir) {
-        push_candidate(recorded);
+        push_candidate(recorded, false);
     }
 
-    let mut conn = pool.acquire().await?;
     let v4_cols = table_columns(&mut conn, "plugin_packages_v4").await?;
     if table_has_all_columns(&v4_cols, &["source_path", "package_json"]) {
         let rows: Vec<(String, String)> =
@@ -338,7 +418,7 @@ pub async fn reconcile_migrated_data_dir_paths(
             if let Some(old_dir) =
                 infer_old_data_dir_from_plugin_source_path(&source_path, data_dir)
             {
-                push_candidate(old_dir);
+                push_candidate(old_dir, true);
             }
             if let Ok(parsed) = serde_json::from_str::<Value>(&package_json) {
                 if let Some(src_path) = parsed
@@ -348,13 +428,13 @@ pub async fn reconcile_migrated_data_dir_paths(
                     && let Some(old_dir) =
                         infer_old_data_dir_from_plugin_source_path(src_path, data_dir)
                 {
-                    push_candidate(old_dir);
+                    push_candidate(old_dir, true);
                 }
                 if let Some(exec_root) = parsed.get("executionRoot").and_then(Value::as_str)
                     && let Some(old_dir) =
                         infer_old_data_dir_from_plugin_source_path(exec_root, data_dir)
                 {
-                    push_candidate(old_dir);
+                    push_candidate(old_dir, true);
                 }
             }
         }
@@ -371,7 +451,7 @@ pub async fn reconcile_migrated_data_dir_paths(
             if let Some(old_dir) =
                 infer_old_data_dir_from_plugin_source_path(&source_path, data_dir)
             {
-                push_candidate(old_dir);
+                push_candidate(old_dir, true);
             }
             if let Ok(parsed) = serde_json::from_str::<Value>(&package_json)
                 && let Some(src_path) = parsed
@@ -381,7 +461,7 @@ pub async fn reconcile_migrated_data_dir_paths(
                 && let Some(old_dir) =
                     infer_old_data_dir_from_plugin_source_path(src_path, data_dir)
             {
-                push_candidate(old_dir);
+                push_candidate(old_dir, true);
             }
         }
     }
@@ -389,6 +469,10 @@ pub async fn reconcile_migrated_data_dir_paths(
 
     for old_dir in &candidates {
         remap_sqlite_data_dir_paths(pool, old_dir, data_dir).await?;
+        let old_key = normalized_data_dir_key(old_dir);
+        if !old_key.is_empty() && old_key != new_key {
+            record_reconciled_data_dir_key(pool, &old_key, &new_key).await?;
+        }
     }
 
     Ok(candidates)
@@ -846,6 +930,81 @@ mod tests {
             Path::new(parsed["source"]["path"].as_str().unwrap()),
             live_snapshot.as_path()
         );
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn reconcile_migrated_data_dir_paths_skips_already_reconciled_sources_until_data_dir_moves()
+     {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let old_dir = temp.path().join("legacy_data");
+        let new_dir = temp.path().join("current_data");
+        let moved_dir = temp.path().join("moved_data");
+        std::fs::create_dir_all(&new_dir).expect("mkdir new_dir");
+        std::fs::create_dir_all(&moved_dir).expect("mkdir moved_dir");
+
+        utils::assets::record_adopted_legacy_source(&new_dir, &old_dir)
+            .expect("record legacy source for new_dir");
+        utils::assets::record_adopted_legacy_source(&moved_dir, &new_dir)
+            .expect("record legacy source for moved_dir");
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(new_dir.join("db.sqlite"))
+                    .create_if_missing(true),
+            )
+            .await
+            .expect("open sqlite");
+
+        sqlx::query("CREATE TABLE repos (id TEXT PRIMARY KEY, path TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let old_repo = old_dir.join("repos").join("r1");
+        sqlx::query("INSERT INTO repos (id, path) VALUES ('r1', ?1)")
+            .bind(old_repo.to_string_lossy().as_ref())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let first = reconcile_migrated_data_dir_paths(&pool, &new_dir)
+            .await
+            .expect("first reconcile");
+        assert_eq!(first.len(), 1);
+
+        let remapped: String = sqlx::query_scalar("SELECT path FROM repos WHERE id = 'r1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(Path::new(&remapped), new_dir.join("repos").join("r1"));
+
+        // Second startup on the same data_dir skips already-reconciled recorded sources.
+        let second = reconcile_migrated_data_dir_paths(&pool, &new_dir)
+            .await
+            .expect("second reconcile");
+        assert!(
+            second.is_empty(),
+            "expected idempotent skip on repeat startup, got {second:?}"
+        );
+
+        // If the DB is later moved to a new data_dir, the new target key reconciles once.
+        let moved = reconcile_migrated_data_dir_paths(&pool, &moved_dir)
+            .await
+            .expect("moved reconcile");
+        assert_eq!(moved.len(), 1);
+        let moved_path: String = sqlx::query_scalar("SELECT path FROM repos WHERE id = 'r1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(Path::new(&moved_path), moved_dir.join("repos").join("r1"));
+
+        let moved_repeat = reconcile_migrated_data_dir_paths(&pool, &moved_dir)
+            .await
+            .expect("moved repeat reconcile");
+        assert!(moved_repeat.is_empty());
 
         pool.close().await;
     }

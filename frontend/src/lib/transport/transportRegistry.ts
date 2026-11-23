@@ -26,8 +26,15 @@ export const fallbackDesktopTransport: BackendTransport = {
 };
 
 export function getLocalDesktopTransport(): BackendTransport {
-  if (hasElectronDesktopRuntime() && window.dimoDesktop?.backend) {
-    return getElectronBackendTransport();
+  if (hasElectronDesktopRuntime()) {
+    const desktop = window.dimoDesktop;
+    const status =
+      typeof desktop?.getSidecarStatus === 'function'
+        ? desktop.getSidecarStatus()
+        : desktop?.sidecarStatus;
+    if (desktop?.backend || status === 'starting' || status === 'restarting') {
+      return getElectronBackendTransport();
+    }
   }
   return fallbackDesktopTransport;
 }

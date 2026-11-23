@@ -126,14 +126,18 @@ fn prompt_started(prompt_id: AgentPromptId, session_id: AgentSessionId) -> Agent
 }
 
 fn test_recorder(pool: SqlitePool) -> ConversationAgentEventRecorder {
+    let read_pool = pool.clone();
     ConversationAgentEventRecorder {
         pool,
+        read_pool,
         deployment: None,
         conversation_context: None,
         event_publisher: None,
         coalescer: StreamingThrottleCoalescer::new(),
         active_turn_cache: std::collections::HashMap::new(),
         cached_turn_epoch: db::models::conversation::active_turn_mutation_epoch(),
+        active_binding_cache: std::collections::HashMap::new(),
+        cached_binding_epoch: db::models::conversation::active_binding_mutation_epoch(),
         pending_step_text: std::collections::HashMap::new(),
         turn_had_tool_call: std::collections::HashSet::new(),
         turn_db_lookups: 0,

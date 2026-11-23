@@ -22,6 +22,107 @@ use utils::{
 static WORKTREE_CREATION_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+fn worktree_lock_key(path: &Path) -> String {
+    let normalized = utils::path::normalize_windows_extended_path_prefix(path);
+    let raw = normalized.to_string_lossy();
+    #[cfg(windows)]
+    {
+        raw.replace('/', "\\")
+            .trim_end_matches('\\')
+            .to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        raw.trim_end_matches('/').to_string()
+    }
+}
+
+fn acquire_worktree_lock(path: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    let key = worktree_lock_key(path);
+    let mut locks = WORKTREE_CREATION_LOCKS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    locks.retain(|k, lock| k == &key || Arc::strong_count(lock) > 1);
+    locks
+        .entry(key)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+fn clear_readonly_recursive(path: &Path) {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            return;
+        }
+        #[cfg(windows)]
+        #[allow(clippy::permissions_set_readonly_false)]
+        {
+            let mut perms = meta.permissions();
+            if perms.readonly() {
+                perms.set_readonly(false);
+                let _ = fs::set_permissions(path, perms);
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = meta.permissions();
+            let mode = perms.mode();
+            let needed = if meta.file_type().is_dir() {
+                0o700
+            } else {
+                0o200
+            };
+            if (mode & needed) != needed {
+                perms.set_mode(mode | needed);
+                let _ = fs::set_permissions(path, perms);
+            }
+        }
+        if meta.file_type().is_dir()
+            && let Ok(entries) = fs::read_dir(path)
+        {
+            for entry in entries.flatten() {
+                clear_readonly_recursive(&entry.path());
+            }
+        }
+    }
+}
+
+fn is_retryable_remove_dir_error(err: &std::io::Error) -> bool {
+    if err.kind() == std::io::ErrorKind::PermissionDenied {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        // ERROR_ACCESS_DENIED (5), ERROR_SHARING_VIOLATION (32), ERROR_DIR_NOT_EMPTY (145)
+        matches!(err.raw_os_error(), Some(5 | 32 | 145))
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn remove_dir_all_retrying(path: &Path) -> std::io::Result<()> {
+    const MAX_ATTEMPTS: usize = 6;
+    let mut delay_ms = 50_u64;
+    for attempt in 0..MAX_ATTEMPTS {
+        match fs::remove_dir_all(path) {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => {
+                if !is_retryable_remove_dir_error(&err) || attempt + 1 == MAX_ATTEMPTS {
+                    return Err(err);
+                }
+                clear_readonly_recursive(path);
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                delay_ms = (delay_ms * 2).min(500);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct WorktreeCleanup {
     pub worktree_path: PathBuf,
@@ -183,13 +284,7 @@ impl WorktreeManager {
         let path_str = worktree_path.to_string_lossy().to_string();
 
         // Get or create a lock for this specific worktree path
-        let lock = {
-            let mut locks = WORKTREE_CREATION_LOCKS.lock().unwrap();
-            locks
-                .entry(path_str.clone())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-        };
+        let lock = acquire_worktree_lock(worktree_path);
 
         // Acquire the lock for this specific worktree path
         let _guard = lock.lock().await;
@@ -520,7 +615,7 @@ impl WorktreeManager {
                 "Removing existing worktree directory: {}",
                 worktree_path.display()
             );
-            std::fs::remove_dir_all(worktree_path).map_err(WorktreeError::Io)?;
+            remove_dir_all_retrying(worktree_path).map_err(WorktreeError::Io)?;
         }
 
         // Step 4: Good-practice to clean up any other stale admin entries
@@ -666,7 +761,7 @@ impl WorktreeManager {
                     "Force removing git worktree metadata: {}",
                     git_worktree_metadata_path.display()
                 );
-                std::fs::remove_dir_all(&git_worktree_metadata_path)?;
+                remove_dir_all_retrying(&git_worktree_metadata_path)?;
             }
         }
 
@@ -696,13 +791,7 @@ impl WorktreeManager {
         let path_str = worktree.worktree_path.to_string_lossy().to_string();
 
         // Get the same lock to ensure we don't interfere with creation
-        let lock = {
-            let mut locks = WORKTREE_CREATION_LOCKS.lock().unwrap();
-            locks
-                .entry(path_str.clone())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-        };
+        let lock = acquire_worktree_lock(&worktree.worktree_path);
 
         let _guard = lock.lock().await;
 
@@ -761,7 +850,7 @@ impl WorktreeManager {
 
         tokio::task::spawn_blocking(move || -> Result<(), WorktreeError> {
             if worktree_path_owned.exists() {
-                std::fs::remove_dir_all(&worktree_path_owned).map_err(WorktreeError::Io)?;
+                remove_dir_all_retrying(&worktree_path_owned).map_err(WorktreeError::Io)?;
                 info!(
                     "Removed worktree directory: {}",
                     worktree_path_owned.display()

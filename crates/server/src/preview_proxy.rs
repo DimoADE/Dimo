@@ -60,6 +60,7 @@ pub async fn start_loopback_preview_proxy(
 pub fn preview_client() -> Result<reqwest::Client, reqwest::Error> {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     reqwest::Client::builder()
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .build()
 }

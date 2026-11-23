@@ -4,6 +4,8 @@ import {
   DEVELOPER_MODE_CHANGED_EVENT,
   GPU_MODE_CHANGED_EVENT,
   IPC_CHANNELS,
+  SIDECAR_EXITED_EVENT,
+  SIDECAR_READY_EVENT,
   SIDECAR_RESTARTED_EVENT,
   convertFileSrcToAssetUrl,
   type BootstrapPayload,
@@ -11,6 +13,7 @@ import {
   type DesktopUpdateCheckResult,
   type DesktopUpdateDownloadEventPayload,
   type ElectronBackendConnectionInfo,
+  type SidecarRuntimeStatus,
 } from '../shared/ipcContract';
 
 interface DragDropPosition {
@@ -67,9 +70,12 @@ const bootstrap = ipcRenderer.sendSync(
 
 let currentBackend: ElectronBackendConnectionInfo | undefined =
   extractBackendConnectionInfo(bootstrap.backend);
+let currentSidecarStatus: SidecarRuntimeStatus =
+  bootstrap.sidecarStatus ?? (currentBackend ? 'running' : 'stopped');
 
 const getBackend = (): ElectronBackendConnectionInfo | undefined =>
   currentBackend;
+const getSidecarStatus = (): SidecarRuntimeStatus => currentSidecarStatus;
 
 let currentGpuMode: DesktopGpuMode = bootstrap.gpuMode ?? 'hardware';
 let currentDeveloperMode = Boolean(bootstrap.developerMode);
@@ -108,11 +114,21 @@ ipcRenderer.on(
     if (!message || typeof message.event !== 'string') {
       return;
     }
-    if (message.event === SIDECAR_RESTARTED_EVENT) {
+    if (
+      message.event === SIDECAR_READY_EVENT ||
+      message.event === SIDECAR_RESTARTED_EVENT
+    ) {
       const nextBackend = extractBackendConnectionInfo(message.payload);
       if (nextBackend) {
         currentBackend = nextBackend;
+        currentSidecarStatus = 'running';
       }
+    }
+    if (message.event === SIDECAR_EXITED_EVENT) {
+      const willRestart = Boolean(
+        (message.payload as { willRestart?: unknown } | undefined)?.willRestart
+      );
+      currentSidecarStatus = willRestart ? 'restarting' : 'stopped';
     }
     if (message.event === GPU_MODE_CHANGED_EVENT) {
       const mode = (message.payload as { mode?: unknown } | undefined)?.mode;
@@ -339,6 +355,10 @@ const dimoDesktopBridge = {
     return currentBackend;
   },
   getBackend,
+  get sidecarStatus(): SidecarRuntimeStatus {
+    return currentSidecarStatus;
+  },
+  getSidecarStatus,
 
   getAppVersion: (): Promise<string> =>
     ipcRenderer.invoke(IPC_CHANNELS.APP_VERSION),
@@ -553,16 +573,22 @@ if (typeof contextBridge.executeInMainWorld === 'function') {
   contextBridge.executeInMainWorld({
     func: (
       bridgeObj: Record<string, unknown>,
-      getBackendFn: () => ElectronBackendConnectionInfo | undefined
+      getBackendFn: () => ElectronBackendConnectionInfo | undefined,
+      getSidecarStatusFn: () => SidecarRuntimeStatus
     ) => {
       const target: Record<string, unknown> = {};
       Object.keys(bridgeObj).forEach((key) => {
-        if (key !== 'backend') {
+        if (key !== 'backend' && key !== 'sidecarStatus') {
           target[key] = bridgeObj[key];
         }
       });
       Object.defineProperty(target, 'backend', {
         get: () => getBackendFn(),
+        enumerable: true,
+        configurable: false,
+      });
+      Object.defineProperty(target, 'sidecarStatus', {
+        get: () => getSidecarStatusFn(),
         enumerable: true,
         configurable: false,
       });
@@ -574,7 +600,7 @@ if (typeof contextBridge.executeInMainWorld === 'function') {
         configurable: false,
       });
     },
-    args: [dimoDesktopBridge, getBackend],
+    args: [dimoDesktopBridge, getBackend, getSidecarStatus],
   });
 } else {
   contextBridge.exposeInMainWorld('dimoDesktop', dimoDesktopBridge);

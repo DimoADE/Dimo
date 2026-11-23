@@ -103,13 +103,19 @@ impl ServerApplicationDomains {
         }
         let root = self.primary_worktree(args.workspace_id, None).await?;
         let root_for_untracked = root.clone();
-        let mut diffs = self.git_read(root, git::GitService::get_file_diffs).await?;
-        if let Some(entries) = diffs.as_array_mut() {
-            for entry in entries {
-                populate_missing_diff(&root_for_untracked, entry);
-                bound_diff(entry);
+        let diffs = self.git_read(root, git::GitService::get_file_diffs).await?;
+        let diffs = tokio::task::spawn_blocking(move || {
+            let mut diffs = diffs;
+            if let Some(entries) = diffs.as_array_mut() {
+                for entry in entries {
+                    populate_missing_diff(&root_for_untracked, entry);
+                    bound_diff(entry);
+                }
             }
-        }
+            diffs
+        })
+        .await
+        .map_err(internal_error)?;
         Ok(diffs)
     }
 }

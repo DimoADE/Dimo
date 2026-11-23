@@ -197,6 +197,13 @@ pub(crate) struct WorkerRestore {
     pub(super) broker: Arc<dyn CapabilityBroker>,
 }
 
+#[derive(Clone)]
+pub(crate) struct LazyWorkerRuntime {
+    pub(super) worker_runtime: Arc<crate::PluginWorkerRuntimeProvider>,
+    pub(super) candidate_root: PathBuf,
+    pub(super) broker: Arc<dyn CapabilityBroker>,
+}
+
 pub struct PluginControlPlane {
     pub(super) registry: Arc<dyn PluginRegistry>,
     pub(super) contributions: ContributionRegistry,
@@ -204,6 +211,7 @@ pub struct PluginControlPlane {
     pub(super) official_mcp: Arc<crate::OfficialMcpRuntime>,
     pub(super) host_services: crate::host_service::HostServiceSupervisor,
     pub(super) worker_restore: tokio::sync::RwLock<Option<WorkerRestore>>,
+    pub(super) lazy_worker_runtime: tokio::sync::RwLock<Option<LazyWorkerRuntime>>,
     pub(super) lazy_activation_lock: tokio::sync::Mutex<()>,
     pub(super) catalog_changes: tokio::sync::broadcast::Sender<u64>,
     pub(super) command_handlers: RwLock<BTreeMap<(String, String), Arc<dyn PluginCommandHandler>>>,
@@ -218,10 +226,27 @@ impl PluginControlPlane {
             official_mcp: Arc::new(crate::OfficialMcpRuntime::default()),
             host_services: crate::host_service::HostServiceSupervisor::default(),
             worker_restore: tokio::sync::RwLock::new(None),
+            lazy_worker_runtime: tokio::sync::RwLock::new(None),
             lazy_activation_lock: tokio::sync::Mutex::new(()),
             catalog_changes: tokio::sync::broadcast::channel(16).0,
             command_handlers: RwLock::new(BTreeMap::new()),
         }
+    }
+
+    /// Registers the runtime provider used by `activation_lease` to resolve
+    /// Node on demand when a plugin is invoked before background startup
+    /// finishes `recover_enabled_workers`.
+    pub async fn configure_lazy_worker_runtime(
+        &self,
+        worker_runtime: Arc<crate::PluginWorkerRuntimeProvider>,
+        candidate_root: PathBuf,
+        broker: Arc<dyn CapabilityBroker>,
+    ) {
+        *self.lazy_worker_runtime.write().await = Some(LazyWorkerRuntime {
+            worker_runtime,
+            candidate_root,
+            broker,
+        });
     }
 
     /// Fires with the new catalog generation whenever the live contribution set

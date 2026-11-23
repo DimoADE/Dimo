@@ -158,11 +158,22 @@ pub fn bootstrap_desktop_path() {
     } else {
         UserBinPlatform::Unix
     };
-    for directory in discovery_bin_directories(platform, &home, |name| std::env::var_os(name)) {
-        expose_user_bin_to_process_path(&directory);
+    let mut fallbacks = discovery_bin_directories(platform, &home, |name| std::env::var_os(name));
+    if let Some(node_dir) = find_node_bin_dir(platform, &home, |name| std::env::var_os(name))
+        && !fallbacks.contains(&node_dir)
+    {
+        fallbacks.push(node_dir);
     }
-    if let Some(node_dir) = find_node_bin_dir(platform, &home, |name| std::env::var_os(name)) {
-        expose_user_bin_to_process_path(&node_dir);
+    if let Ok(fallback_joined) = join_paths(&fallbacks) {
+        let existing = std::env::var_os("PATH").unwrap_or_default();
+        // Preserve the user's active PATH precedence; append discovered toolchains as fallbacks
+        // in their declared priority order instead of prepending in reverse.
+        let merged = merge_paths(&existing, fallback_joined);
+        if merged != existing {
+            unsafe {
+                std::env::set_var("PATH", merged);
+            }
+        }
     }
 }
 
@@ -388,6 +399,28 @@ fn toolchain_bin_directories(
     directories
 }
 
+type SemverSortKey = (u64, u64, u64, bool);
+
+fn parse_semver_sort_key(name: &str) -> SemverSortKey {
+    let trimmed = name.trim_start_matches(['v', 'V']);
+    let is_stable = !trimmed.contains('-');
+    let core = trimmed.split(['-', '+']).next().unwrap_or_default();
+    let mut parts = core.split('.');
+    let major = parts
+        .next()
+        .and_then(|p| p.parse::<u64>().ok())
+        .unwrap_or(0);
+    let minor = parts
+        .next()
+        .and_then(|p| p.parse::<u64>().ok())
+        .unwrap_or(0);
+    let patch = parts
+        .next()
+        .and_then(|p| p.parse::<u64>().ok())
+        .unwrap_or(0);
+    (major, minor, patch, is_stable)
+}
+
 fn push_version_dirs(
     root: &Path,
     push: &mut impl FnMut(PathBuf),
@@ -397,6 +430,7 @@ fn push_version_dirs(
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
+    let mut candidates: Vec<(SemverSortKey, String, PathBuf)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
@@ -405,16 +439,22 @@ fn push_version_dirs(
         let name = path
             .file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or_default();
-        if !include(name) {
+            .unwrap_or_default()
+            .to_string();
+        if !include(&name) {
             continue;
         }
-        if join_bin {
+        let target = if join_bin {
             let bin = path.join("bin");
-            push(if bin.is_dir() { bin } else { path });
+            if bin.is_dir() { bin } else { path }
         } else {
-            push(path);
-        }
+            path
+        };
+        candidates.push((parse_semver_sort_key(&name), name, target));
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    for (_, _, target) in candidates {
+        push(target);
     }
 }
 
@@ -423,14 +463,28 @@ fn push_fnm_installations(fnm_dir: &Path, push: &mut impl FnMut(PathBuf)) {
     let Ok(entries) = std::fs::read_dir(&versions) else {
         return;
     };
+    let mut candidates: Vec<(SemverSortKey, String, PathBuf)> = Vec::new();
     for entry in entries.flatten() {
-        let installation = entry.path().join("installation");
+        let entry_path = entry.path();
+        let name = entry_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let installation = entry_path.join("installation");
         let bin = installation.join("bin");
-        if bin.is_dir() {
-            push(bin);
+        let target = if bin.is_dir() {
+            bin
         } else if installation.is_dir() {
-            push(installation);
-        }
+            installation
+        } else {
+            continue;
+        };
+        candidates.push((parse_semver_sort_key(&name), name, target));
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    for (_, _, target) in candidates {
+        push(target);
     }
 }
 
@@ -559,16 +613,19 @@ async fn get_fresh_path() -> Option<String> {
 
     use tokio::process::Command;
 
+    const START_SENTINEL: &str = "__DIMO_PATH_START__";
+    const END_SENTINEL: &str = "__DIMO_PATH_END__";
+
     async fn run(shell: &UnixShell) -> Option<String> {
         let mut cmd = Command::new(shell.path());
         if shell.login() {
             cmd.arg("-l");
         }
+        let print_expr = format!("printf '%s%s%s' '{START_SENTINEL}' \"$PATH\" '{END_SENTINEL}'");
         if let Some(source_command) = shell.source_command() {
-            cmd.arg("-c")
-                .arg(format!("{source_command}; printf '%s' \"$PATH\""));
+            cmd.arg("-c").arg(format!("{source_command}; {print_expr}"));
         } else {
-            cmd.arg("-c").arg("printf '%s' \"$PATH\"");
+            cmd.arg("-c").arg(print_expr);
         }
         cmd.env("TERM", "dumb")
             .stdout(Stdio::piped())
@@ -606,15 +663,15 @@ async fn get_fresh_path() -> Option<String> {
         if !output.status.success() {
             return None;
         }
-        let path = String::from_utf8(output.stdout).ok()?.trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let after_start = stdout.rsplit_once(START_SENTINEL)?.1;
+        let path = after_start.split_once(END_SENTINEL)?.0.trim().to_string();
         if path.is_empty() { None } else { Some(path) }
     }
 
-    let mut paths = Vec::<OsString>::new();
-
     let current_shell = UnixShell::current_shell();
     if let Some(path) = run(&current_shell).await {
-        paths.push(OsString::from(path));
+        return Some(path);
     }
 
     let shells: Vec<UnixShell> = ["/bin/zsh", "/bin/bash", "/bin/sh"]
@@ -625,18 +682,11 @@ async fn get_fresh_path() -> Option<String> {
         if !(shell == current_shell)
             && let Some(path) = run(&shell).await
         {
-            paths.push(OsString::from(path));
+            return Some(path);
         }
     }
 
-    if paths.is_empty() {
-        return None;
-    }
-
-    paths
-        .into_iter()
-        .reduce(|a, b| merge_paths(&a, &b))
-        .map(|merged| merged.to_string_lossy().into_owned())
+    None
 }
 
 #[cfg(windows)]
@@ -803,6 +853,26 @@ mod tests {
             }),
             Some(active)
         );
+    }
+
+    #[test]
+    fn push_version_dirs_orders_newest_semver_first() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["v9.11.0", "v20.10.0", "v22.14.0", "v22.2.0"] {
+            std::fs::create_dir_all(root.path().join(name)).unwrap();
+        }
+        let mut collected = Vec::new();
+        super::push_version_dirs(
+            root.path(),
+            &mut |path| collected.push(path),
+            |name| name.starts_with('v'),
+            false,
+        );
+        let names: Vec<String> = collected
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["v22.14.0", "v22.2.0", "v20.10.0", "v9.11.0"]);
     }
 
     #[test]

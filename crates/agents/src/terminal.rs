@@ -876,7 +876,12 @@ async fn own_terminal_process(
     };
 
     if kill_requested {
+        #[cfg(windows)]
         process_job.terminate();
+        #[cfg(not(windows))]
+        process_job.close();
+    } else {
+        process_job.close();
     }
 
     if published_without_reaping {
@@ -918,6 +923,7 @@ fn configure_terminal_command(
     for env_var in &args.env {
         command.env(&env_var.name, &env_var.value);
     }
+    workspace_utils::process::scrub_host_secret_env_tokio(command);
 }
 
 /// Fill in a session working directory when the agent omits `cwd`. An explicit

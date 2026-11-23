@@ -1064,13 +1064,46 @@ impl SqlitePulseStore {
         .await
     }
 
+    /// Reset any bot mailbox rows left in `'claimed'` across an unclean process
+    /// restart (along with `'coalesced'` rows claimed in the same batch) back to
+    /// `'queued'` so single-flight claiming is never permanently deadlocked and
+    /// coalesced follow-up messages are not lost.
+    pub async fn recover_claimed_bot_turns(&self) -> Result<u64, sqlx::Error> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let coalesced = sqlx::query(
+            "UPDATE pulse_bot_mailbox
+             SET status = 'queued', claimed_at = NULL
+             WHERE status = 'coalesced'
+               AND claimed_at IS NOT NULL
+               AND EXISTS (
+                   SELECT 1 FROM pulse_bot_mailbox AS primary_row
+                   WHERE primary_row.status = 'claimed'
+                     AND primary_row.member_id = pulse_bot_mailbox.member_id
+                     AND primary_row.claimed_at = pulse_bot_mailbox.claimed_at
+               )",
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        let claimed = sqlx::query(
+            "UPDATE pulse_bot_mailbox
+             SET status = 'queued', claimed_at = NULL
+             WHERE status = 'claimed'",
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        Ok(claimed + coalesced)
+    }
+
     /// Single-flight FIFO claim & batch coalesce per `member_id`.
     pub async fn claim_next_bot_turn(
         &self,
         member_id: &str,
         now: &str,
     ) -> Result<Option<PulseClaimedBotTurn>, sqlx::Error> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let in_flight: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM pulse_bot_mailbox WHERE member_id = ? AND status = 'claimed'",
@@ -1360,12 +1393,28 @@ impl SqlitePulseStore {
         Ok(inserted)
     }
 
+    /// Reset any outbox rows left in `'in_flight'` across an unclean process
+    /// restart back to `'pending'` so external deliveries are retried instead of
+    /// silently abandoned.
+    pub async fn recover_in_flight_outbox(&self, now_iso: &str) -> Result<u64, sqlx::Error> {
+        let res = sqlx::query(
+            "UPDATE pulse_outbox
+             SET status = 'pending', next_attempt_at = ?, updated_at = ?
+             WHERE status = 'in_flight'",
+        )
+        .bind(now_iso)
+        .bind(now_iso)
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected())
+    }
+
     pub async fn claim_due_outbox(
         &self,
         now_iso: &str,
         limit: u32,
     ) -> Result<Vec<PulseOutboxRecord>, sqlx::Error> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let sql = format!(
             "SELECT {OUTBOX_COLUMNS} FROM pulse_outbox WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY next_attempt_at ASC, rowid ASC LIMIT ?"
         );

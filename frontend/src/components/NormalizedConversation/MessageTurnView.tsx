@@ -916,12 +916,14 @@ const AssistantTurnView = memo(function AssistantTurnView({
   // File changes and token stats render after this slice. A missed index or a
   // fold that is the whole turn must still show the reply. A resolved tool
   // slice does not repeat prose that an earlier slice already owns.
-  const trailingMarkdown = isLastSlice
-    ? lastAssistantMarkdownItem(turn.blocks)
-    : null;
-  const trailingProse = trailingMarkdown
-    ? renderTurnItem(trailingMarkdown, `${turn.id}-trailing-prose`)
-    : null;
+  const renderTrailingProse = () => {
+    const trailingMarkdown = isLastSlice
+      ? lastAssistantMarkdownItem(turn.blocks)
+      : null;
+    return trailingMarkdown
+      ? renderTurnItem(trailingMarkdown, `${turn.id}-trailing-prose`)
+      : null;
+  };
 
   const foldDurationMs = (segmentItems: TurnRenderItem[]) =>
     collapsedMessagesDurationMs({
@@ -985,6 +987,7 @@ const AssistantTurnView = memo(function AssistantTurnView({
         (segment) =>
           segment.kind === 'fold' && segment.startIndex === slice.startIndex
       )?.items ?? [];
+    const trailingProse = renderTrailingProse();
     return (
       <div
         className="conv-entry-item conv-assistant-msg conv-msg-hover group px-4 py-2 text-sm"
@@ -1027,6 +1030,7 @@ const AssistantTurnView = memo(function AssistantTurnView({
   if (slice?.kind === 'block') {
     const item = items[slice.itemIndex];
     if (!item) {
+      const trailingProse = renderTrailingProse();
       if (!trailingProse) return null;
       return (
         <div

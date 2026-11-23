@@ -27,8 +27,36 @@ const MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 struct PreviewWatch {
     child: Child,
+    process_job: Option<utils::process::ProcessTreeJob>,
     port: u16,
     references: u32,
+}
+
+impl PreviewWatch {
+    async fn terminate_and_wait(&mut self) {
+        if self.child.id().is_some() {
+            if let Some(job) = self.process_job.take() {
+                let _ = job.terminate();
+            }
+            let _ = self.child.kill().await;
+            let _ = self.child.wait().await;
+        } else if let Some(job) = self.process_job.take() {
+            job.close();
+        }
+    }
+}
+
+impl Drop for PreviewWatch {
+    fn drop(&mut self) {
+        if self.child.id().is_some() {
+            if let Some(job) = self.process_job.take() {
+                let _ = job.terminate();
+            }
+            let _ = self.child.start_kill();
+        } else if let Some(job) = self.process_job.take() {
+            job.close();
+        }
+    }
 }
 
 struct PreviewLease {
@@ -165,6 +193,9 @@ impl PluginPreviewHost for ExternalProcessPreviewHost {
         let arguments = render_arguments(&process.argv, &artifact, port)?;
         let mut command = Command::new(&runtime.executable_path);
         utils::process::configure_tokio_command_no_window(&mut command);
+        utils::process::scrub_host_secret_env_tokio(&mut command);
+        #[cfg(unix)]
+        command.process_group(0);
         command
             .args(arguments)
             .stdin(Stdio::null())
@@ -186,16 +217,28 @@ impl PluginPreviewHost for ExternalProcessPreviewHost {
         let mut child = command
             .spawn()
             .map_err(|error| preview_error("PROCESS_FAILED", error.to_string()))?;
+        let child_pid = child.id();
+        #[cfg(windows)]
+        if let Some(pid) = child_pid {
+            let _ = utils::process::assign_pid_to_guardian_job(pid);
+        }
+        let process_job = child_pid.map(utils::process::ProcessTreeJob::create_and_assign);
         let stdout = child.stdout.take().ok_or_else(|| {
             preview_error("PROCESS_FAILED", "Preview process stdout is unavailable")
         })?;
         let ready_timeout = Duration::from_secs(process.ready_timeout_seconds.clamp(1, 60));
         let announced = wait_for_announcement(stdout, port, ready_timeout).await;
         if let Err(error) = announced {
+            if let Some(job) = process_job.as_ref() {
+                let _ = job.terminate();
+            }
             let _ = child.kill().await;
             return Err(error);
         }
         if let Err(error) = wait_for_tcp(port, ready_timeout).await {
+            if let Some(job) = process_job.as_ref() {
+                let _ = job.terminate();
+            }
             let _ = child.kill().await;
             return Err(error);
         }
@@ -203,6 +246,7 @@ impl PluginPreviewHost for ExternalProcessPreviewHost {
             watch_key.clone(),
             PreviewWatch {
                 child,
+                process_job,
                 port,
                 references: 1,
             },
@@ -245,8 +289,7 @@ impl PluginPreviewHost for ExternalProcessPreviewHost {
             remove_watch = watch.references == 0;
         }
         if remove_watch && let Some(mut watch) = state.watches.remove(&lease.watch) {
-            let _ = watch.child.kill().await;
-            let _ = watch.child.wait().await;
+            watch.terminate_and_wait().await;
         }
         Ok(())
     }
@@ -377,8 +420,7 @@ fn schedule_expiry(
             remove_watch = watch.references == 0;
         }
         if remove_watch && let Some(mut watch) = state.watches.remove(&lease.watch) {
-            let _ = watch.child.kill().await;
-            let _ = watch.child.wait().await;
+            watch.terminate_and_wait().await;
         }
     });
     if let Some(lease) = state.leases.get_mut(&lease_id)
@@ -409,7 +451,9 @@ async fn canonical_artifact(file_path: &str) -> Result<PathBuf, PluginPreviewHos
             "Preview artifact is not a regular file",
         ));
     }
-    Ok(canonical)
+    Ok(utils::path::normalize_windows_extended_path_prefix(
+        canonical,
+    ))
 }
 
 fn render_arguments(

@@ -1182,6 +1182,9 @@ pub trait ContainerService: Send + Sync {
     }
 
     fn spawn_stream_raw_logs_to_db(&self, execution_id: &Uuid) -> JoinHandle<()> {
+        const LOG_BATCH_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+        const LOG_BATCH_MAX_BYTES: usize = 32 * 1024;
+
         let execution_id = *execution_id;
         let msg_stores = self.msg_stores().clone();
         let db = self.db().clone();
@@ -1193,29 +1196,59 @@ pub trait ContainerService: Send + Sync {
                 map.get(&execution_id).cloned()
             };
 
-            if let Some(store) = store {
-                let mut stream = store.history_plus_stream();
+            let Some(store) = store else {
+                return;
+            };
+            let mut stream = store.history_plus_stream();
+            let mut pending = String::new();
+            let mut flush_deadline: Option<tokio::time::Instant> = None;
 
-                while let Some(Ok(msg)) = stream.next().await {
-                    match &msg {
+            let flush = |buf: &mut String, pool: &sqlx::SqlitePool| {
+                let batch = std::mem::take(buf);
+                let pool = pool.clone();
+                async move {
+                    if batch.is_empty() {
+                        return;
+                    }
+                    if let Err(e) =
+                        ExecutionProcessLogs::append_log_line(&pool, execution_id, &batch).await
+                    {
+                        tracing::error!(
+                            "Failed to append log batch for execution {}: {}",
+                            execution_id,
+                            e
+                        );
+                    }
+                }
+            };
+
+            loop {
+                let next_msg = if let Some(deadline) = flush_deadline {
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(deadline) => None,
+                        msg = stream.next() => Some(msg),
+                    }
+                } else {
+                    Some(stream.next().await)
+                };
+
+                match next_msg {
+                    None => {
+                        flush_deadline = None;
+                        flush(&mut pending, &db.pool).await;
+                    }
+                    Some(Some(Ok(msg))) => match &msg {
                         LogMsg::Stdout(_) | LogMsg::Stderr(_) => {
-                            // Serialize this individual message as a JSONL line
                             match serde_json::to_string(&msg) {
                                 Ok(jsonl_line) => {
-                                    let jsonl_line_with_newline = format!("{jsonl_line}\n");
-
-                                    // Append this line to the database
-                                    if let Err(e) = ExecutionProcessLogs::append_log_line(
-                                        &db.pool,
-                                        execution_id,
-                                        &jsonl_line_with_newline,
-                                    )
-                                    .await
-                                    {
-                                        tracing::error!(
-                                            "Failed to append log line for execution {}: {}",
-                                            execution_id,
-                                            e
+                                    pending.push_str(&jsonl_line);
+                                    pending.push('\n');
+                                    if pending.len() >= LOG_BATCH_MAX_BYTES {
+                                        flush_deadline = None;
+                                        flush(&mut pending, &db.pool).await;
+                                    } else if flush_deadline.is_none() {
+                                        flush_deadline = Some(
+                                            tokio::time::Instant::now() + LOG_BATCH_FLUSH_INTERVAL,
                                         );
                                     }
                                 }
@@ -1230,9 +1263,14 @@ pub trait ContainerService: Send + Sync {
                         }
                         LogMsg::SessionId(_) | LogMsg::MessageId(_) => continue,
                         LogMsg::Finished => {
+                            flush(&mut pending, &db.pool).await;
                             break;
                         }
                         LogMsg::JsonPatch(_) | LogMsg::Ready => continue,
+                    },
+                    Some(Some(Err(_))) | Some(None) => {
+                        flush(&mut pending, &db.pool).await;
+                        break;
                     }
                 }
             }

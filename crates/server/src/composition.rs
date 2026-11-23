@@ -134,9 +134,10 @@ pub struct HeadlessServer {
     local_discovery_task: Option<JoinHandle<()>>,
     _delegation_runtime: HeadlessDelegationRuntime,
     workflow_dispatch_task: Option<JoinHandle<()>>,
+    startup_recovery_task: Option<JoinHandle<()>>,
+    plugin_startup_task: Option<JoinHandle<()>>,
     backfill_task: Option<JoinHandle<()>>,
-    developer_link_task: Option<JoinHandle<()>>,
-    cli_inbox_task: Option<JoinHandle<()>>,
+    developer_link_slot: Arc<Mutex<Option<JoinHandle<()>>>>,
     web_service_autostart_task: Option<JoinHandle<()>>,
     settings_watcher: Option<crate::desktop::settings_watcher::SettingsWatcherHandle>,
     plugin_dev_server: Option<crate::desktop::plugin_dev_server::PluginDevServerHandle>,
@@ -307,19 +308,39 @@ impl HeadlessServer {
         };
         let conversation_service =
             conversations::ConversationSessionService::new(conversation_context.clone());
-        conversation_service
-            .recover_interrupted_turns()
-            .await
-            .map_err(|error| ServerBootstrapError::Conversation(error.to_string()))?;
-        crate::host::surface::recover_interrupted_agent_operations(&pool).await;
-        conversations::ConversationRelationControl::new(pool.clone())
-            .backfill_legacy_delegations()
-            .await
-            .map_err(|error| ServerBootstrapError::Conversation(error.to_string()))?;
-        conversation_service
-            .dispatch_queued_inputs()
-            .await
-            .map_err(|error| ServerBootstrapError::Conversation(error.to_string()))?;
+        let startup_recovery_task = if config.desktop_mode {
+            let recovery_pool = pool.clone();
+            Some(tokio::spawn(async move {
+                if let Err(error) = conversation_service.recover_interrupted_turns().await {
+                    tracing::warn!(%error, "deferred interrupted turn recovery failed");
+                }
+                crate::host::surface::recover_interrupted_agent_operations(&recovery_pool).await;
+                if let Err(error) = conversations::ConversationRelationControl::new(recovery_pool)
+                    .backfill_legacy_delegations()
+                    .await
+                {
+                    tracing::warn!(%error, "deferred legacy delegation backfill failed");
+                }
+                if let Err(error) = conversation_service.dispatch_queued_inputs().await {
+                    tracing::warn!(%error, "deferred queued input dispatch failed");
+                }
+            }))
+        } else {
+            conversation_service
+                .recover_interrupted_turns()
+                .await
+                .map_err(|error| ServerBootstrapError::Conversation(error.to_string()))?;
+            crate::host::surface::recover_interrupted_agent_operations(&pool).await;
+            conversations::ConversationRelationControl::new(pool.clone())
+                .backfill_legacy_delegations()
+                .await
+                .map_err(|error| ServerBootstrapError::Conversation(error.to_string()))?;
+            conversation_service
+                .dispatch_queued_inputs()
+                .await
+                .map_err(|error| ServerBootstrapError::Conversation(error.to_string()))?;
+            None
+        };
         let space_delivery =
             conversations::ScopedConversationControl::new(conversation_context.clone())
                 .delivery_context()
@@ -403,87 +424,22 @@ impl HeadlessServer {
         let worker_runtime = Arc::new(plugins::PluginWorkerRuntimeProvider::new(
             config.data_dir.clone(),
         ));
-        let bundled_roots = plugin_control_plane
-            .install_bundled_official_plugins(&config.data_dir, None)
-            .await
-            .map_err(|error| ServerBootstrapError::Plugin(error.to_string()))?;
-        if let Err(error) = plugin_control_plane.import_queued_developer_links().await {
-            tracing::warn!(%error, "queued linked Plugin inbox import failed");
-        }
-        let catalog = plugin_control_plane
-            .catalog()
-            .await
-            .map_err(|error| ServerBootstrapError::Plugin(error.to_string()))?;
-        let enabled_worker_exists = catalog.iter().any(|plugin| {
-            plugin.activation == plugins::PluginActivation::Enabled
-                && plugin.entrypoints.worker.is_some()
-        });
-        let has_developer_links = catalog
-            .iter()
-            .any(|plugin| plugin.source.kind == plugins::PluginSourceKind::DeveloperLink);
-        let mut developer_link_task = None;
-        let recovery_failures = if enabled_worker_exists || has_developer_links {
-            match worker_runtime.resolve().await {
-                Ok(node) => {
-                    let activation = plugins::BundledPluginActivation {
-                        node_executable: node.clone(),
-                        broker: capability_broker.clone(),
-                    };
-                    if let Err(error) = plugin_control_plane
-                        .refresh_installed_bundled_plugins(&bundled_roots, Some(&activation))
-                        .await
-                    {
-                        tracing::warn!(%error, "official plugin packages could not be refreshed");
-                    }
-                    developer_link_task =
-                        Some(plugins::PluginControlPlane::spawn_developer_link_refresh(
-                            plugin_control_plane.clone(),
-                            node.clone(),
-                            config.data_dir.join("plugins").join("dev-candidates"),
-                            capability_broker.clone(),
-                        ));
-                    if enabled_worker_exists {
-                        plugin_control_plane
-                            .recover_enabled_workers(
-                                &node,
-                                &config.data_dir.join("plugins").join("dev-candidates"),
-                                capability_broker.clone(),
-                            )
-                            .await
-                            .map_err(|error| ServerBootstrapError::Plugin(error.to_string()))?
-                    } else {
-                        Vec::new()
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "Plugin Worker Runtime could not be provisioned");
-                    Vec::new()
-                }
-            }
-        } else {
-            if let Err(error) = plugin_control_plane
-                .refresh_installed_bundled_plugins(&bundled_roots, None)
-                .await
-            {
-                tracing::warn!(%error, "official plugin packages could not be refreshed");
-            }
-            Vec::new()
-        };
-        for failure in recovery_failures {
-            tracing::warn!(
-                plugin_id = %failure.plugin_id,
-                code = %failure.code,
-                error = %failure.message,
-                "enabled plugin Worker could not be restored"
-            );
-        }
+        plugin_control_plane
+            .configure_lazy_worker_runtime(
+                worker_runtime.clone(),
+                config.data_dir.join("plugins").join("dev-candidates"),
+                capability_broker.clone(),
+            )
+            .await;
+        // Hydrate live contribution descriptors and the official MCP gate from
+        // SQLite immediately (~1ms) so the desktop UI sees installed plugin
+        // surfaces at t=0 while heavy plugin refresh/worker recovery runs in
+        // the background.
         plugin_control_plane
             .sync_official_product_mcp_gate()
             .await
             .map_err(|error| ServerBootstrapError::Plugin(error.to_string()))?;
-        if let Err(error) = services::services::mcp::patch_grok_product_mcp_startup_timeout() {
-            tracing::warn!(%error, "Grok product MCP startup timeout patch failed");
-        }
+        let developer_link_slot = Arc::new(Mutex::new(None));
         let idle_recycle_task = {
             let idle_recycle = plugin_control_plane.clone();
             tokio::spawn(async move {
@@ -506,7 +462,7 @@ impl HeadlessServer {
         let data_dir_key = config.data_dir.to_string_lossy().into_owned();
         let automation_owner =
             AutomationEngine::acquire(&data_dir_key, FileOwnerLock::default()).await?;
-        let automation_recovery = if automation_owner.is_some() {
+        let automation_recovery = if automation_owner.is_some() && !config.desktop_mode {
             Some(
                 StartupReconciler::new(SqliteAutomationStore::new(pool.clone()), SystemClock)
                     .reconcile()
@@ -522,13 +478,15 @@ impl HeadlessServer {
         );
         let preview_proxy = PreviewProxyRegistry::default();
         crate::start_chat_inbound(pool.clone(), conversation_context.clone());
-        application::WorkflowStoreExecutionPort::with_conversations(
-            pool.clone(),
-            conversation_context.clone(),
-        )
-        .reconcile_interrupted()
-        .await
-        .map_err(|error| ServerBootstrapError::Conversation(error.to_string()))?;
+        if !config.desktop_mode {
+            application::WorkflowStoreExecutionPort::with_conversations(
+                pool.clone(),
+                conversation_context.clone(),
+            )
+            .reconcile_interrupted()
+            .await
+            .map_err(|error| ServerBootstrapError::Conversation(error.to_string()))?;
+        }
         let product_mcp_commands = crate::ProductMcpCommandHost::default();
         let (delegation_runtime, companion_memory, delegation_broker) =
             HeadlessDelegationRuntime::start(
@@ -540,15 +498,17 @@ impl HeadlessServer {
                 product_mcp_commands.clone(),
             );
         collaboration_host.install_companion_memory(companion_memory.clone());
-        let host_config = deployment.config().read().await.clone();
-        if let Err(error) = crate::host::plugin_projections::refresh_official_product_runtime_with(
-            &plugin_control_plane,
-            &delegation_broker,
-            &host_config,
-        )
-        .await
-        {
-            tracing::warn!(%error, "official product runtime sync failed");
+        let plugin_startup_ctx = PluginStartupContext {
+            plugin_control_plane: plugin_control_plane.clone(),
+            worker_runtime: worker_runtime.clone(),
+            capability_broker: capability_broker.clone(),
+            delegation_broker: delegation_broker.clone(),
+            deployment: deployment.clone(),
+            data_dir: config.data_dir.clone(),
+            developer_link_slot: developer_link_slot.clone(),
+        };
+        if !config.desktop_mode {
+            initialize_plugins_and_runtime(&plugin_startup_ctx).await?;
         }
         {
             let plane = plugin_control_plane.clone();
@@ -601,6 +561,27 @@ impl HeadlessServer {
         product_mcp_commands
             .attach_commands(host.commands.clone())
             .await;
+        // Spawn deferred plugin startup AFTER HostRuntime subscribes to
+        // `catalog_changes` so any newly installed/refreshed bundled plugins
+        // reliably broadcast `plugin-contributions-changed` to connected UIs.
+        let plugin_startup_task = if config.desktop_mode {
+            let inbox_ctx = crate::desktop::startup_hooks::CliInboxContext {
+                plugin_control_plane: plugin_control_plane.clone(),
+                worker_runtime: worker_runtime.clone(),
+                capability_broker: capability_broker.clone(),
+                delegation_broker: delegation_broker.clone(),
+                deployment: deployment.clone(),
+                data_dir: config.data_dir.clone(),
+            };
+            Some(tokio::spawn(async move {
+                if let Err(error) = initialize_plugins_and_runtime(&plugin_startup_ctx).await {
+                    tracing::warn!(%error, "deferred desktop plugin startup failed");
+                }
+                crate::desktop::startup_hooks::import_cli_inbox(inbox_ctx).await;
+            }))
+        } else {
+            None
+        };
         let local_discovery_task = {
             let runtime = host.agent_management_runtime.clone();
             let events = host.events.clone();
@@ -632,32 +613,46 @@ impl HeadlessServer {
         };
         let workflow_dispatcher =
             application::WorkflowAgentDispatcher::new(conversation_context.clone());
-        let workflow_dispatch_task = tokio::spawn(async move {
-            loop {
-                let woken = workflows::workflow_wake().notified();
-                tokio::pin!(woken);
-                woken.as_mut().enable();
+        let workflow_dispatch_task = {
+            let workflow_pool = pool.clone();
+            let workflow_conversations = conversation_context.clone();
+            let desktop_mode = config.desktop_mode;
+            tokio::spawn(async move {
+                if desktop_mode
+                    && let Err(error) = application::WorkflowStoreExecutionPort::with_conversations(
+                        workflow_pool,
+                        workflow_conversations,
+                    )
+                    .reconcile_interrupted()
+                    .await
+                {
+                    tracing::warn!(%error, "deferred workflow interrupted reconciliation failed");
+                }
+                loop {
+                    let woken = workflows::workflow_wake().notified();
+                    tokio::pin!(woken);
+                    woken.as_mut().enable();
 
-                match workflow_dispatcher.tick().await {
-                    Ok(true) => continue,
-                    Ok(false) => {
-                        tokio::select! {
-                            _ = &mut woken => {}
-                            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                    match workflow_dispatcher.tick().await {
+                        Ok(true) => continue,
+                        Ok(false) => {
+                            tokio::select! {
+                                _ = &mut woken => {}
+                                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "workflow dispatcher tick failed");
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                         }
                     }
-                    Err(error) => {
-                        tracing::warn!(%error, "workflow dispatcher tick failed");
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    }
                 }
-            }
-        });
+            })
+        };
         let shutdown_notify = config
             .shutdown_notify
             .unwrap_or_else(|| Arc::new(Notify::new()));
         let mut backfill_task = None;
-        let mut cli_inbox_task = None;
         let mut web_service_autostart_task = None;
         let mut settings_watcher = None;
         let mut plugin_dev_server = None;
@@ -693,17 +688,6 @@ impl HeadlessServer {
                     }
                 }
                 crate::desktop::release_startup_working_set(&search_pool).await;
-            }));
-            let inbox_ctx = crate::desktop::startup_hooks::CliInboxContext {
-                plugin_control_plane: plugin_control_plane.clone(),
-                worker_runtime: worker_runtime.clone(),
-                capability_broker: capability_broker.clone(),
-                delegation_broker: delegation_broker.clone(),
-                deployment: deployment.clone(),
-                data_dir: config.data_dir.clone(),
-            };
-            cli_inbox_task = Some(tokio::spawn(async move {
-                crate::desktop::startup_hooks::import_cli_inbox(inbox_ctx).await;
             }));
             let proxy_handle = tokio::runtime::Handle::current();
             settings_watcher = crate::desktop::settings_watcher::start(
@@ -757,7 +741,10 @@ impl HeadlessServer {
         let pty = deployment.pty().clone();
         let mut runtime = ServerRuntime::from_host(
             config.server,
-            Arc::new(crate::SqliteServerAuth::new(pool.clone())),
+            Arc::new(
+                crate::SqliteServerAuth::new(pool.clone())
+                    .with_read_pool(deployment.db().reader().as_pool().clone()),
+            ),
             host,
             pty.clone(),
         );
@@ -783,9 +770,10 @@ impl HeadlessServer {
             local_discovery_task: Some(local_discovery_task),
             _delegation_runtime: delegation_runtime,
             workflow_dispatch_task: Some(workflow_dispatch_task),
+            startup_recovery_task,
+            plugin_startup_task,
             backfill_task,
-            developer_link_task,
-            cli_inbox_task,
+            developer_link_slot,
             web_service_autostart_task,
             settings_watcher,
             plugin_dev_server,
@@ -846,7 +834,30 @@ impl HeadlessServer {
         let automation_task = self.automation_owner.take().map(|engine| {
             let runtime = self.automation_runtime.clone();
             let recovery = self.automation_recovery.take();
-            tokio::spawn(runtime.run(engine, recovery))
+            let pool = self.pool.clone();
+            let desktop_mode = self.desktop_mode;
+            tokio::spawn(async move {
+                let recovery = match recovery {
+                    Some(report) => Some(report),
+                    None if desktop_mode => {
+                        match StartupReconciler::new(SqliteAutomationStore::new(pool), SystemClock)
+                            .reconcile()
+                            .await
+                        {
+                            Ok(report) => Some(report),
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    "deferred automation startup reconciliation failed"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    None => None,
+                };
+                runtime.run(engine, recovery).await;
+            })
         });
         tracing::info!(listen_addr = %bound_addr, desktop_mode = self.desktop_mode, "dimo-server listening");
         on_ready(bound_addr);
@@ -872,17 +883,19 @@ impl HeadlessServer {
             handle.cleanup_connection_file();
             handle.take_task()
         });
+        let developer_link_task = self.developer_link_slot.lock().await.take();
         let background_tasks: Vec<JoinHandle<()>> = [
             automation_task,
             plugin_dev_task,
             self.agent_event_task.take(),
             self.workflow_dispatch_task.take(),
+            self.startup_recovery_task.take(),
+            self.plugin_startup_task.take(),
             self.terminal_task.take(),
             self.idle_recycle_task.take(),
             self.local_discovery_task.take(),
             self.backfill_task.take(),
-            self.developer_link_task.take(),
-            self.cli_inbox_task.take(),
+            developer_link_task,
             self.web_service_autostart_task.take(),
         ]
         .into_iter()
@@ -896,6 +909,10 @@ impl HeadlessServer {
             futures::future::join_all(background_tasks),
         )
         .await;
+        if let Some(late_dev_link_task) = self.developer_link_slot.lock().await.take() {
+            late_dev_link_task.abort();
+            let _ = tokio::time::timeout(Duration::from_millis(250), late_dev_link_task).await;
+        }
 
         // 3. Stop desktop web service (HTTP listeners, relay, quick tunnel).
         if self.desktop_mode {
@@ -957,6 +974,123 @@ impl HeadlessServer {
     }
 }
 
+struct PluginStartupContext {
+    plugin_control_plane: Arc<PluginControlPlane>,
+    worker_runtime: Arc<plugins::PluginWorkerRuntimeProvider>,
+    capability_broker: Arc<plugins::HostCapabilityBroker>,
+    delegation_broker: Arc<delegation::DelegationBroker>,
+    deployment: Arc<LocalDeployment>,
+    data_dir: PathBuf,
+    developer_link_slot: Arc<Mutex<Option<JoinHandle<()>>>>,
+}
+
+async fn initialize_plugins_and_runtime(
+    ctx: &PluginStartupContext,
+) -> Result<(), ServerBootstrapError> {
+    let bundled_roots = ctx
+        .plugin_control_plane
+        .install_bundled_official_plugins(&ctx.data_dir, None)
+        .await
+        .map_err(|error| ServerBootstrapError::Plugin(error.to_string()))?;
+    if let Err(error) = ctx
+        .plugin_control_plane
+        .import_queued_developer_links()
+        .await
+    {
+        tracing::warn!(%error, "queued linked Plugin inbox import failed");
+    }
+    let catalog = ctx
+        .plugin_control_plane
+        .catalog()
+        .await
+        .map_err(|error| ServerBootstrapError::Plugin(error.to_string()))?;
+    let enabled_worker_exists = catalog.iter().any(|plugin| {
+        plugin.activation == plugins::PluginActivation::Enabled
+            && plugin.entrypoints.worker.is_some()
+    });
+    let has_developer_links = catalog
+        .iter()
+        .any(|plugin| plugin.source.kind == plugins::PluginSourceKind::DeveloperLink);
+    let recovery_failures = if enabled_worker_exists || has_developer_links {
+        match ctx.worker_runtime.resolve().await {
+            Ok(node) => {
+                let activation = plugins::BundledPluginActivation {
+                    node_executable: node.clone(),
+                    broker: ctx.capability_broker.clone(),
+                };
+                if let Err(error) = ctx
+                    .plugin_control_plane
+                    .refresh_installed_bundled_plugins(&bundled_roots, Some(&activation))
+                    .await
+                {
+                    tracing::warn!(%error, "official plugin packages could not be refreshed");
+                }
+                let dev_link_task = plugins::PluginControlPlane::spawn_developer_link_refresh(
+                    ctx.plugin_control_plane.clone(),
+                    node.clone(),
+                    ctx.data_dir.join("plugins").join("dev-candidates"),
+                    ctx.capability_broker.clone(),
+                );
+                if let Some(previous) = ctx.developer_link_slot.lock().await.replace(dev_link_task)
+                {
+                    previous.abort();
+                }
+                if enabled_worker_exists {
+                    ctx.plugin_control_plane
+                        .recover_enabled_workers(
+                            &node,
+                            &ctx.data_dir.join("plugins").join("dev-candidates"),
+                            ctx.capability_broker.clone(),
+                        )
+                        .await
+                        .map_err(|error| ServerBootstrapError::Plugin(error.to_string()))?
+                } else {
+                    Vec::new()
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Plugin Worker Runtime could not be provisioned");
+                Vec::new()
+            }
+        }
+    } else {
+        if let Err(error) = ctx
+            .plugin_control_plane
+            .refresh_installed_bundled_plugins(&bundled_roots, None)
+            .await
+        {
+            tracing::warn!(%error, "official plugin packages could not be refreshed");
+        }
+        Vec::new()
+    };
+    for failure in recovery_failures {
+        tracing::warn!(
+            plugin_id = %failure.plugin_id,
+            code = %failure.code,
+            error = %failure.message,
+            "enabled plugin Worker could not be restored"
+        );
+    }
+    ctx.plugin_control_plane
+        .sync_official_product_mcp_gate()
+        .await
+        .map_err(|error| ServerBootstrapError::Plugin(error.to_string()))?;
+    if let Err(error) = services::services::mcp::patch_grok_product_mcp_startup_timeout() {
+        tracing::warn!(%error, "Grok product MCP startup timeout patch failed");
+    }
+    let host_config = ctx.deployment.config().read().await.clone();
+    if let Err(error) = crate::host::plugin_projections::refresh_official_product_runtime_with(
+        &ctx.plugin_control_plane,
+        &ctx.delegation_broker,
+        &host_config,
+    )
+    .await
+    {
+        tracing::warn!(%error, "official product runtime sync failed");
+    }
+    Ok(())
+}
+
 async fn shutdown_plugin_control_plane(
     plugin_control_plane: &PluginControlPlane,
     capability_broker: &plugins::HostCapabilityBroker,
@@ -1001,15 +1135,21 @@ impl Drop for HeadlessServer {
     fn drop(&mut self) {
         self.settings_watcher.take();
         self.plugin_dev_server.take();
+        let developer_link_task = self
+            .developer_link_slot
+            .try_lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
         for task in [
             self.workflow_dispatch_task.take(),
+            self.startup_recovery_task.take(),
+            self.plugin_startup_task.take(),
             self.terminal_task.take(),
             self.idle_recycle_task.take(),
             self.local_discovery_task.take(),
             self.backfill_task.take(),
             self.agent_event_task.take(),
-            self.developer_link_task.take(),
-            self.cli_inbox_task.take(),
+            developer_link_task,
             self.web_service_autostart_task.take(),
         ]
         .into_iter()

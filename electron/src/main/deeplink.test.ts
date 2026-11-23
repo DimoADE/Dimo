@@ -18,11 +18,8 @@ const preloadMocks = vi.hoisted(() => ({
     platform: 'win32',
     windowLabel: 'main',
     gpuMode: 'hardware',
-    backend: {
-      baseUrl: 'http://127.0.0.1:4100',
-      token: 'tok-initial',
-      dataDir: '/tmp/dimo',
-    },
+    backend: null,
+    sidecarStatus: 'starting',
   })),
   ipcSend: vi.fn(),
   ipcInvoke: vi.fn(),
@@ -171,7 +168,11 @@ vi.mock('electron', () => {
   };
 });
 
-import { IPC_CHANNELS, SIDECAR_RESTARTED_EVENT } from '../shared/ipcContract';
+import {
+  IPC_CHANNELS,
+  SIDECAR_READY_EVENT,
+  SIDECAR_RESTARTED_EVENT,
+} from '../shared/ipcContract';
 import { DeepLinkManager } from './deeplink';
 import {
   DESKTOP_TOAST_ACTIVATED_EVENT,
@@ -440,6 +441,8 @@ describe('preload sidecar-restarted live backend and drag-drop reset', () => {
       const dimoDesktop = (globalThis as Record<string, unknown>).dimoDesktop as {
         backend?: { baseUrl: string; token: string };
         getBackend: () => { baseUrl: string; token: string } | undefined;
+        sidecarStatus: string;
+        getSidecarStatus: () => string;
         window: {
           onDragDropEvent: (
             cb: (event: { payload: { type: string } }) => void
@@ -447,18 +450,35 @@ describe('preload sidecar-restarted live backend and drag-drop reset', () => {
         };
       };
 
+      expect(dimoDesktop.backend).toBeUndefined();
+      expect(dimoDesktop.sidecarStatus).toBe('starting');
+      expect(dimoDesktop.getSidecarStatus()).toBe('starting');
+      expect(Object.isFrozen(dimoDesktop)).toBe(true);
+
+      // Simulate main-process SIDECAR_READY_EVENT broadcast once parallel boot finishes
+      const eventsListener = preloadMocks.ipcOnListeners.get(
+        IPC_CHANNELS.EVENTS_MESSAGE
+      );
+      expect(eventsListener).toBeTypeOf('function');
+      eventsListener?.({}, {
+        event: SIDECAR_READY_EVENT,
+        payload: {
+          backend: {
+            baseUrl: 'http://127.0.0.1:4100',
+            token: 'tok-initial',
+            dataDir: '/tmp/dimo',
+          },
+        },
+      });
+      expect(dimoDesktop.sidecarStatus).toBe('running');
+      expect(dimoDesktop.getSidecarStatus()).toBe('running');
       expect(dimoDesktop.backend).toEqual({
         baseUrl: 'http://127.0.0.1:4100',
         token: 'tok-initial',
         dataDir: '/tmp/dimo',
       });
-      expect(Object.isFrozen(dimoDesktop)).toBe(true);
 
       // Simulate main-process SIDECAR_RESTARTED_EVENT broadcast
-      const eventsListener = preloadMocks.ipcOnListeners.get(
-        IPC_CHANNELS.EVENTS_MESSAGE
-      );
-      expect(eventsListener).toBeTypeOf('function');
       eventsListener?.({}, {
         event: SIDECAR_RESTARTED_EVENT,
         payload: {

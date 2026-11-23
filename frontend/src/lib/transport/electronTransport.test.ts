@@ -683,4 +683,105 @@ describe('getLocalDesktopTransport & electronRemoteDesktopBridge', () => {
 
     unlisten();
   });
+
+  it('queues server host calls until sidecar-ready while letting desktop shell commands run immediately', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        operation_id: 'op-ready',
+        data: { projects: ['p-ready'] },
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const shell = createMockShell();
+    const shellInvoke = shell.shell.invoke as ReturnType<typeof vi.fn>;
+    shellInvoke.mockResolvedValue({ shown: true });
+
+    const sidecarState: {
+      backend?: { baseUrl: string; token: string; dataDir?: string };
+      status: 'starting' | 'running' | 'restarting' | 'stopped';
+    } = {
+      status: 'starting',
+    };
+
+    (window as unknown as Record<string, unknown>).dimoDesktop = {
+      platform: 'win32',
+      getWindowLabel: () => 'main',
+      getAppVersion: async () => '0.5.4',
+      get backend() {
+        return sidecarState.backend;
+      },
+      getBackend: () => sidecarState.backend,
+      get sidecarStatus() {
+        return sidecarState.status;
+      },
+      getSidecarStatus: () => sidecarState.status,
+      invoke: shellInvoke,
+      events: shell.shell.events,
+      window: {},
+      dialog: {},
+      fs: {},
+      path: {},
+      shell: {},
+      assets: { convertFileSrc: (p: string) => p },
+      updater: {},
+    };
+    resetElectronBackendTransportForTests();
+
+    const transport = getLocalDesktopTransport();
+    expect(transport).toBeInstanceOf(ElectronTransport);
+    expect(transport.origin).toBe('');
+
+    // DESKTOP_SHELL_COMMANDS execute immediately without waiting for sidecar-ready.
+    const revealResult = await transport.call('reveal_main_window');
+    expect(revealResult).toEqual({ shown: true });
+    expect(shellInvoke).toHaveBeenCalledWith('reveal_main_window');
+
+    // Server host command queues cleanly until sidecar-ready fires.
+    let resolved = false;
+    const hostCallPromise = transport.call('get_projects', {}).then((res) => {
+      resolved = true;
+      return res;
+    });
+    await Promise.resolve();
+    expect(resolved).toBe(false);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    sidecarState.backend = {
+      baseUrl: 'http://127.0.0.1:47770',
+      token: 'ready-sidecar-token',
+    };
+    sidecarState.status = 'running';
+    shell.emitIpcEvent('sidecar-ready', { backend: sidecarState.backend });
+
+    await expect(hostCallPromise).resolves.toEqual({ projects: ['p-ready'] });
+    expect(transport.origin).toBe('http://127.0.0.1:47770');
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:47770/api/v1/call/get_projects',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer ready-sidecar-token',
+        }),
+      })
+    );
+  });
+
+  it('rejects queued host calls cleanly if sidecar exits fatally before sidecar-ready', async () => {
+    const shell = createMockShell();
+    const transport = new ElectronTransport({
+      backend: null,
+      shell: shell.shell,
+    });
+    await Promise.resolve();
+
+    const pendingCall = transport.call('get_projects', {});
+    shell.emitIpcEvent('sidecar-exited', { willRestart: false });
+
+    await expect(pendingCall).rejects.toThrow(
+      'dimo-server sidecar exited before becoming ready'
+    );
+    transport.destroy();
+  });
 });

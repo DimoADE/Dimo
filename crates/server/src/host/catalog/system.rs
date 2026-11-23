@@ -308,7 +308,28 @@ fn map_log_level(level: LogLevel) -> crate::desktop::logging::LogLevel {
     }
 }
 
+async fn read_log_tail(path: &std::path::Path, max_bytes: u64) -> std::io::Result<String> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
+
+    let mut file = tokio::fs::File::open(path).await?;
+    let len = file.metadata().await?.len();
+    let offset = len.saturating_sub(max_bytes);
+    if offset > 0 {
+        file.seek(SeekFrom::Start(offset)).await?;
+    }
+    let mut buf = Vec::with_capacity(len.saturating_sub(offset) as usize);
+    file.read_to_end(&mut buf).await?;
+    let text = String::from_utf8_lossy(&buf);
+    if offset > 0
+        && let Some(pos) = text.find('\n')
+    {
+        return Ok(text[pos + 1..].to_string());
+    }
+    Ok(text.into_owned())
+}
+
 pub(super) async fn get_recent_logs(args: Value) -> Result<Value, ApplicationError> {
+    const MAX_LOG_TAIL_BYTES: u64 = 2 * 1024 * 1024;
     let args: LimitArgs = parse(args).unwrap_or(LimitArgs { limit: None });
     let limit = args.limit.unwrap_or(500).clamp(1, 5_000);
     let live_records = crate::desktop::logging::recent_logs(limit);
@@ -323,7 +344,7 @@ pub(super) async fn get_recent_logs(args: Value) -> Result<Value, ApplicationErr
             if path.extension().and_then(|ext| ext.to_str()) != Some("log") {
                 continue;
             }
-            if let Ok(content) = tokio::fs::read_to_string(&path).await {
+            if let Ok(content) = read_log_tail(&path, MAX_LOG_TAIL_BYTES).await {
                 for (index, line) in content.lines().rev().take(limit).enumerate() {
                     records.push(LogRecord {
                         seq: index as u64,

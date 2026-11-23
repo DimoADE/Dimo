@@ -115,6 +115,66 @@ pub fn extract_searchable_text(timeline: &ConversationTimeline) -> String {
     parts.join("\n")
 }
 
+const FTS_ROWID_INDEX_META_CONV: &str = "__meta__";
+const FTS_ROWID_INDEX_META_ROW: &str = "backfilled_v1";
+
+async fn ensure_fts_rowid_index_on_conn(conn: &mut SqliteConnection) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS conversation_fts_rowids (
+            conversation_id TEXT NOT NULL,
+            row_id TEXT NOT NULL,
+            fts_rowid INTEGER NOT NULL,
+            PRIMARY KEY (conversation_id, row_id)
+        )",
+    )
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+async fn fts_rowid_index_is_backfilled(conn: &mut SqliteConnection) -> Result<bool, sqlx::Error> {
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM conversation_fts_rowids
+            WHERE conversation_id = ? AND row_id = ?
+        )",
+    )
+    .bind(FTS_ROWID_INDEX_META_CONV)
+    .bind(FTS_ROWID_INDEX_META_ROW)
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(exists != 0)
+}
+
+async fn insert_fts_row_indexed(
+    conn: &mut SqliteConnection,
+    conv_id_str: &str,
+    row_id: &str,
+    role: &str,
+    text: &str,
+) -> Result<(), sqlx::Error> {
+    let res = sqlx::query(
+        "INSERT INTO conversation_fts(conversation_id, row_id, role, text) VALUES (?, ?, ?, ?)",
+    )
+    .bind(conv_id_str)
+    .bind(row_id)
+    .bind(role)
+    .bind(text)
+    .execute(&mut *conn)
+    .await?;
+    let fts_rowid = res.last_insert_rowid();
+    sqlx::query(
+        "INSERT OR REPLACE INTO conversation_fts_rowids(conversation_id, row_id, fts_rowid)
+         VALUES (?, ?, ?)",
+    )
+    .bind(conv_id_str)
+    .bind(row_id)
+    .bind(fts_rowid)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
 /// O(1) row-level FTS upsert keyed by `(conversation_id, row_id)`.
 pub async fn upsert_fts_row_on_conn(
     conn: &mut SqliteConnection,
@@ -123,22 +183,11 @@ pub async fn upsert_fts_row_on_conn(
     role: &str,
     text: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM conversation_fts WHERE conversation_id = ? AND row_id = ?")
-        .bind(conversation_id.to_string())
-        .bind(row_id)
-        .execute(&mut *conn)
-        .await?;
+    delete_fts_row_on_conn(&mut *conn, conversation_id, row_id).await?;
     let trimmed = text.trim();
     if !trimmed.is_empty() {
-        sqlx::query(
-            "INSERT INTO conversation_fts(conversation_id, row_id, role, text) VALUES (?, ?, ?, ?)",
-        )
-        .bind(conversation_id.to_string())
-        .bind(row_id)
-        .bind(role)
-        .bind(trimmed)
-        .execute(&mut *conn)
-        .await?;
+        let conv_id_str = conversation_id.to_string();
+        insert_fts_row_indexed(&mut *conn, &conv_id_str, row_id, role, trimmed).await?;
     }
     Ok(())
 }
@@ -161,8 +210,38 @@ pub async fn delete_fts_row_on_conn(
     conversation_id: Uuid,
     row_id: &str,
 ) -> Result<(), sqlx::Error> {
+    ensure_fts_rowid_index_on_conn(&mut *conn).await?;
+    let conv_id_str = conversation_id.to_string();
+    let indexed_rowid: Option<i64> = sqlx::query_scalar(
+        "SELECT fts_rowid FROM conversation_fts_rowids
+         WHERE conversation_id = ? AND row_id = ?",
+    )
+    .bind(&conv_id_str)
+    .bind(row_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    if let Some(fts_rowid) = indexed_rowid {
+        sqlx::query("DELETE FROM conversation_fts WHERE rowid = ?")
+            .bind(fts_rowid)
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("DELETE FROM conversation_fts_rowids WHERE conversation_id = ? AND row_id = ?")
+            .bind(&conv_id_str)
+            .bind(row_id)
+            .execute(&mut *conn)
+            .await?;
+        return Ok(());
+    }
+
+    if fts_rowid_index_is_backfilled(&mut *conn).await? {
+        // Index covers every existing FTS row; absence means no row to delete.
+        return Ok(());
+    }
+
+    // Legacy fallback until background backfill syncs pre-existing FTS rows.
     sqlx::query("DELETE FROM conversation_fts WHERE conversation_id = ? AND row_id = ?")
-        .bind(conversation_id.to_string())
+        .bind(&conv_id_str)
         .bind(row_id)
         .execute(conn)
         .await?;
@@ -200,25 +279,18 @@ pub async fn reindex_timeline_rows_on_conn(
     let mut inserted = 0usize;
     for row in rows {
         if let Some((role, text)) = extract_row_searchable_text(row) {
-            sqlx::query(
-                "INSERT INTO conversation_fts(conversation_id, row_id, role, text) VALUES (?, ?, ?, ?)",
-            )
-            .bind(&conv_id_str)
-            .bind(&row.row_id)
-            .bind(role)
-            .bind(text)
-            .execute(&mut *conn)
-            .await?;
+            insert_fts_row_indexed(&mut *conn, &conv_id_str, &row.row_id, role, &text).await?;
             inserted += 1;
         }
     }
     if inserted == 0 {
-        sqlx::query(
-            "INSERT INTO conversation_fts(conversation_id, row_id, role, text) VALUES (?, ?, 'system', '')",
+        insert_fts_row_indexed(
+            &mut *conn,
+            &conv_id_str,
+            INDEXED_SENTINEL_ROW_ID,
+            "system",
+            "",
         )
-        .bind(&conv_id_str)
-        .bind(INDEXED_SENTINEL_ROW_ID)
-        .execute(&mut *conn)
         .await?;
     }
     Ok(())
@@ -245,15 +317,8 @@ pub async fn reindex_conversation(
     } else {
         (LEGACY_BODY_ROW_ID, "assistant")
     };
-    sqlx::query(
-        "INSERT INTO conversation_fts(conversation_id, row_id, role, text) VALUES (?, ?, ?, ?)",
-    )
-    .bind(conversation_id.to_string())
-    .bind(row_id)
-    .bind(role)
-    .bind(trimmed)
-    .execute(&mut *conn)
-    .await?;
+    let conv_id_str = conversation_id.to_string();
+    insert_fts_row_indexed(&mut *conn, &conv_id_str, row_id, role, trimmed).await?;
     Ok(())
 }
 
@@ -262,10 +327,30 @@ pub async fn delete_from_index(
     conn: &mut SqliteConnection,
     conversation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM conversation_fts WHERE conversation_id = ?")
-        .bind(conversation_id.to_string())
-        .execute(conn)
+    ensure_fts_rowid_index_on_conn(&mut *conn).await?;
+    let conv_id_str = conversation_id.to_string();
+    let rowids: Vec<i64> = sqlx::query_scalar(
+        "SELECT fts_rowid FROM conversation_fts_rowids WHERE conversation_id = ?",
+    )
+    .bind(&conv_id_str)
+    .fetch_all(&mut *conn)
+    .await?;
+    for fts_rowid in rowids {
+        sqlx::query("DELETE FROM conversation_fts WHERE rowid = ?")
+            .bind(fts_rowid)
+            .execute(&mut *conn)
+            .await?;
+    }
+    sqlx::query("DELETE FROM conversation_fts_rowids WHERE conversation_id = ?")
+        .bind(&conv_id_str)
+        .execute(&mut *conn)
         .await?;
+    if !fts_rowid_index_is_backfilled(&mut *conn).await? {
+        sqlx::query("DELETE FROM conversation_fts WHERE conversation_id = ?")
+            .bind(&conv_id_str)
+            .execute(conn)
+            .await?;
+    }
     Ok(())
 }
 
@@ -549,37 +634,64 @@ pub async fn reindex_from_projection(
     reindex_timeline_rows_on_conn(&mut conn, conversation_id, &timeline.rows).await
 }
 
-/// Index every conversation that has no FTS row yet.
+/// Index every conversation that has no FTS row yet, and populate the O(1)
+/// `conversation_fts_rowids` companion index once for pre-existing FTS rows.
 /// Returns the number of conversations indexed. Best-effort per conversation.
 pub async fn backfill_missing(pool: &SqlitePool) -> Result<usize, sqlx::Error> {
-    let missing: i64 = sqlx::query_scalar(
-        "SELECT EXISTS(\
-            SELECT 1 FROM sessions \
-            WHERE NOT EXISTS (\
-                SELECT 1 FROM conversation_fts \
-                WHERE conversation_fts.conversation_id = CAST(sessions.id AS TEXT) \
-                   OR replace(lower(conversation_fts.conversation_id), '-', '') = lower(hex(sessions.id))\
-            )\
-         )",
-    )
-    .fetch_one(pool)
-    .await?;
-    if missing == 0 {
-        return Ok(0);
+    {
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        ensure_fts_rowid_index_on_conn(&mut tx).await?;
+        if !fts_rowid_index_is_backfilled(&mut tx).await? {
+            // Remove any legacy duplicate (conversation_id, row_id) entries in
+            // `conversation_fts` (keeping the newest rowid) so the companion
+            // primary key `(conversation_id, row_id)` maps 1:1 to FTS rows.
+            sqlx::query(
+                "DELETE FROM conversation_fts
+                 WHERE rowid NOT IN (
+                     SELECT MAX(rowid) FROM conversation_fts GROUP BY conversation_id, row_id
+                 )",
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "INSERT OR REPLACE INTO conversation_fts_rowids(conversation_id, row_id, fts_rowid)
+                 SELECT conversation_id, row_id, rowid FROM conversation_fts",
+            )
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
+                "INSERT OR REPLACE INTO conversation_fts_rowids(conversation_id, row_id, fts_rowid)
+                 VALUES (?, ?, 1)",
+            )
+            .bind(FTS_ROWID_INDEX_META_CONV)
+            .bind(FTS_ROWID_INDEX_META_ROW)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
     }
+
     let rows = sqlx::query("SELECT id FROM sessions")
         .fetch_all(pool)
         .await?;
-    let indexed_ids: HashSet<String> =
-        sqlx::query_scalar::<_, String>("SELECT DISTINCT conversation_id FROM conversation_fts")
-            .fetch_all(pool)
-            .await?
-            .into_iter()
-            .collect();
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    let indexed_ids: HashSet<String> = sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT conversation_id FROM conversation_fts_rowids WHERE conversation_id != ?",
+    )
+    .bind(FTS_ROWID_INDEX_META_CONV)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|id| id.replace('-', "").to_ascii_lowercase())
+    .collect();
+
     let mut indexed = 0usize;
     for row in rows {
         let id: Uuid = row.try_get("id")?;
-        if indexed_ids.contains(&id.to_string()) {
+        let normalized = id.simple().to_string();
+        if indexed_ids.contains(&normalized) {
             continue;
         }
         match reindex_from_projection(pool, id).await {

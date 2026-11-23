@@ -501,6 +501,7 @@ impl ServerAuth for StaticServerAuth {
 #[derive(Clone)]
 pub struct SqliteServerAuth {
     pool: SqlitePool,
+    read_pool: SqlitePool,
     clock: Arc<dyn AuthClock>,
     pairing_ttl_seconds: i64,
 }
@@ -511,16 +512,37 @@ impl SqliteServerAuth {
     }
 
     pub fn with_clock(pool: SqlitePool, clock: Arc<dyn AuthClock>) -> Self {
+        let read_pool = pool.clone();
         Self {
             pool,
+            read_pool,
             clock,
             pairing_ttl_seconds: PAIRING_TTL_DEFAULT_SECONDS,
         }
     }
 
+    pub fn with_read_pool(mut self, read_pool: SqlitePool) -> Self {
+        self.read_pool = read_pool;
+        self
+    }
+
     fn now(&self) -> i64 {
         self.clock.unix_seconds()
     }
+}
+
+fn decode_hex_blob(hex: &str) -> Option<Vec<u8>> {
+    let bytes = hex.as_bytes();
+    if !bytes.len().is_multiple_of(2) || bytes.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        let hi = (pair[0] as char).to_digit(16)?;
+        let lo = (pair[1] as char).to_digit(16)?;
+        out.push(((hi << 4) | lo) as u8);
+    }
+    Some(out)
 }
 
 #[async_trait]
@@ -540,7 +562,7 @@ impl ServerAuth for SqliteServerAuth {
                  LIMIT 1",
             )
             .bind(digest.as_bytes().as_slice())
-            .fetch_optional(&self.pool)
+            .fetch_optional(&self.read_pool)
             .await?
         {
             return Ok(Some(AuthenticatedCredential {
@@ -559,7 +581,7 @@ impl ServerAuth for SqliteServerAuth {
              LIMIT 1",
         )
         .bind(digest.as_bytes().as_slice())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.read_pool)
         .await?
         {
             let id: String = row.try_get("id")?;
@@ -583,7 +605,7 @@ impl ServerAuth for SqliteServerAuth {
                  LIMIT 1",
             )
             .bind(digest.as_bytes().as_slice())
-            .fetch_optional(&self.pool)
+            .fetch_optional(&self.read_pool)
             .await?
         {
             return Ok(Some(AuthenticatedCredential {
@@ -602,25 +624,57 @@ impl ServerAuth for SqliteServerAuth {
         &self,
         credential: &AuthenticatedCredential,
     ) -> Result<bool, AuthStoreError> {
-        let query = match credential.kind {
+        let active: i64 = match credential.kind {
             CredentialKind::Server => {
-                "SELECT EXISTS(
-                    SELECT 1 FROM server_access_tokens
-                    WHERE lower(hex(id)) = ? AND revoked_at IS NULL
-                ) AS active"
+                if let Some(id_bytes) = decode_hex_blob(&credential.credential_id) {
+                    if let Ok(id_text) = std::str::from_utf8(&id_bytes) {
+                        sqlx::query(
+                            "SELECT EXISTS(
+                                SELECT 1 FROM server_access_tokens
+                                WHERE id IN (?1, ?2) AND revoked_at IS NULL
+                            ) AS active",
+                        )
+                        .bind(&id_bytes)
+                        .bind(id_text)
+                        .fetch_one(&self.read_pool)
+                        .await?
+                        .try_get("active")?
+                    } else {
+                        sqlx::query(
+                            "SELECT EXISTS(
+                                SELECT 1 FROM server_access_tokens
+                                WHERE id = ? AND revoked_at IS NULL
+                            ) AS active",
+                        )
+                        .bind(&id_bytes)
+                        .fetch_one(&self.read_pool)
+                        .await?
+                        .try_get("active")?
+                    }
+                } else {
+                    sqlx::query(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM server_access_tokens
+                            WHERE lower(hex(id)) = ? AND revoked_at IS NULL
+                        ) AS active",
+                    )
+                    .bind(&credential.credential_id)
+                    .fetch_one(&self.read_pool)
+                    .await?
+                    .try_get("active")?
+                }
             }
-            CredentialKind::Device => {
+            CredentialKind::Device => sqlx::query(
                 "SELECT EXISTS(
                     SELECT 1 FROM server_device_credentials
                     WHERE id = ? AND revoked_at_unix IS NULL
-                ) AS active"
-            }
-        };
-        let active: i64 = sqlx::query(query)
+                ) AS active",
+            )
             .bind(&credential.credential_id)
-            .fetch_one(&self.pool)
+            .fetch_one(&self.read_pool)
             .await?
-            .try_get("active")?;
+            .try_get("active")?,
+        };
         Ok(active == 1)
     }
 
@@ -2413,5 +2467,64 @@ mod host_console_pairing_tests {
                 .expect("second revoke"),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn server_token_is_active_handles_both_text_and_blob_primary_keys() {
+        let auth = auth().await;
+        let text_token = "dimo_test_text_id_token_secret";
+        let blob_token = "dimo_test_blob_id_token_secret";
+        let text_digest = super::TokenDigest::from_secret(text_token);
+        let blob_digest = super::TokenDigest::from_secret(blob_token);
+        let text_id = uuid::Uuid::new_v4().to_string();
+        let blob_id = uuid::Uuid::new_v4().as_bytes().to_vec();
+
+        sqlx::query(
+            "INSERT INTO server_access_tokens (id, token_hash, scopes_json, created_at)
+             VALUES (?, ?, '[\"*\"]', CURRENT_TIMESTAMP)",
+        )
+        .bind(&text_id)
+        .bind(text_digest.as_bytes().as_slice())
+        .execute(&auth.pool)
+        .await
+        .expect("insert text-id server token");
+
+        let text_cred = auth
+            .authenticate(text_token)
+            .await
+            .expect("auth text")
+            .expect("text cred");
+        assert!(auth.is_active(&text_cred).await.expect("text active"));
+
+        sqlx::query("UPDATE server_access_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE id = ?")
+            .bind(&text_id)
+            .execute(&auth.pool)
+            .await
+            .expect("revoke text");
+        assert!(!auth.is_active(&text_cred).await.expect("text revoked"));
+
+        sqlx::query(
+            "INSERT INTO server_access_tokens (id, token_hash, scopes_json, created_at)
+             VALUES (?, ?, '[\"*\"]', CURRENT_TIMESTAMP)",
+        )
+        .bind(&blob_id)
+        .bind(blob_digest.as_bytes().as_slice())
+        .execute(&auth.pool)
+        .await
+        .expect("insert blob-id server token");
+
+        let blob_cred = auth
+            .authenticate(blob_token)
+            .await
+            .expect("auth blob")
+            .expect("blob cred");
+        assert!(auth.is_active(&blob_cred).await.expect("blob active"));
+
+        sqlx::query("UPDATE server_access_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE id = ?")
+            .bind(&blob_id)
+            .execute(&auth.pool)
+            .await
+            .expect("revoke blob");
+        assert!(!auth.is_active(&blob_cred).await.expect("blob revoked"));
     }
 }

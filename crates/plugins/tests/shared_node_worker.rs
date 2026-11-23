@@ -806,3 +806,590 @@ async fn shared_node_worker_does_not_lock_first_mounted_plugin_directory() {
         .unwrap();
     assert_eq!(after["pid"], json!(shared_pid));
 }
+
+struct UnusedPreviewHost;
+
+#[async_trait]
+impl plugins::PluginPreviewHost for UnusedPreviewHost {
+    async fn open_preview(
+        &self,
+        _request: plugins::PluginPreviewRequest,
+    ) -> Result<plugins::PluginPreviewSession, plugins::PluginPreviewHostError> {
+        unreachable!("test never opens preview")
+    }
+
+    async fn close_preview(
+        &self,
+        _file_path: &str,
+        _lease_id: Option<&str>,
+    ) -> Result<(), plugins::PluginPreviewHostError> {
+        unreachable!("test never closes preview")
+    }
+
+    async fn renew_preview(
+        &self,
+        _lease_id: &str,
+    ) -> Result<plugins::PluginPreviewSession, plugins::PluginPreviewHostError> {
+        unreachable!("test never renews preview")
+    }
+}
+
+fn write_reentrant_stdio_worker_package(root: &Path, plugin_id: &str, handler_id: &str) {
+    std::fs::create_dir_all(root.join(".dimo-plugin")).unwrap();
+    std::fs::write(
+        root.join(".dimo-plugin/plugin.json"),
+        serde_json::to_string_pretty(&json!({
+            "manifestVersion": 4,
+            "apiVersion": "1.0",
+            "id": plugin_id,
+            "publisher": "dev.dimo",
+            "name": plugin_id,
+            "version": "1.0.0",
+            "engines": { "dimo": ">=0.1.3 <1.0.0", "pluginSdk": "^1.0.0" },
+            "entrypoints": {
+                "worker": { "path": "worker.mjs", "runtime": "node", "protocol": "1.1" }
+            },
+            "permissions": [],
+            "contributes": {
+                "agent.invocations": [{
+                    "id": "invoke-reentrant",
+                    "kindVersion": 1,
+                    "label": "Invoke Reentrant",
+                    "entrypoints": ["action"],
+                    "handler": handler_id,
+                }]
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    std::fs::write(
+        root.join("worker.mjs"),
+        reentrant_stdio_worker_source(handler_id),
+    )
+    .unwrap();
+}
+
+fn write_reentrant_v4_product_worker_package(root: &Path, plugin_id: &str, handler_id: &str) {
+    std::fs::create_dir_all(root.join(".dimo-plugin")).unwrap();
+    std::fs::create_dir_all(root.join("contents")).unwrap();
+    std::fs::write(root.join("README.md"), "# Test Reentrant Settings\n").unwrap();
+    std::fs::write(
+        root.join("config.json"),
+        "{\n  \"theme\": \"light\",\n  \"revision\": 1\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join(".dimo-plugin/content.index.json"),
+        serde_json::to_string_pretty(&json!({
+            "schemaVersion": 1,
+            "entries": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join(".dimo-plugin/plugin.json"),
+        serde_json::to_string_pretty(&json!({
+            "manifestVersion": 4,
+            "apiVersion": "2.0",
+            "id": plugin_id,
+            "publisher": "dev.dimo",
+            "name": plugin_id,
+            "version": "1.0.0",
+            "readme": "README.md",
+            "engines": { "dimo": ">=0.1.3 <1.0.0", "pluginSdk": "^2.0.0" },
+            "content": {
+                "root": "contents",
+                "index": ".dimo-plugin/content.index.json"
+            },
+            "config": {
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": true
+                }
+            },
+            "entrypoints": {
+                "worker": { "path": "worker.mjs", "runtime": "node", "protocol": "1.1" }
+            },
+            "permissions": [],
+            "contributes": {
+                "agent.invocations": [{
+                    "id": "invoke-reentrant",
+                    "kindVersion": 1,
+                    "label": "Invoke Reentrant",
+                    "entrypoints": ["action"],
+                    "handler": handler_id,
+                }]
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let worker_source = reentrant_stdio_worker_source(handler_id);
+    std::fs::write(root.join("worker.mjs"), worker_source).unwrap();
+}
+
+fn reentrant_stdio_worker_source(handler_id: &str) -> String {
+    format!(
+        r#"import {{ createInterface }} from "node:readline";
+let hostSeq = 0;
+const pending = new Map();
+const configUpdates = [];
+const rl = createInterface({{ input: process.stdin, crlfDelay: Infinity }});
+for await (const line of rl) {{
+  const msg = JSON.parse(line);
+  if ("ok" in msg && pending.has(msg.id)) {{
+    const p = pending.get(msg.id);
+    pending.delete(msg.id);
+    p.resolve(msg);
+    continue;
+  }}
+  if (msg.method === "initialize") {{
+    console.log(JSON.stringify({{
+      id: msg.id,
+      ok: true,
+      result: {{
+        protocolVersion: "1.1",
+        sdkVersion: "1.0.0",
+        registrations: ["{handler_id}"],
+        requestedFeatures: []
+      }}
+    }}));
+  }} else if (msg.method === "activate") {{
+    console.log(JSON.stringify({{
+      id: msg.id,
+      ok: true,
+      result: {{ handlers: ["{handler_id}"] }}
+    }}));
+  }} else if (msg.method === "config.volatile-update") {{
+    configUpdates.push(msg.params?.config ?? null);
+    console.log(JSON.stringify({{ id: msg.id, ok: true, result: null }}));
+  }} else if (msg.method === "dispose") {{
+    console.log(JSON.stringify({{ id: msg.id, ok: true, result: null }}));
+  }} else if (msg.method === "invoke") {{
+    (async () => {{
+      const input = msg.params?.input ?? {{}};
+      if (input.op === "read_updates") {{
+        console.log(JSON.stringify({{
+          id: msg.id,
+          ok: true,
+          result: {{ configUpdates }}
+        }}));
+        return;
+      }}
+      const callId = `host:${{++hostSeq}}`;
+      const brokerPromise = new Promise((resolve) => pending.set(callId, {{ resolve }}));
+      console.log(JSON.stringify({{
+        id: callId,
+        method: "host.call",
+        params: {{
+          capability: input.capability,
+          operation: input.operation,
+          input: input.payload ?? {{}}
+        }}
+      }}));
+      const hostResp = await brokerPromise;
+      console.log(JSON.stringify({{
+        id: msg.id,
+        ok: true,
+        result: {{
+          hostOk: hostResp.ok,
+          hostResult: hostResp.result ?? null,
+          hostError: hostResp.error ?? null,
+          configUpdatesCount: configUpdates.length
+        }}
+      }}));
+    }})();
+  }}
+}}
+"#
+    )
+}
+
+#[tokio::test]
+async fn reentrant_storage_settings_put_does_not_deadlock_and_delivers_deferred_update() {
+    let Some(node) = node_executable() else {
+        return;
+    };
+    let control = Arc::new(PluginControlPlane::new(Arc::new(
+        InMemoryPluginRegistry::default(),
+    )));
+    let data_dir = tempfile::tempdir().unwrap();
+    let broker = Arc::new(plugins::HostCapabilityBroker::new(
+        Arc::clone(&control),
+        Arc::new(UnusedPreviewHost),
+    ));
+    broker.set_plugin_data_root(data_dir.path());
+
+    let pkg_dir = tempfile::tempdir().unwrap();
+    let plugin_id = "dev.dimo.reentrant-settings";
+    let handler_id = "settings.test";
+    write_reentrant_v4_product_worker_package(pkg_dir.path(), plugin_id, handler_id);
+    let package = PluginPackage::inspect(pkg_dir.path(), PluginSourceKind::DeveloperLink).unwrap();
+    control
+        .import(package, ConflictDecision::Reject)
+        .await
+        .unwrap();
+    control
+        .activate_and_enable(&node, plugin_id, &[], broker)
+        .await
+        .unwrap();
+
+    let lease = control.activation_lease(plugin_id).await.unwrap();
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        lease.invoke(
+            handler_id,
+            json!({
+                "capability": "storage",
+                "operation": "settings.put",
+                "payload": { "theme": "dark", "revision": 2 }
+            }),
+        ),
+    )
+    .await
+    .expect("re-entrant storage.settings.put must not deadlock")
+    .unwrap();
+
+    // Wait briefly for the deferred volatile config push to reach the worker.
+    let mut delivered = false;
+    for _ in 0..20 {
+        let state = lease
+            .invoke(handler_id, json!({ "op": "read_updates" }))
+            .await
+            .unwrap();
+        if state["configUpdates"]
+            .as_array()
+            .is_some_and(|updates| updates.iter().any(|u| u["theme"] == json!("dark")))
+        {
+            delivered = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    let persisted = control.plugin(plugin_id).await.unwrap().unwrap();
+    control.uninstall(plugin_id).await.unwrap();
+
+    assert_eq!(response["hostOk"], json!(true));
+    assert_eq!(response["hostResult"]["theme"], json!("dark"));
+    assert_eq!(persisted.package.config["theme"], json!("dark"));
+    assert_eq!(persisted.package.config["revision"], json!(2));
+    assert!(
+        delivered,
+        "deferred config.volatile-update must be delivered after outer invoke releases worker lock"
+    );
+}
+
+struct ControlPlaneReentrantBroker {
+    control: Arc<PluginControlPlane>,
+}
+
+#[async_trait]
+impl CapabilityBroker for ControlPlaneReentrantBroker {
+    fn supports(&self, _capability: &str) -> bool {
+        true
+    }
+
+    async fn call(
+        &self,
+        plugin_id: &str,
+        _generation: u64,
+        _capability: &str,
+        operation: &str,
+        input: Value,
+    ) -> Result<Value, WorkerHostError> {
+        match operation {
+            "invoke_command" => {
+                let target_plugin = input["targetPluginId"].as_str().unwrap_or(plugin_id);
+                let target_handler = input["handler"].as_str().unwrap();
+                self.control
+                    .invoke_plugin_command(target_plugin, target_handler, json!({}))
+                    .await
+            }
+            "quarantine" => {
+                self.control
+                    .quarantine_plugin(plugin_id, "reentrant-test")
+                    .await
+                    .map_err(|error| {
+                        WorkerHostError::broker("quarantine_failed", error.to_string())
+                    })?;
+                Ok(json!({ "quarantined": true }))
+            }
+            _ => Err(WorkerHostError::broker("unsupported", operation)),
+        }
+    }
+}
+
+#[tokio::test]
+async fn reentrant_invoke_and_quarantine_inside_host_call_do_not_deadlock() {
+    let Some(node) = node_executable() else {
+        return;
+    };
+    let control = Arc::new(PluginControlPlane::new(Arc::new(
+        InMemoryPluginRegistry::default(),
+    )));
+    let broker = Arc::new(ControlPlaneReentrantBroker {
+        control: Arc::clone(&control),
+    });
+
+    let dir_a = tempfile::tempdir().unwrap();
+    let dir_b = tempfile::tempdir().unwrap();
+    write_reentrant_stdio_worker_package(dir_a.path(), "dev.dimo.reentrant-a", "handler.a");
+    write_reentrant_stdio_worker_package(dir_b.path(), "dev.dimo.reentrant-b", "handler.b");
+
+    for dir in [&dir_a, &dir_b] {
+        let pkg = PluginPackage::inspect(dir.path(), PluginSourceKind::DeveloperLink).unwrap();
+        control.import(pkg, ConflictDecision::Reject).await.unwrap();
+    }
+    control
+        .activate_and_enable(&node, "dev.dimo.reentrant-a", &[], broker.clone())
+        .await
+        .unwrap();
+    control
+        .activate_and_enable(&node, "dev.dimo.reentrant-b", &[], broker.clone())
+        .await
+        .unwrap();
+
+    let lease_a = control
+        .activation_lease("dev.dimo.reentrant-a")
+        .await
+        .unwrap();
+
+    // 1. Self re-entrant invoke must fail fast instead of deadlocking.
+    let self_resp = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        lease_a.invoke(
+            "handler.a",
+            json!({
+                "capability": "reentrant",
+                "operation": "invoke_command",
+                "payload": { "targetPluginId": "dev.dimo.reentrant-a", "handler": "handler.a" }
+            }),
+        ),
+    )
+    .await
+    .expect("self re-entrant invoke must not deadlock")
+    .unwrap();
+    assert_eq!(self_resp["hostOk"], json!(false));
+    assert_eq!(
+        self_resp["hostError"]["code"],
+        json!("worker_reentrant_invoke")
+    );
+
+    // 2. Sibling plugin on the same SharedNodeWorkerHost must also fail fast.
+    let sibling_resp = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        lease_a.invoke(
+            "handler.a",
+            json!({
+                "capability": "reentrant",
+                "operation": "invoke_command",
+                "payload": { "targetPluginId": "dev.dimo.reentrant-b", "handler": "handler.b" }
+            }),
+        ),
+    )
+    .await
+    .expect("sibling re-entrant invoke on same SharedNode host must not deadlock")
+    .unwrap();
+    assert_eq!(sibling_resp["hostOk"], json!(false));
+    assert_eq!(
+        sibling_resp["hostError"]["code"],
+        json!("worker_reentrant_invoke")
+    );
+
+    // 3. Quarantine (which calls deactivate -> dispose) inside host.call must not deadlock.
+    let quarantine_resp = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        lease_a.invoke(
+            "handler.a",
+            json!({
+                "capability": "reentrant",
+                "operation": "quarantine",
+                "payload": {}
+            }),
+        ),
+    )
+    .await
+    .expect("re-entrant quarantine inside host.call must not deadlock")
+    .unwrap();
+    assert_eq!(quarantine_resp["hostOk"], json!(true));
+    assert!(
+        control
+            .activation_lease("dev.dimo.reentrant-a")
+            .await
+            .is_none()
+    );
+
+    // Sibling B remains alive and responsive; wait briefly for A's deferred dispose.
+    let lease_b = control
+        .activation_lease("dev.dimo.reentrant-b")
+        .await
+        .unwrap();
+    let probe_b = lease_b
+        .invoke("handler.b", json!({ "op": "read_updates" }))
+        .await
+        .unwrap();
+    assert!(probe_b["configUpdates"].is_array());
+    control.uninstall("dev.dimo.reentrant-b").await.unwrap();
+}
+
+struct DedicatedReentrantBroker {
+    host_slot: Mutex<Option<Arc<plugins::WorkerHost>>>,
+}
+
+#[async_trait]
+impl CapabilityBroker for DedicatedReentrantBroker {
+    fn supports(&self, _capability: &str) -> bool {
+        true
+    }
+
+    async fn call(
+        &self,
+        _plugin_id: &str,
+        _generation: u64,
+        _capability: &str,
+        _operation: &str,
+        _input: Value,
+    ) -> Result<Value, WorkerHostError> {
+        let host = self
+            .host_slot
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("host registered")
+            .clone();
+        let is_terminal = host.is_terminal().await;
+        let pid = host.pid().await;
+        let invoke_err = host
+            .invoke("handler.ded", json!({ "op": "read_updates" }))
+            .await
+            .unwrap_err();
+        let update_err = host.update_config(json!({ "k": "v" })).await.unwrap_err();
+        Ok(json!({
+            "isTerminal": is_terminal,
+            "hasPid": pid.is_some(),
+            "invokeErrCode": invoke_err.code(),
+            "updateErrCode": update_err.code(),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn dedicated_worker_reentrant_is_terminal_pid_and_guards_do_not_deadlock() {
+    let Some(node) = node_executable() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    write_reentrant_stdio_worker_package(dir.path(), "dev.dimo.dedicated-reentrant", "handler.ded");
+    let package = PluginPackage::inspect(dir.path(), PluginSourceKind::DeveloperLink).unwrap();
+    let broker = Arc::new(DedicatedReentrantBroker {
+        host_slot: Mutex::new(None),
+    });
+    let host = Arc::new(
+        plugins::WorkerHost::spawn(&node, &package, 1, &[], broker.clone())
+            .await
+            .unwrap(),
+    );
+    assert!(host.is_dedicated_process());
+    *broker.host_slot.lock().unwrap() = Some(Arc::clone(&host));
+
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        host.invoke(
+            "handler.ded",
+            json!({
+                "capability": "probe",
+                "operation": "check",
+                "payload": {}
+            }),
+        ),
+    )
+    .await
+    .expect("dedicated worker re-entrant checks must not deadlock")
+    .unwrap();
+
+    assert_eq!(resp["hostOk"], json!(true));
+    assert_eq!(resp["hostResult"]["isTerminal"], json!(false));
+    assert_eq!(resp["hostResult"]["hasPid"], json!(true));
+    assert_eq!(
+        resp["hostResult"]["invokeErrCode"],
+        json!("worker_reentrant_invoke")
+    );
+    assert_eq!(
+        resp["hostResult"]["updateErrCode"],
+        json!("worker_reentrant_update")
+    );
+
+    host.dispose("test complete").await.unwrap();
+    assert!(host.is_terminal().await);
+}
+
+#[tokio::test]
+async fn lazy_worker_runtime_activates_plugin_on_demand_before_background_recovery() {
+    let Some(node) = node_executable() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = tempfile::tempdir().unwrap();
+    write_shared_worker_package(dir.path(), 42, "1.0.0", false);
+
+    let registry = Arc::new(InMemoryPluginRegistry::default());
+    let control_seed = PluginControlPlane::new(registry.clone());
+    control_seed
+        .import(
+            PluginPackage::inspect(dir.path(), PluginSourceKind::DeveloperLink).unwrap(),
+            ConflictDecision::Reject,
+        )
+        .await
+        .unwrap();
+    let broker = Arc::new(RecordingBroker::default());
+    control_seed
+        .activate_and_enable(&node, "dev.dimo.shared-42", &[], broker.clone())
+        .await
+        .unwrap();
+    control_seed
+        .deactivate_worker("dev.dimo.shared-42")
+        .await
+        .unwrap();
+
+    // Simulate a fresh Host restart in desktop mode: the registry already has the
+    // enabled plugin + active generation, `configure_lazy_worker_runtime` is wired,
+    // and `recover_enabled_workers` has NOT run yet.
+    let restarted = PluginControlPlane::new(registry);
+    let worker_runtime = Arc::new(plugins::PluginWorkerRuntimeProvider::new(
+        data_dir.path().to_path_buf(),
+    ));
+    restarted
+        .configure_lazy_worker_runtime(
+            worker_runtime,
+            data_dir.path().join("plugins").join("dev-candidates"),
+            broker,
+        )
+        .await;
+    restarted.sync_official_product_mcp_gate().await.unwrap();
+
+    assert!(
+        !restarted.is_worker_running("dev.dimo.shared-42").await,
+        "worker process should stay cold until first invocation"
+    );
+
+    let lease = restarted
+        .activation_lease("dev.dimo.shared-42")
+        .await
+        .expect("lazy worker runtime must resolve Node and activate plugin on demand");
+    let response = lease
+        .invoke("ping.w42", json!({ "lazy": true }))
+        .await
+        .unwrap();
+    assert_eq!(response["index"], json!(42));
+    assert!(response["pid"].is_u64());
+
+    restarted
+        .deactivate_worker("dev.dimo.shared-42")
+        .await
+        .unwrap();
+}

@@ -31,11 +31,14 @@ pub fn write_host_token(data_dir: impl AsRef<Path>, token: &ServerToken) -> io::
     let data_dir = data_dir.as_ref();
     fs::create_dir_all(data_dir)?;
     let path = host_token_path(data_dir);
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&path)?;
+    let mut open = fs::OpenOptions::new();
+    open.create(true).write(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open.mode(0o600);
+    }
+    let mut file = open.open(&path)?;
     file.write_all(token.as_str().as_bytes())?;
     file.write_all(b"\n")?;
     file.sync_all()?;

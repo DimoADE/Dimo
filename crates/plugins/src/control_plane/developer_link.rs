@@ -274,17 +274,19 @@ impl PluginControlPlane {
                 );
                 continue;
             }
-            let digest = match crate::package_content_digest(&plugin.source.path) {
-                Ok(digest) => digest,
-                Err(error) => {
-                    tracing::warn!(
-                        plugin_id = %plugin.id(),
-                        error = %error,
-                        "linked Plugin digest could not be computed"
-                    );
-                    continue;
-                }
-            };
+            let digest =
+                match crate::digest::package_content_digest_async(plugin.source.path.clone()).await
+                {
+                    Ok(digest) => digest,
+                    Err(error) => {
+                        tracing::warn!(
+                            plugin_id = %plugin.id(),
+                            error = %error,
+                            "linked Plugin digest could not be computed"
+                        );
+                        continue;
+                    }
+                };
             if digest == plugin.package_digest {
                 continue;
             }
@@ -449,7 +451,8 @@ impl PluginControlPlane {
             if installed.source.kind == crate::PluginSourceKind::DeveloperLink {
                 continue;
             }
-            let incoming_digest = crate::package_content_digest(builtin_root)?;
+            let incoming_digest =
+                crate::digest::package_content_digest_async(builtin_root.to_path_buf()).await?;
             if installed.package_digest == incoming_digest {
                 continue;
             }
@@ -562,12 +565,17 @@ impl PluginControlPlane {
         let mut builtin =
             crate::PluginPackage::inspect(builtin_root, crate::PluginSourceKind::Builtin)?;
         let installed = self.plugin(builtin.id.as_str()).await?;
+        let incoming_digest = if installed.is_some() {
+            Some(crate::digest::package_content_digest_async(builtin_root.to_path_buf()).await?)
+        } else {
+            None
+        };
         match installed {
             None => {
                 self.import(builtin, ConflictDecision::Reject).await?;
             }
             Some(installed)
-                if installed.package_digest != crate::package_content_digest(builtin_root)? =>
+                if Some(installed.package_digest.as_str()) != incoming_digest.as_deref() =>
             {
                 if installed.config_schema.is_some() {
                     builtin.write_adopted_config(installed.config.clone())?;

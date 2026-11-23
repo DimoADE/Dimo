@@ -1,11 +1,12 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    future::Future,
     io,
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -29,6 +30,35 @@ use crate::PluginPackage;
 /// back to the Host (must accommodate interactive user-confirmation flows such
 /// as `provider.presets.bind`, which allow up to 180s).
 const HOST_CALL_MAX_TIMEOUT: Duration = Duration::from_secs(240);
+
+tokio::task_local! {
+    static ACTIVE_WORKER_LOCKS: Vec<usize>;
+}
+
+fn lock_id_held(lock_id: usize) -> bool {
+    if lock_id == 0 {
+        return false;
+    }
+    ACTIVE_WORKER_LOCKS
+        .try_with(|locks| locks.contains(&lock_id))
+        .unwrap_or(false)
+}
+
+async fn with_worker_lock_scope<F, T>(lock_id: usize, future: F) -> T
+where
+    F: Future<Output = T>,
+{
+    if lock_id == 0 {
+        return future.await;
+    }
+    let mut locks = ACTIVE_WORKER_LOCKS
+        .try_with(Clone::clone)
+        .unwrap_or_default();
+    if !locks.contains(&lock_id) {
+        locks.push(lock_id);
+    }
+    ACTIVE_WORKER_LOCKS.scope(locks, future).await
+}
 
 fn runtime_host_version() -> String {
     std::env::var("DIMO_APP_VERSION")
@@ -465,7 +495,8 @@ fn isolate_worker_process_group(command: &mut Command) {
 }
 
 /// Best-effort process-tree kill. Windows uses `taskkill /T`; Unix signals the
-/// process group. Callers still `start_kill`/`kill` the leader as a fallback.
+/// isolated process group in-process via `ProcessTreeJob` (`killpg`).
+/// Callers still `start_kill`/`kill` the leader as a fallback.
 pub(crate) fn kill_os_process_tree(pid: u32) {
     #[cfg(windows)]
     {
@@ -480,78 +511,108 @@ pub(crate) fn kill_os_process_tree(pid: u32) {
     }
     #[cfg(unix)]
     {
-        let self_pid = std::process::id();
-        if pid > 1 && pid != self_pid {
-            let _ = std::process::Command::new("kill")
-                .args(["-KILL", &format!("-{pid}")])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
+        let _ = utils::process::ProcessTreeJob::create_and_assign(pid).terminate();
     }
 }
 
-enum HostedChild {
-    Command(Option<Child>),
+struct HostedChild {
+    child: Option<Child>,
+    process_job: Option<utils::process::ProcessTreeJob>,
 }
 
 impl HostedChild {
-    fn id(&self) -> Option<u32> {
-        match self {
-            Self::Command(child) => child.as_ref().and_then(Child::id),
+    fn from_child(child: Child) -> Self {
+        let pid = child.id();
+        #[cfg(windows)]
+        if let Some(pid) = pid {
+            let _ = utils::process::assign_pid_to_guardian_job(pid);
+        }
+        let process_job = pid.map(utils::process::ProcessTreeJob::create_and_assign);
+        Self {
+            child: Some(child),
+            process_job,
         }
     }
 
+    fn id(&self) -> Option<u32> {
+        self.child.as_ref().and_then(Child::id)
+    }
+
     fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-        match self {
-            Self::Command(Some(child)) => child.try_wait(),
-            Self::Command(None) => Ok(None),
+        match self.child.as_mut() {
+            Some(child) => {
+                let status = child.try_wait()?;
+                if status.is_some()
+                    && let Some(job) = self.process_job.take()
+                {
+                    job.close();
+                }
+                Ok(status)
+            }
+            None => Ok(None),
         }
     }
 
     async fn kill(&mut self) -> std::io::Result<()> {
-        match self {
-            Self::Command(Some(child)) => {
-                if let Some(pid) = child.id() {
-                    kill_os_process_tree(pid);
-                }
-                child.kill().await
+        let Some(child) = self.child.as_mut() else {
+            if let Some(job) = self.process_job.take() {
+                job.close();
             }
-            Self::Command(None) => Ok(()),
+            return Ok(());
+        };
+        let Some(pid) = child.id() else {
+            // Child was already reaped; disarm job without post-reap killpg.
+            if let Some(job) = self.process_job.take() {
+                job.close();
+            }
+            return Ok(());
+        };
+        let job_terminated = self.process_job.take().is_some_and(|job| job.terminate());
+        if !job_terminated {
+            kill_os_process_tree(pid);
         }
+        child.kill().await
     }
 
     async fn wait(&mut self) -> std::io::Result<()> {
-        match self {
-            Self::Command(Some(child)) => child.wait().await.map(|_| ()),
-            Self::Command(None) => Ok(()),
+        let result = match self.child.as_mut() {
+            Some(child) => child.wait().await.map(|_| ()),
+            None => Ok(()),
+        };
+        if let Some(job) = self.process_job.take() {
+            job.close();
         }
+        result
     }
 }
 
 impl Drop for HostedChild {
     fn drop(&mut self) {
-        let Self::Command(child_opt) = self;
-        if let Some(mut child) = child_opt.take() {
+        if let Some(mut child) = self.child.take() {
             if let Some(pid) = child.id() {
-                kill_os_process_tree(pid);
+                let job_terminated = self.process_job.take().is_some_and(|job| job.terminate());
+                if !job_terminated {
+                    kill_os_process_tree(pid);
+                }
+                let _ = child.start_kill();
+                if matches!(child.try_wait(), Ok(None))
+                    && let Ok(handle) = tokio::runtime::Handle::try_current()
+                {
+                    handle.spawn(async move {
+                        let _ = child.wait().await;
+                    });
+                }
+            } else if let Some(job) = self.process_job.take() {
+                job.close();
             }
-            let _ = child.start_kill();
-            if matches!(child.try_wait(), Ok(None))
-                && let Ok(handle) = tokio::runtime::Handle::try_current()
-            {
-                handle.spawn(async move {
-                    let _ = child.wait().await;
-                });
-            }
+        } else if let Some(job) = self.process_job.take() {
+            job.close();
         }
     }
 }
 
 struct WorkerProcess {
     child: HostedChild,
-    pid: Option<u32>,
     stdin: Box<dyn AsyncWrite + Unpin + Send>,
     stdout: BufReader<Box<dyn AsyncRead + Unpin + Send>>,
     sequence: u64,
@@ -668,6 +729,10 @@ impl SharedNodeWorkerHost {
             .unwrap_or_default()
     }
 
+    pub(crate) fn lock_id(&self) -> usize {
+        std::ptr::from_ref(&self.inner) as usize
+    }
+
     pub async fn invoke_slot(
         &self,
         plugin_id: &str,
@@ -676,6 +741,15 @@ impl SharedNodeWorkerHost {
         input: Value,
         request_timeout: Duration,
     ) -> Result<Value, WorkerHostError> {
+        let lock_id = self.lock_id();
+        if lock_id_held(lock_id) {
+            return Err(WorkerHostError::new(
+                "worker_reentrant_invoke",
+                format!(
+                    "Cannot invoke handler {handler} on {plugin_id} re-entrantly while its shared Node worker host is already inside an in-flight host.call"
+                ),
+            ));
+        }
         let mut guard = self.inner.lock().await;
         let Some(process) = guard.as_mut() else {
             return Err(WorkerHostError::new(
@@ -703,16 +777,28 @@ impl SharedNodeWorkerHost {
             "invoke",
             json!({ "handler": handler, "input": input }),
             request_timeout,
+            lock_id,
         )
         .await
     }
 }
 
+#[derive(Default)]
+struct DeferredConfigState {
+    latest: Option<Value>,
+    task_active: bool,
+}
+
 enum WorkerBackend {
     Lightweight,
-    Dedicated(Box<Mutex<WorkerProcess>>),
+    Dedicated {
+        process: Arc<Mutex<WorkerProcess>>,
+        pid: Option<u32>,
+        terminal: AtomicBool,
+    },
     SharedNode {
         host: Arc<SharedNodeWorkerHost>,
+        terminal: AtomicBool,
         terminal_error: Mutex<Option<String>>,
     },
 }
@@ -724,6 +810,7 @@ pub struct WorkerHost {
     request_timeout: Duration,
     frame_codec: FrameCodec,
     last_activity_ms: AtomicU64,
+    deferred_config: std::sync::Mutex<DeferredConfigState>,
 }
 
 impl WorkerHost {
@@ -761,6 +848,7 @@ impl WorkerHost {
             request_timeout: Duration::from_secs(30),
             frame_codec,
             last_activity_ms: AtomicU64::new(activity_now_ms()),
+            deferred_config: std::sync::Mutex::new(DeferredConfigState::default()),
         })
     }
 
@@ -816,7 +904,8 @@ impl WorkerHost {
             package.entrypoints.worker_max_frame_bytes,
             MAX_LOGICAL_MESSAGE_BYTES,
         );
-        let package_digest = crate::package_content_digest(&package_root)
+        let package_digest = crate::digest::package_content_digest_async(package_root.clone())
+            .await
             .map_err(|error| WorkerHostError::new("worker_package_invalid", error.to_string()))?;
 
         let slot_spec = MountedSlotSpec {
@@ -838,6 +927,16 @@ impl WorkerHost {
             initial_config: package.config.clone(),
         };
 
+        let lock_id = shared_host.lock_id();
+        if lock_id_held(lock_id) {
+            return Err(WorkerHostError::new(
+                "worker_reentrant_spawn",
+                format!(
+                    "Cannot mount worker slot {plugin_id} re-entrantly while the shared Node worker host is already inside an in-flight host.call"
+                ),
+            ));
+        }
+
         let mut guard = shared_host.inner.lock().await;
         let mut crashed_survivors = Vec::new();
         if let Some(existing) = guard.as_mut()
@@ -852,7 +951,7 @@ impl WorkerHost {
         if guard.is_none() {
             let mut fresh = spawn_fresh_shared_node_process(&node_executable)?;
             for survivor in crashed_survivors {
-                let _ = remount_survivor_slot(&mut fresh, survivor).await;
+                let _ = remount_survivor_slot(&mut fresh, survivor, lock_id).await;
             }
             *guard = Some(fresh);
         }
@@ -863,7 +962,7 @@ impl WorkerHost {
             .brokers
             .insert(slot_key.clone(), scoped_broker.clone());
 
-        let handshake_result = mount_and_activate_slot_muxed(process, &slot_spec)
+        let handshake_result = mount_and_activate_slot_muxed(process, &slot_spec, lock_id)
             .await
             .and_then(|handlers| {
                 validate_registrations(package, &handlers)?;
@@ -887,11 +986,13 @@ impl WorkerHost {
                     broker: scoped_broker,
                     backend: WorkerBackend::SharedNode {
                         host: shared_host,
+                        terminal: AtomicBool::new(false),
                         terminal_error: Mutex::new(None),
                     },
                     request_timeout,
                     frame_codec,
                     last_activity_ms: AtomicU64::new(activity_now_ms()),
+                    deferred_config: std::sync::Mutex::new(DeferredConfigState::default()),
                 })
             }
             Err(error) => {
@@ -918,7 +1019,7 @@ impl WorkerHost {
                     *guard = None;
                     if let Ok(mut fresh) = spawn_fresh_shared_node_process(&node_executable) {
                         for survivor in survivors {
-                            let _ = remount_survivor_slot(&mut fresh, survivor).await;
+                            let _ = remount_survivor_slot(&mut fresh, survivor, lock_id).await;
                         }
                         if !fresh.mounted_slots.is_empty() {
                             *guard = Some(fresh);
@@ -998,14 +1099,14 @@ impl WorkerHost {
         );
         let mut process = WorkerProcess {
             child,
-            pid,
             stdin,
             stdout: BufReader::new(stdout),
             sequence: 0,
             terminal_error: None,
         };
         let granted_capabilities = vec!["*".to_owned()];
-        let package_digest = crate::package_content_digest(&package_root)
+        let package_digest = crate::digest::package_content_digest_async(package_root.clone())
+            .await
             .map_err(|error| WorkerHostError::new("worker_package_invalid", error.to_string()))?;
         let initialized = exchange(
             &mut process,
@@ -1038,6 +1139,7 @@ impl WorkerHost {
                 }
             }),
             Duration::from_secs(10),
+            0,
         )
         .await?;
         if initialized.get("protocolVersion").and_then(Value::as_str) != Some("1.1") {
@@ -1060,6 +1162,7 @@ impl WorkerHost {
                 "config": package.config,
             }),
             Duration::from_secs(10),
+            0,
         )
         .await?;
         let handlers = response
@@ -1082,15 +1185,20 @@ impl WorkerHost {
                 handlers,
             },
             broker: scoped_broker,
-            backend: WorkerBackend::Dedicated(Box::new(Mutex::new(process))),
+            backend: WorkerBackend::Dedicated {
+                process: Arc::new(Mutex::new(process)),
+                pid,
+                terminal: AtomicBool::new(false),
+            },
             request_timeout,
             frame_codec,
             last_activity_ms: AtomicU64::new(activity_now_ms()),
+            deferred_config: std::sync::Mutex::new(DeferredConfigState::default()),
         })
     }
 
     pub fn is_dedicated_process(&self) -> bool {
-        matches!(self.backend, WorkerBackend::Dedicated(_))
+        matches!(self.backend, WorkerBackend::Dedicated { .. })
     }
 
     pub fn is_shared_node_process(&self) -> bool {
@@ -1101,21 +1209,91 @@ impl WorkerHost {
         matches!(self.backend, WorkerBackend::Lightweight)
     }
 
+    pub(crate) fn lock_id(&self) -> Option<usize> {
+        match &self.backend {
+            WorkerBackend::Lightweight => None,
+            WorkerBackend::Dedicated { process, .. } => Some(Arc::as_ptr(process) as usize),
+            WorkerBackend::SharedNode { host, .. } => Some(host.lock_id()),
+        }
+    }
+
+    pub(crate) fn is_reentrant_lock_held(&self) -> bool {
+        self.lock_id().is_some_and(lock_id_held)
+    }
+
+    pub(crate) fn mark_terminal(&self) {
+        match &self.backend {
+            WorkerBackend::Lightweight => {}
+            WorkerBackend::Dedicated { terminal, .. }
+            | WorkerBackend::SharedNode { terminal, .. } => {
+                terminal.store(true, Ordering::Release);
+            }
+        }
+    }
+
+    pub(crate) fn defer_config_update(self: &Arc<Self>, config: Value) {
+        let should_spawn = {
+            let mut state = self
+                .deferred_config
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.latest = Some(config);
+            if state.task_active {
+                false
+            } else {
+                state.task_active = true;
+                true
+            }
+        };
+        if should_spawn {
+            let host = Arc::clone(self);
+            tokio::spawn(async move {
+                loop {
+                    let next = {
+                        let mut state = host
+                            .deferred_config
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        match state.latest.take() {
+                            Some(config) => config,
+                            None => {
+                                state.task_active = false;
+                                break;
+                            }
+                        }
+                    };
+                    if let Err(error) = host.update_config(next).await {
+                        tracing::warn!(
+                            plugin_id = %host.activation.plugin_id,
+                            %error,
+                            "deferred volatile config update failed"
+                        );
+                    }
+                }
+            });
+        }
+    }
+
     pub async fn is_terminal(&self) -> bool {
         match &self.backend {
             WorkerBackend::Lightweight => false,
-            WorkerBackend::Dedicated(process) => process.lock().await.terminal_error.is_some(),
+            WorkerBackend::Dedicated { terminal, .. } => terminal.load(Ordering::Acquire),
             WorkerBackend::SharedNode {
                 host,
+                terminal,
                 terminal_error,
-            } => terminal_error.lock().await.is_some() || !host.is_running().await,
+            } => {
+                terminal.load(Ordering::Acquire)
+                    || terminal_error.lock().await.is_some()
+                    || !host.is_running().await
+            }
         }
     }
 
     pub async fn pid(&self) -> Option<u32> {
         match &self.backend {
             WorkerBackend::Lightweight => None,
-            WorkerBackend::Dedicated(process) => process.lock().await.pid,
+            WorkerBackend::Dedicated { pid, .. } => *pid,
             WorkerBackend::SharedNode { host, .. } => host.pid().await,
         }
     }
@@ -1139,11 +1317,26 @@ impl WorkerHost {
     /// worker without restarting its generation or spawning a new process.
     pub async fn update_config(&self, config: Value) -> Result<bool, WorkerHostError> {
         self.touch_activity();
+        if self.is_reentrant_lock_held() {
+            return Err(WorkerHostError::new(
+                "worker_reentrant_update",
+                format!(
+                    "Cannot push volatile config update to {} re-entrantly while its worker host is already inside an in-flight host.call",
+                    self.activation.plugin_id
+                ),
+            ));
+        }
         match &self.backend {
             WorkerBackend::Lightweight => Ok(false),
-            WorkerBackend::Dedicated(process) => {
+            WorkerBackend::Dedicated {
+                process, terminal, ..
+            } => {
+                if terminal.load(Ordering::Acquire) {
+                    return Ok(false);
+                }
+                let lock_id = Arc::as_ptr(process) as usize;
                 let mut process = process.lock().await;
-                if process.terminal_error.is_some() {
+                if process.terminal_error.is_some() || terminal.load(Ordering::Acquire) {
                     return Ok(false);
                 }
                 let _ = exchange(
@@ -1153,17 +1346,20 @@ impl WorkerHost {
                     "config.volatile-update",
                     json!({ "config": config }),
                     Duration::from_secs(5),
+                    lock_id,
                 )
                 .await?;
                 Ok(true)
             }
             WorkerBackend::SharedNode {
                 host,
+                terminal,
                 terminal_error,
             } => {
-                if terminal_error.lock().await.is_some() {
+                if terminal.load(Ordering::Acquire) || terminal_error.lock().await.is_some() {
                     return Ok(false);
                 }
+                let lock_id = host.lock_id();
                 let mut guard = host.inner.lock().await;
                 let Some(process) = guard.as_mut() else {
                     return Ok(false);
@@ -1185,6 +1381,7 @@ impl WorkerHost {
                     "config.volatile-update",
                     json!({ "config": config }),
                     Duration::from_secs(5),
+                    lock_id,
                 )
                 .await?;
                 Ok(true)
@@ -1214,15 +1411,39 @@ impl WorkerHost {
                 format!("handler {handler} is not active"),
             ));
         }
+        if self.is_reentrant_lock_held() {
+            return Err(WorkerHostError::new(
+                "worker_reentrant_invoke",
+                format!(
+                    "Cannot invoke handler {handler} on {} re-entrantly while its worker host is already inside an in-flight host.call",
+                    self.activation.plugin_id
+                ),
+            ));
+        }
         match &self.backend {
             WorkerBackend::Lightweight => Err(WorkerHostError::new(
                 "handler_not_found",
                 format!("handler {handler} is not active on lightweight plugin"),
             )),
-            WorkerBackend::Dedicated(process) => {
+            WorkerBackend::Dedicated {
+                process, terminal, ..
+            } => {
+                if terminal.load(Ordering::Acquire) {
+                    return Err(WorkerHostError::new(
+                        "worker_terminal",
+                        "Worker is already terminated",
+                    ));
+                }
+                let lock_id = Arc::as_ptr(process) as usize;
                 let mut process = process.lock().await;
                 if let Some(reason) = &process.terminal_error {
                     return Err(WorkerHostError::new("worker_terminal", reason));
+                }
+                if terminal.load(Ordering::Acquire) {
+                    return Err(WorkerHostError::new(
+                        "worker_terminal",
+                        "Worker is already terminated",
+                    ));
                 }
                 let result = exchange(
                     &mut process,
@@ -1231,6 +1452,7 @@ impl WorkerHost {
                     "invoke",
                     json!({ "handler": handler, "input": input }),
                     request_timeout,
+                    lock_id,
                 )
                 .await;
                 if let Err(error) = &result
@@ -1241,23 +1463,39 @@ impl WorkerHost {
                     let _ = process.child.kill().await;
                     let _ = process.child.wait().await;
                     process.terminal_error = Some(reason);
+                    terminal.store(true, Ordering::Release);
                 }
                 result
             }
             WorkerBackend::SharedNode {
                 host,
+                terminal,
                 terminal_error,
             } => {
                 if let Some(reason) = terminal_error.lock().await.as_ref() {
                     return Err(WorkerHostError::new("worker_terminal", reason));
                 }
+                if terminal.load(Ordering::Acquire) {
+                    return Err(WorkerHostError::new(
+                        "worker_terminal",
+                        "Worker is already terminated",
+                    ));
+                }
+                let lock_id = host.lock_id();
                 let mut guard = host.inner.lock().await;
                 if let Some(reason) = terminal_error.lock().await.as_ref() {
                     return Err(WorkerHostError::new("worker_terminal", reason));
                 }
+                if terminal.load(Ordering::Acquire) {
+                    return Err(WorkerHostError::new(
+                        "worker_terminal",
+                        "Worker is already terminated",
+                    ));
+                }
                 let Some(process) = guard.as_mut() else {
                     let msg = "Shared Node worker process is not running";
                     *terminal_error.lock().await = Some(msg.to_owned());
+                    terminal.store(true, Ordering::Release);
                     return Err(WorkerHostError::new("worker_terminal", msg));
                 };
                 let slot_key = (
@@ -1267,6 +1505,7 @@ impl WorkerHost {
                 if !process.mounted_slots.contains(&slot_key) {
                     let msg = "Shared Node worker slot is no longer mounted";
                     *terminal_error.lock().await = Some(msg.to_owned());
+                    terminal.store(true, Ordering::Release);
                     return Err(WorkerHostError::new("worker_terminal", msg));
                 }
                 let result = exchange_muxed(
@@ -1276,6 +1515,7 @@ impl WorkerHost {
                     "invoke",
                     json!({ "handler": handler, "input": input }),
                     request_timeout,
+                    lock_id,
                 )
                 .await;
                 if let Err(error) = &result
@@ -1284,6 +1524,7 @@ impl WorkerHost {
                     record_plugin_crash(&self.activation.plugin_id, error.to_string());
                     let reason = error.to_string();
                     *terminal_error.lock().await = Some(reason);
+                    terminal.store(true, Ordering::Release);
                     process.mounted_slots.remove(&slot_key);
                     process.brokers.remove(&slot_key);
                     let _ = process.slot_specs.remove(&slot_key);
@@ -1315,7 +1556,7 @@ impl WorkerHost {
                         *guard = None;
                         if let Ok(mut fresh) = spawn_fresh_shared_node_process(&node_exec) {
                             for survivor in survivors {
-                                let _ = remount_survivor_slot(&mut fresh, survivor).await;
+                                let _ = remount_survivor_slot(&mut fresh, survivor, lock_id).await;
                             }
                             if !fresh.mounted_slots.is_empty() {
                                 *guard = Some(fresh);
@@ -1330,11 +1571,25 @@ impl WorkerHost {
     }
 
     pub async fn dispose(&self, reason: &str) -> Result<(), WorkerHostError> {
+        if self.is_reentrant_lock_held() {
+            self.mark_terminal();
+            return Err(WorkerHostError::new(
+                "worker_reentrant_dispose",
+                format!(
+                    "Cannot dispose worker {} re-entrantly while its worker host is already inside an in-flight host.call",
+                    self.activation.plugin_id
+                ),
+            ));
+        }
         match &self.backend {
             WorkerBackend::Lightweight => Ok(()),
-            WorkerBackend::Dedicated(process) => {
+            WorkerBackend::Dedicated {
+                process, terminal, ..
+            } => {
+                let lock_id = Arc::as_ptr(process) as usize;
                 let mut process = process.lock().await;
                 if process.terminal_error.is_some() {
+                    terminal.store(true, Ordering::Release);
                     return Ok(());
                 }
                 let _ = exchange(
@@ -1344,6 +1599,7 @@ impl WorkerHost {
                     "dispose",
                     json!({ "reason": reason }),
                     Duration::from_secs(5),
+                    lock_id,
                 )
                 .await;
                 process.child.kill().await.map_err(|error| {
@@ -1351,19 +1607,24 @@ impl WorkerHost {
                 })?;
                 let _ = process.child.wait().await;
                 process.terminal_error = Some(format!("disposed: {reason}"));
+                terminal.store(true, Ordering::Release);
                 Ok(())
             }
             WorkerBackend::SharedNode {
                 host,
+                terminal,
                 terminal_error,
             } => {
                 {
                     let mut term = terminal_error.lock().await;
                     if term.is_some() {
+                        terminal.store(true, Ordering::Release);
                         return Ok(());
                     }
                     *term = Some(format!("disposed: {reason}"));
+                    terminal.store(true, Ordering::Release);
                 }
+                let lock_id = host.lock_id();
                 let mut guard = host.inner.lock().await;
                 let Some(process) = guard.as_mut() else {
                     host.sync_status(&mut guard);
@@ -1382,6 +1643,7 @@ impl WorkerHost {
                         "dispose",
                         json!({ "reason": reason }),
                         Duration::from_secs(5),
+                        lock_id,
                     )
                     .await;
                     let _ = unmount_slot_muxed(
@@ -2609,6 +2871,7 @@ fn spawn_fresh_shared_node_process(
 async fn mount_and_activate_slot_muxed(
     process: &mut SharedNodeProcess,
     spec: &MountedSlotSpec,
+    lock_id: usize,
 ) -> Result<Vec<String>, WorkerHostError> {
     mount_slot_muxed(
         process,
@@ -2651,6 +2914,7 @@ async fn mount_and_activate_slot_muxed(
             }
         }),
         Duration::from_secs(10),
+        lock_id,
     )
     .await?;
     if initialized.get("protocolVersion").and_then(Value::as_str) != Some("1.1") {
@@ -2673,6 +2937,7 @@ async fn mount_and_activate_slot_muxed(
             "config": spec.initial_config,
         }),
         Duration::from_secs(10),
+        lock_id,
     )
     .await?;
     let handlers = response
@@ -2689,12 +2954,13 @@ async fn mount_and_activate_slot_muxed(
 async fn remount_survivor_slot(
     process: &mut SharedNodeProcess,
     spec: MountedSlotSpec,
+    lock_id: usize,
 ) -> Result<(), WorkerHostError> {
     let slot_key = (spec.plugin_id.clone(), spec.generation);
     process
         .brokers
         .insert(slot_key.clone(), spec.broker.clone());
-    match mount_and_activate_slot_muxed(process, &spec).await {
+    match mount_and_activate_slot_muxed(process, &spec, lock_id).await {
         Ok(_) => {
             process.mounted_slots.insert(slot_key.clone());
             process.slot_specs.insert(slot_key, spec);
@@ -2741,15 +3007,12 @@ fn spawn_shared_node_runner(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     utils::process::configure_tokio_command_no_window(&mut command);
+    utils::process::scrub_host_secret_env_tokio(&mut command);
     isolate_worker_process_group(&mut command);
     let mut child = command
         .spawn()
         .map_err(|error| WorkerHostError::new("worker_spawn_failed", error.to_string()))?;
     let pid = child.id();
-    #[cfg(windows)]
-    if let Some(pid) = pid {
-        let _ = utils::process::assign_pid_to_guardian_job(pid);
-    }
     let stdin = child.stdin.take().ok_or_else(|| {
         WorkerHostError::new(
             "worker_transport_failed",
@@ -2764,7 +3027,7 @@ fn spawn_shared_node_runner(
     })?;
     let stderr = child.stderr.take();
     Ok((
-        HostedChild::Command(Some(child)),
+        HostedChild::from_child(child),
         pid,
         Box::new(stdin),
         Box::new(stdout),
@@ -2938,6 +3201,7 @@ async fn exchange_muxed(
     method: &str,
     params: Value,
     deadline: Duration,
+    lock_id: usize,
 ) -> Result<Value, WorkerHostError> {
     let plugin_id = broker.plugin_id.as_str();
     let generation = broker.generation;
@@ -3001,6 +3265,7 @@ async fn exchange_muxed(
                     codec,
                     &other_msg,
                     host_call_timeout,
+                    lock_id,
                 )
                 .await?;
             }
@@ -3018,8 +3283,15 @@ async fn exchange_muxed(
         };
         if let Some(msg_method) = message.get("method").and_then(Value::as_str) {
             if msg_method == "host.call" {
-                dispatch_host_call_muxed(process, broker, codec, &message, host_call_timeout)
-                    .await?;
+                dispatch_host_call_muxed(
+                    process,
+                    broker,
+                    codec,
+                    &message,
+                    host_call_timeout,
+                    lock_id,
+                )
+                .await?;
                 continue;
             }
             if msg_method == "worker.log" {
@@ -3070,6 +3342,7 @@ async fn dispatch_host_call_muxed(
     codec: FrameCodec,
     message: &Value,
     host_call_timeout: Duration,
+    lock_id: usize,
 ) -> Result<(), WorkerHostError> {
     let id = message
         .get("id")
@@ -3091,7 +3364,11 @@ async fn dispatch_host_call_muxed(
         .pointer("/params/input")
         .cloned()
         .unwrap_or(Value::Null);
-    let response = match timeout(host_call_timeout, broker.call(capability, operation, input)).await
+    let response = match with_worker_lock_scope(
+        lock_id,
+        timeout(host_call_timeout, broker.call(capability, operation, input)),
+    )
+    .await
     {
         Ok(Ok(result)) => json!({ "id": id, "ok": true, "result": result }),
         Ok(Err(error)) => json!({
@@ -3128,10 +3405,6 @@ fn spawn_hosted_worker(
     let mut child = command
         .spawn()
         .map_err(|error| WorkerHostError::new("worker_spawn_failed", error.to_string()))?;
-    #[cfg(windows)]
-    if let Some(pid) = child.id() {
-        let _ = utils::process::assign_pid_to_guardian_job(pid);
-    }
     let stdin = child.stdin.take().ok_or_else(|| {
         WorkerHostError::new("worker_transport_failed", "Worker stdin is unavailable")
     })?;
@@ -3140,7 +3413,7 @@ fn spawn_hosted_worker(
     })?;
     let stderr = child.stderr.take();
     Ok((
-        HostedChild::Command(Some(child)),
+        HostedChild::from_child(child),
         Box::new(stdin),
         Box::new(stdout),
         stderr,
@@ -3172,6 +3445,7 @@ fn hosted_worker_command(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     utils::process::configure_tokio_command_no_window(&mut command);
+    utils::process::scrub_host_secret_env_tokio(&mut command);
     isolate_worker_process_group(&mut command);
     command
 }
@@ -3211,6 +3485,7 @@ async fn exchange(
     method: &str,
     params: Value,
     deadline: Duration,
+    lock_id: usize,
 ) -> Result<Value, WorkerHostError> {
     process.sequence = process.sequence.saturating_add(1);
     let request_id = format!("host:{}", process.sequence);
@@ -3247,7 +3522,8 @@ async fn exchange(
             }
         };
         if message.get("method").and_then(Value::as_str) == Some("host.call") {
-            dispatch_host_call(process, broker, codec, &message, host_call_timeout).await?;
+            dispatch_host_call(process, broker, codec, &message, host_call_timeout, lock_id)
+                .await?;
             continue;
         }
         if message.get("method").and_then(Value::as_str) == Some("worker.log") {
@@ -3283,6 +3559,7 @@ async fn dispatch_host_call(
     codec: FrameCodec,
     message: &Value,
     host_call_timeout: Duration,
+    lock_id: usize,
 ) -> Result<(), WorkerHostError> {
     let id = message
         .get("id")
@@ -3304,7 +3581,11 @@ async fn dispatch_host_call(
         .pointer("/params/input")
         .cloned()
         .unwrap_or(Value::Null);
-    let response = match timeout(host_call_timeout, broker.call(capability, operation, input)).await
+    let response = match with_worker_lock_scope(
+        lock_id,
+        timeout(host_call_timeout, broker.call(capability, operation, input)),
+    )
+    .await
     {
         Ok(Ok(result)) => json!({ "id": id, "ok": true, "result": result }),
         Ok(Err(error)) => json!({

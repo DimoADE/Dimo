@@ -660,7 +660,8 @@ impl PluginControlPlane {
         grants: &[CapabilityGrant],
         broker: Arc<dyn CapabilityBroker>,
     ) -> Result<InstalledPlugin, WorkerHostError> {
-        let digest = crate::package_content_digest(&package.source.path)
+        let digest = crate::digest::package_content_digest_async(package.source.path.clone())
+            .await
             .map_err(|error| WorkerHostError::external(error.code(), error))?;
         package.source.update_lock =
             crate::PluginSourceLock::from_source(&package.source, &package.version, &digest);

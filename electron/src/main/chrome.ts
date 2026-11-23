@@ -174,6 +174,10 @@ export class DesktopChromeManager {
     this.options = options;
   }
 
+  setDataDir(dataDir: string | undefined): void {
+    this.options.dataDir = dataDir;
+  }
+
   install(): void {
     this.installTray();
     if (process.platform === 'darwin') {

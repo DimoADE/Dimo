@@ -18,7 +18,9 @@ export function useConversationTimeline(
   const isActive = options?.active ?? true;
   const subscribe = useCallback(
     (onStoreChange: () => void) =>
-      subscribeConversationTimeline(onStoreChange, conversationId),
+      conversationId
+        ? subscribeConversationTimeline(onStoreChange, conversationId)
+        : () => {},
     [conversationId]
   );
   const snapshot = useSyncExternalStore(
@@ -40,14 +42,26 @@ export function useConversationTimeline(
 export function useConversationSessionFacts(
   conversationId: string | null
 ): ConversationSessionFacts {
+  return useConversationTimelineSelector(
+    conversationId,
+    getConversationSessionFacts
+  );
+}
+
+export function useConversationTimelineSelector<T>(
+  conversationId: string | null,
+  selector: (id: string | null) => T
+): T {
   const subscribe = useCallback(
     (onStoreChange: () => void) =>
-      subscribeConversationTimeline(onStoreChange, conversationId),
+      conversationId
+        ? subscribeConversationTimeline(onStoreChange, conversationId)
+        : () => {},
     [conversationId]
   );
   return useSyncExternalStore(
     subscribe,
-    () => getConversationSessionFacts(conversationId),
-    () => getConversationSessionFacts(conversationId)
+    () => selector(conversationId),
+    () => selector(conversationId)
   );
 }

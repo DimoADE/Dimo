@@ -94,6 +94,14 @@ pub fn package_content_digest(root: &Path) -> Result<String, PluginError> {
     Ok(format!("{:x}", Sha256::digest(rows.join("\n").as_bytes())))
 }
 
+pub(crate) async fn package_content_digest_async(root: PathBuf) -> Result<String, PluginError> {
+    tokio::task::spawn_blocking(move || package_content_digest(&root))
+        .await
+        .map_err(|error| {
+            PluginError::io("join package digest task", std::io::Error::other(error))
+        })?
+}
+
 fn collect_digest_files(
     root: &Path,
     directory: &Path,

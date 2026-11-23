@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { hasElectronDesktopRuntime } from '@/lib/desktopShell';
 import { HostedElectronBrowserWebview } from './HostedElectronBrowserWebview';
 import {
@@ -17,8 +18,11 @@ import {
  */
 export function ElectronBrowserHost() {
   const isElectron = hasElectronDesktopRuntime();
-  const tabOrder = useElectronBrowserSurfaceStore((state) => state.tabOrder);
-  const tabs = useElectronBrowserSurfaceStore((state) => state.tabs);
+  const hostedTabIds = useElectronBrowserSurfaceStore(
+    useShallow((state) =>
+      state.tabOrder.filter((tabId) => !state.tabs[tabId]?.inline)
+    )
+  );
 
   useEffect(() => {
     if (!isElectron) {
@@ -33,8 +37,6 @@ export function ElectronBrowserHost() {
   if (!isElectron) {
     return null;
   }
-
-  const hostedTabIds = tabOrder.filter((tabId) => !tabs[tabId]?.inline);
 
   return (
     <div

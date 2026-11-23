@@ -23,8 +23,6 @@ use services::services::{
 };
 use tokio::sync::RwLock;
 use utils::msg_store::MsgStore;
-#[cfg(target_os = "windows")]
-use utils::process::new_hidden_std_command;
 
 use crate::{container::LocalContainerService, pty::PtyService};
 mod command;
@@ -287,18 +285,10 @@ fn generate_user_id_uncached() -> String {
 
     #[cfg(target_os = "windows")]
     {
-        if let Ok(output) = new_hidden_std_command(
-            "powershell",
-            [
-                "-NoProfile",
-                "-Command",
-                "(Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Cryptography').MachineGuid",
-            ],
-        )
-        .output()
-            && output.status.success()
-        {
-            output.stdout.hash(&mut hasher);
+        if let Some(guid) = utils::windows_machine_guid() {
+            // Preserve the historical PowerShell stdout format (`{guid}\r\n`) so
+            // existing Windows installations keep their exact `user_id` hash.
+            format!("{guid}\r\n").into_bytes().hash(&mut hasher);
         }
     }
 

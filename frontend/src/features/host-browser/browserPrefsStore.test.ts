@@ -1,11 +1,15 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { BackendTransport } from '@/lib/transport/backendTransport';
+import { mountBackendTransport } from '@/lib/transport/transportRegistry';
 import {
   DEFAULT_BROWSER_SETTINGS,
   evaluateHostRules,
+  loadBrowserPrefs,
   matchHostRule,
   normalizeBrowserSettings,
   parseHostRulePattern,
   resetBrowserPrefsForTests,
+  resolveHostBrowserPluginId,
   resolveLinkOpenAction,
   resolveSiteRuleAction,
   validateHostRulePattern,
@@ -263,6 +267,118 @@ describe('browserPrefsStore', () => {
       expect(resolveSiteRuleAction('https://other.example/', settings)).toBe(
         null
       );
+    });
+  });
+
+  describe('loadBrowserPrefs & resolveHostBrowserPluginId', () => {
+    it('deduplicates concurrent loads, uses read-only settings.get, and skips redundant reloads unless forced', async () => {
+      const calls: Array<{ command: string; args?: Record<string, unknown> }> =
+        [];
+      const callMock = vi.fn(
+        async (command: string, args?: Record<string, unknown>) => {
+          calls.push({ command, args });
+          // Yield to ensure all concurrent callers hit the in-flight guard.
+          await Promise.resolve();
+          if (command === 'plugin_product_detail') {
+            return {
+              config: {
+                defaultGrant: 'read',
+              },
+            };
+          }
+          if (command === 'plugin_invoke_contribution') {
+            const input = args?.input as { operation?: string } | undefined;
+            if (input?.operation === 'settings.get') {
+              return {
+                defaultGrant: 'read',
+                evalApproval: 'ask',
+              };
+            }
+            if (input?.operation === 'capabilities') {
+              return {
+                policy: {
+                  source: 'default',
+                  enabled: true,
+                  managedRules: [],
+                  rulesCount: 0,
+                },
+              };
+            }
+          }
+          return null;
+        }
+      );
+
+      const transport: BackendTransport = {
+        environment: 'desktop',
+        call: callMock,
+      };
+      const unmount = mountBackendTransport(transport);
+      try {
+        // 20 components mounting simultaneously (e.g. MarkdownResourceLink + tool cards)
+        const snapshots = await Promise.all(
+          Array.from({ length: 20 }, () => loadBrowserPrefs('dimo.browser'))
+        );
+
+        expect(snapshots[0]?.settings.defaultGrant).toBe('read');
+        expect(snapshots[0]?.settings.evalApproval).toBe('ask');
+        expect(snapshots[0]?.capabilities?.policy.enabled).toBe(true);
+
+        const detailCalls = calls.filter(
+          (c) => c.command === 'plugin_product_detail'
+        );
+        const invokeOps = calls
+          .filter((c) => c.command === 'plugin_invoke_contribution')
+          .map((c) => (c.args?.input as { operation?: string })?.operation);
+
+        expect(detailCalls).toHaveLength(1);
+        expect(invokeOps).toEqual(['settings.get', 'capabilities']);
+        expect(invokeOps).not.toContain('settings.set');
+
+        // Subsequent non-forced load must perform 0 RPCs.
+        callMock.mockClear();
+        await loadBrowserPrefs('dimo.browser');
+        expect(callMock).not.toHaveBeenCalled();
+
+        // Explicit { force: true } refreshes via read-only path.
+        await loadBrowserPrefs('dimo.browser', { force: true });
+        expect(callMock).toHaveBeenCalledTimes(3);
+        const forcedOps = callMock.mock.calls
+          .filter(([cmd]) => cmd === 'plugin_invoke_contribution')
+          .map(
+            ([, args]) => (args?.input as { operation?: string })?.operation
+          );
+        expect(forcedOps).toEqual(['settings.get', 'capabilities']);
+      } finally {
+        unmount();
+      }
+    });
+
+    it('deduplicates concurrent resolveHostBrowserPluginId catalog lookups', async () => {
+      const callMock = vi.fn(async () => {
+        await Promise.resolve();
+        return {
+          items: [
+            {
+              pluginId: 'dimo.browser',
+              metadata: { engine: 'host-browser' },
+            },
+          ],
+        };
+      });
+      const unmount = mountBackendTransport({
+        environment: 'desktop',
+        call: callMock,
+      });
+      try {
+        const ids = await Promise.all(
+          Array.from({ length: 10 }, () => resolveHostBrowserPluginId())
+        );
+        expect(ids.every((id) => id === 'dimo.browser')).toBe(true);
+        expect(callMock).toHaveBeenCalledTimes(1);
+      } finally {
+        unmount();
+      }
     });
   });
 });

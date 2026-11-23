@@ -1,12 +1,5 @@
 import { TooltipProvider } from '@/components/ui/tooltip';
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  useSyncExternalStore,
-} from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
 import type { AgentKind } from 'shared/types';
@@ -35,8 +28,8 @@ import {
   getConversationPersona,
   getConversationPromptSuggestion,
   getConversationSessionGoal,
-  subscribeConversationTimeline,
 } from '@/features/conversation/conversationTimelineRegistry';
+import { useConversationTimelineSelector } from '@/features/conversation/useConversationTimeline';
 import { normalizeAgentIdentity } from '@/features/conversation/conversationStore';
 import { sessionsApi } from '@/lib/api';
 import { listenToConversationEvents } from '@/features/conversation/events';
@@ -196,35 +189,30 @@ export function TaskFollowUpSection({
     isNewSessionMode,
     sessionId: session?.id,
   });
-  const storedPersona = useSyncExternalStore(
-    subscribeConversationTimeline,
-    () => getConversationPersona(sessionId ?? null),
-    () => getConversationPersona(sessionId ?? null)
+  const activeSessionId = sessionId ?? null;
+  const storedPersona = useConversationTimelineSelector(
+    activeSessionId,
+    getConversationPersona
   );
-  const storedSessionGoal = useSyncExternalStore(
-    subscribeConversationTimeline,
-    () => getConversationSessionGoal(sessionId ?? null),
-    () => getConversationSessionGoal(sessionId ?? null)
+  const storedSessionGoal = useConversationTimelineSelector(
+    activeSessionId,
+    getConversationSessionGoal
   );
-  const storedAsyncTasks = useSyncExternalStore(
-    subscribeConversationTimeline,
-    () => getConversationAsyncTasks(sessionId ?? null),
-    () => getConversationAsyncTasks(sessionId ?? null)
+  const storedAsyncTasks = useConversationTimelineSelector(
+    activeSessionId,
+    getConversationAsyncTasks
   );
-  const storedPromptSuggestion = useSyncExternalStore(
-    subscribeConversationTimeline,
-    () => getConversationPromptSuggestion(sessionId ?? null),
-    () => getConversationPromptSuggestion(sessionId ?? null)
+  const storedPromptSuggestion = useConversationTimelineSelector(
+    activeSessionId,
+    getConversationPromptSuggestion
   );
-  const handoffPending = useSyncExternalStore(
-    subscribeConversationTimeline,
-    () => getConversationHandoffPending(sessionId ?? null),
-    () => getConversationHandoffPending(sessionId ?? null)
+  const handoffPending = useConversationTimelineSelector(
+    activeSessionId,
+    getConversationHandoffPending
   );
-  const timelineControlsAgentId = useSyncExternalStore(
-    subscribeConversationTimeline,
-    () => getConversationControlsAgentId(sessionId ?? null),
-    () => getConversationControlsAgentId(sessionId ?? null)
+  const timelineControlsAgentId = useConversationTimelineSelector(
+    activeSessionId,
+    getConversationControlsAgentId
   );
   const previousSessionIdRef = useRef(sessionId);
   useEffect(() => {
@@ -352,6 +340,7 @@ export function TaskFollowUpSection({
     if (!sessionId || !liveFeedbackOn) return;
     let active = true;
     let unlisten: (() => void) | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     listenToConversationEvents((batch) => {
       if (!active || batch.conversation_id !== sessionId) return;
       if (
@@ -360,7 +349,11 @@ export function TaskFollowUpSection({
       ) {
         return;
       }
-      void refetchLiveFeedback();
+      if (timer !== undefined) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = undefined;
+        if (active) void refetchLiveFeedback();
+      }, 250);
     }, sessionId)
       .then((unsubscribe) => {
         if (!active) {
@@ -372,6 +365,7 @@ export function TaskFollowUpSection({
       .catch(() => {});
     return () => {
       active = false;
+      if (timer !== undefined) clearTimeout(timer);
       unlisten?.();
     };
   }, [liveFeedbackOn, refetchLiveFeedback, sessionId]);

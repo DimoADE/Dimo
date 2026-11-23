@@ -570,3 +570,61 @@ describe.skipIf(!fs.existsSync(DEBUG_SERVER_BIN))(
     );
   }
 );
+
+describe('SidecarManager parallel startup readiness', () => {
+  it('reports starting status while spawning and resolves waitForReady() once ready handshake arrives', async () => {
+    const { EventEmitter } = await import('node:events');
+    const { PassThrough } = await import('node:stream');
+
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const fakeChild = Object.assign(new EventEmitter(), {
+      stdout,
+      stderr,
+      stdin: new PassThrough(),
+      pid: 98765,
+      exitCode: null as number | null,
+      killed: false,
+      kill: vi.fn(() => {
+        fakeChild.exitCode = 0;
+        fakeChild.killed = true;
+        fakeChild.emit('exit', 0, null);
+        return true;
+      }),
+    });
+
+    const manager = new SidecarManager();
+    const startPromise = manager.start({
+      binaryPath: process.execPath,
+      appVersion: '0.5.4',
+      readyTimeoutMs: 5_000,
+      spawnProcess: (() => fakeChild) as unknown as typeof import('node:child_process').spawn,
+    });
+
+    expect(manager.getStatus()).toBe('starting');
+    expect(manager.getConnectionOrNull()).toBeNull();
+
+    const waitPromise = manager.waitForReady();
+    stdout.write(
+      `${JSON.stringify({
+        type: 'dimo-server-ready',
+        listen_addr: '127.0.0.1:49999',
+        port: 49999,
+        pid: 98765,
+        protocol_version: '1.0',
+        data_dir: '/tmp/dimo-test',
+      })}\n`
+    );
+
+    const [started, waited] = await Promise.all([startPromise, waitPromise]);
+    expect(started.baseUrl).toBe('http://127.0.0.1:49999');
+    expect(waited).toEqual(started);
+    expect(manager.getStatus()).toBe('running');
+    expect(manager.getDataDir()).toBe('/tmp/dimo-test');
+
+    const shutdownPromise = manager.shutdown();
+    fakeChild.kill();
+    await shutdownPromise;
+    expect(manager.getStatus()).toBe('stopped');
+  });
+});

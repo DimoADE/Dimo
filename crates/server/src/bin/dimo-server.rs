@@ -7,11 +7,40 @@ use server::{
 };
 use tokio::sync::Notify;
 
+#[derive(Default)]
+struct CapturedStartupTokens {
+    desktop_token: Option<String>,
+    server_token: Option<String>,
+}
+
+fn capture_and_scrub_startup_tokens() -> CapturedStartupTokens {
+    let take_var = |key: &str| {
+        let value = std::env::var(key)
+            .ok()
+            .filter(|token| !token.trim().is_empty());
+        if std::env::var_os(key).is_some() {
+            // SAFETY: Called in `main()` before the Tokio runtime or any background threads spawn.
+            unsafe {
+                std::env::remove_var(key);
+            }
+        }
+        value
+    };
+    CapturedStartupTokens {
+        desktop_token: take_var("DIMO_DESKTOP_TOKEN"),
+        server_token: take_var("DIMO_SERVER_TOKEN"),
+    }
+}
+
 fn main() -> ExitCode {
     let parsed = parse_args(std::env::args().skip(1));
-    if let Ok(ParsedArgs::Start(ref launch)) = parsed {
+    let startup_tokens = if let Ok(ParsedArgs::Start(ref launch)) = parsed {
         apply_launch_process_hints(launch);
-    }
+        utils::shell::bootstrap_desktop_path();
+        capture_and_scrub_startup_tokens()
+    } else {
+        CapturedStartupTokens::default()
+    };
 
     // Match the desktop Host: debug command futures exceed Tokio's default stack.
     tokio::runtime::Builder::new_multi_thread()
@@ -19,7 +48,7 @@ fn main() -> ExitCode {
         .thread_stack_size(16 * 1024 * 1024)
         .build()
         .expect("could not initialize Host runtime")
-        .block_on(run_command(parsed))
+        .block_on(run_command(parsed, startup_tokens))
 }
 
 fn apply_launch_process_hints(launch: &ServerLaunch) {
@@ -52,7 +81,10 @@ fn apply_launch_process_hints(launch: &ServerLaunch) {
     }
 }
 
-async fn run_command(parsed: Result<ParsedArgs, server::ParseError>) -> ExitCode {
+async fn run_command(
+    parsed: Result<ParsedArgs, server::ParseError>,
+    startup_tokens: CapturedStartupTokens,
+) -> ExitCode {
     match parsed {
         Ok(ParsedArgs::Command(LaunchCommand::Version)) => {
             println!("{}", utils::version::runtime_app_version());
@@ -64,7 +96,7 @@ async fn run_command(parsed: Result<ParsedArgs, server::ParseError>) -> ExitCode
         }
         Ok(ParsedArgs::Agents(command)) => run_agents_command(command).await,
         Ok(ParsedArgs::Pairing(command)) => run_pairing_command(command).await,
-        Ok(ParsedArgs::Start(launch)) => run(launch).await,
+        Ok(ParsedArgs::Start(launch)) => run(launch, startup_tokens).await,
         Err(error) => {
             eprintln!("{error}");
             eprint!("{}", usage());
@@ -73,14 +105,13 @@ async fn run_command(parsed: Result<ParsedArgs, server::ParseError>) -> ExitCode
     }
 }
 
-async fn run(launch: ServerLaunch) -> ExitCode {
+async fn run(launch: ServerLaunch, startup_tokens: CapturedStartupTokens) -> ExitCode {
     if let Some(explicit) = utils::assets::renamed_env_var("DIMO_DATA_DIR") {
         let path = PathBuf::from(explicit);
         let _ = std::fs::create_dir_all(&path);
         utils::assets::use_data_dir_for_this_run(path);
     }
     let data_dir_adoptions = server::adopt_legacy_data_dir().await;
-    utils::shell::bootstrap_desktop_path();
     let _log_guard = server::desktop::logging::init_logging(launch.desktop, launch.reveal_console);
     if launch.desktop {
         server::desktop::crash_reports::install_panic_hook();
@@ -136,7 +167,7 @@ async fn run(launch: ServerLaunch) -> ExitCode {
     bootstrap.server = server;
 
     if launch.desktop {
-        let desktop_token = match resolve_desktop_token() {
+        let desktop_token = match resolve_desktop_token(startup_tokens.desktop_token) {
             Ok(token) => token,
             Err(error) => {
                 eprintln!("invalid DIMO_DESKTOP_TOKEN: {error}");
@@ -188,13 +219,14 @@ async fn run(launch: ServerLaunch) -> ExitCode {
         };
     }
 
-    let supplied_token = match resolve_startup_token(&data_dir, &launch) {
-        Ok(token) => token,
-        Err(error) => {
-            eprintln!("invalid host token: {error}");
-            return ExitCode::from(2);
-        }
-    };
+    let supplied_token =
+        match resolve_startup_token(&data_dir, &launch, startup_tokens.server_token) {
+            Ok(token) => token,
+            Err(error) => {
+                eprintln!("invalid host token: {error}");
+                return ExitCode::from(2);
+            }
+        };
     if let Some(token) = &supplied_token
         && let Err(error) = write_host_token(&data_dir, token)
     {
@@ -241,11 +273,10 @@ async fn run(launch: ServerLaunch) -> ExitCode {
     }
 }
 
-fn resolve_desktop_token() -> Result<ServerToken, server::ServerTokenError> {
-    if let Some(value) = std::env::var("DIMO_DESKTOP_TOKEN")
-        .ok()
-        .filter(|token| !token.trim().is_empty())
-    {
+fn resolve_desktop_token(
+    captured_env_token: Option<String>,
+) -> Result<ServerToken, server::ServerTokenError> {
+    if let Some(value) = captured_env_token {
         return ServerToken::try_new(value);
     }
     Ok(issue_host_token())
@@ -311,11 +342,9 @@ fn wait_for_parent_exit(pid: u32) {
 fn resolve_startup_token(
     data_dir: &std::path::Path,
     launch: &ServerLaunch,
+    captured_env_token: Option<String>,
 ) -> Result<Option<ServerToken>, server::ServerTokenError> {
-    if let Some(value) = std::env::var("DIMO_SERVER_TOKEN")
-        .ok()
-        .filter(|token| !token.trim().is_empty())
-    {
+    if let Some(value) = captured_env_token {
         return ServerToken::try_new(value).map(Some);
     }
     if launch.reveal_console || launch.rotate_token {

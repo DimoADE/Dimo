@@ -78,6 +78,19 @@ pub fn cache_dir() -> std::path::PathBuf {
         .to_path_buf()
 }
 
+/// Read the Windows `MachineGuid` directly from the registry without spawning
+/// a subprocess (`powershell.exe` costs 500ms-2s during cold boot).
+#[cfg(windows)]
+pub fn windows_machine_guid() -> Option<String> {
+    use winreg::{RegKey, enums::HKEY_LOCAL_MACHINE};
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let key = hklm.open_subkey("SOFTWARE\\Microsoft\\Cryptography").ok()?;
+    let guid: String = key.get_value("MachineGuid").ok()?;
+    let trimmed = guid.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 #[cfg(test)]
 pub(crate) fn lock_site_env() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

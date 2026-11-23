@@ -611,6 +611,13 @@ if (typeof window !== 'undefined') {
   });
 }
 
+let inFlightResolvePluginId: Promise<string | null> | null = null;
+let inFlightLoad: {
+  pluginId: string;
+  promise: Promise<BrowserPrefsSnapshot>;
+} | null = null;
+let loadedPluginId: string | null = null;
+
 export async function resolveHostBrowserPluginId(
   explicitPluginId?: string | null
 ): Promise<string | null> {
@@ -621,25 +628,31 @@ export async function resolveHostBrowserPluginId(
     return explicitPluginId;
   }
   if (state.pluginId) return state.pluginId;
-  try {
-    const catalog = await backendCall<{
-      items?: Array<{ pluginId: string; metadata?: unknown }>;
-    }>('plugin_contribution_catalog');
-    const match = (catalog?.items ?? []).find((item) => {
-      const meta =
-        item.metadata && typeof item.metadata === 'object'
-          ? (item.metadata as Record<string, unknown>)
-          : {};
-      return meta.engine === 'host-browser';
-    });
-    if (match?.pluginId) {
-      setState({ pluginId: match.pluginId });
-      return match.pluginId;
+  if (inFlightResolvePluginId) return inFlightResolvePluginId;
+  inFlightResolvePluginId = (async () => {
+    try {
+      const catalog = await backendCall<{
+        items?: Array<{ pluginId: string; metadata?: unknown }>;
+      }>('plugin_contribution_catalog');
+      const match = (catalog?.items ?? []).find((item) => {
+        const meta =
+          item.metadata && typeof item.metadata === 'object'
+            ? (item.metadata as Record<string, unknown>)
+            : {};
+        return meta.engine === 'host-browser';
+      });
+      if (match?.pluginId) {
+        setState({ pluginId: match.pluginId });
+        return match.pluginId;
+      }
+    } catch {
+      /* ignore */
+    } finally {
+      inFlightResolvePluginId = null;
     }
-  } catch {
-    /* ignore */
-  }
-  return null;
+    return null;
+  })();
+  return inFlightResolvePluginId;
 }
 
 export async function dispatchHostBrowser<T = unknown>(
@@ -662,67 +675,87 @@ export async function dispatchHostBrowser<T = unknown>(
 }
 
 export async function loadBrowserPrefs(
-  explicitPluginId?: string | null
+  explicitPluginId?: string | null,
+  options?: { force?: boolean }
 ): Promise<BrowserPrefsSnapshot> {
-  setState({ loading: true });
   const pluginId = await resolveHostBrowserPluginId(explicitPluginId);
   if (!pluginId) {
-    setState({ loading: false });
+    if (state.loading) {
+      setState({ loading: false });
+    }
     return state;
   }
 
-  let merged = state.settings;
-  try {
-    const detail = await backendCall<{ config?: Record<string, unknown> }>(
-      'plugin_product_detail',
-      { pluginId }
-    );
-    if (detail?.config && typeof detail.config === 'object') {
-      merged = normalizeBrowserSettings({ ...merged, ...detail.config });
-    }
-  } catch {
-    /* fallback to cached or host state */
+  if (!options?.force && loadedPluginId === pluginId) {
+    return state;
+  }
+  if (!options?.force && inFlightLoad?.pluginId === pluginId) {
+    return inFlightLoad.promise;
   }
 
-  try {
-    const synced = await dispatchHostBrowser<Record<string, unknown>>(
-      'settings.set',
-      merged as unknown as Record<string, unknown>,
-      pluginId
-    );
-    merged = normalizeBrowserSettings(synced);
-  } catch {
+  const run = (async (): Promise<BrowserPrefsSnapshot> => {
+    setState({ loading: true });
+    let merged = state.settings;
+    let loadedFromBackend = false;
+
+    try {
+      const detail = await backendCall<{ config?: Record<string, unknown> }>(
+        'plugin_product_detail',
+        { pluginId }
+      );
+      loadedFromBackend = true;
+      if (detail?.config && typeof detail.config === 'object') {
+        merged = normalizeBrowserSettings({ ...merged, ...detail.config });
+      }
+    } catch {
+      /* fallback to cached or host state */
+    }
+
     try {
       const hostSettings = await dispatchHostBrowser<Record<string, unknown>>(
         'settings.get',
         {},
         pluginId
       );
-      merged = normalizeBrowserSettings({ ...merged, ...hostSettings });
+      loadedFromBackend = true;
+      if (hostSettings && typeof hostSettings === 'object') {
+        merged = normalizeBrowserSettings({ ...merged, ...hostSettings });
+      }
     } catch {
       /* keep merged */
     }
-  }
 
-  let capabilities = state.capabilities;
-  try {
-    capabilities = await dispatchHostBrowser<BrowserCapabilities>(
-      'capabilities',
-      {},
-      pluginId
-    );
-  } catch {
-    /* keep existing capabilities */
-  }
+    let capabilities = state.capabilities;
+    try {
+      capabilities = await dispatchHostBrowser<BrowserCapabilities>(
+        'capabilities',
+        {},
+        pluginId
+      );
+      loadedFromBackend = true;
+    } catch {
+      /* keep existing capabilities */
+    }
 
-  writeCachedSettings(merged);
-  setState({
-    pluginId,
-    settings: merged,
-    capabilities,
-    loading: false,
+    writeCachedSettings(merged);
+    if (loadedFromBackend) {
+      loadedPluginId = pluginId;
+    }
+    setState({
+      pluginId,
+      settings: merged,
+      capabilities,
+      loading: false,
+    });
+    return state;
+  })().finally(() => {
+    if (inFlightLoad?.promise === run) {
+      inFlightLoad = null;
+    }
   });
-  return state;
+
+  inFlightLoad = { pluginId, promise: run };
+  return run;
 }
 
 export async function updateBrowserPrefs(
@@ -788,7 +821,7 @@ export async function createBrowserProfile(
     { label: label.trim() },
     explicitPluginId
   );
-  await loadBrowserPrefs(explicitPluginId);
+  await loadBrowserPrefs(explicitPluginId, { force: true });
   const pluginId = await resolveHostBrowserPluginId(explicitPluginId);
   if (pluginId) {
     await backendCall('plugin_save_config', {
@@ -811,7 +844,7 @@ export async function removeBrowserProfile(
   explicitPluginId?: string | null
 ): Promise<void> {
   await dispatchHostBrowser('profile.remove', { profileId }, explicitPluginId);
-  await loadBrowserPrefs(explicitPluginId);
+  await loadBrowserPrefs(explicitPluginId, { force: true });
   const pluginId = await resolveHostBrowserPluginId(explicitPluginId);
   if (pluginId) {
     await backendCall('plugin_save_config', {
@@ -864,6 +897,9 @@ export function resolveSiteRuleAction(
 }
 
 export function resetBrowserPrefsForTests(): void {
+  inFlightResolvePluginId = null;
+  inFlightLoad = null;
+  loadedPluginId = null;
   if (typeof window !== 'undefined') {
     try {
       window.localStorage.removeItem(STORAGE_KEY);

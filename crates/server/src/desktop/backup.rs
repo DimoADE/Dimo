@@ -487,7 +487,15 @@ fn resolve_restore_target_with_roots(
     Ok(target)
 }
 
-async fn prepare_sqlite_snapshot(pool: &SqlitePool, asset_dir: &Path) -> Option<TempFileGuard> {
+async fn prepare_sqlite_snapshot(
+    pool: &SqlitePool,
+    asset_dir: &Path,
+) -> Result<Option<TempFileGuard>, DesktopError> {
+    let db_path = asset_dir.join("db.sqlite");
+    if !db_path.is_file() {
+        return Ok(None);
+    }
+
     match tokio::time::timeout(
         Duration::from_secs(5),
         sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)").execute(pool),
@@ -498,16 +506,13 @@ async fn prepare_sqlite_snapshot(pool: &SqlitePool, asset_dir: &Path) -> Option<
             tracing::debug!("SQLite WAL checkpoint(TRUNCATE) completed before backup");
         }
         Ok(Err(error)) => {
-            tracing::warn!(%error, "SQLite WAL checkpoint(TRUNCATE) before backup failed; continuing");
+            tracing::warn!(%error, "SQLite WAL checkpoint(TRUNCATE) before backup failed; continuing to VACUUM INTO");
         }
         Err(_) => {
-            tracing::warn!("SQLite WAL checkpoint(TRUNCATE) before backup timed out; continuing");
+            tracing::warn!(
+                "SQLite WAL checkpoint(TRUNCATE) before backup timed out; continuing to VACUUM INTO"
+            );
         }
-    }
-
-    let db_path = asset_dir.join("db.sqlite");
-    if !db_path.is_file() {
-        return None;
     }
 
     let snapshot_path = asset_dir.join(format!(
@@ -518,34 +523,25 @@ async fn prepare_sqlite_snapshot(pool: &SqlitePool, asset_dir: &Path) -> Option<
     let guard = TempFileGuard::new(snapshot_path.clone());
 
     match tokio::time::timeout(
-        Duration::from_secs(15),
+        Duration::from_secs(60),
         sqlx::query("VACUUM INTO ?1")
             .bind(&snapshot_str)
             .execute(pool),
     )
     .await
     {
-        Ok(Ok(_)) if snapshot_path.is_file() => Some(guard),
-        Ok(Ok(_)) => {
-            tracing::warn!(
-                snapshot = %snapshot_path.display(),
-                "VACUUM INTO succeeded but snapshot file was missing; falling back to checkpointed db.sqlite"
-            );
-            None
-        }
-        Ok(Err(error)) => {
-            tracing::warn!(
-                %error,
-                "VACUUM INTO before backup failed; falling back to checkpointed db.sqlite"
-            );
-            None
-        }
-        Err(_) => {
-            tracing::warn!(
-                "VACUUM INTO before backup timed out; falling back to checkpointed db.sqlite"
-            );
-            None
-        }
+        Ok(Ok(_)) if snapshot_path.is_file() => Ok(Some(guard)),
+        Ok(Ok(_)) => Err(DesktopError::Internal(format!(
+            "Consistent SQLite backup snapshot was not created at {}",
+            snapshot_path.display()
+        ))),
+        Ok(Err(error)) => Err(DesktopError::Internal(format!(
+            "Failed to create consistent SQLite backup snapshot via VACUUM INTO: {error}"
+        ))),
+        Err(_) => Err(DesktopError::Internal(
+            "Timed out creating consistent SQLite backup snapshot via VACUUM INTO (60s)"
+                .to_string(),
+        )),
     }
 }
 
@@ -573,7 +569,7 @@ async fn backup_create_with_roots(
     }
 
     let db_snapshot_guard = if let Some(pool) = pool {
-        prepare_sqlite_snapshot(pool, &roots.asset_dir).await
+        prepare_sqlite_snapshot(pool, &roots.asset_dir).await?
     } else {
         None
     };
