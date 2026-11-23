@@ -4,7 +4,11 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { resolveSigningMode } = require("../electron/build/signWindows");
+const {
+  isWindowsInstallerArtifact,
+  resolveSigningMode,
+  shouldEvsignFile,
+} = require("../electron/build/signWindows");
 const {
   appendPublisherNameToUpdateConfig,
   collectSidecarBinaries,
@@ -134,7 +138,7 @@ test("Windows NSIS custom hook scopes staged companion termination to $INSTDIR a
   );
 });
 
-test("signWindows resolves evsign, signtool, and unsigned modes cleanly", () => {
+test("signWindows resolves evsign, signtool, and unsigned modes cleanly and limits EVSign to installers by default", () => {
   assert.equal(
     resolveSigningMode({ cscInfo: null }, { EVSIGN_LICENSE_KEY: "license-key" }),
     "evsign",
@@ -147,6 +151,52 @@ test("signWindows resolves evsign, signtool, and unsigned modes cleanly", () => 
     "signtool",
   );
   assert.equal(resolveSigningMode({ cscInfo: null }, {}), "unsigned");
+
+  assert.equal(
+    isWindowsInstallerArtifact("electron/release/Dimo-0.5.3-windows-x64-setup.exe"),
+    true,
+  );
+  assert.equal(
+    isWindowsInstallerArtifact("electron/release/Dimo-0.5.3-windows-arm64-setup.exe"),
+    true,
+  );
+  assert.equal(
+    isWindowsInstallerArtifact("electron/release/Dimo-0.5.3-windows-x64.msi"),
+    true,
+  );
+  assert.equal(
+    isWindowsInstallerArtifact("electron/release/win-unpacked/Dimo.exe"),
+    false,
+  );
+  assert.equal(
+    isWindowsInstallerArtifact(
+      "electron/release/win-unpacked/resources/bin/dimo-server.exe",
+    ),
+    false,
+  );
+  assert.equal(
+    isWindowsInstallerArtifact("electron/release/__uninstaller-nsis-dimo.exe"),
+    false,
+  );
+
+  assert.equal(
+    shouldEvsignFile("electron/release/Dimo-0.5.3-windows-x64-setup.exe", {}),
+    true,
+  );
+  assert.equal(
+    shouldEvsignFile(
+      "electron/release/win-unpacked/resources/bin/dimo-server.exe",
+      {},
+    ),
+    false,
+  );
+  assert.equal(
+    shouldEvsignFile(
+      "electron/release/win-unpacked/resources/bin/dimo-server.exe",
+      { EVSIGN_SIGN_INNER_BINARIES: "1" },
+    ),
+    true,
+  );
 });
 
 test("afterPack resolves macOS signing identity from APPLE_SIGNING_IDENTITY or CSC_NAME", () => {
@@ -339,6 +389,69 @@ test("afterPack injects Windows EVSign publisherName into app-update.yml", () =>
         ["Ignored"],
       ),
       "provider: github\npublisherName:\n  - Existing\n",
+    );
+
+    // Installer-only EVSign skips unsigned sidecar derivation when EVSIGN_PUBLISHER_NAME is unset
+    fs.writeFileSync(
+      appUpdatePath,
+      "owner: DimoADE\nrepo: Dimo\nprovider: github\n",
+      "utf8",
+    );
+    assert.equal(
+      ensureWindowsEvsignPublisherName(
+        { electronPlatformName: "win32", appOutDir: tmpDir },
+        {
+          env: { EVSIGN_LICENSE_KEY: "ev-key" },
+          readSubject: () => {
+            throw new Error("Expected valid Authenticode signature, got NotSigned");
+          },
+        },
+      ),
+      false,
+    );
+
+    // Strict mode throws if EVSIGN_SIGN_INNER_BINARIES=1 and sidecar is unsigned
+    assert.throws(
+      () =>
+        ensureWindowsEvsignPublisherName(
+          { electronPlatformName: "win32", appOutDir: tmpDir },
+          {
+            env: {
+              EVSIGN_LICENSE_KEY: "ev-key",
+              EVSIGN_SIGN_INNER_BINARIES: "1",
+            },
+            readSubject: () => {
+              throw new Error(
+                "Expected valid Authenticode signature, got NotSigned",
+              );
+            },
+          },
+        ),
+      /NotSigned/,
+    );
+
+    // Explicit EVSIGN_PUBLISHER_NAME works even when sidecar is unsigned
+    assert.equal(
+      ensureWindowsEvsignPublisherName(
+        { electronPlatformName: "win32", appOutDir: tmpDir },
+        {
+          env: {
+            EVSIGN_LICENSE_KEY: "ev-key",
+            EVSIGN_PUBLISHER_NAME: "CN=Dimo",
+          },
+          readSubject: () => {
+            throw new Error(
+              "should not inspect sidecar when EVSIGN_PUBLISHER_NAME is set",
+            );
+          },
+        },
+      ),
+      true,
+    );
+    assert.ok(
+      fs
+        .readFileSync(appUpdatePath, "utf8")
+        .includes('publisherName:\n  - "CN=Dimo"\n'),
     );
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });

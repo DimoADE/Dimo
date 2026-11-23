@@ -14,6 +14,32 @@ function resolveSigningMode(configuration, env = process.env) {
   return 'unsigned';
 }
 
+function isTruthyEnv(value) {
+  if (typeof value !== 'string') {
+    return false;
+  }
+  const normalized = value.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes';
+}
+
+function isWindowsInstallerArtifact(filePath) {
+  if (typeof filePath !== 'string' || !filePath.trim()) {
+    return false;
+  }
+  const baseName = path.basename(filePath).toLowerCase();
+  if (baseName.includes('uninstaller')) {
+    return false;
+  }
+  return baseName.endsWith('-setup.exe') || baseName.endsWith('.msi');
+}
+
+function shouldEvsignFile(filePath, env = process.env) {
+  if (isTruthyEnv(env.EVSIGN_SIGN_INNER_BINARIES)) {
+    return true;
+  }
+  return isWindowsInstallerArtifact(filePath);
+}
+
 function resolvePowerShellExecutable(env = process.env) {
   const pathEnv = env.PATH || env.Path || '';
   for (const dir of pathEnv.split(path.delimiter)) {
@@ -32,6 +58,12 @@ async function signWindows(configuration, packager) {
   if (mode === 'evsign') {
     // EVSign performs a single SHA-256 Authenticode pass; ignore nested passes.
     if (configuration.isNest) {
+      return;
+    }
+    if (!shouldEvsignFile(configuration.path, process.env)) {
+      console.log(
+        `[signWindows] skipping EVSign for non-installer binary ${path.basename(configuration.path)} (EVSign signs installers only unless EVSIGN_SIGN_INNER_BINARIES=1)`
+      );
       return;
     }
     if (process.platform !== 'win32') {
@@ -101,3 +133,5 @@ module.exports.default = signWindows;
 module.exports.sign = signWindows;
 module.exports.resolveSigningMode = resolveSigningMode;
 module.exports.resolvePowerShellExecutable = resolvePowerShellExecutable;
+module.exports.isWindowsInstallerArtifact = isWindowsInstallerArtifact;
+module.exports.shouldEvsignFile = shouldEvsignFile;

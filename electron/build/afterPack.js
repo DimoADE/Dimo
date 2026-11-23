@@ -108,11 +108,21 @@ function appendPublisherNameToUpdateConfig(yamlContent, publisherNames) {
   return `${normalized}${lines.join('\n')}\n`;
 }
 
+function isEvsignInnerBinariesEnabled(env = process.env) {
+  const value = env.EVSIGN_SIGN_INNER_BINARIES;
+  if (typeof value !== 'string') {
+    return false;
+  }
+  const normalized = value.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes';
+}
+
 // PublishManager writes resources/app-update.yml in its system afterPack
-// listener (which always runs before user afterPack hooks), after extraResources
-// sidecars have already been signed by win.signtoolOptions.sign. Because EVSign
-// has no local PFX certificate for electron-builder to inspect, inject the
+// listener (which always runs before user afterPack hooks). When
+// EVSIGN_PUBLISHER_NAME is provided or inner sidecars are EVSigned, inject the
 // signer DN here so NsisUpdater.verifySignature() enforces Authenticode checks.
+// In installer-only EVSign mode without EVSIGN_PUBLISHER_NAME, inner binaries
+// are intentionally unsigned at afterPack time so derivation is skipped.
 function ensureWindowsEvsignPublisherName(
   context,
   {
@@ -143,13 +153,30 @@ function ensureWindowsEvsignPublisherName(
 
   let publisherNames = parsePublisherNameEnv(env.EVSIGN_PUBLISHER_NAME);
   if (!publisherNames) {
+    const requireSignedSidecar = isEvsignInnerBinariesEnabled(env);
     const signedSidecar = findSignedWindowsSidecar(context.appOutDir);
     if (!signedSidecar) {
-      throw new Error(
-        `Cannot derive EVSign publisherName: no signed sidecar found under ${path.join(context.appOutDir, 'resources', 'bin')}`
+      if (requireSignedSidecar) {
+        throw new Error(
+          `Cannot derive EVSign publisherName: no signed sidecar found under ${path.join(context.appOutDir, 'resources', 'bin')}`
+        );
+      }
+      console.log(
+        '[afterPack] skipping Windows EVSign publisherName derivation (no sidecar found and EVSIGN_PUBLISHER_NAME is unset)'
       );
+      return false;
     }
-    publisherNames = [readSubject(signedSidecar)];
+    try {
+      publisherNames = [readSubject(signedSidecar)];
+    } catch (error) {
+      if (requireSignedSidecar) {
+        throw error;
+      }
+      console.log(
+        `[afterPack] skipping Windows EVSign publisherName derivation in installer-only EVSign mode (${error.message})`
+      );
+      return false;
+    }
   }
 
   const updatedYaml = appendPublisherNameToUpdateConfig(

@@ -493,8 +493,13 @@ jobs:
       - name: Verify signed Windows artifacts
         if: ${{ runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_enabled == 'true' }}
         shell: pwsh
+        env:
+          WINDOWS_SIGNING_METHOD: ${{ needs.prepare-release.outputs.windows_signing_method }}
+          EVSIGN_PUBLISHER_NAME: ${{ vars.EVSIGN_PUBLISHER_NAME || secrets.EVSIGN_PUBLISHER_NAME }}
         run: |
           $errors = [System.Collections.Generic.List[string]]::new()
+          $verifyInnerSignatures = ($env:WINDOWS_SIGNING_METHOD -eq 'pfx')
+          $requirePublisherName = ($env:WINDOWS_SIGNING_METHOD -eq 'pfx') -or (-not [string]::IsNullOrWhiteSpace($env:EVSIGN_PUBLISHER_NAME))
           $artifacts = @(Get-ChildItem "electron/release" -File |
             Where-Object { $_.Extension -in '.exe', '.msi' })
           if ($artifacts.Count -eq 0) {
@@ -556,16 +561,18 @@ jobs:
                 $errors.Add("Missing packaged Windows executable: $exePath")
                 continue
               }
-              $innerSig = Get-AuthenticodeSignature -LiteralPath $exePath
-              if ($innerSig.Status -ne 'Valid') {
-                $errors.Add("Invalid Authenticode signature for packaged executable ${exePath}: $($innerSig.Status)")
+              if ($verifyInnerSignatures) {
+                $innerSig = Get-AuthenticodeSignature -LiteralPath $exePath
+                if ($innerSig.Status -ne 'Valid') {
+                  $errors.Add("Invalid Authenticode signature for packaged executable ${exePath}: $($innerSig.Status)")
+                }
               }
             }
 
             $appUpdatePath = Join-Path $unpacked.FullName 'resources\app-update.yml'
             if (-not (Test-Path -LiteralPath $appUpdatePath -PathType Leaf)) {
               $errors.Add("Missing updater config: $appUpdatePath")
-            } else {
+            } elseif ($requirePublisherName) {
               $appUpdateYml = Get-Content -LiteralPath $appUpdatePath -Raw
               if ($appUpdateYml -notmatch '(?m)^\s*publisherName\s*:\s*(\S+|\r?\n\s*-\s*\S+)') {
                 $errors.Add('app-update.yml is missing publisherName; NsisUpdater would skip signature verification.')
@@ -576,7 +583,7 @@ jobs:
           if ($errors.Count -gt 0) {
             throw ("Windows signing verification failed:`n - " + ($errors -join "`n - "))
           }
-          Write-Host 'Verified Windows installer, inner executables, blockmap, latest.yml hashes, and app-update.yml publisherName.'
+          Write-Host "Verified signed Windows installer, packaged executables, blockmap, and latest.yml hashes (method: $($env:WINDOWS_SIGNING_METHOD))."
 
       - name: Smoke-test Linux desktop startup through Xvfb
         if: runner.os == 'Linux'
