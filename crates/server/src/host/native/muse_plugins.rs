@@ -159,22 +159,27 @@ pub fn resolve_muse(user_home: &Path, environment: &HashMap<String, String>) -> 
     if let Ok(found) = which::which("muse") {
         return Some(found);
     }
-    let mut candidates = vec![
+    let candidates = [
         user_home.join(".local").join("bin").join("muse"),
         user_home.join(".local").join("bin").join("muse.exe"),
         user_home.join(".local").join("bin").join("muse.cmd"),
     ];
+    if let Some(found) = candidates.into_iter().find(|path| path.is_file()) {
+        return Some(found);
+    }
     #[cfg(windows)]
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA")
+        && !local_app_data.trim().is_empty()
     {
-        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA")
-            && !local_app_data.trim().is_empty()
-        {
-            let dir = PathBuf::from(local_app_data).join("Programs").join("muse");
-            candidates.push(dir.join("muse.cmd"));
-            candidates.push(dir.join("muse.exe"));
+        let dir = PathBuf::from(local_app_data).join("Programs").join("muse");
+        for name in ["muse.cmd", "muse.exe"] {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
         }
     }
-    candidates.into_iter().find(|path| path.is_file())
+    None
 }
 
 async fn list_via_cli(

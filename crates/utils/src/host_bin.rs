@@ -124,12 +124,13 @@ fn is_build_tree_binary(path: &Path) -> bool {
         return true;
     }
 
-    let components: Vec<String> = path
-        .parent()
-        .into_iter()
-        .flat_map(Path::components)
-        .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+    let raw = path.to_string_lossy();
+    let mut components: Vec<String> = raw
+        .split(['/', '\\'])
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_ascii_lowercase)
         .collect();
+    components.pop();
 
     if matches!(
         components.last().map(String::as_str),

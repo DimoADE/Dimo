@@ -5,15 +5,24 @@ import { describe, expect, it } from 'vitest';
 
 const STYLESHEET = resolve(process.cwd(), 'src/styles/legacy/index.css');
 
+function normalizeSelector(selector: string): string {
+  return selector
+    .replace(/\s+/g, ' ')
+    .replace(/\(\s+/g, '(')
+    .replace(/\s+\)/g, ')')
+    .trim();
+}
+
 function declarationsFor(
   selector: string
 ): Record<string, { value: string; important: boolean }> {
   const css = readFileSync(STYLESHEET, 'utf8');
+  const target = normalizeSelector(selector);
   const declarations: Record<string, { value: string; important: boolean }> =
     {};
   parse(css).walkRules((rule: Rule) => {
-    const normalized = rule.selector.replace(/\s+/g, ' ').trim();
-    if (normalized !== selector) return;
+    const normalized = normalizeSelector(rule.selector);
+    if (normalized !== target) return;
     rule.walkDecls((declaration) => {
       declarations[declaration.prop] = {
         value: declaration.value

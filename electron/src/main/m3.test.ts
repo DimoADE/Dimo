@@ -447,6 +447,7 @@ describe('floating desktop toast layout & queue', () => {
     const toast = new DesktopToastManager({
       preloadPath: '/preload.js',
       windows,
+      platform: 'win32',
     });
 
     toast.show({
@@ -476,6 +477,43 @@ describe('floating desktop toast layout & queue', () => {
     expect(toastRecord.setIgnoreMouseEvents).toHaveBeenLastCalledWith(true, {
       forward: true,
     });
+    expect(toastRecord.hide).toHaveBeenCalledTimes(1);
+    toast.destroy();
+  });
+
+  it('keeps mouse events enabled and resizes toast overlay height on Linux', () => {
+    createdWindows.length = 0;
+    const windows = new WindowManager({ preloadPath: '/preload.js' });
+    const toast = new DesktopToastManager({
+      preloadPath: '/preload.js',
+      windows,
+      platform: 'linux',
+    });
+
+    toast.show({
+      projectId: 'p1',
+      workspaceId: 'w1',
+      sessionId: 's1',
+      title: 'Alert',
+      description: 'Linux overlay',
+      kind: 'info',
+      durationMs: 4000,
+    });
+
+    expect(createdWindows).toHaveLength(1);
+    const toastRecord = createdWindows[0];
+    expect(toastRecord.setIgnoreMouseEvents).not.toHaveBeenCalled();
+
+    toast.setIgnoreMouseEvents(false);
+    expect(toastRecord.setIgnoreMouseEvents).not.toHaveBeenCalled();
+
+    toast.setContentHeight(220);
+    expect(toastRecord.setBounds).toHaveBeenLastCalledWith(
+      expect.objectContaining({ height: 220 })
+    );
+
+    toast.hide();
+    expect(toastRecord.setIgnoreMouseEvents).not.toHaveBeenCalled();
     expect(toastRecord.hide).toHaveBeenCalledTimes(1);
     toast.destroy();
   });
