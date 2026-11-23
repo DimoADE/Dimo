@@ -690,6 +690,32 @@ impl ProcessTreeJob {
             }
         }
     }
+
+    /// Detach the handle if no live processes remain in the tracked OS group.
+    ///
+    /// On Unix, probes the process group with signal `0` (`killpg(pgid, None)`)
+    /// and clears the stored `pgid` when `ESRCH` confirms the group is empty,
+    /// preventing future signals against a recycled PGID while keeping the
+    /// handle armed when detached background grandchildren remain alive.
+    ///
+    /// On Windows, Win32 Job Object handles are kernel-owned and never suffer
+    /// PID/PGID reuse, so this is a no-op; the handle stays open until explicit
+    /// [`Self::terminate`] / [`Self::close`] / `Drop` so detached grandchildren
+    /// are not killed prematurely before terminal release.
+    pub fn close_if_empty(&self) {
+        #[cfg(unix)]
+        {
+            if let Ok(mut guard) = self.inner.pgid.lock()
+                && let Some(pgid) = *guard
+                && matches!(
+                    killpg(Pid::from_raw(pgid), None),
+                    Err(nix::errno::Errno::ESRCH)
+                )
+            {
+                let _ = guard.take();
+            }
+        }
+    }
 }
 
 impl Drop for ProcessTreeJobInner {

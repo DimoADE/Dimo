@@ -536,6 +536,7 @@ impl AgentTerminalRegistry {
             return false;
         };
         if session.exit_status.read().await.is_some() {
+            session.process_job.terminate();
             return true;
         }
         session.kill_notify.notify_one();
@@ -876,12 +877,9 @@ async fn own_terminal_process(
     };
 
     if kill_requested {
-        #[cfg(windows)]
         process_job.terminate();
-        #[cfg(not(windows))]
-        process_job.close();
     } else {
-        process_job.close();
+        process_job.close_if_empty();
     }
 
     if published_without_reaping {

@@ -168,11 +168,13 @@ pub async fn optimize_wal_on_pool(
         .map(wal_file_size_bytes)
         .unwrap_or(0);
 
-    // Execute `PRAGMA wal_checkpoint(TRUNCATE)` and `PRAGMA optimize` — NEVER `VACUUM`.
+    // Execute `PRAGMA optimize` before `PRAGMA wal_checkpoint(TRUNCATE)` — NEVER `VACUUM`.
+    // `PRAGMA optimize` may update `sqlite_stat1` and append WAL frames, so checkpointing
+    // afterward ensures those frames are flushed and the WAL is actually truncated.
+    let _ = sqlx::query("PRAGMA optimize").execute(pool).await;
     let _checkpoint_row: (i64, i64, i64) = sqlx::query_as("PRAGMA wal_checkpoint(TRUNCATE)")
         .fetch_one(pool)
         .await?;
-    let _ = sqlx::query("PRAGMA optimize").execute(pool).await;
 
     let wal_size_after = db_file_path
         .as_deref()
