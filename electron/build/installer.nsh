@@ -1,3 +1,9 @@
+; Defining customCheckAppRunning skips allowOnlyOneInstallerInstance.nsh's
+; guarded include of getProcessInfo.nsh and Var pid, which _CHECK_APP_RUNNING
+; requires when invoked from customCheckAppRunning.
+!include "getProcessInfo.nsh"
+Var pid
+
 !macro stopStagedSidecars
   ; Stop only sidecar/MCP helper processes running inside $INSTDIR so upgrades
   ; and uninstalls release file locks without killing unrelated headless

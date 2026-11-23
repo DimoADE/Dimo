@@ -120,6 +120,16 @@ test("Windows NSIS custom hook scopes staged companion termination to $INSTDIR a
   assert.match(nsh, /\$INSTDIR/);
   assert.match(nsh, /Win32_Process/);
   assert.match(nsh, /customCheckAppRunning/);
+  assert.match(
+    nsh,
+    /^!include\s+"getProcessInfo\.nsh"\s*$/m,
+    "installer.nsh must include getProcessInfo.nsh when overriding customCheckAppRunning and calling _CHECK_APP_RUNNING",
+  );
+  assert.match(
+    nsh,
+    /^Var\s+pid\s*$/m,
+    "installer.nsh must declare Var pid when overriding customCheckAppRunning and calling _CHECK_APP_RUNNING",
+  );
   assert.doesNotMatch(
     nsh,
     /!macro\s+customInit\b/,
