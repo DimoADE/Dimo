@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
@@ -1228,11 +1229,18 @@ export function startClaudeNativeDriverStdioServer({
   return { server, readline: rl };
 }
 
-const isDirectEntry =
-  Boolean(process.argv[1]) &&
-  import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+function isDirectEntry() {
+  if (!process.argv[1]) return false;
+  const entry = pathToFileURL(path.resolve(process.argv[1])).href;
+  if (entry === import.meta.url) return true;
+  try {
+    return pathToFileURL(realpathSync.native(process.argv[1])).href === import.meta.url;
+  } catch {
+    return false;
+  }
+}
 
-if (isDirectEntry) {
+if (isDirectEntry()) {
   if (process.argv.includes('--probe')) {
     process.stdout.write(`${PROBE_OK}\n`);
     process.exit(0);

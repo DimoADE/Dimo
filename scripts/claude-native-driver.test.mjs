@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,6 +19,19 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DRIVER_SCRIPT = path.join(__dirname, 'claude-native-driver.mjs');
+
+test('从目录联接启动驱动可以通过探测', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-entry-'));
+  const alias = path.join(root, 'scripts');
+  try {
+    await fs.symlink(__dirname, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const output = execFileSync(process.execPath, [path.join(alias, path.basename(DRIVER_SCRIPT)), '--probe'], { encoding: 'utf8' });
+    assert.equal(output.trim(), PROBE_OK);
+  } finally {
+    await fs.rm(alias, { force: true });
+    await fs.rmdir(root);
+  }
+});
 
 function createHarness({ env = {}, sdkLoader, now, fetchImpl } = {}) {
   const stdin = new PassThrough();
