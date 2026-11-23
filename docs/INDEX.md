@@ -107,7 +107,7 @@ Read only the smallest set of files matching your task:
 | [`docs/protocol/v1/README.md`](protocol/v1/README.md) | Remote Protocol v1 overview (`/api/v1/capabilities`, `/api/v1/commands/{command}`, `/api/v1/ws`) + generated `openapi.json`, `schema.json`, and TS/Swift/Kotlin models. |
 | [`docs/security/dependency-license-audit.md`](security/dependency-license-audit.md) | Dependency license allowlist gate (`pnpm run dependency:licenses`) and supply-chain audit rules. |
 | [`docs/third-party/codeg-adoption.md`](third-party/codeg-adoption.md) | Clean-room Codeg adoption provenance record (verified by `scripts/check-third-party-adoption.test.js`). |
-| [`docs/release/`](release/) | Versioned release notes (`0.1.2.md` – `0.5.2.md`) used by release CI pipelines. |
+| [`docs/release/`](release/) | Versioned release notes (`0.1.2.md` – `0.5.3.md`) used by release CI pipelines. |
 | [`npx-cli/README.md`](../npx-cli/README.md) | `dimoai` npm CLI package usage and distribution guide. |
 | [`packages/plugin-cli/README.md`](../packages/plugin-cli/README.md) | `@dimoai/plugin-cli` (`dimo-plugin`) author CLI README. |
 | [`packages/dimo-workflow-mcp/README.md`](../packages/dimo-workflow-mcp/README.md) | Standalone Workflow MCP server package README. |
