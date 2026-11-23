@@ -207,6 +207,196 @@ export function isAgentMentionCodeContext(
   return fence !== null;
 }
 
+type CodeFenceState = { marker: '`' | '~'; size: number };
+
+function matchLineFencePrefix(
+  source: string,
+  lineStart: number,
+  lineEnd: number
+): {
+  marker: '`' | '~';
+  size: number;
+  prefixEnd: number;
+  markerStart: number;
+} | null {
+  let cursor = lineStart;
+  let spaces = 0;
+  while (cursor < lineEnd && spaces < 3 && source.charCodeAt(cursor) === 32) {
+    cursor += 1;
+    spaces += 1;
+  }
+  if (cursor >= lineEnd) return null;
+  const ch = source.charCodeAt(cursor);
+  if (ch !== 96 && ch !== 126) return null;
+  const markerStart = cursor;
+  while (cursor < lineEnd && source.charCodeAt(cursor) === ch) {
+    cursor += 1;
+  }
+  const size = cursor - markerStart;
+  if (size < 3) return null;
+  return {
+    marker: ch === 96 ? '`' : '~',
+    size,
+    prefixEnd: cursor,
+    markerStart,
+  };
+}
+
+function advanceInlineBackticks(
+  source: string,
+  from: number,
+  limit: number,
+  initialDelimiter: number
+): { pos: number; delimiter: number; resultAtLimit: boolean } {
+  let pos = from;
+  let delimiter = initialDelimiter;
+  while (pos < limit) {
+    const tick = source.indexOf('`', pos);
+    if (tick === -1 || tick >= limit) {
+      return { pos: limit, delimiter, resultAtLimit: delimiter > 0 };
+    }
+    let runEnd = tick + 1;
+    while (runEnd < source.length && source.charCodeAt(runEnd) === 96) {
+      runEnd += 1;
+    }
+    if (runEnd > limit) {
+      const partialLen = limit - tick;
+      const tempDelimiter =
+        delimiter === partialLen ? 0 : delimiter === 0 ? partialLen : delimiter;
+      return { pos: tick, delimiter, resultAtLimit: tempDelimiter > 0 };
+    }
+    const runLength = runEnd - tick;
+    delimiter =
+      delimiter === runLength ? 0 : delimiter === 0 ? runLength : delimiter;
+    pos = runEnd;
+  }
+  return { pos, delimiter, resultAtLimit: delimiter > 0 };
+}
+
+/**
+ * Stateful O(N) equivalent of `isAgentMentionCodeContext(source, offset)` for
+ * monotonically non-decreasing `offset` queries across `source`.
+ */
+export function createAgentMentionCodeContextScanner(
+  source: string
+): (offset: number) => boolean {
+  const len = source.length;
+  let fence: CodeFenceState | null = null;
+  let lineStart = 0;
+  let lineEnd = -1;
+  let lineKind: 'normal' | 'fence-open' | 'fence-close' | 'indented' = 'normal';
+  let fencePrefixEnd = 0;
+  let closingWhitespaceEnd = 0;
+  let nextLineFence: CodeFenceState | null = null;
+  let indentEnd = Number.POSITIVE_INFINITY;
+  let inlinePos = 0;
+  let inlineDelimiter = 0;
+  let initialized = false;
+
+  const initLine = (start: number) => {
+    lineStart = start;
+    const nl = source.indexOf('\n', start);
+    lineEnd = nl === -1 ? len : nl;
+    inlinePos = start;
+    inlineDelimiter = 0;
+    indentEnd = Number.POSITIVE_INFINITY;
+
+    const matched = matchLineFencePrefix(source, lineStart, lineEnd);
+    if (matched) {
+      if (!fence) {
+        fencePrefixEnd = matched.markerStart + 3;
+        lineKind = 'fence-open';
+        nextLineFence = { marker: matched.marker, size: matched.size };
+        return;
+      }
+      if (fence.marker === matched.marker && matched.size >= fence.size) {
+        fencePrefixEnd = matched.markerStart + fence.size;
+        let ws = matched.prefixEnd;
+        while (
+          ws < lineEnd &&
+          (source.charCodeAt(ws) === 32 || source.charCodeAt(ws) === 9)
+        ) {
+          ws += 1;
+        }
+        closingWhitespaceEnd = ws;
+        lineKind = 'fence-close';
+        nextLineFence = ws === lineEnd ? null : fence;
+        return;
+      }
+    }
+
+    lineKind = 'normal';
+    nextLineFence = fence;
+    if (!fence && lineStart < lineEnd) {
+      const first = source.charCodeAt(lineStart);
+      if (first === 9) {
+        lineKind = 'indented';
+        indentEnd = lineStart + 1;
+      } else if (
+        first === 32 &&
+        lineStart + 4 <= lineEnd &&
+        source.charCodeAt(lineStart + 1) === 32 &&
+        source.charCodeAt(lineStart + 2) === 32 &&
+        source.charCodeAt(lineStart + 3) === 32
+      ) {
+        lineKind = 'indented';
+        indentEnd = lineStart + 4;
+      }
+    }
+  };
+
+  return (offset: number): boolean => {
+    const clamped = Math.max(0, Math.min(offset, len));
+    if (!initialized) {
+      initialized = true;
+      initLine(0);
+    } else if (clamped < lineStart) {
+      // Fallback for non-monotonic callers
+      return isAgentMentionCodeContext(source, clamped);
+    }
+
+    while (clamped > lineEnd) {
+      fence = nextLineFence;
+      initLine(lineEnd + 1);
+    }
+
+    if (lineKind === 'fence-open') {
+      if (clamped >= fencePrefixEnd) return true;
+      const step = advanceInlineBackticks(
+        source,
+        inlinePos,
+        clamped,
+        inlineDelimiter
+      );
+      inlinePos = step.pos;
+      inlineDelimiter = step.delimiter;
+      return step.resultAtLimit;
+    }
+
+    if (lineKind === 'fence-close') {
+      if (clamped < fencePrefixEnd) return true;
+      if (clamped <= closingWhitespaceEnd) return false;
+      return true;
+    }
+
+    if (fence !== null) return true;
+
+    if (lineKind === 'indented' && clamped >= indentEnd) {
+      return true;
+    }
+
+    const step = advanceInlineBackticks(
+      source,
+      inlinePos,
+      clamped,
+      inlineDelimiter
+    );
+    inlinePos = step.pos;
+    inlineDelimiter = step.delimiter;
+    return step.resultAtLimit;
+  };
+}
+
 export function matchAgentMentionTrigger(
   text: string
 ): TypeaheadTriggerMatch | null {

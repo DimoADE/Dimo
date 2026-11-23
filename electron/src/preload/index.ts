@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 import {
+  DEVELOPER_MODE_CHANGED_EVENT,
   GPU_MODE_CHANGED_EVENT,
   IPC_CHANNELS,
   SIDECAR_RESTARTED_EVENT,
@@ -71,6 +72,7 @@ const getBackend = (): ElectronBackendConnectionInfo | undefined =>
   currentBackend;
 
 let currentGpuMode: DesktopGpuMode = bootstrap.gpuMode ?? 'hardware';
+let currentDeveloperMode = Boolean(bootstrap.developerMode);
 function applyGpuModeAttribute(mode: DesktopGpuMode): void {
   currentGpuMode = mode;
   if (typeof document !== 'undefined' && document.documentElement) {
@@ -116,6 +118,13 @@ ipcRenderer.on(
       const mode = (message.payload as { mode?: unknown } | undefined)?.mode;
       if (mode === 'software' || mode === 'hardware') {
         applyGpuModeAttribute(mode);
+      }
+    }
+    if (message.event === DEVELOPER_MODE_CHANGED_EVENT) {
+      const enabled = (message.payload as { enabled?: unknown } | undefined)
+        ?.enabled;
+      if (typeof enabled === 'boolean') {
+        currentDeveloperMode = enabled;
       }
     }
     const handlers = eventListeners.get(message.event);
@@ -324,6 +333,8 @@ function detachDragDropListeners(): void {
 
 const dimoDesktopBridge = {
   platform: bootstrap.platform,
+  isDev: Boolean(bootstrap.isDev),
+  isDeveloperMode: (): boolean => currentDeveloperMode,
   get backend(): ElectronBackendConnectionInfo | undefined {
     return currentBackend;
   },

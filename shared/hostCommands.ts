@@ -666,6 +666,9 @@ export const DESKTOP_SHELL_COMMANDS = [
   'get_developer_mode',
   'set_developer_mode',
   'open_developer_tools',
+  'inspect_element',
+  'reload_window',
+  'force_reload_window',
 ] as const;
 
 export const HOST_CAPABILITY_SCOPES = [

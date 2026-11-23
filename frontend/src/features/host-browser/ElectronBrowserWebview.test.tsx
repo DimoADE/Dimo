@@ -28,11 +28,10 @@ import {
 } from './HostedElectronBrowserWebview';
 import { closeBrowserTabOnce } from './browserPanelLifetime';
 import {
-  notifyCanvasBrowserViewportChange,
   resetElectronBrowserSurfaceStoreForTests,
+  setBrowserOverlayDragging,
   setCanvasBrowserInteracting,
   unregisterElectronBrowserTab,
-  useElectronBrowserSurfaceStore,
 } from './electronBrowserSurfaceStore';
 
 interface MockWebviewElement extends HTMLElement {
@@ -317,7 +316,74 @@ describe('ElectronBrowserWebview', () => {
     ).toBe(String(MAX_WEBVIEW_CRASH_RECOVERIES));
   });
 
-  it('bubbles guest pointerdown ipc-message to the slot ancestor and notifies onSurfacePointerDown', () => {
+  it('renders canvas browser webviews inline inside the node DOM instead of app-root overlay so HUD and cards stack natively', () => {
+    render(
+      <>
+        <ElectronBrowserHost />
+        <div data-testid="workspace-canvas-stage" className="react-flow">
+          <div
+            data-testid="browser-node"
+            className="react-flow__node"
+            style={{ zIndex: 1 }}
+          >
+            <ElectronBrowserWebview
+              tabId="tab-canvas-inline"
+              url="https://github.com/"
+              profileId="default"
+              surfaceHost="canvas"
+              panelVisible={true}
+              surfaceZIndex={1}
+              backgroundColor="#14171f"
+            />
+          </div>
+          <div data-viewport-position="bottom-right">
+            <div className="pointer-events-auto" data-testid="canvas-minimap" />
+          </div>
+        </div>
+      </>
+    );
+
+    const slot = screen.getByTestId('electron-browser-surface-slot');
+    const webview = screen.getByTestId('electron-browser-webview');
+
+    // Webview lives directly inside the canvas node slot (never duplicated in ElectronBrowserHost)
+    expect(slot.contains(webview)).toBe(true);
+    expect(screen.queryByTestId('electron-browser-host-wrapper')).toBeNull();
+    expect(
+      screen.queryByTestId('electron-browser-occlusion-snapshot')
+    ).toBeNull();
+    expect(webview.style.width).toBe('100%');
+    expect(webview.style.height).toBe('100%');
+    expect(webview.style.visibility).toBe('visible');
+    expect(webview.style.pointerEvents).toBe('auto');
+
+    // During canvas pan/drag or overlay drag, pointer-events disable cleanly and recover immediately
+    act(() => {
+      setCanvasBrowserInteracting(true);
+    });
+    expect(webview.style.pointerEvents).toBe('none');
+
+    act(() => {
+      setCanvasBrowserInteracting(false);
+    });
+    expect(webview.style.pointerEvents).toBe('auto');
+
+    act(() => {
+      setBrowserOverlayDragging(true);
+    });
+    expect(webview.style.pointerEvents).toBe('none');
+
+    act(() => {
+      setBrowserOverlayDragging(false);
+    });
+    expect(webview.style.pointerEvents).toBe('auto');
+
+    act(() => {
+      unregisterElectronBrowserTab('tab-canvas-inline');
+    });
+  });
+
+  it('bubbles guest pointerdown ipc-message from an inline canvas webview to the node ancestor and notifies onSurfacePointerDown', () => {
     const onParentPointerDown = vi.fn();
     const onSurfacePointerDown = vi.fn();
 
@@ -350,134 +416,6 @@ describe('ElectronBrowserWebview', () => {
 
     expect(onParentPointerDown).toHaveBeenCalledTimes(1);
     expect(onSurfacePointerDown).toHaveBeenCalledTimes(1);
-  });
-
-  it('scales, clips, clamps z-index, and disables pointer-events during canvas interactions', () => {
-    render(
-      <>
-        <ElectronBrowserHost />
-        <div data-testid="workspace-canvas-stage" className="react-flow">
-          <div className="react-flow__node" style={{ zIndex: 10 }}>
-            <ElectronBrowserWebview
-              tabId="tab-canvas-zoom"
-              url="https://zoom.example.com"
-              profileId="default"
-              surfaceHost="canvas"
-              panelVisible={true}
-              surfaceZIndex={7}
-              backgroundColor="#14171f"
-            />
-          </div>
-        </div>
-      </>
-    );
-
-    const stage = screen.getByTestId('workspace-canvas-stage');
-    const slot = screen.getByTestId('electron-browser-surface-slot');
-    mockRect(stage, { left: 100, top: 50, width: 800, height: 600 });
-    mockRect(slot, { left: 80, top: 100, width: 400, height: 300 });
-    Object.defineProperty(slot, 'offsetWidth', {
-      configurable: true,
-      value: 800,
-    });
-
-    act(() => {
-      window.dispatchEvent(new Event('resize'));
-    });
-
-    const wrapper = screen.getByTestId('electron-browser-host-wrapper');
-    const webview = screen.getByTestId('electron-browser-webview');
-    expect(wrapper.getAttribute('data-visible')).toBe('true');
-    expect(wrapper.style.left).toBe('80px');
-    expect(wrapper.style.top).toBe('100px');
-    expect(wrapper.style.width).toBe('400px');
-    expect(wrapper.style.height).toBe('300px');
-    expect(wrapper.style.zIndex).toBe('22');
-    expect(wrapper.style.clipPath).toBe('inset(0px 0px 0px 20px)');
-    expect(wrapper.style.pointerEvents).toBe('auto');
-    expect(webview.style.display).toBe('flex');
-    expect(webview.style.width).toBe('800px');
-    expect(webview.style.height).toBe('600px');
-    expect(webview.style.transform).toBe(
-      'matrix3d(0.5, 0, 0, 0, 0, 0.5, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)'
-    );
-    expect(webview.style.transformStyle).toBe('preserve-3d');
-
-    // During canvas pan/drag, pointer-events must become none so React Flow owns gestures
-    act(() => {
-      setCanvasBrowserInteracting(true);
-      notifyCanvasBrowserViewportChange(0.5);
-    });
-    expect(wrapper.style.pointerEvents).toBe('none');
-
-    act(() => {
-      setCanvasBrowserInteracting(false);
-    });
-    expect(wrapper.style.pointerEvents).toBe('auto');
-
-    act(() => {
-      unregisterElectronBrowserTab('tab-canvas-zoom');
-    });
-  });
-
-  it('switches an occluded canvas browser card to a freeze snapshot while parking the root webview offscreen', async () => {
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === 'electron_browser_capture_thumbnail') {
-        return { mime: 'image/jpeg', data: 'b2NjbHVkZWQ=' };
-      }
-      return { ok: true };
-    });
-
-    render(
-      <>
-        <ElectronBrowserHost />
-        <div data-testid="workspace-canvas-stage" className="react-flow">
-          <div
-            data-testid="browser-node"
-            className="react-flow__node"
-            style={{ zIndex: 1 }}
-          >
-            <ElectronBrowserWebview
-              tabId="tab-occluded"
-              url="https://occluded.example.com"
-              profileId="default"
-              surfaceHost="canvas"
-              panelVisible={true}
-              surfaceZIndex={1}
-            />
-          </div>
-          <div
-            data-testid="covering-node"
-            className="react-flow__node"
-            style={{ zIndex: 5 }}
-          />
-        </div>
-      </>
-    );
-
-    const stage = screen.getByTestId('workspace-canvas-stage');
-    const slot = screen.getByTestId('electron-browser-surface-slot');
-    const browserNode = screen.getByTestId('browser-node');
-    const coveringNode = screen.getByTestId('covering-node');
-
-    mockRect(stage, { left: 0, top: 0, width: 1200, height: 800 });
-    mockRect(browserNode, { left: 100, top: 100, width: 500, height: 400 });
-    mockRect(slot, { left: 100, top: 100, width: 500, height: 400 });
-    mockRect(coveringNode, { left: 250, top: 150, width: 400, height: 300 });
-
-    await act(async () => {
-      window.dispatchEvent(new Event('resize'));
-      await Promise.resolve();
-    });
-
-    const wrapper = screen.getByTestId('electron-browser-host-wrapper');
-    expect(wrapper.getAttribute('data-visible')).toBe('false');
-    expect(slot.getAttribute('data-occluded')).toBe('true');
-
-    const snapshot = screen.getByTestId('electron-browser-occlusion-snapshot');
-    expect(snapshot.getAttribute('src')).toBe(
-      'data:image/jpeg;base64,b2NjbHVkZWQ='
-    );
   });
 
   it('hibernates canvas cards only when truly offscreen outside the stage viewport and wakes on click', async () => {
@@ -568,7 +506,7 @@ describe('ElectronBrowserWebview', () => {
     expect(screen.queryByTestId('electron-browser-hibernated')).toBeNull();
   });
 
-  it('renders ElectronBrowserHost with display: contents so webviews stack above workspace-canvas-stage', () => {
+  it('renders ElectronBrowserHost with display: contents for Dockview tabs', () => {
     render(
       <>
         <ElectronBrowserHost />
@@ -576,9 +514,8 @@ describe('ElectronBrowserWebview', () => {
           tabId="tab-stacking"
           url="https://stacking.example.com"
           profileId="default"
-          surfaceHost="canvas"
+          surfaceHost="dockview"
           panelVisible={true}
-          surfaceZIndex={3}
         />
       </>
     );
@@ -586,9 +523,12 @@ describe('ElectronBrowserWebview', () => {
     const host = screen.getByTestId('electron-browser-host');
     expect(host.style.display).toBe('contents');
     expect(host.style.zIndex).toBe('');
+    expect(
+      screen.getByTestId('electron-browser-host-wrapper')
+    ).toBeInTheDocument();
   });
 
-  it('keeps unattached webview paintable offscreen on Windows until did-attach fires and retries occluded snapshot on load', async () => {
+  it('keeps unattached Dockview webview paintable offscreen on Windows until did-attach fires', async () => {
     const platformDescriptor = Object.getOwnPropertyDescriptor(
       navigator,
       'platform'
@@ -606,60 +546,19 @@ describe('ElectronBrowserWebview', () => {
       value: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
     });
 
-    let captureAttempt = 0;
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === 'electron_browser_capture_thumbnail') {
-        captureAttempt += 1;
-        if (captureAttempt === 1) {
-          return null;
-        }
-        return { mime: 'image/jpeg', data: 'cmV0cmllZA==' };
-      }
-      return { ok: true };
-    });
-
     try {
       render(
         <>
           <ElectronBrowserHost />
-          <div data-testid="workspace-canvas-stage" className="react-flow">
-            <div
-              data-testid="browser-node"
-              className="react-flow__node"
-              style={{ zIndex: 1 }}
-            >
-              <ElectronBrowserWebview
-                tabId="tab-win-occluded"
-                url="https://github.com/"
-                profileId="default"
-                surfaceHost="canvas"
-                panelVisible={true}
-                surfaceZIndex={1}
-              />
-            </div>
-            <div
-              data-testid="covering-node"
-              className="react-flow__node"
-              style={{ zIndex: 5 }}
-            />
-          </div>
+          <ElectronBrowserWebview
+            tabId="tab-win-hidden"
+            url="https://github.com/"
+            profileId="default"
+            surfaceHost="dockview"
+            panelVisible={false}
+          />
         </>
       );
-
-      const stage = screen.getByTestId('workspace-canvas-stage');
-      const slot = screen.getByTestId('electron-browser-surface-slot');
-      const browserNode = screen.getByTestId('browser-node');
-      const coveringNode = screen.getByTestId('covering-node');
-
-      mockRect(stage, { left: 0, top: 0, width: 1200, height: 800 });
-      mockRect(browserNode, { left: 100, top: 100, width: 500, height: 400 });
-      mockRect(slot, { left: 100, top: 100, width: 500, height: 400 });
-      mockRect(coveringNode, { left: 250, top: 150, width: 400, height: 300 });
-
-      await act(async () => {
-        window.dispatchEvent(new Event('resize'));
-        await Promise.resolve();
-      });
 
       const wrapper = screen.getByTestId('electron-browser-host-wrapper');
       const webview = screen.getByTestId(
@@ -667,26 +566,16 @@ describe('ElectronBrowserWebview', () => {
       ) as MockWebviewElement;
       expect(wrapper.getAttribute('data-visible')).toBe('false');
       expect(wrapper.style.visibility).toBe('visible');
-      expect(
-        screen.queryByTestId('electron-browser-occlusion-snapshot')
-      ).toBeNull();
 
       webview.getWebContentsId = () => 303;
       webview.getURL = () => 'https://github.com/';
 
       await act(async () => {
         webview.dispatchEvent(new Event('did-attach'));
-        webview.dispatchEvent(new Event('did-stop-loading'));
         await Promise.resolve();
       });
 
       expect(wrapper.style.visibility).toBe('hidden');
-      const snapshot = screen.getByTestId(
-        'electron-browser-occlusion-snapshot'
-      );
-      expect(snapshot.getAttribute('src')).toBe(
-        'data:image/jpeg;base64,cmV0cmllZA=='
-      );
     } finally {
       if (platformDescriptor) {
         Object.defineProperty(navigator, 'platform', platformDescriptor);
@@ -711,11 +600,6 @@ describe('ElectronBrowserWebview', () => {
       </StrictMode>
     );
 
-    const detachCallsBeforeAttach = invokeMock.mock.calls.filter(
-      ([cmd]) => cmd === 'electron_browser_detach'
-    );
-    expect(detachCallsBeforeAttach).toHaveLength(0);
-
     const webview = screen.getByTestId(
       'electron-browser-webview'
     ) as MockWebviewElement;
@@ -726,97 +610,18 @@ describe('ElectronBrowserWebview', () => {
       webview.dispatchEvent(new Event('did-attach'));
     });
 
-    expect(invokeMock).toHaveBeenCalledWith('electron_browser_attach', {
+    const detachCalls = invokeMock.mock.calls.filter(
+      ([cmd]) => cmd === 'electron_browser_detach'
+    );
+    expect(detachCalls).toHaveLength(0);
+
+    const attachCalls = invokeMock.mock.calls.filter(
+      ([cmd]) => cmd === 'electron_browser_attach'
+    );
+    expect(attachCalls).toHaveLength(1);
+    expect(attachCalls[0][1]).toMatchObject({
       tabId: 'tab-strict-attach',
       webContentsId: 404,
-      profileId: 'default',
-      url: 'https://github.com/',
     });
-  });
-
-  it('routes canvas viewport transform mutations to coalesced rAF live sync without synchronous store setState', async () => {
-    const rafQueue: FrameRequestCallback[] = [];
-    const rafSpy = vi
-      .spyOn(window, 'requestAnimationFrame')
-      .mockImplementation((cb) => {
-        rafQueue.push(cb);
-        return rafQueue.length;
-      });
-    const cancelSpy = vi
-      .spyOn(window, 'cancelAnimationFrame')
-      .mockImplementation(() => {});
-
-    try {
-      render(
-        <>
-          <ElectronBrowserHost />
-          <div data-testid="workspace-canvas-stage" className="react-flow">
-            <div
-              data-testid="canvas-viewport"
-              className="react-flow__viewport"
-              style={{ transform: 'translate(0px, 0px) scale(1)' }}
-            >
-              <div className="react-flow__node" style={{ zIndex: 5 }}>
-                <ElectronBrowserWebview
-                  tabId="tab-canvas-pan"
-                  url="https://pan.example.com"
-                  profileId="default"
-                  surfaceHost="canvas"
-                  panelVisible={true}
-                  surfaceZIndex={5}
-                />
-              </div>
-            </div>
-          </div>
-        </>
-      );
-
-      const stage = screen.getByTestId('workspace-canvas-stage');
-      const viewport = screen.getByTestId('canvas-viewport');
-      const slot = screen.getByTestId('electron-browser-surface-slot');
-      mockRect(stage, { left: 0, top: 0, width: 1200, height: 800 });
-      mockRect(slot, { left: 100, top: 100, width: 400, height: 300 });
-
-      act(() => {
-        window.dispatchEvent(new Event('resize'));
-      });
-
-      const setStateSpy = vi.spyOn(useElectronBrowserSurfaceStore, 'setState');
-      try {
-        mockRect(slot, { left: 140, top: 120, width: 400, height: 300 });
-        await act(async () => {
-          viewport.style.transform = 'translate(40px, 20px) scale(1)';
-          await Promise.resolve();
-        });
-        expect(setStateSpy).not.toHaveBeenCalled();
-        expect(rafQueue).toHaveLength(1);
-
-        // Second mutation before next vsync coalesces into the same pending frame
-        mockRect(slot, { left: 180, top: 140, width: 400, height: 300 });
-        await act(async () => {
-          viewport.style.transform = 'translate(80px, 40px) scale(1)';
-          await Promise.resolve();
-        });
-        expect(setStateSpy).not.toHaveBeenCalled();
-        expect(rafQueue).toHaveLength(1);
-
-        act(() => {
-          rafQueue.shift()?.(16);
-        });
-        const wrapper = screen.getByTestId('electron-browser-host-wrapper');
-        expect(wrapper.style.left).toBe('180px');
-        expect(wrapper.style.top).toBe('140px');
-        expect(setStateSpy).not.toHaveBeenCalled();
-      } finally {
-        setStateSpy.mockRestore();
-      }
-
-      act(() => {
-        unregisterElectronBrowserTab('tab-canvas-pan');
-      });
-    } finally {
-      rafSpy.mockRestore();
-      cancelSpy.mockRestore();
-    }
   });
 });

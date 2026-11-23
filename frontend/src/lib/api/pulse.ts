@@ -634,6 +634,11 @@ export function createPulseApi(transport: BackendTransport) {
         input,
       }),
 
+    emitEventEnvelope: (envelope: EventEnvelope) =>
+      callPulseTransport<EventEnvelope>(transport, 'pulse_event_emit', {
+        input: envelope,
+      }),
+
     listCapturedEvents: (limit = 25) =>
       callPulseTransport<EventEnvelope[]>(transport, 'pulse_captured_events', {
         limit,

@@ -8,6 +8,7 @@ import { Textarea } from '@/components/ui/textarea';
 import i18n from '@/i18n';
 import {
   pulseApi,
+  type BotConversationScope,
   type BotMailboxPolicy,
   type EventSourceKind,
   type GateFilterCondition,
@@ -23,6 +24,7 @@ import {
   buildSampleEnvelopeForSource,
   defaultEventTypeForSource,
   defaultTemporalSpecForSource,
+  detectLocalTimezone,
   isTemporalSourceKind,
 } from './collaborationPulseEvents';
 
@@ -201,6 +203,28 @@ export function PulseRuleProposalCard({
     }));
   };
 
+  const updateConversationScope = (conversationScope: BotConversationScope) => {
+    setSpec((prev) => ({
+      ...prev,
+      targets: prev.targets.map((target, idx) =>
+        idx === 0 && target.kind === 'bot'
+          ? { ...target, conversationScope }
+          : target
+      ),
+    }));
+  };
+
+  const updateSubscribeThread = (subscribeThread: boolean) => {
+    setSpec((prev) => ({
+      ...prev,
+      targets: prev.targets.map((target, idx) =>
+        idx === 0 && target.kind === 'bot'
+          ? { ...target, subscribeThread }
+          : target
+      ),
+    }));
+  };
+
   const updateGroupDispatchType = (
     nextType: GroupDispatchMode['type'],
     seatMemberId?: string
@@ -297,13 +321,17 @@ export function PulseRuleProposalCard({
     <section
       className="settings-surface rounded-lg border border-border bg-popover p-3 text-xs text-foreground shadow-sm"
       data-testid="pulse-rule-proposal-card"
-      aria-label={t('pulseProposal.cardTitle')}
+      aria-label={
+        ruleId ? t('pulseProposal.editCardTitle') : t('pulseProposal.cardTitle')
+      }
     >
       <div className="mb-2.5 flex items-center justify-between gap-2 border-b border-border/70 pb-2">
         <div className="flex min-w-0 items-center gap-1.5">
           <Sparkles className="h-3.5 w-3.5 shrink-0 text-primary" />
           <span className="truncate font-semibold text-foreground">
-            {t('pulseProposal.cardTitle')}
+            {ruleId
+              ? t('pulseProposal.editCardTitle')
+              : t('pulseProposal.cardTitle')}
           </span>
           {contextLabel ? (
             <span className="truncate rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
@@ -416,48 +444,100 @@ export function PulseRuleProposalCard({
         </div>
 
         {spec.temporal?.kind === 'cron' ? (
-          <div className="grid grid-cols-2 gap-2 rounded-md bg-muted/35 p-2">
-            <div className="space-y-1">
-              <Label className="text-[11px]">
-                {t('pulseProposal.cronExpression')}
-              </Label>
-              <Input
-                aria-label={t('pulseProposal.cronExpression')}
-                value={spec.temporal.expression}
-                onChange={(event) =>
-                  updateTemporal({
-                    ...spec.temporal,
-                    kind: 'cron',
-                    expression: event.target.value,
-                    timezone:
-                      spec.temporal?.kind === 'cron'
-                        ? spec.temporal.timezone
-                        : 'UTC',
-                  })
-                }
-                className="h-7 px-2 font-mono text-xs tabular-nums"
-              />
+          <div className="space-y-2 rounded-md bg-muted/35 p-2">
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <Label className="text-[11px]">
+                  {t('pulseProposal.cronExpression')}
+                </Label>
+                <Input
+                  aria-label={t('pulseProposal.cronExpression')}
+                  value={spec.temporal.expression}
+                  onChange={(event) =>
+                    updateTemporal({
+                      ...spec.temporal,
+                      kind: 'cron',
+                      expression: event.target.value,
+                      timezone:
+                        spec.temporal?.kind === 'cron'
+                          ? spec.temporal.timezone
+                          : detectLocalTimezone(),
+                    })
+                  }
+                  className="h-7 px-2 font-mono text-xs tabular-nums"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-[11px]">
+                  {t('pulseProposal.timezone')}
+                </Label>
+                <Input
+                  aria-label={t('pulseProposal.timezone')}
+                  value={spec.temporal.timezone}
+                  onChange={(event) =>
+                    updateTemporal({
+                      ...spec.temporal,
+                      kind: 'cron',
+                      expression:
+                        spec.temporal?.kind === 'cron'
+                          ? spec.temporal.expression
+                          : '0 9 * * 1-5',
+                      timezone: event.target.value,
+                    })
+                  }
+                  className="h-7 px-2 text-xs"
+                />
+              </div>
             </div>
-            <div className="space-y-1">
-              <Label className="text-[11px]">
-                {t('pulseProposal.timezone')}
-              </Label>
-              <Input
-                aria-label={t('pulseProposal.timezone')}
-                value={spec.temporal.timezone}
-                onChange={(event) =>
-                  updateTemporal({
-                    ...spec.temporal,
-                    kind: 'cron',
-                    expression:
-                      spec.temporal?.kind === 'cron'
-                        ? spec.temporal.expression
-                        : '0 9 * * 1-5',
-                    timezone: event.target.value,
-                  })
-                }
-                className="h-7 px-2 text-xs"
-              />
+            <div className="flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground">
+              <label className="inline-flex cursor-pointer items-center gap-1.5">
+                <input
+                  type="checkbox"
+                  data-testid="pulse-cron-weekdays-only"
+                  checked={Boolean(spec.temporal.weekdaysOnly)}
+                  onChange={(event) =>
+                    updateTemporal({
+                      ...spec.temporal,
+                      kind: 'cron',
+                      expression:
+                        spec.temporal?.kind === 'cron'
+                          ? spec.temporal.expression
+                          : '0 9 * * 1-5',
+                      timezone:
+                        spec.temporal?.kind === 'cron'
+                          ? spec.temporal.timezone
+                          : detectLocalTimezone(),
+                      weekdaysOnly: event.target.checked,
+                    })
+                  }
+                  className="h-3.5 w-3.5 rounded border-border accent-primary"
+                />
+                <span>{t('pulseProposal.weekdaysOnly')}</span>
+              </label>
+              <label className="inline-flex cursor-pointer items-center gap-1.5">
+                <input
+                  type="checkbox"
+                  data-testid="pulse-cron-catch-up-once"
+                  checked={Boolean(spec.temporal.catchUpOnce)}
+                  onChange={(event) =>
+                    updateTemporal({
+                      ...spec.temporal,
+                      kind: 'cron',
+                      expression:
+                        spec.temporal?.kind === 'cron'
+                          ? spec.temporal.expression
+                          : '0 9 * * 1-5',
+                      timezone:
+                        spec.temporal?.kind === 'cron'
+                          ? spec.temporal.timezone
+                          : detectLocalTimezone(),
+                      catchUpOnce: event.target.checked,
+                    })
+                  }
+                  className="h-3.5 w-3.5 rounded border-border accent-primary"
+                />
+                <span>{t('pulseProposal.catchUpOnce')}</span>
+              </label>
             </div>
           </div>
         ) : null}
@@ -479,23 +559,47 @@ export function PulseRuleProposalCard({
         ) : null}
 
         {spec.temporal?.kind === 'interval' ? (
-          <div className="space-y-1 rounded-md bg-muted/35 p-2">
-            <Label className="text-[11px]">
-              {t('pulseProposal.intervalLabel')}
-            </Label>
-            <Input
-              type="number"
-              aria-label={t('pulseProposal.intervalAria')}
-              value={spec.temporal.everySeconds}
-              onChange={(event) =>
-                updateTemporal({
-                  kind: 'interval',
-                  everySeconds: Number(event.target.value) || 0,
-                  skipIfBusy: true,
-                })
-              }
-              className="h-7 px-2 font-mono text-xs tabular-nums"
-            />
+          <div className="space-y-2 rounded-md bg-muted/35 p-2">
+            <div className="space-y-1">
+              <Label className="text-[11px]">
+                {t('pulseProposal.intervalLabel')}
+              </Label>
+              <Input
+                type="number"
+                aria-label={t('pulseProposal.intervalAria')}
+                value={spec.temporal.everySeconds}
+                onChange={(event) =>
+                  updateTemporal({
+                    kind: 'interval',
+                    everySeconds: Number(event.target.value) || 0,
+                    skipIfBusy:
+                      spec.temporal?.kind === 'interval'
+                        ? spec.temporal.skipIfBusy
+                        : true,
+                  })
+                }
+                className="h-7 px-2 font-mono text-xs tabular-nums"
+              />
+            </div>
+            <label className="inline-flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground">
+              <input
+                type="checkbox"
+                data-testid="pulse-interval-skip-if-busy"
+                checked={spec.temporal.skipIfBusy ?? true}
+                onChange={(event) =>
+                  updateTemporal({
+                    kind: 'interval',
+                    everySeconds:
+                      spec.temporal?.kind === 'interval'
+                        ? spec.temporal.everySeconds
+                        : 900,
+                    skipIfBusy: event.target.checked,
+                  })
+                }
+                className="h-3.5 w-3.5 rounded border-border accent-primary"
+              />
+              <span>{t('pulseProposal.skipIfBusy')}</span>
+            </label>
           </div>
         ) : null}
 
@@ -546,36 +650,84 @@ export function PulseRuleProposalCard({
         ) : null}
 
         {primaryTarget?.kind === 'bot' ? (
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-muted/35 px-2.5 py-1.5">
-            <span className="text-[11px] text-muted-foreground">
-              {t('pulseProposal.botTargetLabel')}{' '}
-              <strong className="font-mono text-foreground">
-                {primaryTarget.memberId}
-              </strong>{' '}
-              · {t('pulseProposal.persistentMemory')}
-            </span>
-            <div className="inline-flex items-center gap-1">
+          <div className="space-y-2 rounded-md bg-muted/35 px-2.5 py-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="text-[11px] text-muted-foreground">
-                {t('pulseProposal.mailboxLabel')}
+                {t('pulseProposal.botTargetLabel')}{' '}
+                <strong className="font-mono text-foreground">
+                  {primaryTarget.memberId}
+                </strong>{' '}
+                · {t('pulseProposal.persistentMemory')}
               </span>
-              {(['fifo_serial', 'coalesce_batch'] as const).map((policy) => (
-                <button
-                  key={policy}
-                  type="button"
-                  data-testid={`pulse-mailbox-${policy}`}
-                  onClick={() => updateMailboxPolicy(policy)}
-                  className={cn(
-                    'rounded border px-1.5 py-0.5 text-[11px] font-medium',
-                    (primaryTarget.mailboxPolicy ?? 'fifo_serial') === policy
-                      ? 'border-primary bg-primary text-primary-foreground'
-                      : 'border-border bg-background text-muted-foreground'
-                  )}
-                >
-                  {t(
-                    `pulseFilter.mailbox.${policy.replace(/_([a-z])/g, (_, ch: string) => ch.toUpperCase())}`
-                  )}
-                </button>
-              ))}
+              <div className="inline-flex items-center gap-1">
+                <span className="text-[11px] text-muted-foreground">
+                  {t('pulseProposal.mailboxLabel')}
+                </span>
+                {(['fifo_serial', 'coalesce_batch'] as const).map((policy) => (
+                  <button
+                    key={policy}
+                    type="button"
+                    data-testid={`pulse-mailbox-${policy}`}
+                    onClick={() => updateMailboxPolicy(policy)}
+                    className={cn(
+                      'rounded border px-1.5 py-0.5 text-[11px] font-medium',
+                      (primaryTarget.mailboxPolicy ?? 'fifo_serial') === policy
+                        ? 'border-primary bg-primary text-primary-foreground'
+                        : 'border-border bg-background text-muted-foreground'
+                    )}
+                  >
+                    {t(
+                      `pulseFilter.mailbox.${policy.replace(/_([a-z])/g, (_, ch: string) => ch.toUpperCase())}`
+                    )}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/50 pt-1.5">
+              <div className="inline-flex items-center gap-1">
+                <span className="text-[11px] text-muted-foreground">
+                  {t('pulseProposal.conversationScopeLabel')}
+                </span>
+                {(
+                  [
+                    ['fixed_primary', t('pulseProposal.scopeFixedPrimary')],
+                    [
+                      'per_thread_topic',
+                      t('pulseProposal.scopePerThreadTopic'),
+                    ],
+                  ] as const
+                ).map(([scope, label]) => (
+                  <button
+                    key={scope}
+                    type="button"
+                    data-testid={`pulse-scope-${scope}`}
+                    onClick={() => updateConversationScope(scope)}
+                    className={cn(
+                      'rounded border px-1.5 py-0.5 text-[11px] font-medium',
+                      (primaryTarget.conversationScope ?? 'fixed_primary') ===
+                        scope
+                        ? 'border-primary bg-primary text-primary-foreground'
+                        : 'border-border bg-background text-muted-foreground'
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {!isTemporalSourceKind(activeSourceKind) ? (
+                <label className="inline-flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    data-testid="pulse-bot-subscribe-thread"
+                    checked={primaryTarget.subscribeThread ?? true}
+                    onChange={(event) =>
+                      updateSubscribeThread(event.target.checked)
+                    }
+                    className="h-3.5 w-3.5 rounded border-border accent-primary"
+                  />
+                  <span>{t('pulseProposal.subscribeThread')}</span>
+                </label>
+              ) : null}
             </div>
           </div>
         ) : null}
@@ -786,7 +938,9 @@ export function PulseRuleProposalCard({
           >
             {saving
               ? t('pulseProposal.saving')
-              : t('pulseProposal.savePulseRule')}
+              : ruleId
+                ? t('pulseProposal.updatePulseRule')
+                : t('pulseProposal.savePulseRule')}
           </Button>
         </div>
       </div>

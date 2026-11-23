@@ -32,6 +32,13 @@ pub use local_data_reset::{clear_local_database_rows, reset_local_database};
 pub type DbPool = sqlx::SqlitePool;
 
 async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), Error> {
+    let repaired_fts = local_data_reset::repair_corrupt_fts_virtual_tables(pool).await?;
+    if !repaired_fts.is_empty() {
+        tracing::warn!(
+            tables = ?repaired_fts,
+            "rebuilt corrupt FTS5 virtual table(s) before running migrations"
+        );
+    }
     // Keep this call in the DB crate so every composition embeds the same migration set.
     let migrator = sqlx::migrate!("./migrations");
     for migration in migrator.iter() {
@@ -834,6 +841,177 @@ mod tests {
         .await
         .expect("kv count");
         assert_eq!(kv_count, 1);
+    }
+
+    #[tokio::test]
+    async fn migrations_recover_from_corrupt_conversation_fts_before_projection_single_authority() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db_path = temp.path().join("db.sqlite");
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true)
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("open pre-upgrade sqlite db");
+
+        let migrator = sqlx::migrate!("./migrations");
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS _sqlx_migrations (
+                version BIGINT PRIMARY KEY,
+                description TEXT NOT NULL,
+                installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                success BOOLEAN NOT NULL,
+                checksum BLOB NOT NULL,
+                execution_time BIGINT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("create _sqlx_migrations");
+
+        for migration in migrator.iter() {
+            if migration.migration_type.is_down_migration() || migration.version < 20261115000000 {
+                continue;
+            }
+            sqlx::query(
+                "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time)
+                 VALUES (?, ?, 1, ?, 1)",
+            )
+            .bind(migration.version)
+            .bind(migration.description.as_ref())
+            .bind(migration.checksum.as_ref())
+            .execute(&pool)
+            .await
+            .expect("pre-mark target and later migrations");
+        }
+        migrator.run(&pool).await.expect("run pre-0.5.0 migrations");
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version >= 20261115000000")
+            .execute(&pool)
+            .await
+            .expect("unmark 0.5.0+ migrations");
+
+        // Seed the legacy conversation_fts table, then wipe its shadow tables to reproduce the
+        // v0.2.8 local-data-reset bug that leaves SQLite 3.46 returning SQLITE_CORRUPT_VTAB (267).
+        sqlx::query(
+            "INSERT INTO conversation_fts (body, conversation_id, workspace_id, title)
+             VALUES ('legacy body', 'conv-legacy', 'ws-legacy', 'Legacy Title')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert legacy fts row");
+        let shadow_tables: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table' AND name LIKE 'conversation_fts_%'",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("list fts shadow tables");
+        assert!(!shadow_tables.is_empty());
+        for table in shadow_tables {
+            let stmt = format!("DELETE FROM \"{table}\"");
+            sqlx::query(&stmt)
+                .execute(&pool)
+                .await
+                .expect("empty shadow table");
+        }
+        // Closing the pool forces a fresh xConnect when DBService::new_at opens the database.
+        pool.close().await;
+
+        let db = super::DBService::new_at(temp.path()).await.expect(
+            "DBService::new_at must recover corrupt conversation_fts before 20261115000000",
+        );
+
+        sqlx::query(
+            "INSERT INTO conversation_fts (conversation_id, row_id, role, text)
+             VALUES ('conv-1', 'turn-1:assistant', 'assistant', 'recovered trigram index')",
+        )
+        .execute(db.writer().as_pool())
+        .await
+        .expect("insert into rebuilt row-level conversation_fts");
+        let matched: String = sqlx::query_scalar(
+            "SELECT row_id FROM conversation_fts WHERE conversation_fts MATCH '\"recovered\"'",
+        )
+        .fetch_one(db.reader().as_pool())
+        .await
+        .expect("query rebuilt conversation_fts");
+        assert_eq!(matched, "turn-1:assistant");
+
+        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_one(db.reader().as_pool())
+            .await
+            .expect("integrity_check");
+        assert_eq!(integrity, "ok");
+
+        db.reader().as_pool().close().await;
+        db.writer().as_pool().close().await;
+    }
+
+    #[tokio::test]
+    async fn migrations_recover_corrupt_conversation_fts_after_upgrade_and_preserve_intact_rows() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let db = super::DBService::new_at(temp.path())
+            .await
+            .expect("initial DBService::new_at");
+
+        sqlx::query(
+            "INSERT INTO conversation_fts (conversation_id, row_id, role, text)
+             VALUES ('conv-keep', 'turn-1:user', 'user', 'intact searchable payload')",
+        )
+        .execute(db.writer().as_pool())
+        .await
+        .expect("insert intact fts row");
+        db.reader().as_pool().close().await;
+        db.writer().as_pool().close().await;
+
+        // Normal restart with an intact FTS table must preserve indexed rows.
+        let db = super::DBService::new_at(temp.path())
+            .await
+            .expect("restart with intact fts");
+        let preserved: String = sqlx::query_scalar(
+            "SELECT row_id FROM conversation_fts WHERE conversation_fts MATCH '\"intact\"'",
+        )
+        .fetch_one(db.reader().as_pool())
+        .await
+        .expect("intact row must survive restart");
+        assert_eq!(preserved, "turn-1:user");
+
+        // Now corrupt conversation_fts_data after 20261115000000 is already applied.
+        sqlx::query("DELETE FROM conversation_fts_data")
+            .execute(db.writer().as_pool())
+            .await
+            .expect("corrupt conversation_fts_data");
+        db.reader().as_pool().close().await;
+        db.writer().as_pool().close().await;
+
+        let db = super::DBService::new_at(temp.path())
+            .await
+            .expect("restart must self-heal corrupt conversation_fts after upgrade");
+        sqlx::query(
+            "INSERT INTO conversation_fts (conversation_id, row_id, role, text)
+             VALUES ('conv-healed', 'turn-2:assistant', 'assistant', 'self healed index')",
+        )
+        .execute(db.writer().as_pool())
+        .await
+        .expect("insert into self-healed conversation_fts");
+        let healed: String = sqlx::query_scalar(
+            "SELECT row_id FROM conversation_fts WHERE conversation_fts MATCH '\"healed\"'",
+        )
+        .fetch_one(db.reader().as_pool())
+        .await
+        .expect("query self-healed conversation_fts");
+        assert_eq!(healed, "turn-2:assistant");
+
+        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_one(db.reader().as_pool())
+            .await
+            .expect("integrity_check");
+        assert_eq!(integrity, "ok");
+
+        db.reader().as_pool().close().await;
+        db.writer().as_pool().close().await;
     }
 }
 

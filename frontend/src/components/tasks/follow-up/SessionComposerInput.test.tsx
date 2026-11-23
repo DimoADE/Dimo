@@ -2325,4 +2325,137 @@ describe('SessionComposerInput (Astryx)', () => {
       '#c2410c'
     );
   });
+
+  it('delivers a dragged browser element token and screenshot only to the targeted composer drop zone', async () => {
+    const onChangeA = vi.fn();
+    const onAttachA = vi.fn();
+    const onChangeB = vi.fn();
+    const onAttachB = vi.fn();
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    const { container } = render(
+      <QueryClientProvider client={queryClient}>
+        <div data-testid="composer-a">
+          <SessionComposerInput
+            value=""
+            onChange={onChangeA}
+            onSubmit={vi.fn()}
+            onAttachImages={onAttachA}
+          />
+        </div>
+        <div data-testid="composer-b">
+          <SessionComposerInput
+            value=""
+            onChange={onChangeB}
+            onSubmit={vi.fn()}
+            onAttachImages={onAttachB}
+          />
+        </div>
+      </QueryClientProvider>
+    );
+
+    const dropZones = container.querySelectorAll<HTMLElement>(
+      '[data-file-reference-drop-zone]'
+    );
+    expect(dropZones).toHaveLength(2);
+
+    const imageFile = new File(['png-bytes'], 'picked-button.png', {
+      type: 'image/png',
+    });
+    const tokenValue = formatSessionComposerCommand({
+      type: '@',
+      key: '@button',
+      value: '<button class="primary">Submit</button>',
+    });
+
+    const dropEvent = new CustomEvent('dimo-browser-element-drop', {
+      detail: {
+        id: 'browser-el-1',
+        tabId: 'tab-1',
+        label: '@button',
+        tokenValue,
+        selector: 'button.primary',
+        description: 'Submit',
+        imageFile,
+      },
+      bubbles: false,
+      cancelable: true,
+    });
+
+    const notCancelled = dropZones[1].dispatchEvent(dropEvent);
+    expect(notCancelled).toBe(false);
+
+    await waitFor(() => {
+      expect(onChangeB).toHaveBeenCalled();
+      expect(onAttachB).toHaveBeenCalledTimes(1);
+    });
+    expect(onChangeB.mock.calls.at(-1)?.[0]).toContain(tokenValue);
+    expect(onAttachB.mock.calls[0]?.[0]?.[0]?.name).toBe('picked-button.png');
+    expect(onChangeA).not.toHaveBeenCalled();
+    expect(onAttachA).not.toHaveBeenCalled();
+  });
+
+  it('hides the placeholder immediately when dropping a browser element token into an empty composer', async () => {
+    const placeholderText = 'Type anything. @ files, $ skills, / commands';
+
+    function ControlledComposer() {
+      const [value, setValue] = useState('');
+      return (
+        <SessionComposerInput
+          value={value}
+          onChange={setValue}
+          onSubmit={vi.fn()}
+          onAttachImages={vi.fn()}
+          placeholder={placeholderText}
+        />
+      );
+    }
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { container } = render(
+      <QueryClientProvider client={queryClient}>
+        <ControlledComposer />
+      </QueryClientProvider>
+    );
+
+    expect(screen.getByText(placeholderText)).toBeInTheDocument();
+
+    const dropZone = container.querySelector<HTMLElement>(
+      '[data-file-reference-drop-zone]'
+    );
+    expect(dropZone).not.toBeNull();
+
+    const tokenValue = formatSessionComposerCommand({
+      type: '@',
+      key: '@span',
+      value: '<span>Hello</span>',
+    });
+
+    act(() => {
+      dropZone!.dispatchEvent(
+        new CustomEvent('dimo-browser-element-drop', {
+          detail: {
+            id: 'browser-el-placeholder',
+            tabId: 'tab-1',
+            label: '@span',
+            tokenValue,
+            selector: 'span',
+            description: 'Hello',
+            imageFile: null,
+          },
+          bubbles: false,
+          cancelable: true,
+        })
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText(placeholderText)).toBeNull();
+    });
+  });
 });

@@ -286,6 +286,18 @@ export const desktopApi = {
   openDeveloperTools: async (): Promise<void> => {
     return desktopShellCall<void>('open_developer_tools');
   },
+  inspectElement: async (x: number, y: number): Promise<void> => {
+    return desktopShellCall<void>('inspect_element', {
+      x: Math.round(x),
+      y: Math.round(y),
+    });
+  },
+  reloadWindow: async (): Promise<void> => {
+    return desktopShellCall<void>('reload_window');
+  },
+  forceReloadWindow: async (): Promise<void> => {
+    return desktopShellCall<void>('force_reload_window');
+  },
   isMainWindowFocused: async (): Promise<boolean> => {
     return desktopShellCall<boolean>('is_main_window_focused');
   },

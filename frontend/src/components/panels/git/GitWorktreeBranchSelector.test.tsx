@@ -151,15 +151,47 @@ describe('buildDirectoryBranchGroups & GitWorktreeBranchSelector', () => {
     expect(selectorRoot.className).toContain('git-branch-selector');
     fireEvent.click(selectorRoot);
 
-    // Level 2 group renders standard ARIA group under Default Directory
+    // Level 1 shows directories without dumping branches directly beneath Default Directory
+    expect(
+      screen.queryByRole('group', { name: 'Default Directory' })
+    ).toBeNull();
+    expect(screen.queryByText('feat/search')).toBeNull();
+
+    // Linked worktree row displays "Worktree" rather than "External" / "外部"
+    const worktreeOption = screen.getByRole('option', {
+      name: /hotfix\/auth/,
+    });
+    expect(worktreeOption.textContent).toContain('Worktree');
+    expect(worktreeOption.textContent).not.toContain('外部');
+    expect(worktreeOption.textContent).not.toContain('External');
+
+    // Clicking Default Directory opens Level 2 branch list
+    fireEvent.click(screen.getByTestId('git-dir-group-dir:main'));
     const mainGroup = screen.getByRole('group', { name: 'Default Directory' });
     expect(within(mainGroup).getByText('main')).toBeTruthy();
 
-    // Clicking non-checked-out local branch selects read-only branch target without checkout
+    // Read-only branch displays concise "只读" badge instead of "只读差异"
     const branchOption = within(mainGroup).getByRole('option', {
       name: /feat\/search/,
     });
-    fireEvent.click(branchOption);
+    expect(branchOption.textContent).toContain('只读');
+    expect(branchOption.textContent).not.toContain('只读差异');
+
+    // Back button returns cleanly to Level 1 directory list
+    fireEvent.click(screen.getByTestId('git-branch-selector-back'));
+    expect(
+      screen.queryByRole('group', { name: 'Default Directory' })
+    ).toBeNull();
+
+    // Re-enter Level 2 and select read-only branch target without checkout
+    fireEvent.click(screen.getByTestId('git-dir-group-dir:main'));
+    fireEvent.click(
+      within(
+        screen.getByRole('group', { name: 'Default Directory' })
+      ).getByRole('option', {
+        name: /feat\/search/,
+      })
+    );
     expect(onSelectTarget).toHaveBeenCalledTimes(1);
     expect(onSelectTarget.mock.calls[0][0]).toMatchObject<
       Partial<GitDiffTarget>
@@ -168,6 +200,82 @@ describe('buildDirectoryBranchGroups & GitWorktreeBranchSelector', () => {
       branch: 'feat/search',
       baseBranch: 'main',
     });
+  });
+
+  it('renders a cursor-safe 11px search input and filters long branch names cleanly when more than 6 targets exist', () => {
+    const worktrees: GitWorktreeInfo[] = [
+      {
+        path: '/repo',
+        branch: 'master',
+        head_sha: 'aaa1111',
+        is_main: true,
+        is_detached: false,
+        is_bare: false,
+      },
+    ];
+    const branches: GitBranch[] = [
+      makeBranch('master', { is_current: true }),
+      makeBranch('refactor/native-engine-architecture'),
+      makeBranch('canvas-audit-fixes'),
+      makeBranch('feat/cross-agent-foundation'),
+      makeBranch('integration/t3code-refactor'),
+      makeBranch(
+        'member/115d0a52-5063-55a2-a17d-f15b7fd6a0b3/2e8266c3-658f-5fe7-9553-05283d9e95c6'
+      ),
+      makeBranch(
+        'member/44421762-bc3a-542d-950e-cfe0d56ccf9f/58b7092b-ab19-5116-90c2-2df907f5e85f'
+      ),
+    ];
+
+    const groups = buildDirectoryBranchGroups({
+      worktrees,
+      branches,
+      workspaces: [],
+      fallbackCurrentBranch: 'master',
+      baseBranch: 'master',
+      defaultDirLabel: '默认目录',
+    });
+
+    const onSelectTarget = vi.fn();
+    render(
+      <GitWorktreeBranchSelector
+        groups={groups}
+        selectedTarget={groups[0].options[0]}
+        onSelectTarget={onSelectTarget}
+      />
+    );
+
+    fireEvent.click(screen.getByTestId('git-worktree-branch-selector'));
+
+    const searchInput = screen.getByRole('textbox');
+    expect(searchInput.className).toContain('text-[11px]');
+    expect(searchInput.className).toContain('rounded-none');
+    expect(searchInput.className).toContain('leading-normal');
+    expect(searchInput.closest('[data-control-frame="true"]')).toBeTruthy();
+
+    // Open Level 2 by clicking the directory row to verify long branch truncation
+    fireEvent.click(screen.getByTestId('git-dir-group-dir:main'));
+    const longBranchLabel = screen.getByText(
+      'member/115d0a52-5063-55a2-a17d-f15b7fd6a0b3/2e8266c3-658f-5fe7-9553-05283d9e95c6'
+    );
+    expect(longBranchLabel.className).toContain('truncate');
+    expect(longBranchLabel.getAttribute('title')).toBe(
+      'member/115d0a52-5063-55a2-a17d-f15b7fd6a0b3/2e8266c3-658f-5fe7-9553-05283d9e95c6'
+    );
+
+    fireEvent.change(searchInput, { target: { value: 'canvas-audit' } });
+    expect(screen.getAllByRole('option')).toHaveLength(1);
+    expect(
+      screen.getByRole('option', { name: /canvas-audit-fixes/ })
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('option', { name: /canvas-audit-fixes/ }));
+    expect(onSelectTarget).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'branch',
+        branch: 'canvas-audit-fixes',
+      })
+    );
   });
 });
 

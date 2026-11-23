@@ -4,8 +4,21 @@ import type {
   GroupDispatchMode,
   PulseEvalMode,
   PulseRuleSpec,
+  PulseRuleView,
   PulseTemporalSpec,
 } from '@/lib/api/pulse';
+
+export function detectLocalTimezone(): string {
+  try {
+    const resolved = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (typeof resolved === 'string' && resolved.trim()) {
+      return resolved.trim();
+    }
+  } catch {
+    // Fall back to UTC in environments without full Intl timezone support.
+  }
+  return 'UTC';
+}
 
 export const COLLABORATION_PULSE_PROPOSAL_EVENT =
   'vibex:collaboration-pulse-proposal';
@@ -54,7 +67,7 @@ export function defaultTemporalSpecForSource(
       return {
         kind: 'cron',
         expression: '0 9 * * 1-5',
-        timezone: 'UTC',
+        timezone: detectLocalTimezone(),
         weekdaysOnly: true,
         catchUpOnce: true,
       };
@@ -270,5 +283,131 @@ export function buildSampleEnvelopeForSource(
       hopCount: 0,
     },
     payload: defaultPayload,
+  };
+}
+
+function setJsonPointerValue(
+  target: Record<string, unknown>,
+  pointer: string,
+  value: unknown
+) {
+  const segments = pointer
+    .split('/')
+    .slice(1)
+    .map((segment) => segment.replace(/~1/g, '/').replace(/~0/g, '~'));
+  if (segments.length === 0) return;
+  let cursor: Record<string, unknown> = target;
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    const key = segments[i];
+    if (!key) return;
+    const existing = cursor[key];
+    if (!existing || typeof existing !== 'object' || Array.isArray(existing)) {
+      cursor[key] = {};
+    }
+    cursor = cursor[key] as Record<string, unknown>;
+  }
+  const leaf = segments[segments.length - 1];
+  if (leaf) {
+    cursor[leaf] = value;
+  }
+}
+
+export function buildManualTestEnvelopeForRule(
+  rule: PulseRuleView
+): EventEnvelope {
+  const uniqueId =
+    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  const temporal = rule.spec.temporal;
+  let sourceKind: EventSourceKind;
+  let instanceId: string;
+  if (temporal) {
+    switch (temporal.kind) {
+      case 'cron':
+        sourceKind = 'time_cron';
+        instanceId = `temporal:${rule.id}`;
+        break;
+      case 'once':
+        sourceKind = 'time_once';
+        instanceId = `temporal:${rule.id}`;
+        break;
+      case 'interval':
+        sourceKind = 'time_interval';
+        instanceId = `temporal:${rule.id}`;
+        break;
+      case 'inactivity_sla':
+        sourceKind = 'time_sla';
+        instanceId = `sla:${rule.id}`;
+        break;
+    }
+  } else {
+    sourceKind = rule.spec.filter.sourceKinds[0] ?? 'webhook_standard';
+    instanceId = rule.spec.filter.sourceInstanceIds[0] ?? 'manual-test';
+  }
+
+  const eventType =
+    rule.spec.filter.eventTypes[0] || defaultEventTypeForSource(sourceKind);
+
+  const payload: Record<string, unknown> = {
+    summary: `Manual test trigger for ${rule.spec.name}`,
+    manualTest: true,
+    ruleId: rule.id,
+  };
+
+  for (const cond of rule.spec.filter.conditions) {
+    if (cond.op === 'contains') {
+      setJsonPointerValue(payload, cond.pointer, cond.needle);
+    } else if (cond.op === 'eq') {
+      setJsonPointerValue(payload, cond.pointer, cond.value);
+    } else if (cond.op === 'in_set' && cond.values.length > 0) {
+      setJsonPointerValue(payload, cond.pointer, cond.values[0]);
+    } else if (cond.op === 'exists') {
+      setJsonPointerValue(payload, cond.pointer, true);
+    } else if (cond.op === 'gt') {
+      setJsonPointerValue(payload, cond.pointer, cond.value + 1);
+    } else if (cond.op === 'gte') {
+      setJsonPointerValue(payload, cond.pointer, cond.value);
+    } else if (cond.op === 'lt') {
+      setJsonPointerValue(payload, cond.pointer, cond.value - 1);
+    } else if (cond.op === 'lte') {
+      setJsonPointerValue(payload, cond.pointer, cond.value);
+    }
+  }
+
+  const allowedActor = rule.spec.filter.allowedActors[0];
+  const eventId = `evt-manual-${uniqueId}`;
+  const threadKey =
+    temporal?.kind === 'inactivity_sla'
+      ? `${temporal.threadKeyPrefix}manual-test`
+      : `manual-test:${rule.id}`;
+
+  return {
+    eventId,
+    deliveryId: `dlv-manual-${uniqueId}`,
+    source: {
+      kind: sourceKind,
+      instanceId,
+      trustLevel: 'trusted_human',
+    },
+    eventType,
+    occurredAt: new Date().toISOString(),
+    actor: {
+      id: allowedActor || 'user:local-desktop',
+      displayName: 'Manual Test',
+      roles: ['owner'],
+      isBot: false,
+      isSelf: false,
+    },
+    threadKey,
+    correlations: [],
+    replyChannels: [],
+    trace: {
+      rootEventId: eventId,
+      parentRunId: null,
+      hopCount: 0,
+    },
+    payload,
   };
 }

@@ -50,7 +50,10 @@ import {
 import { ProductContextMenu } from '@/components/context-menu/ProductContextMenu';
 import type { ProductContextMenuItem } from '@/components/context-menu/contextMenuTypes';
 import { cn } from '@/lib/utils';
-import { CanvasDotBackground } from './CanvasDotBackground';
+import {
+  CanvasDotBackground,
+  type CanvasDotBackgroundHandle,
+} from './CanvasDotBackground';
 import {
   CanvasLinksLayer,
   type CanvasConnectingState,
@@ -210,6 +213,7 @@ const NODE_TYPES = {
 
 const VIEWPORT_SAVE_DELAY_MS = 500;
 const ALIGN_TOLERANCE_PX = 6;
+const CANVAS_VIRTUALIZATION_NODE_THRESHOLD = 150;
 let nextCanvasInstanceId = 0;
 
 export interface SessionCanvasApi {
@@ -438,6 +442,8 @@ function SessionCanvasFlow({
     useReactFlow();
   const flowStore = useStoreApi();
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const dotBackgroundRef = useRef<CanvasDotBackgroundHandle | null>(null);
+  const onlyRenderVisibleRef = useRef(false);
   const [creationHost, setCreationHost] = useState<HTMLDivElement | null>(null);
   useLayoutEffect(
     () => (creationHost ? registerCanvasCreationHost(creationHost) : undefined),
@@ -447,29 +453,61 @@ function SessionCanvasFlow({
   const onMiddleClick = useCallback((event: MouseEvent) => {
     onMiddleClickRef.current(event);
   }, []);
-  const rightPanOriginRef = useRef<{
+  const liveRightPanRef = useRef<{
     gestureId: number;
+    originX: number;
+    originY: number;
+    zoom: number;
     x: number;
     y: number;
-    zoom: number;
+    directDom: boolean;
+    viewportEl: HTMLElement | null;
+    selectionEl: HTMLElement | null;
   } | null>(null);
   const onRightPan = useCallback(
     (delta: { x: number; y: number; gestureId: number }) => {
-      let origin = rightPanOriginRef.current;
-      if (origin == null || origin.gestureId !== delta.gestureId) {
+      let session = liveRightPanRef.current;
+      if (session == null || session.gestureId !== delta.gestureId) {
         const viewport = getViewport();
-        origin = {
+        const surface = surfaceRef.current;
+        const viewportEl =
+          surface?.querySelector<HTMLElement>('.react-flow__viewport') ?? null;
+        const selectionEl =
+          surface?.querySelector<HTMLElement>('.react-flow__nodesselection') ??
+          null;
+        session = {
           gestureId: delta.gestureId,
+          originX: viewport.x,
+          originY: viewport.y,
+          zoom: viewport.zoom,
           x: viewport.x,
           y: viewport.y,
-          zoom: viewport.zoom,
+          directDom: Boolean(viewportEl) && !onlyRenderVisibleRef.current,
+          viewportEl,
+          selectionEl,
         };
-        rightPanOriginRef.current = origin;
+        liveRightPanRef.current = session;
       }
+      const nextX = session.originX + delta.x;
+      const nextY = session.originY + delta.y;
+      session.x = nextX;
+      session.y = nextY;
+
+      if (session.directDom && session.viewportEl) {
+        const transformCss = `translate3d(${nextX}px, ${nextY}px, 0) scale(${session.zoom})`;
+        session.viewportEl.style.transform = transformCss;
+        if (session.selectionEl) {
+          session.selectionEl.style.transform = transformCss;
+        }
+        dotBackgroundRef.current?.applyTransform(nextX, nextY, session.zoom);
+        notifyCanvasBrowserViewportChange(session.zoom);
+        return;
+      }
+
       void setViewport({
-        x: origin.x + delta.x,
-        y: origin.y + delta.y,
-        zoom: origin.zoom,
+        x: nextX,
+        y: nextY,
+        zoom: session.zoom,
       });
     },
     [getViewport, setViewport]
@@ -683,6 +721,13 @@ function SessionCanvasFlow({
     };
     const clear = () => {
       altHeldRef.current = false;
+      liveRightPanRef.current = null;
+      isRightPanningRef.current = false;
+      isPanningRef.current = false;
+      surfaceRef.current?.removeAttribute('data-canvas-panning');
+      surfaceRef.current?.removeAttribute('data-canvas-drag-panning');
+      surfaceRef.current?.removeAttribute('data-canvas-dragging');
+      setCanvasBrowserInteracting(false);
     };
     window.addEventListener('keydown', sync);
     window.addEventListener('keyup', sync);
@@ -2653,17 +2698,34 @@ function SessionCanvasFlow({
   }, [persist]);
 
   onRightPanStateChangeRef.current = (panning) => {
-    isRightPanningRef.current = panning;
     if (panning) {
+      isRightPanningRef.current = true;
       isPanningRef.current = true;
       setCanvasBrowserInteracting(true);
-      setMinimapSuspended(true);
+      if (onlyRenderVisibleRef.current) {
+        setMinimapSuspended(true);
+      }
       return;
     }
+    const liveSession = liveRightPanRef.current;
+    liveRightPanRef.current = null;
+    let finalViewport: Viewport | null = null;
+    if (liveSession?.directDom) {
+      finalViewport = {
+        x: liveSession.x,
+        y: liveSession.y,
+        zoom: liveSession.zoom,
+      };
+      // Commit once while isRightPanningRef is still true so the synchronous
+      // onMove/onMoveEnd fired by setViewport does not re-toggle pan attributes
+      // or suspend/remount the minimap.
+      void setViewport(finalViewport);
+    }
+    isRightPanningRef.current = false;
     isPanningRef.current = false;
     setCanvasBrowserInteracting(false);
     setMinimapSuspended(false);
-    const viewport = pendingViewport.current ?? getViewport();
+    const viewport = finalViewport ?? pendingViewport.current ?? getViewport();
     pendingViewport.current = viewport;
     pendingViewportDirtyRef.current = true;
     zoomRef.current = viewport.zoom;
@@ -2721,6 +2783,7 @@ function SessionCanvasFlow({
 
   useEffect(
     () => () => {
+      liveRightPanRef.current = null;
       isRightPanningRef.current = false;
       isPanningRef.current = false;
       surfaceRef.current?.removeAttribute('data-canvas-panning');
@@ -2763,6 +2826,10 @@ function SessionCanvasFlow({
   );
 
   const empty = nodes.length === 0;
+  const onlyRenderVisibleElements =
+    !canvasHasLiveSurfaces(nodes) &&
+    nodes.length > CANVAS_VIRTUALIZATION_NODE_THRESHOLD;
+  onlyRenderVisibleRef.current = onlyRenderVisibleElements;
   const selectedNodes = nodes.filter((node) => selectedIds.has(node.id));
   const selectedCards = selectedNodes.filter((node) => !isGroupNode(node));
   const selectedExpanded =
@@ -2886,7 +2953,7 @@ function SessionCanvasFlow({
             minZoom={CANVAS_MIN_ZOOM}
             maxZoom={CANVAS_MAX_ZOOM}
             elevateNodesOnSelect={false}
-            onlyRenderVisibleElements={!canvasHasLiveSurfaces(nodes)}
+            onlyRenderVisibleElements={onlyRenderVisibleElements}
             panOnDrag={CANVAS_PAN_ON_DRAG}
             selectionOnDrag
             selectionMode={SelectionMode.Partial}
@@ -2902,6 +2969,7 @@ function SessionCanvasFlow({
               maxZoom={CANVAS_MAX_ZOOM}
             />
             <CanvasDotBackground
+              ref={dotBackgroundRef}
               gap={BOARD_DOT_GAP}
               size={1.5}
               className="canvas-dots"

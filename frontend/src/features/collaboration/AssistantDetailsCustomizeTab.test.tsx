@@ -71,6 +71,9 @@ describe('AssistantDetailsCustomizeTab', () => {
     expect(agentReadonly).toHaveTextContent('Claude Code');
     expect(agentReadonly.parentElement).toHaveTextContent('Agent');
     expect(screen.queryByRole('combobox', { name: '选择 Agent' })).toBeNull();
+    expect(
+      screen.queryByTestId('assistant-details-tab-automations')
+    ).toBeNull();
     await user.click(agentReadonly);
     expect(agentReadonly).toHaveClass('is-shaking');
     expect(screen.getByLabelText('人设（可选）')).toHaveValue('你是小A');

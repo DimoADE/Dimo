@@ -52,11 +52,17 @@ describe('hardcoded string i18n', () => {
     await i18n.changeLanguage('en');
     expect(COPY.requestFailed).toBe('Request failed');
     expect(CONTACT_ROW_MENU_COPY.pin).toBe('Pin');
+    expect(CONTACT_ROW_MENU_COPY.createPulseTrigger).toBe(
+      'Create Event Trigger…'
+    );
+    expect(CONTACT_ROW_MENU_COPY.schedulePulse).toBe('Schedule Pulse…');
     expect(SPACE_TAG_PRESETS[0].label).toBe('Blue');
     expect(BOT_AVATAR_SHAPE_PRESETS[0].label).toBe('Circle');
     await i18n.changeLanguage('zh-CN');
     expect(COPY.requestFailed).toBe('请求失败');
     expect(CONTACT_ROW_MENU_COPY.pin).toBe('置顶');
+    expect(CONTACT_ROW_MENU_COPY.createPulseTrigger).toBe('创建事件任务…');
+    expect(CONTACT_ROW_MENU_COPY.schedulePulse).toBe('创建定时任务…');
     expect(SPACE_TAG_PRESETS[0].label).toBe('蓝色');
   });
 

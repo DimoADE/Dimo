@@ -300,6 +300,7 @@ describe('SessionCreationForm agent capability catalog controls', () => {
     renderForm('grok', onPreset, 'new_workspace');
 
     const summary = await screen.findByTestId('session-settings-summary');
+    expect(summary).toHaveTextContent('Grok 4.6 · 高 · Ask');
     expect(summary).toHaveAttribute(
       'aria-label',
       expect.stringMatching(/Grok 4\.6/)
@@ -309,6 +310,62 @@ describe('SessionCreationForm agent capability catalog controls', () => {
     expect(onPreset).toHaveBeenLastCalledWith({
       modeOverride: 'default',
       configOverrides: { model: 'grok-4.6', effort: 'high' },
+    });
+  });
+
+  it('displays and updates the permission mode in the visible session settings summary', async () => {
+    capabilityCatalog.mockResolvedValue({
+      modes: [
+        { id: 'ask', label: 'Ask', description: null },
+        { id: 'yolo', label: 'YOLO', description: null },
+      ],
+      current_mode: 'yolo',
+      config_options: [
+        {
+          key: 'model',
+          label: 'Model',
+          description: null,
+          category: 'model',
+          value: 'gemini-4-neon',
+          choices: [
+            {
+              value: 'gemini-4-neon',
+              label: 'Gemini 4 Neon',
+              description: null,
+            },
+            { value: 'gemini-4-pro', label: 'Gemini 4 Pro', description: null },
+          ],
+        },
+        {
+          key: 'effort',
+          label: '推理强度',
+          description: null,
+          category: 'thought_level',
+          value: 'high',
+          choices: [
+            { value: 'low', label: '低', description: null },
+            { value: 'high', label: '高', description: null },
+          ],
+        },
+      ],
+    });
+    const onPreset = vi.fn();
+    renderForm('antigravity', onPreset, 'existing_workspace');
+    const user = userEvent.setup();
+
+    const summary = await screen.findByTestId('session-settings-summary');
+    expect(summary).toHaveTextContent('Gemini 4 Neon · 高 · YOLO');
+
+    await user.click(summary);
+    await user.click(screen.getByText('sessionModeSelector.title'));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Ask' }));
+
+    await waitFor(() =>
+      expect(summary).toHaveTextContent('Gemini 4 Neon · 高 · Ask')
+    );
+    expect(onPreset).toHaveBeenLastCalledWith({
+      modeOverride: 'ask',
+      configOverrides: { model: 'gemini-4-neon', effort: 'high' },
     });
   });
 

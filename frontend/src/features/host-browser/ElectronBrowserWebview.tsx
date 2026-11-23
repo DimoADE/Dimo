@@ -2,10 +2,6 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { getDesktopShell } from '@/lib/desktopShell';
 import type { BrowserSurfaceHost } from './browserPanelLifetime';
 import {
-  canvasLayerCoversBrowser,
-  clipBrowserSurfaceRect,
-} from './browserSurfaceBounds';
-import {
   acquireElectronBrowserSurface,
   registerElectronBrowserCallbacks,
   registerElectronBrowserTab,
@@ -91,13 +87,7 @@ function resolveStageClipRect(
   return clip;
 }
 
-function resolveCornerRadius(
-  element: HTMLElement,
-  surfaceHost: BrowserSurfaceHost
-): number {
-  if (surfaceHost === 'canvas') {
-    return 12;
-  }
+function resolveDockviewCornerRadius(element: HTMLElement): number {
   const group = element.closest('.dv-groupview') as HTMLElement | null;
   if (!group) return 0;
   const isBottomCorner =
@@ -107,30 +97,16 @@ function resolveCornerRadius(
   return isBottomCorner ? 14 : 0;
 }
 
-function measureSlotScale(
-  element: HTMLElement,
-  rect: DOMRect,
-  surfaceHost: BrowserSurfaceHost
-): number {
-  if (surfaceHost !== 'canvas') {
-    return 1;
-  }
-  if (element.offsetWidth > 1 && rect.width > 1) {
-    const ratio = rect.width / element.offsetWidth;
-    if (Number.isFinite(ratio) && ratio > 0.05 && ratio < 10) {
-      return ratio;
-    }
-  }
-  return useElectronBrowserSurfaceStore.getState().canvasZoom || 1;
-}
-
 /**
  * Slot controller for an Electron Host Browser surface.
  *
- * When `<ElectronBrowserHost />` is mounted at app root, this component renders
- * only a lightweight placeholder slot and leases the persistent root-mounted
- * `<webview>` to overlay this slot's geometry (with stage clipping, canvas zoom
- * scaling, occlusion freeze fallback, and true offscreen-viewport hibernation).
+ * - On Infinite Canvas (`surfaceHost === 'canvas'`), renders `<webview>`
+ *   directly inline inside the canvas node so CSS z-index, clipping, transforms,
+ *   minimap/HUD overlays, and sibling cards compose natively without any
+ *   Tauri-era occlusion or freeze-frame patchwork.
+ * - In Dockview (`surfaceHost === 'dockview'`), leases a persistent root-mounted
+ *   `<webview>` from `<ElectronBrowserHost />` so dragging tabs across split
+ *   panes never reparents or reloads the guest WebContents.
  */
 export function ElectronBrowserWebview({
   tabId,
@@ -149,6 +125,8 @@ export function ElectronBrowserWebview({
     (state) => state.hostMounted
   );
 
+  const renderInline = surfaceHost === 'canvas' || !hostMounted;
+
   const slotRef = useRef<HTMLDivElement | null>(null);
   const leaseRef = useRef<ElectronBrowserSurfaceLease | null>(null);
   const lastUrlTabIdRef = useRef<string>(tabId);
@@ -160,27 +138,14 @@ export function ElectronBrowserWebview({
   const [hibernatedSnapshot, setHibernatedSnapshot] = useState<string | null>(
     null
   );
-  const [occluded, setOccluded] = useState(false);
-  const [occlusionSnapshot, setOcclusionSnapshot] = useState<string | null>(
-    null
-  );
-  const [occlusionCaptureNonce, setOcclusionCaptureNonce] = useState(0);
   const [inCanvasViewport, setInCanvasViewport] = useState(true);
 
-  const occludedRef = useRef(false);
-  occludedRef.current = occluded;
-  const occlusionCaptureInFlightRef = useRef(false);
-  const lastCapturedOcclusionKeyRef = useRef<string | null>(null);
   const hibernatedRef = useRef(false);
   hibernatedRef.current = hibernated;
   const panelVisibleRef = useRef(panelVisible);
   panelVisibleRef.current = panelVisible;
-  const surfaceHostRef = useRef(surfaceHost);
-  surfaceHostRef.current = surfaceHost;
   const surfaceZIndexRef = useRef(surfaceZIndex);
   surfaceZIndexRef.current = surfaceZIndex;
-  const backgroundColorRef = useRef(backgroundColor);
-  backgroundColorRef.current = backgroundColor;
 
   useEffect(() => {
     if (url && url.trim().length > 0) {
@@ -188,7 +153,8 @@ export function ElectronBrowserWebview({
     }
   }, [url]);
 
-  // Register tab in root host store & keep metadata synced.
+  // Register tab metadata in store; canvas tabs are marked `inline: true` so
+  // root ElectronBrowserHost never mounts a duplicate `<webview>`.
   useLayoutEffect(() => {
     if (lastUrlTabIdRef.current !== tabId) {
       lastUrlTabIdRef.current = tabId;
@@ -202,77 +168,91 @@ export function ElectronBrowserWebview({
       profileId,
       backgroundColor,
       hibernated,
+      inline: surfaceHost === 'canvas',
     });
-  }, [backgroundColor, hibernated, profileId, tabId, url]);
+  }, [backgroundColor, hibernated, profileId, surfaceHost, tabId, url]);
 
-  // Register callbacks for history, guest pointerdown, and load completion notifications.
+  // Register callbacks for history and guest pointerdown notifications.
   useEffect(() => {
     const callbacks = {
       onHistoryAvailabilityChange,
       onPointerDown: onSurfacePointerDown,
-      onLoadFinished: () => {
-        if (
-          occludedRef.current &&
-          surfaceHostRef.current === 'canvas' &&
-          !hibernatedRef.current
-        ) {
-          setOcclusionCaptureNonce((prev) => prev + 1);
-        }
-      },
     };
     return registerElectronBrowserCallbacks(tabId, callbacks);
   }, [onHistoryAvailabilityChange, onSurfacePointerDown, tabId]);
 
-  // Reset local hibernation/occlusion state on logical tabId switch.
+  // Reset local hibernation state on logical tabId switch.
   useEffect(() => {
     const nextUrl = latestUrlPropRef.current || 'about:blank';
     setHibernated(false);
     setHibernatedSnapshot(null);
-    setOccluded(false);
-    setOcclusionSnapshot(null);
-    setOcclusionCaptureNonce(0);
-    lastCapturedOcclusionKeyRef.current = null;
     setInCanvasViewport(true);
     lastUrlRef.current = nextUrl;
   }, [tabId]);
 
-  // Trigger a snapshot when a higher-z-index canvas node covers this browser card.
-  useEffect(() => {
-    if (!occluded || surfaceHost !== 'canvas' || hibernated) {
-      lastCapturedOcclusionKeyRef.current = null;
+  // Track whether a canvas browser card is outside the stage viewport for idle hibernation.
+  useLayoutEffect(() => {
+    if (surfaceHost !== 'canvas' || hibernated) {
       return undefined;
     }
-    const captureKey = `${tabId}:${url}:${occlusionCaptureNonce}`;
-    if (
-      lastCapturedOcclusionKeyRef.current === captureKey ||
-      occlusionCaptureInFlightRef.current
-    ) {
-      return undefined;
-    }
-    let cancelled = false;
-    occlusionCaptureInFlightRef.current = true;
-    void (async () => {
-      try {
-        const frame =
-          await getDesktopShell().invoke<FreezeThumbnailPayload | null>(
-            'electron_browser_capture_thumbnail',
-            { tabId }
-          );
-        if (!cancelled && frame?.data) {
-          const mime = frame.mime || 'image/jpeg';
-          lastCapturedOcclusionKeyRef.current = captureKey;
-          setOcclusionSnapshot(`data:${mime};base64,${frame.data}`);
-        }
-      } catch {
-        // Proceed without snapshot if unavailable.
-      } finally {
-        occlusionCaptureInFlightRef.current = false;
-      }
-    })();
-    return () => {
-      cancelled = true;
+    const el = slotRef.current;
+    if (!el) return undefined;
+
+    const checkViewport = () => {
+      const target = slotRef.current;
+      if (!target) return;
+      const domRect = target.getBoundingClientRect();
+      const rect: ElectronBrowserRect = {
+        x: Math.round(domRect.x),
+        y: Math.round(domRect.y),
+        width: Math.max(0, Math.round(domRect.width)),
+        height: Math.max(0, Math.round(domRect.height)),
+      };
+      const clipRect = resolveStageClipRect(target, 'canvas');
+      const withinHibernateMargin =
+        rect.width > 0 &&
+        rect.height > 0 &&
+        isSurfaceRectIntersectingClip(
+          rect,
+          clipRect,
+          CANVAS_HIBERNATE_VIEWPORT_MARGIN_PX
+        );
+      setInCanvasViewport((prev) =>
+        prev === withinHibernateMargin ? prev : withinHibernateMargin
+      );
     };
-  }, [hibernated, occluded, occlusionCaptureNonce, surfaceHost, tabId, url]);
+
+    checkViewport();
+
+    let rafId: number | null = null;
+    const scheduleCheck = () => {
+      if (rafId !== null) return;
+      rafId = window.requestAnimationFrame(() => {
+        rafId = null;
+        checkViewport();
+      });
+    };
+
+    const unsubscribeViewport =
+      subscribeCanvasBrowserViewportChange(scheduleCheck);
+    const resizeObserver =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(checkViewport)
+        : null;
+    resizeObserver?.observe(el);
+    window.addEventListener('resize', checkViewport);
+    window.addEventListener('scroll', checkViewport, true);
+
+    return () => {
+      if (rafId !== null) {
+        window.cancelAnimationFrame(rafId);
+      }
+      unsubscribeViewport();
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', checkViewport);
+      window.removeEventListener('scroll', checkViewport, true);
+    };
+  }, [hibernated, surfaceHost, tabId]);
 
   // Infinite-canvas hibernation: release guest Chromium process only after offscreen idle.
   const effectivelyVisibleForHibernate =
@@ -337,10 +317,10 @@ export function ElectronBrowserWebview({
     url,
   ]);
 
-  // Acquire surface lease and synchronize slot geometry -> root ElectronBrowserHost.
+  // Dockview surface lease: synchronize slot geometry -> root ElectronBrowserHost.
   useLayoutEffect(() => {
     const el = slotRef.current;
-    if (!el || hibernated) {
+    if (!el || hibernated || renderInline) {
       leaseRef.current?.release();
       leaseRef.current = null;
       return undefined;
@@ -348,9 +328,8 @@ export function ElectronBrowserWebview({
 
     let lease = acquireElectronBrowserSurface(tabId);
     leaseRef.current = lease;
-    let rafId: number | null = null;
 
-    const measureAndSync = (liveOnly: boolean) => {
+    const syncGeometry = () => {
       const target = slotRef.current;
       if (!target) return;
 
@@ -361,91 +340,29 @@ export function ElectronBrowserWebview({
         width: Math.max(0, Math.round(domRect.width)),
         height: Math.max(0, Math.round(domRect.height)),
       };
-      const hostKind = surfaceHostRef.current;
-      const clipRect = resolveStageClipRect(target, hostKind);
-      const scale = measureSlotScale(target, domRect, hostKind);
+      const clipRect = resolveStageClipRect(target, 'dockview');
       const zIndex = resolveHostBrowserZIndex(
-        hostKind,
+        'dockview',
         surfaceZIndexRef.current
       );
-      const cornerRadius = resolveCornerRadius(target, hostKind);
-
-      let nextOccluded = false;
-      if (hostKind === 'canvas' && rect.width > 1 && rect.height > 1) {
-        const clipped = clipBrowserSurfaceRect(target, {
-          left: domRect.left,
-          top: domRect.top,
-          right: domRect.right,
-          bottom: domRect.bottom,
-        });
-        if (
-          clipped.right - clipped.left >= 2 &&
-          clipped.bottom - clipped.top >= 2
-        ) {
-          nextOccluded = canvasLayerCoversBrowser(target);
-        }
-      }
-      if (nextOccluded !== occludedRef.current) {
-        occludedRef.current = nextOccluded;
-        setOccluded(nextOccluded);
-        if (!nextOccluded) {
-          setOcclusionSnapshot(null);
-        }
-      }
-
+      const cornerRadius = resolveDockviewCornerRadius(target);
       const intersectsStage = isSurfaceRectIntersectingClip(rect, clipRect, 0);
-      if (hostKind === 'canvas') {
-        const withinHibernateMargin =
-          rect.width > 0 &&
-          rect.height > 0 &&
-          isSurfaceRectIntersectingClip(
-            rect,
-            clipRect,
-            CANVAS_HIBERNATE_VIEWPORT_MARGIN_PX
-          );
-        setInCanvasViewport((prev) =>
-          prev === withinHibernateMargin ? prev : withinHibernateMargin
-        );
-      }
-
       const visible =
         panelVisibleRef.current &&
         !hibernatedRef.current &&
-        !nextOccluded &&
         rect.width > 0 &&
         rect.height > 0 &&
         intersectsStage;
-
-      const interactive =
-        visible &&
-        !(
-          hostKind === 'canvas' &&
-          useElectronBrowserSurfaceStore.getState().canvasInteracting
-        );
-
-      if (liveOnly) {
-        lease.pushLive({
-          rect,
-          clipRect,
-          visible,
-          scale,
-          zIndex,
-          cornerRadius,
-          interactive,
-          backgroundColor: backgroundColorRef.current,
-        });
-        return;
-      }
 
       const presented = lease.present({
         rect,
         clipRect,
         visible,
-        scale,
+        scale: 1,
         zIndex,
         cornerRadius,
-        interactive,
-        surfaceHost: hostKind,
+        interactive: visible,
+        surfaceHost: 'dockview',
         slotElement: target,
       });
       if (visible && !presented) {
@@ -456,102 +373,37 @@ export function ElectronBrowserWebview({
           rect,
           clipRect,
           visible,
-          scale,
+          scale: 1,
           zIndex,
           cornerRadius,
-          interactive,
-          surfaceHost: hostKind,
+          interactive: visible,
+          surfaceHost: 'dockview',
           slotElement: target,
         });
       }
     };
 
-    const scheduleFullSync = () => {
-      measureAndSync(false);
-    };
-
-    const scheduleLiveSync = () => {
-      if (rafId !== null) return;
-      rafId = window.requestAnimationFrame(() => {
-        rafId = null;
-        measureAndSync(true);
-      });
-    };
-
-    measureAndSync(false);
+    syncGeometry();
 
     const resizeObserver =
       typeof ResizeObserver !== 'undefined'
-        ? new ResizeObserver(scheduleFullSync)
+        ? new ResizeObserver(syncGeometry)
         : null;
     if (resizeObserver) {
       resizeObserver.observe(el);
       const groupEl = el.closest('.dv-groupview');
       if (groupEl) resizeObserver.observe(groupEl);
-      const stageEl = el.closest(
-        '[data-testid="workspace-canvas-stage"], .workspace-stage-host'
-      );
+      const stageEl = el.closest('.workspace-stage-host');
       if (stageEl) resizeObserver.observe(stageEl);
     }
 
-    let canvasMutationObserver: MutationObserver | null = null;
-    if (surfaceHost === 'canvas' && typeof MutationObserver !== 'undefined') {
-      const flowRoot =
-        el.closest('.react-flow') ?? el.closest('[data-canvas-surface]');
-      if (flowRoot) {
-        canvasMutationObserver = new MutationObserver((mutations) => {
-          const interacting =
-            useElectronBrowserSurfaceStore.getState().canvasInteracting;
-          const liveTransformOnly =
-            mutations.length > 0 &&
-            mutations.every((mutation) => {
-              if (
-                mutation.type !== 'attributes' ||
-                mutation.attributeName !== 'style' ||
-                !(mutation.target instanceof Element)
-              ) {
-                return false;
-              }
-              if (mutation.target.classList.contains('react-flow__viewport')) {
-                return true;
-              }
-              return (
-                interacting &&
-                mutation.target.classList.contains('react-flow__node')
-              );
-            });
-          if (liveTransformOnly) {
-            scheduleLiveSync();
-            return;
-          }
-          scheduleFullSync();
-        });
-        canvasMutationObserver.observe(flowRoot, {
-          attributes: true,
-          attributeFilter: ['style', 'class', 'hidden', 'aria-hidden'],
-          childList: true,
-          subtree: true,
-        });
-      }
-    }
-
-    const unsubscribeCanvasViewport =
-      surfaceHost === 'canvas'
-        ? subscribeCanvasBrowserViewportChange(scheduleLiveSync)
-        : undefined;
-
-    window.addEventListener('resize', scheduleFullSync);
-    window.addEventListener('scroll', scheduleFullSync, true);
+    window.addEventListener('resize', syncGeometry);
+    window.addEventListener('scroll', syncGeometry, true);
 
     return () => {
-      if (rafId !== null) {
-        window.cancelAnimationFrame(rafId);
-      }
       resizeObserver?.disconnect();
-      canvasMutationObserver?.disconnect();
-      unsubscribeCanvasViewport?.();
-      window.removeEventListener('resize', scheduleFullSync);
-      window.removeEventListener('scroll', scheduleFullSync, true);
+      window.removeEventListener('resize', syncGeometry);
+      window.removeEventListener('scroll', syncGeometry, true);
       lease.release();
       if (leaseRef.current === lease) {
         leaseRef.current = null;
@@ -561,7 +413,7 @@ export function ElectronBrowserWebview({
     backgroundColor,
     hibernated,
     panelVisible,
-    surfaceHost,
+    renderInline,
     surfaceZIndex,
     tabId,
   ]);
@@ -599,20 +451,15 @@ export function ElectronBrowserWebview({
       data-testid="electron-browser-surface-slot"
       data-browser-surface-slot={tabId}
       data-surface-host={surfaceHost}
-      data-occluded={occluded ? 'true' : 'false'}
       className="relative flex h-full w-full overflow-hidden"
     >
-      {occluded && occlusionSnapshot ? (
-        <img
-          src={occlusionSnapshot}
-          alt=""
-          draggable={false}
-          data-testid="electron-browser-occlusion-snapshot"
-          className="pointer-events-none h-full w-full select-none object-cover"
+      {renderInline ? (
+        <HostedElectronBrowserWebview
+          tabId={tabId}
+          inlineFallback
+          panelVisible={panelVisible}
+          surfaceHost={surfaceHost}
         />
-      ) : null}
-      {!hostMounted ? (
-        <HostedElectronBrowserWebview tabId={tabId} inlineFallback />
       ) : null}
     </div>
   );

@@ -38,7 +38,7 @@ describe('collaboration group and assistant details width', () => {
     ).toBe('28rem');
   });
 
-  it('caps assistant details, collection, and customize separately', () => {
+  it('caps assistant details, collection, tasks, and customize separately', () => {
     expect(
       declarationsFor('.collaboration-assistant-details-session')['max-width']
         ?.value
@@ -47,6 +47,10 @@ describe('collaboration group and assistant details width', () => {
       declarationsFor(
         '.collaboration-assistant-details-body.collaboration-group-details-body'
       )['max-width']?.value
+    ).toBe('28rem');
+    expect(
+      declarationsFor('.collaboration-assistant-details-tasks')['max-width']
+        ?.value
     ).toBe('28rem');
     expect(
       declarationsFor('.collaboration-assistant-details-customize')['max-width']

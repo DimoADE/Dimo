@@ -8,11 +8,12 @@ export type BrowserSurfaceRect = {
 const CANVAS_STAGE_CLIP_SELECTOR =
   '[data-canvas-surface], [data-testid="workspace-canvas-stage"], .react-flow, .workspace-stage-host';
 
+// Only blocking foreground overlays (expanded session list drawer, creation panel)
+// should freeze an underlying browser card. Ambient canvas HUD controls (minimap,
+// zoom pill, toolbar dock) sit permanently in corners/edges and must never freeze
+// or hide an active browser node into a blank/static state.
 const CANVAS_FLOATING_CHROME_SELECTOR = [
   '.session-canvas-floating-panel',
-  '[data-dock-position="bottom"]',
-  '[data-dock-position] .pointer-events-auto',
-  '[data-viewport-position] .pointer-events-auto',
   '[data-testid="canvas-creation-panel"] .pointer-events-auto',
 ].join(',');
 

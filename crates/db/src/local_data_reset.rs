@@ -80,6 +80,94 @@ pub async fn reset_local_database(pool: &SqlitePool) -> Result<(), sqlx::Error> 
     Ok(())
 }
 
+/// Detects FTS5 virtual tables whose shadow tables are corrupt (for example
+/// missing `conversation_fts_data` rowid 10 after a legacy v0.2.x local-data
+/// reset) and rebuilds them empty before migrations or queries attempt
+/// `DROP TABLE` / `SELECT`, which would otherwise fail in SQLite 3.46 with
+/// `SQLITE_CORRUPT_VTAB` (267).
+pub(crate) async fn repair_corrupt_fts_virtual_tables(
+    pool: &SqlitePool,
+) -> Result<Vec<String>, sqlx::Error> {
+    let mut connection = pool.acquire().await?;
+    let fts_tables: Vec<(String, String)> = sqlx::query_as(
+        "SELECT name, sql FROM sqlite_master \
+         WHERE type = 'table' AND sql LIKE 'CREATE VIRTUAL TABLE%'",
+    )
+    .fetch_all(&mut *connection)
+    .await?
+    .into_iter()
+    .filter(|(_, sql): &(String, String)| sql.to_ascii_lowercase().contains("using fts5"))
+    .collect();
+
+    if fts_tables.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut corrupt = Vec::new();
+    for (name, create_sql) in fts_tables {
+        let escaped = name.replace('"', "\"\"");
+        let probe = format!("SELECT rowid FROM \"{escaped}\" LIMIT 1");
+        match sqlx::query_scalar::<_, i64>(&probe)
+            .persistent(false)
+            .fetch_optional(&mut *connection)
+            .await
+        {
+            Ok(_) => {}
+            Err(error) if is_corrupt_fts5_error(&error) => {
+                tracing::warn!(
+                    table = %name,
+                    %error,
+                    "detected corrupt FTS5 virtual table; excising and recreating empty index"
+                );
+                corrupt.push((name, create_sql));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    if corrupt.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let repair_result: Result<(), sqlx::Error> = async {
+        excise_virtual_tables(&mut connection, &corrupt).await?;
+        for (_, create_sql) in &corrupt {
+            sqlx::query(create_sql)
+                .persistent(false)
+                .execute(&mut *connection)
+                .await?;
+        }
+        Ok(())
+    }
+    .await;
+
+    if repair_result.is_err() {
+        connection.close_on_drop();
+    }
+    repair_result?;
+    drop(connection);
+
+    reload_idle_schemas(pool).await;
+    // Reclaim unreferenced B-tree pages left behind by direct sqlite_master deletion.
+    let _ = sqlx::query("VACUUM").execute(pool).await;
+
+    Ok(corrupt.into_iter().map(|(name, _)| name).collect())
+}
+
+fn is_corrupt_fts5_error(error: &sqlx::Error) -> bool {
+    let Some(db_err) = error.as_database_error() else {
+        return false;
+    };
+    if matches!(db_err.code().as_deref(), Some("11" | "267")) {
+        return true;
+    }
+    let message = db_err.message().to_ascii_lowercase();
+    message.contains("vtable constructor failed")
+        || message.contains("database disk image is malformed")
+        || message.contains("fts5:")
+        || message.contains("no such table:")
+}
+
 async fn excise_virtual_tables(
     connection: &mut SqliteConnection,
     virtual_tables: &[(String, String)],

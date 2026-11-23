@@ -155,6 +155,8 @@ export interface ElectronBackendConnectionInfo {
  */
 export interface ElectronDesktopBridge {
   readonly platform?: string;
+  readonly isDev?: boolean;
+  isDeveloperMode?: () => boolean;
   readonly backend?: ElectronBackendConnectionInfo;
   getAppVersion(): Promise<string>;
   getWindowLabel(): string;

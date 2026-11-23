@@ -481,6 +481,10 @@ export function installDockviewPointerTabDnd(rootElement: HTMLElement): {
       return;
     }
 
+    if (activeSourceTab) {
+      endActiveDragSession(event.clientX, event.clientY, false);
+    }
+
     pending = {
       pointerId: event.pointerId,
       tabElement,
@@ -491,6 +495,23 @@ export function installDockviewPointerTabDnd(rootElement: HTMLElement): {
     window.addEventListener('pointermove', handleWindowPointerMove, true);
     window.addEventListener('pointerup', handleWindowPointerUp, true);
     window.addEventListener('pointercancel', handleWindowPointerCancel, true);
+  };
+
+  // Chromium records the draggable candidate on mousedown, so even after our
+  // pointermove handler dispatches a synthetic dragstart and sets
+  // draggable="false", the browser still fires a trusted native dragstart.
+  // If that second dragstart reaches Dockview's TabDragHandler, its
+  // `this.dataDisposable.value = this.getData(event)` evaluates getData() first
+  // and then disposes the previous disposable, wiping LocalSelectionTransfer,
+  // showing the native ghost image, and firing pointercancel to kill our drag.
+  // Intercept and cancel any duplicate native dragstart in capture phase before
+  // TabDragHandler can see it.
+  const handleRootDragStartCapture = (event: DragEvent) => {
+    if (isDispatchingSyntheticDragStart || !activeSourceTab) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
   };
 
   const handleRootDragStart = (event: DragEvent) => {
@@ -508,6 +529,9 @@ export function installDockviewPointerTabDnd(rootElement: HTMLElement): {
     // cancel the native drag and bridge to our ghost-based system. The native
     // WebView2 OLE DoDragDrop would otherwise set a no-drop cursor on Windows.
     if (isDispatchingSyntheticDragStart) {
+      if (!getPanelData()) {
+        return;
+      }
       event.preventDefault();
       const startX = event.clientX || pending?.startX || 0;
       const startY = event.clientY || pending?.startY || 0;
@@ -540,6 +564,7 @@ export function installDockviewPointerTabDnd(rootElement: HTMLElement): {
   };
 
   rootElement.addEventListener('pointerdown', handleRootPointerDown, true);
+  rootElement.addEventListener('dragstart', handleRootDragStartCapture, true);
   rootElement.addEventListener('dragstart', handleRootDragStart, false);
 
   return {
@@ -560,6 +585,11 @@ export function installDockviewPointerTabDnd(rootElement: HTMLElement): {
       rootElement.removeEventListener(
         'pointerdown',
         handleRootPointerDown,
+        true
+      );
+      rootElement.removeEventListener(
+        'dragstart',
+        handleRootDragStartCapture,
         true
       );
       rootElement.removeEventListener('dragstart', handleRootDragStart, false);

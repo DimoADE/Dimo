@@ -27,6 +27,16 @@
       "selector": "Selector",
       "html": "Element HTML"
     },
+    "pastedTextToken": {
+      "chipLines": "Pasted · {{lines}} lines",
+      "chipChars": "Pasted · {{chars}} chars",
+      "metaLinesChars": "Pasted · {{lines}} lines · {{chars}} chars",
+      "metaChars": "Pasted · {{chars}} chars",
+      "expand": "Expand",
+      "copy": "Copy",
+      "copied": "Copied",
+      "remove": "Remove"
+    },
     "atReference": {
       "listbox": "References",
       "loading": "Searching…",

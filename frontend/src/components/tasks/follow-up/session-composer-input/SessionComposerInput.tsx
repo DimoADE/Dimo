@@ -48,6 +48,16 @@ import {
   syncTriggerMenuWidth,
 } from './sessionComposerDom';
 import { useSessionComposerHover } from './useSessionComposerHover';
+import {
+  expandPastedTextChip,
+  insertPastedTextChipAtSelection,
+  measurePastedText,
+  normalizePastedText,
+  removePastedTextChip,
+  shouldFoldPastedTextAsChip,
+  undoPastedTextChipInsert,
+  type PastedChipUndoEntry,
+} from './pastedTextToken';
 import { useSessionComposerCommands } from './useSessionComposerCommands';
 import { useSessionComposerInsert } from './useSessionComposerInsert';
 import { buildSessionComposerTriggers } from './SessionComposerTriggers';
@@ -89,6 +99,11 @@ export function SessionComposerInput({
   const composerRootRef = useRef<HTMLDivElement | null>(null);
   const lastCompositionEndAtRef = useRef(Number.NEGATIVE_INFINITY);
   const lastSelfEmittedValueRef = useRef<string | null>(null);
+  const pastedChipUndoRef = useRef<PastedChipUndoEntry | null>(null);
+  const suppressDuplicatePasteEmitRef = useRef<{
+    active: boolean;
+    emittedValue: string | null;
+  }>({ active: false, emittedValue: null });
   const [isComposing, setIsComposing] = useState(false);
   const historyIndexRef = useRef(-1);
   const historyDraftRef = useRef('');
@@ -104,7 +119,10 @@ export function SessionComposerInput({
   const {
     elementTokenTooltipId,
     quoteTokenTooltipId,
-    activeHoverToken,
+    pastedTextTokenTooltipId,
+    activeHover,
+    showTokenHover,
+    dismissTokenHover,
     cancelHoverHide,
     hideTokenHover,
     setQuoteEditing,
@@ -233,6 +251,25 @@ export function SessionComposerInput({
 
   const handleSelfEmittedChange = useCallback(
     (next: string) => {
+      const pasteGuard = suppressDuplicatePasteEmitRef.current;
+      if (pasteGuard.active) {
+        pasteGuard.emittedValue = next;
+      } else if (pasteGuard.emittedValue === next) {
+        pasteGuard.emittedValue = null;
+        return;
+      } else {
+        pasteGuard.emittedValue = null;
+      }
+
+      const undoEntry = pastedChipUndoRef.current;
+      if (undoEntry) {
+        if (undoEntry.valueAfterInsert === null) {
+          undoEntry.valueAfterInsert = next;
+        } else if (undoEntry.valueAfterInsert !== next) {
+          pastedChipUndoRef.current = null;
+        }
+      }
+
       lastSelfEmittedValueRef.current = next;
       onChange(next);
     },
@@ -340,9 +377,44 @@ export function SessionComposerInput({
       if (!editor) {
         return false;
       }
-      return insertComposerTextWithUndo(editor, pasted);
+
+      const normalized = normalizePastedText(pasted);
+      if (shouldFoldPastedTextAsChip(normalized)) {
+        const { lineCount, charCount } = measurePastedText(normalized);
+        const label =
+          lineCount > 1
+            ? t('composer.pastedTextToken.chipLines', {
+                lines: lineCount.toLocaleString(),
+              })
+            : t('composer.pastedTextToken.chipChars', {
+                chars: charCount.toLocaleString(),
+              });
+        const entry = insertPastedTextChipAtSelection(
+          editor,
+          normalized,
+          label
+        );
+        if (entry) {
+          pastedChipUndoRef.current = entry;
+          return true;
+        }
+      }
+
+      pastedChipUndoRef.current = null;
+      suppressDuplicatePasteEmitRef.current = {
+        active: true,
+        emittedValue: null,
+      };
+      try {
+        return insertComposerTextWithUndo(editor, pasted);
+      } finally {
+        suppressDuplicatePasteEmitRef.current.active = false;
+        queueMicrotask(() => {
+          suppressDuplicatePasteEmitRef.current.emittedValue = null;
+        });
+      }
     },
-    [disabled, onAttachImages, onDismissPromptSuggestion, promptSuggestion]
+    [disabled, onAttachImages, onDismissPromptSuggestion, promptSuggestion, t]
   );
 
   const historySessionIdRef = useRef(sessionId);
@@ -351,10 +423,13 @@ export function SessionComposerInput({
     historyIndexRef.current = -1;
     historyDraftRef.current = '';
     localSubmitsRef.current = [];
+    pastedChipUndoRef.current = null;
   }
 
   const isMaterializingSubmitRef = useRef(false);
   const clearSubmittedEditor = useCallback(() => {
+    pastedChipUndoRef.current = null;
+    dismissTokenHover();
     const editable = composerRootRef.current?.querySelector<HTMLElement>(
       '[contenteditable="true"]'
     );
@@ -363,7 +438,7 @@ export function SessionComposerInput({
       editable.dispatchEvent(new Event('input', { bubbles: true }));
     }
     onChange('');
-  }, [onChange]);
+  }, [dismissTokenHover, onChange]);
 
   const commitSubmission = useCallback(
     (rawText: string, submittedText: string) => {
@@ -541,6 +616,56 @@ export function SessionComposerInput({
     [onChange, value]
   );
 
+  const handleExpandPastedTextChip = useCallback(
+    (anchor: HTMLElement) => {
+      const editor = getSessionComposerEditable(composerRootRef.current);
+      if (!editor) return;
+      if (!expandPastedTextChip(editor, anchor)) return;
+      pastedChipUndoRef.current = null;
+      dismissTokenHover();
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+    },
+    [dismissTokenHover]
+  );
+
+  const handleRemovePastedTextChip = useCallback(
+    (anchor: HTMLElement) => {
+      const editor = getSessionComposerEditable(composerRootRef.current);
+      if (!editor) return;
+      if (!removePastedTextChip(editor, anchor)) return;
+      pastedChipUndoRef.current = null;
+      dismissTokenHover();
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+    },
+    [dismissTokenHover]
+  );
+
+  const handleUndoPastedTextChip = useCallback((): boolean => {
+    const entry = pastedChipUndoRef.current;
+    if (!entry) return false;
+    const editor = getSessionComposerEditable(composerRootRef.current);
+    if (!editor || !entry.chip.isConnected || !editor.contains(entry.chip)) {
+      pastedChipUndoRef.current = null;
+      return false;
+    }
+    const currentValue = composerHandleRef.current?.getValue() ?? value;
+    if (
+      entry.valueAfterInsert !== null &&
+      currentValue !== entry.valueAfterInsert
+    ) {
+      pastedChipUndoRef.current = null;
+      return false;
+    }
+    if (!undoPastedTextChipInsert(editor, entry)) {
+      pastedChipUndoRef.current = null;
+      return false;
+    }
+    pastedChipUndoRef.current = null;
+    dismissTokenHover();
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  }, [dismissTokenHover, value]);
+
   return (
     <SessionComposerSurface
       dropZoneRef={dropZoneRef}
@@ -576,12 +701,17 @@ export function SessionComposerInput({
       isMaterializingSubmitRef={isMaterializingSubmitRef}
       onAttachImages={onAttachImages}
       handleComposerPaste={handleComposerPaste}
-      activeHoverToken={activeHoverToken}
+      activeHover={activeHover}
       elementTokenTooltipId={elementTokenTooltipId}
       quoteTokenTooltipId={quoteTokenTooltipId}
+      pastedTextTokenTooltipId={pastedTextTokenTooltipId}
+      showTokenHover={showTokenHover}
       cancelHoverHide={cancelHoverHide}
       hideTokenHover={hideTokenHover}
       setQuoteEditing={setQuoteEditing}
+      onExpandPastedTextChip={handleExpandPastedTextChip}
+      onRemovePastedTextChip={handleRemovePastedTextChip}
+      onUndoPastedTextChip={handleUndoPastedTextChip}
     />
   );
 }

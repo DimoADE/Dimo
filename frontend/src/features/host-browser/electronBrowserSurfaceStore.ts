@@ -11,10 +11,12 @@ export interface RegisteredElectronBrowserTab {
   profileId: string;
   backgroundColor?: string;
   hibernated: boolean;
+  inline: boolean;
 }
 
 export interface ElectronBrowserSurfacePresentation {
   leaseToken: symbol;
+  geometrySeq: number;
   rect: ElectronBrowserRect;
   clipRect: ElectronBrowserClipRect | null;
   visible: boolean;
@@ -27,6 +29,7 @@ export interface ElectronBrowserSurfacePresentation {
 }
 
 export interface LiveSurfaceGeometry {
+  geometrySeq: number;
   rect: ElectronBrowserRect;
   clipRect: ElectronBrowserClipRect | null;
   visible: boolean;
@@ -49,8 +52,11 @@ interface ElectronBrowserSurfaceState {
   tabs: Record<string, RegisteredElectronBrowserTab>;
   presentations: Record<string, ElectronBrowserSurfacePresentation>;
   canvasInteracting: boolean;
+  overlayDragging: boolean;
   canvasZoom: number;
 }
+
+let nextGeometrySeq = 1;
 
 const geometryListeners = new Map<
   string,
@@ -66,6 +72,7 @@ export const useElectronBrowserSurfaceStore =
     tabs: {},
     presentations: {},
     canvasInteracting: false,
+    overlayDragging: false,
     canvasZoom: 1,
   }));
 
@@ -81,6 +88,7 @@ export function registerElectronBrowserTab(input: {
   profileId: string;
   backgroundColor?: string;
   hibernated?: boolean;
+  inline?: boolean;
 }): void {
   const { tabId } = input;
   if (!tabId) return;
@@ -92,13 +100,15 @@ export function registerElectronBrowserTab(input: {
       profileId: input.profileId || existing?.profileId || 'default',
       backgroundColor: input.backgroundColor ?? existing?.backgroundColor,
       hibernated: input.hibernated ?? existing?.hibernated ?? false,
+      inline: input.inline ?? existing?.inline ?? false,
     };
     if (
       existing &&
       existing.url === nextTab.url &&
       existing.profileId === nextTab.profileId &&
       existing.backgroundColor === nextTab.backgroundColor &&
-      existing.hibernated === nextTab.hibernated
+      existing.hibernated === nextTab.hibernated &&
+      existing.inline === nextTab.inline
     ) {
       return state;
     }
@@ -132,7 +142,8 @@ export function updateElectronBrowserTab(
       existing.url === nextTab.url &&
       existing.profileId === nextTab.profileId &&
       existing.backgroundColor === nextTab.backgroundColor &&
-      existing.hibernated === nextTab.hibernated
+      existing.hibernated === nextTab.hibernated &&
+      existing.inline === nextTab.inline
     ) {
       return state;
     }
@@ -196,9 +207,12 @@ function clipRectsNearlyEqual(
 export interface ElectronBrowserSurfaceLease {
   readonly token: symbol;
   present: (
-    presentation: Omit<ElectronBrowserSurfacePresentation, 'leaseToken'>
+    presentation: Omit<
+      ElectronBrowserSurfacePresentation,
+      'leaseToken' | 'geometrySeq'
+    >
   ) => boolean;
-  pushLive: (geometry: LiveSurfaceGeometry) => void;
+  pushLive: (geometry: Omit<LiveSurfaceGeometry, 'geometrySeq'>) => void;
   release: () => void;
 }
 
@@ -216,6 +230,7 @@ export function acquireElectronBrowserSurface(
         ...state.presentations,
         [tabId]: {
           leaseToken: token,
+          geometrySeq: nextGeometrySeq++,
           rect: existing?.rect ?? { x: 0, y: 0, width: 1, height: 1 },
           clipRect: existing?.clipRect ?? null,
           visible: false,
@@ -242,6 +257,7 @@ export function acquireElectronBrowserSurface(
       const next: ElectronBrowserSurfacePresentation = {
         ...presentation,
         leaseToken: token,
+        geometrySeq: nextGeometrySeq++,
       };
       if (
         current &&
@@ -281,8 +297,12 @@ export function acquireElectronBrowserSurface(
       }
       const listeners = geometryListeners.get(tabId);
       if (!listeners || listeners.size === 0) return;
+      const stamped: LiveSurfaceGeometry = {
+        ...geometry,
+        geometrySeq: nextGeometrySeq++,
+      };
       for (const listener of listeners) {
-        listener(geometry);
+        listener(stamped);
       }
     },
     release() {
@@ -299,8 +319,10 @@ export function acquireElectronBrowserSurface(
             ...state.presentations,
             [tabId]: {
               ...current,
+              geometrySeq: nextGeometrySeq++,
               visible: false,
               interactive: false,
+              keepPaintableWhenInactive: undefined,
               slotElement: null,
             },
           },
@@ -356,6 +378,14 @@ export function setCanvasBrowserInteracting(interacting: boolean): void {
   );
 }
 
+export function setBrowserOverlayDragging(dragging: boolean): void {
+  useElectronBrowserSurfaceStore.setState((state) =>
+    state.overlayDragging === dragging
+      ? state
+      : { ...state, overlayDragging: dragging }
+  );
+}
+
 export function notifyCanvasBrowserViewportChange(zoom?: number): void {
   if (typeof zoom === 'number' && Number.isFinite(zoom) && zoom > 0) {
     const currentZoom = useElectronBrowserSurfaceStore.getState().canvasZoom;
@@ -378,6 +408,7 @@ export function subscribeCanvasBrowserViewportChange(
 }
 
 export function resetElectronBrowserSurfaceStoreForTests(): void {
+  nextGeometrySeq = 1;
   geometryListeners.clear();
   tabCallbacks.clear();
   canvasViewportListeners.clear();
@@ -387,6 +418,7 @@ export function resetElectronBrowserSurfaceStoreForTests(): void {
     tabs: {},
     presentations: {},
     canvasInteracting: false,
+    overlayDragging: false,
     canvasZoom: 1,
   });
 }

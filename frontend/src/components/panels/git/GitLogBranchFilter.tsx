@@ -297,14 +297,17 @@ export const GitLogBranchFilter = memo(function GitLogBranchFilter({
         {/* Compact branch filter input */}
         {branches.length > 6 && (
           <div className="border-b border-border/30 px-2 py-1.5">
-            <div className="flex h-6 items-center gap-1.5 rounded border border-border/60 bg-background/60 px-2 focus-within:border-primary/60">
+            <div
+              data-control-frame="true"
+              className="flex h-7 items-center gap-1.5 rounded-md border border-border/60 bg-background/60 px-2 focus-within:border-primary/60"
+            >
               <Search className="h-3 w-3 shrink-0 text-muted-foreground" />
               <input
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder={i18n.t('panels:ui.git.filterBranches')}
-                className="min-w-0 flex-1 bg-transparent text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none"
+                className="h-full min-w-0 flex-1 rounded-none border-0 bg-transparent p-0 pl-0.5 text-[11px] leading-normal text-foreground shadow-none placeholder:text-[11px] placeholder:text-muted-foreground focus:outline-none"
               />
             </div>
           </div>
@@ -317,7 +320,7 @@ export const GitLogBranchFilter = memo(function GitLogBranchFilter({
         >
           {visibleBranches.length === 0 ? (
             <div className="px-2 py-3 text-center text-[11px] text-muted-foreground">
-              {i18n.t('panels:ui.git.noBranchesFound')}
+              {i18n.t('panels:ui.git.noMatchingBranches')}
             </div>
           ) : (
             visibleBranches.map((branch) => {

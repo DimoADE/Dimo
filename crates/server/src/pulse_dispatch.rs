@@ -626,8 +626,8 @@ impl ServerApplicationDomains {
         }
     }
 
-    /// Drains queued items in `pulse_bot_mailbox` for `member_id` while respecting
-    /// active in-flight turns (`fifo_serial`, `coalesce_batch`, and `steer_active`).
+    /// Drains queued `PulseBotMailbox` items for a single `member_id` while honoring
+    /// active in-flight turns (`fifo_serial` and `coalesce_batch`).
     pub(crate) async fn drain_bot_mailbox(&self, member_id: &str) -> Result<usize, String> {
         let mut drained = 0usize;
         let store = self.pulse_engine.store();
@@ -648,7 +648,19 @@ impl ServerApplicationDomains {
                 break;
             }
 
-            let Some(workspace) = self.resolve_default_workspace(None).await? else {
+            let trigger_envelope = if peeked.event_id.is_empty() {
+                None
+            } else {
+                store
+                    .get_envelope_by_event_id(&peeked.event_id)
+                    .await
+                    .ok()
+                    .flatten()
+            };
+            let Some(workspace) = self
+                .resolve_workflow_workspace(peeked.rule_id.as_deref(), trigger_envelope.as_ref())
+                .await?
+            else {
                 break;
             };
             let topic_key = match peeked.conversation_scope {

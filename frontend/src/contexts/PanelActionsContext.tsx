@@ -672,23 +672,43 @@ export function PanelActionsProvider({ children }: { children: ReactNode }) {
     return group;
   }, [getLeftGroup, normalizeEditorGroupIds]);
 
+  const getVisibleTabBarGroups = useCallback((dockviewApi: DockviewApi) => {
+    return dockviewApi.groups
+      .filter(
+        (group) =>
+          group.api.isVisible && (isEditorGroup(group) || isSessionGroup(group))
+      )
+      .sort(compareEditorGroups);
+  }, []);
+
   const getActiveEditorGroup = useCallback(() => {
     const dockviewApi = apiRef.current;
     if (!dockviewApi) return undefined;
 
-    if (dockviewApi.activeGroup && isEditorGroup(dockviewApi.activeGroup)) {
+    if (
+      dockviewApi.activeGroup &&
+      dockviewApi.activeGroup.api.isVisible &&
+      (isEditorGroup(dockviewApi.activeGroup) ||
+        isSessionGroup(dockviewApi.activeGroup))
+    ) {
       return dockviewApi.activeGroup;
     }
 
     if (
       dockviewApi.activePanel &&
-      isEditorGroup(dockviewApi.activePanel.group)
+      dockviewApi.activePanel.group.api.isVisible &&
+      (isEditorGroup(dockviewApi.activePanel.group) ||
+        isSessionGroup(dockviewApi.activePanel.group))
     ) {
       return dockviewApi.activePanel.group;
     }
 
-    return getEditorGroups(dockviewApi)[0] ?? recreateWelcomeEditorGroup();
-  }, [getEditorGroups, recreateWelcomeEditorGroup]);
+    return (
+      getVisibleTabBarGroups(dockviewApi)[0] ??
+      getEditorGroups(dockviewApi)[0] ??
+      recreateWelcomeEditorGroup()
+    );
+  }, [getEditorGroups, getVisibleTabBarGroups, recreateWelcomeEditorGroup]);
 
   const runInEditorGroup = useCallback(
     (groupId: string, action: () => void) => {
@@ -737,17 +757,38 @@ export function PanelActionsProvider({ children }: { children: ReactNode }) {
           ) ?? getRightGroup(dockviewApi);
       }
       if (!targetGroup && placement === 'least') {
-        const visible = getEditorGroups(dockviewApi).filter(
-          (group) => group.api.isVisible
-        );
+        const visible = getVisibleTabBarGroups(dockviewApi);
         const activeId =
-          dockviewApi.activeGroup && isEditorGroup(dockviewApi.activeGroup)
+          dockviewApi.activeGroup &&
+          dockviewApi.activeGroup.api.isVisible &&
+          (isEditorGroup(dockviewApi.activeGroup) ||
+            isSessionGroup(dockviewApi.activeGroup))
             ? dockviewApi.activeGroup.id
             : undefined;
         targetGroup = leastPopulatedEditorGroup(visible, activeId);
       }
-      targetGroup ??= getActiveEditorGroup();
+
+      let createdBootstrapWelcomeGroup = false;
+      if (!targetGroup) {
+        const hadEditorGroups = getEditorGroups(dockviewApi).length > 0;
+        const hadWelcomePanel = Boolean(
+          dockviewApi.getPanel(PANEL_IDS.WELCOME)
+        );
+        targetGroup = getActiveEditorGroup();
+        createdBootstrapWelcomeGroup =
+          !hadEditorGroups &&
+          !hadWelcomePanel &&
+          Boolean(targetGroup) &&
+          options.id !== PANEL_IDS.WELCOME;
+      }
       if (!targetGroup) return undefined;
+
+      const wasVisible = targetGroup.api.isVisible;
+      const shouldReplaceAnchorWelcome =
+        options.id !== PANEL_IDS.WELCOME &&
+        targetGroup.panels.length > 0 &&
+        targetGroup.panels.every((panel) => panel.id === PANEL_IDS.WELCOME) &&
+        (!wasVisible || createdBootstrapWelcomeGroup);
 
       if (isLeftGroup(targetGroup) || isSessionGroup(targetGroup)) {
         setColumnVisible(
@@ -770,8 +811,10 @@ export function PanelActionsProvider({ children }: { children: ReactNode }) {
         }
       }
 
-      const placeholderPanels = targetGroup.panels.filter((panel) =>
-        isPlaceholderPanelId(panel.id)
+      const placeholderPanels = targetGroup.panels.filter(
+        (panel) =>
+          isPlaceholderPanelId(panel.id) ||
+          (shouldReplaceAnchorWelcome && panel.id === PANEL_IDS.WELCOME)
       );
 
       const panel = dockviewApi.addPanel({
@@ -809,6 +852,7 @@ export function PanelActionsProvider({ children }: { children: ReactNode }) {
       getEditorGroups,
       getLeftGroup,
       getRightGroup,
+      getVisibleTabBarGroups,
       normalizeEditorGroupIds,
     ]
   );
@@ -2483,8 +2527,15 @@ export function PanelActionsProvider({ children }: { children: ReactNode }) {
         );
       }
 
+      let createdBootstrapWelcomeGroup = false;
       if (!targetGroup) {
+        const hadEditorGroups = getEditorGroups(dockviewApi).length > 0;
+        const hadWelcomePanel = Boolean(
+          dockviewApi.getPanel(PANEL_IDS.WELCOME)
+        );
         targetGroup = getActiveEditorGroup() ?? getEditorGroups(dockviewApi)[0];
+        createdBootstrapWelcomeGroup =
+          !hadEditorGroups && !hadWelcomePanel && Boolean(targetGroup);
       }
 
       if (!targetGroup) {
@@ -2509,6 +2560,12 @@ export function PanelActionsProvider({ children }: { children: ReactNode }) {
         ).element?.setAttribute('data-session-dock', 'true');
       }
 
+      const wasVisible = targetGroup.api.isVisible;
+      const shouldReplaceAnchorWelcome =
+        targetGroup.panels.length > 0 &&
+        targetGroup.panels.every((panel) => panel.id === PANEL_IDS.WELCOME) &&
+        (!wasVisible || createdBootstrapWelcomeGroup);
+
       if (isSessionGroup(targetGroup)) {
         useLayoutStore.getState().setRightPanelVisible(true);
       }
@@ -2516,7 +2573,9 @@ export function PanelActionsProvider({ children }: { children: ReactNode }) {
 
       const unboundPlaceholders = targetGroup.panels.filter(
         (panel) =>
-          panel.id === PANEL_IDS.AI_CHAT || isPlaceholderPanelId(panel.id)
+          panel.id === PANEL_IDS.AI_CHAT ||
+          isPlaceholderPanelId(panel.id) ||
+          (shouldReplaceAnchorWelcome && panel.id === PANEL_IDS.WELCOME)
       );
 
       const panel = dockviewApi.addPanel({

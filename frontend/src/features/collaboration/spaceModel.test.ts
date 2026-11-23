@@ -136,6 +136,7 @@ describe('collaboration space model', () => {
     expect(COPY.assistantDetailsButton).toBe('助手详情');
     expect(COPY.assistantDetailsTab).toBe('详情');
     expect(COPY.assistantCollectionTab).toBe('资产');
+    expect(COPY.assistantTasksTab).toBe('任务');
     expect(COPY.assistantCustomizeTab).toBe('自定义');
     expect(COPY.personaPromptLabel).toBe('人设（可选）');
     expect(COPY.addSpaceMember).toBe('添加成员');

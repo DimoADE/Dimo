@@ -1,6 +1,6 @@
 import type { MemberBotAvatarConfig } from '@/features/collaboration/MemberBotAvatar';
 import {
-  isAgentMentionCodeContext,
+  createAgentMentionCodeContextScanner,
   serializeAgentMention,
   type AgentMention,
 } from './AgentMention';
@@ -147,14 +147,21 @@ export function atReferenceChipLabel(name: string): string {
   return `@${trimmed.replace(/^#/, '')}`;
 }
 
-function parseMarkdownLinkAt(
+function hasReferenceSchemeAt(source: string, index: number): boolean {
+  const head = source.slice(index, index + 8).toLowerCase();
+  return head.startsWith('dimo://') || head === 'vibex://';
+}
+
+function parseReferenceMarkdownLinkAt(
   source: string,
   start: number
 ): { label: string; uri: string; end: number } | null {
-  if (source.charAt(start) !== '[') return null;
+  if (source.charCodeAt(start) !== 91) return null;
   const labelPart = readEscapedPart(source, start + 1, ']');
-  if (!labelPart || source.charAt(labelPart.end + 1) !== '(') return null;
-  const uriPart = readEscapedPart(source, labelPart.end + 2, ')');
+  if (!labelPart || source.charCodeAt(labelPart.end + 1) !== 40) return null;
+  const uriStart = labelPart.end + 2;
+  if (!hasReferenceSchemeAt(source, uriStart)) return null;
+  const uriPart = readEscapedPart(source, uriStart, ')');
   if (!uriPart) return null;
   return {
     label: labelPart.value,
@@ -163,27 +170,62 @@ function parseMarkdownLinkAt(
   };
 }
 
-function parseConversationReferenceAt(
+function parseReferenceLinkAt(
   source: string,
   start: number
 ): { token: SessionComposerStructuredToken; end: number } | null {
-  const link = parseMarkdownLinkAt(source, start);
+  const link = parseReferenceMarkdownLinkAt(source, start);
   if (!link) return null;
+
+  const project = parseProjectReferenceUri(link.uri);
+  if (project) {
+    return {
+      token: {
+        kind: 'project',
+        type: '@',
+        key: project.projectId,
+        label: atReferenceChipLabel(link.label || project.path),
+        value: project.path,
+        raw: source.slice(start, link.end),
+        title: project.path,
+      },
+      end: link.end,
+    };
+  }
+
   const conversationId = parseConversationReferenceUri(link.uri);
-  if (!conversationId) return null;
-  const raw = source.slice(start, link.end);
-  return {
-    token: {
-      kind: 'conversation',
-      type: '@',
-      key: conversationId,
-      label: atReferenceChipLabel(link.label || conversationId),
-      value: conversationId,
-      raw,
-      title: conversationId,
-    },
-    end: link.end,
-  };
+  if (conversationId) {
+    return {
+      token: {
+        kind: 'conversation',
+        type: '@',
+        key: conversationId,
+        label: atReferenceChipLabel(link.label || conversationId),
+        value: conversationId,
+        raw: source.slice(start, link.end),
+        title: conversationId,
+      },
+      end: link.end,
+    };
+  }
+
+  const commit = parseCommitReferenceUri(link.uri);
+  if (commit) {
+    return {
+      token: {
+        kind: 'commit',
+        type: '@',
+        key: commit.sha,
+        label: atReferenceChipLabel(link.label || shortCommitSha(commit.sha)),
+        value: commit.sha,
+        raw: source.slice(start, link.end),
+        title: commit.sha,
+      },
+      end: link.end,
+    };
+  }
+
+  return null;
 }
 
 function parseQuoteTokenAt(
@@ -228,73 +270,39 @@ function parseQuoteTokenAt(
   };
 }
 
-function parseProjectReferenceAt(
-  source: string,
-  start: number
-): { token: SessionComposerStructuredToken; end: number } | null {
-  const link = parseMarkdownLinkAt(source, start);
-  if (!link) return null;
-  const parsed = parseProjectReferenceUri(link.uri);
-  if (!parsed) return null;
-  const raw = source.slice(start, link.end);
-  return {
-    token: {
-      kind: 'project',
-      type: '@',
-      key: parsed.projectId,
-      label: atReferenceChipLabel(link.label || parsed.path),
-      value: parsed.path,
-      raw,
-      title: parsed.path,
-    },
-    end: link.end,
-  };
-}
+type PreparedSpaceMember = {
+  nick: string;
+  member: AtReferenceMember;
+};
 
-function parseCommitReferenceAt(
-  source: string,
-  start: number
-): { token: SessionComposerStructuredToken; end: number } | null {
-  const link = parseMarkdownLinkAt(source, start);
-  if (!link) return null;
-  const parsed = parseCommitReferenceUri(link.uri);
-  if (!parsed) return null;
-  const raw = source.slice(start, link.end);
-  return {
-    token: {
-      kind: 'commit',
-      type: '@',
-      key: parsed.sha,
-      label: atReferenceChipLabel(link.label || shortCommitSha(parsed.sha)),
-      value: parsed.sha,
-      raw,
-      title: parsed.sha,
-    },
-    end: link.end,
-  };
+function prepareSpaceMembers(
+  members: AtReferenceMember[] | undefined
+): PreparedSpaceMember[] {
+  if (!members || members.length === 0) return [];
+  const prepared: PreparedSpaceMember[] = [];
+  for (const member of members) {
+    const nick = (member.nickname ?? '').trim();
+    if (nick.length > 0) {
+      prepared.push({ nick, member });
+    }
+  }
+  prepared.sort((a, b) => b.nick.length - a.nick.length);
+  return prepared;
 }
 
 function parseSpaceMemberMentionAt(
   source: string,
   start: number,
-  members: AtReferenceMember[]
+  sortedMembers: PreparedSpaceMember[]
 ): { token: SessionComposerStructuredToken; end: number } | null {
-  if (source.charAt(start) !== '@' || !isTokenBoundary(source, start)) {
+  if (source.charCodeAt(start) !== 64 || !isTokenBoundary(source, start)) {
     return null;
   }
-  if (members.length === 0) return null;
+  if (sortedMembers.length === 0) return null;
 
-  const sorted = [...members]
-    .filter((m) => (m.nickname ?? '').trim().length > 0)
-    .sort(
-      (a, b) =>
-        (b.nickname ?? '').trim().length - (a.nickname ?? '').trim().length
-    );
-
-  for (const member of sorted) {
-    const nick = (member.nickname ?? '').trim();
+  for (const { nick, member } of sortedMembers) {
     const candidateEnd = start + 1 + nick.length;
-    if (source.slice(start + 1, candidateEnd) !== nick) continue;
+    if (!source.startsWith(nick, start + 1)) continue;
     const nextChar = source.charAt(candidateEnd);
     // Require a trailing space or end after `@nickname ` when typing so partial prefixes don't prematurely lock,
     // OR any non-identifier boundary.
@@ -488,8 +496,19 @@ function readEscapedPart(
   start: number,
   closer: ']' | ')'
 ): { value: string; end: number } | null {
-  let cursor = start;
-  let value = '';
+  const firstClose = source.indexOf(closer, start);
+  if (firstClose === -1) return null;
+
+  const firstEscape = source.indexOf('\\', start);
+  if (firstEscape === -1 || firstEscape > firstClose) {
+    return {
+      value: source.slice(start, firstClose),
+      end: firstClose,
+    };
+  }
+
+  let cursor = firstEscape;
+  let value = source.slice(start, firstEscape);
 
   while (cursor < source.length) {
     const current = source.charAt(cursor);
@@ -782,7 +801,7 @@ export function mayContainStructuredComposerToken(
   options: StructuredTokenOptions = {}
 ): boolean {
   if (!value) return false;
-  if (value.includes('[')) return true;
+  if (value.includes('](')) return true;
   if ((options.spaceMembers?.length ?? 0) > 0 && value.includes('@')) {
     return true;
   }
@@ -804,173 +823,134 @@ export function getSessionComposerStructuredTokenSegments(
     return [{ kind: 'text', text: value }];
   }
   const includeLegacyTokens = options.includeLegacyTokens ?? false;
+  const hasBracketLink = value.includes('](');
+  const sortedSpaceMembers = prepareSpaceMembers(options.spaceMembers);
+  const bareAgentMentions =
+    options.bareAgentMentions && options.bareAgentMentions.length > 0
+      ? options.bareAgentMentions
+      : null;
+
+  let codeContextScanner: ((offset: number) => boolean) | null = null;
+  const isInCodeContext = (offset: number): boolean => {
+    if (!codeContextScanner) {
+      codeContextScanner = createAgentMentionCodeContextScanner(value);
+    }
+    return codeContextScanner(offset);
+  };
+
   const segments: SessionComposerStructuredTokenSegment[] = [];
+  const pushToken = (
+    match: { token: SessionComposerStructuredToken; end: number },
+    start: number
+  ) => {
+    if (start > cursor) {
+      segments.push({ kind: 'text', text: value.slice(cursor, start) });
+    }
+    segments.push({
+      kind: 'token',
+      token: match.token,
+      start,
+      end: match.end,
+    });
+    cursor = match.end;
+    scan = match.end;
+  };
+
   let cursor = 0;
   let scan = 0;
+  const len = value.length;
 
-  while (scan < value.length) {
-    const mention = isAgentMentionCodeContext(value, scan)
-      ? null
-      : parseAgentMentionAt(value, scan);
-    if (mention) {
-      if (scan > cursor) {
-        segments.push({ kind: 'text', text: value.slice(cursor, scan) });
-      }
-      segments.push({
-        kind: 'token',
-        token: mention.token,
-        start: scan,
-        end: mention.end,
-      });
-      cursor = mention.end;
-      scan = mention.end;
-      continue;
-    }
+  while (scan < len) {
+    const code = value.charCodeAt(scan);
 
-    const project = isAgentMentionCodeContext(value, scan)
-      ? null
-      : parseProjectReferenceAt(value, scan);
-    if (project) {
-      if (scan > cursor) {
-        segments.push({ kind: 'text', text: value.slice(cursor, scan) });
-      }
-      segments.push({
-        kind: 'token',
-        token: project.token,
-        start: scan,
-        end: project.end,
-      });
-      cursor = project.end;
-      scan = project.end;
-      continue;
-    }
-
-    const conversation = isAgentMentionCodeContext(value, scan)
-      ? null
-      : parseConversationReferenceAt(value, scan);
-    if (conversation) {
-      if (scan > cursor) {
-        segments.push({ kind: 'text', text: value.slice(cursor, scan) });
-      }
-      segments.push({
-        kind: 'token',
-        token: conversation.token,
-        start: scan,
-        end: conversation.end,
-      });
-      cursor = conversation.end;
-      scan = conversation.end;
-      continue;
-    }
-
-    const commit = isAgentMentionCodeContext(value, scan)
-      ? null
-      : parseCommitReferenceAt(value, scan);
-    if (commit) {
-      if (scan > cursor) {
-        segments.push({ kind: 'text', text: value.slice(cursor, scan) });
-      }
-      segments.push({
-        kind: 'token',
-        token: commit.token,
-        start: scan,
-        end: commit.end,
-      });
-      cursor = commit.end;
-      scan = commit.end;
-      continue;
-    }
-
-    const quote = isAgentMentionCodeContext(value, scan)
-      ? null
-      : parseQuoteTokenAt(value, scan);
-    if (quote) {
-      if (scan > cursor) {
-        segments.push({ kind: 'text', text: value.slice(cursor, scan) });
-      }
-      segments.push({
-        kind: 'token',
-        token: quote.token,
-        start: scan,
-        end: quote.end,
-      });
-      cursor = quote.end;
-      scan = quote.end;
-      continue;
-    }
-
-    const spaceMemberMention =
-      options.spaceMembers &&
-      options.spaceMembers.length > 0 &&
-      !isAgentMentionCodeContext(value, scan)
-        ? parseSpaceMemberMentionAt(value, scan, options.spaceMembers)
-        : null;
-    if (spaceMemberMention) {
-      if (scan > cursor) {
-        segments.push({ kind: 'text', text: value.slice(cursor, scan) });
-      }
-      segments.push({
-        kind: 'token',
-        token: spaceMemberMention.token,
-        start: scan,
-        end: spaceMemberMention.end,
-      });
-      cursor = spaceMemberMention.end;
-      scan = spaceMemberMention.end;
-      continue;
-    }
-
-    const bareMention =
-      options.bareAgentMentions && !isAgentMentionCodeContext(value, scan)
-        ? parseBareAgentMentionAt(value, scan, options.bareAgentMentions)
-        : null;
-    if (bareMention) {
-      if (scan > cursor) {
-        segments.push({ kind: 'text', text: value.slice(cursor, scan) });
-      }
-      segments.push({
-        kind: 'token',
-        token: bareMention.token,
-        start: scan,
-        end: bareMention.end,
-      });
-      cursor = bareMention.end;
-      scan = bareMention.end;
-      continue;
-    }
-
-    const explicit = parseExplicitCommandAt(value, scan);
-    if (explicit) {
-      if (scan > cursor) {
-        segments.push({ kind: 'text', text: value.slice(cursor, scan) });
-      }
-
-      segments.push({
-        kind: 'token',
-        token: explicit.token,
-        start: scan,
-        end: explicit.end,
-      });
-      cursor = explicit.end;
-      scan = explicit.end;
-      continue;
-    }
-
-    if (includeLegacyTokens) {
-      const legacy = parseLegacyTokenAt(value, scan);
-      if (legacy) {
-        if (scan > cursor) {
-          segments.push({ kind: 'text', text: value.slice(cursor, scan) });
+    if (code === 91 && hasBracketLink) {
+      // '[' — candidate for agent_mention, reference link, quote, or explicit command
+      const nextCode = value.charCodeAt(scan + 1);
+      const inCode = isInCodeContext(scan);
+      if (!inCode) {
+        if (nextCode === 38) {
+          const mention = parseAgentMentionAt(value, scan);
+          if (mention) {
+            pushToken(mention, scan);
+            continue;
+          }
         }
 
-        segments.push({
-          kind: 'token',
-          token: legacy.token,
-          start: scan,
-          end: legacy.end,
-        });
-        cursor = legacy.end;
-        scan = legacy.end;
+        const reference = parseReferenceLinkAt(value, scan);
+        if (reference) {
+          pushToken(reference, scan);
+          continue;
+        }
+
+        if (nextCode === 58) {
+          const quote = parseQuoteTokenAt(value, scan);
+          if (quote) {
+            pushToken(quote, scan);
+            continue;
+          }
+        }
+      }
+
+      if (value.charCodeAt(scan + 2) === 58) {
+        const explicit = parseExplicitCommandAt(value, scan);
+        if (explicit) {
+          pushToken(explicit, scan);
+          continue;
+        }
+      }
+
+      scan += 1;
+      continue;
+    }
+
+    if (code === 64) {
+      // '@'
+      if (sortedSpaceMembers.length > 0 && !isInCodeContext(scan)) {
+        const spaceMemberMention = parseSpaceMemberMentionAt(
+          value,
+          scan,
+          sortedSpaceMembers
+        );
+        if (spaceMemberMention) {
+          pushToken(spaceMemberMention, scan);
+          continue;
+        }
+      }
+      if (includeLegacyTokens) {
+        const legacy = parseLegacyTokenAt(value, scan);
+        if (legacy) {
+          pushToken(legacy, scan);
+          continue;
+        }
+      }
+      scan += 1;
+      continue;
+    }
+
+    if (code === 38) {
+      // '&'
+      if (bareAgentMentions && !isInCodeContext(scan)) {
+        const bareMention = parseBareAgentMentionAt(
+          value,
+          scan,
+          bareAgentMentions
+        );
+        if (bareMention) {
+          pushToken(bareMention, scan);
+          continue;
+        }
+      }
+      scan += 1;
+      continue;
+    }
+
+    if (
+      includeLegacyTokens &&
+      (code === 47 || code === 36 || code === 35 || code === 33)
+    ) {
+      const legacy = parseLegacyTokenAt(value, scan);
+      if (legacy) {
+        pushToken(legacy, scan);
         continue;
       }
     }
@@ -978,7 +958,7 @@ export function getSessionComposerStructuredTokenSegments(
     scan += 1;
   }
 
-  if (cursor < value.length) {
+  if (cursor < len) {
     segments.push({ kind: 'text', text: value.slice(cursor) });
   }
 

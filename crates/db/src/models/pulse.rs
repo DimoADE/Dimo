@@ -39,7 +39,16 @@ pub async fn ensure_pulse_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .fetch_optional(pool)
     .await?;
-    if initialized.is_some() {
+    let has_mailbox_rule_id: Option<i64> = if initialized.is_some() {
+        sqlx::query_scalar(
+            "SELECT 1 FROM pragma_table_info('pulse_bot_mailbox') WHERE name = 'rule_id' LIMIT 1",
+        )
+        .fetch_optional(pool)
+        .await?
+    } else {
+        None
+    };
+    if initialized.is_some() && has_mailbox_rule_id.is_some() {
         return Ok(());
     }
     let _guard = PULSE_SCHEMA_DDL_LOCK.lock().await;
@@ -50,6 +59,16 @@ pub async fn ensure_pulse_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     .await?;
     if recheck.is_none() {
         sqlx::raw_sql(PULSE_MIGRATION_SQL).execute(pool).await?;
+    }
+    let recheck_rule_id: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM pragma_table_info('pulse_bot_mailbox') WHERE name = 'rule_id' LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+    if recheck_rule_id.is_none() {
+        sqlx::query("ALTER TABLE pulse_bot_mailbox ADD COLUMN rule_id TEXT")
+            .execute(pool)
+            .await?;
     }
     Ok(())
 }
@@ -108,6 +127,7 @@ pub struct PulseBotMailboxItem {
     pub mailbox_policy: BotMailboxPolicy,
     pub thread_key: Option<String>,
     pub event_id: String,
+    pub rule_id: Option<String>,
     pub prompt_text: String,
     pub status: String,
     pub created_at: String,
@@ -608,6 +628,49 @@ impl SqlitePulseStore {
         self.get_rule(id).await
     }
 
+    pub async fn set_rule_mode_with_state(
+        &self,
+        id: &str,
+        eval_mode: PulseEvalMode,
+        enabled: bool,
+        promote_draft: bool,
+        next_fire_at: Option<Option<&str>>,
+        now: &str,
+    ) -> Result<Option<PulseRuleView>, sqlx::Error> {
+        let Some(mut current) = self.get_rule(id).await? else {
+            return Ok(None);
+        };
+        current.spec.eval_mode = eval_mode;
+        let eval_mode_str = encode_enum_str(&eval_mode)?;
+        let spec_json = serde_json::to_string(&current.spec).map_err(protocol_error)?;
+        let clear_draft = current.draft_only && promote_draft && enabled;
+        let update_fire = next_fire_at.is_some();
+        let fire_value = next_fire_at.flatten();
+        let sql = "UPDATE pulse_rules
+            SET eval_mode = ?,
+                spec_json = ?,
+                enabled = ?,
+                draft_only = CASE WHEN ? THEN 0 ELSE draft_only END,
+                mandate_origin = CASE WHEN ? THEN 'explicit_human' ELSE mandate_origin END,
+                next_fire_at = CASE WHEN ? THEN ? ELSE next_fire_at END,
+                revision = revision + 1,
+                updated_at = ?
+            WHERE id = ?";
+        sqlx::query(sql)
+            .bind(eval_mode_str)
+            .bind(spec_json)
+            .bind(enabled)
+            .bind(clear_draft)
+            .bind(clear_draft)
+            .bind(update_fire)
+            .bind(fire_value)
+            .bind(now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        self.get_rule(id).await
+    }
+
     pub async fn set_rule_enabled(
         &self,
         id: &str,
@@ -911,8 +974,8 @@ impl SqlitePulseStore {
         sqlx::query(
             "INSERT INTO pulse_bot_mailbox (
                 id, member_id, conversation_scope, mailbox_policy, thread_key,
-                event_id, prompt_text, status, created_at, claimed_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, NULL)",
+                event_id, rule_id, prompt_text, status, created_at, claimed_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, NULL)",
         )
         .bind(&item.id)
         .bind(&item.member_id)
@@ -920,6 +983,7 @@ impl SqlitePulseStore {
         .bind(policy_str)
         .bind(&item.thread_key)
         .bind(&item.event_id)
+        .bind(&item.rule_id)
         .bind(&item.prompt_text)
         .bind(&item.created_at)
         .execute(&self.pool)
@@ -944,8 +1008,8 @@ impl SqlitePulseStore {
         sqlx::query(
             "INSERT OR IGNORE INTO pulse_bot_mailbox (
                 id, member_id, conversation_scope, mailbox_policy, thread_key,
-                event_id, prompt_text, status, created_at, claimed_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, NULL)",
+                event_id, rule_id, prompt_text, status, created_at, claimed_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, NULL)",
         )
         .bind(&item.id)
         .bind(&item.member_id)
@@ -953,6 +1017,7 @@ impl SqlitePulseStore {
         .bind(policy_str)
         .bind(&item.thread_key)
         .bind(&item.event_id)
+        .bind(&item.rule_id)
         .bind(&item.prompt_text)
         .bind(&item.created_at)
         .execute(&self.pool)
@@ -1458,6 +1523,7 @@ mod tests {
             mailbox_policy: BotMailboxPolicy::CoalesceBatch,
             thread_key: None,
             event_id: format!("ev-{id}"),
+            rule_id: Some("rule-ops".to_string()),
             prompt_text: format!("prompt-{id}"),
             status: "queued".to_string(),
             created_at: ts.to_string(),
@@ -1486,6 +1552,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(first.primary.id, "pulse-1");
+        assert_eq!(first.primary.rule_id.as_deref(), Some("rule-ops"));
         assert_eq!(
             first
                 .coalesced_items
@@ -1512,5 +1579,76 @@ mod tests {
             .unwrap();
         assert_eq!(third.primary.id, "wf-bot:run2:s1:1");
         assert!(third.coalesced_items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_rule_mode_with_state_syncs_enabled_draft_and_next_fire_at() {
+        let db = DBService::new_in_memory_for_tests().await.expect("db");
+        let pool = db.writer().as_pool().clone();
+        ensure_pulse_schema(&pool).await.expect("pulse schema");
+        let store = SqlitePulseStore::new(pool);
+
+        let spec = PulseRuleSpec {
+            name: "Daily Bot Summary".to_string(),
+            description: None,
+            project_id: None,
+            workspace_id: Some("ws-1".to_string()),
+            eval_mode: PulseEvalMode::Off,
+            orchestrator: Default::default(),
+            filter: Default::default(),
+            temporal: None,
+            debounce_ms: 0,
+            claim_exclusive: false,
+            targets: vec![],
+            callback: None,
+            task_meta: None,
+        };
+        store
+            .save_rule(PulseRuleUpsert {
+                id: "rule-sync".to_string(),
+                enabled: false,
+                draft_only: true,
+                mandate_origin: MandateOrigin::UntrustedExternal,
+                spec,
+                webhook_route_id: None,
+                next_fire_at: None,
+                now: "2026-11-23T00:00:00Z".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let active = store
+            .set_rule_mode_with_state(
+                "rule-sync",
+                PulseEvalMode::Auto,
+                true,
+                true,
+                Some(Some("2026-11-24T01:00:00Z")),
+                "2026-11-23T00:01:00Z",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(active.enabled);
+        assert!(!active.draft_only);
+        assert_eq!(active.mandate_origin, MandateOrigin::ExplicitHuman);
+        assert_eq!(active.spec.eval_mode, PulseEvalMode::Auto);
+        assert_eq!(active.next_fire_at.as_deref(), Some("2026-11-24T01:00:00Z"));
+
+        let disabled = store
+            .set_rule_mode_with_state(
+                "rule-sync",
+                PulseEvalMode::Off,
+                false,
+                false,
+                Some(None),
+                "2026-11-23T00:02:00Z",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!disabled.enabled);
+        assert_eq!(disabled.spec.eval_mode, PulseEvalMode::Off);
+        assert!(disabled.next_fire_at.is_none());
     }
 }

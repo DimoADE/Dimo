@@ -227,4 +227,135 @@ describe('workspace tab drag', () => {
       bridge.dispose();
     }
   });
+
+  it('cancels a follow-up native dragstart in capture phase so Dockview panel transfer stays intact', () => {
+    let api: DockviewApi | undefined;
+    let editorGroup: ReturnType<DockviewApi['addGroup']> | undefined;
+    let sessionGroup: ReturnType<DockviewApi['addGroup']> | undefined;
+
+    const onReady = (event: DockviewReadyEvent) => {
+      api = event.api;
+      const notes = event.api.addPanel({
+        id: 'notes',
+        component: 'panel',
+        title: 'Notes',
+      });
+      editorGroup = notes.group;
+      (editorGroup as { id: string }).id = 'group-editor-1';
+      syncDockviewGroupRegistry(event.api);
+
+      sessionGroup = event.api.addGroup({
+        id: 'group-right',
+        direction: 'right',
+        referencePanel: notes,
+      });
+      event.api.addPanel({
+        id: 'ai-chat:session-1',
+        component: 'panel',
+        title: 'Session 1',
+        params: { sessionId: 'session-1', agent: 'CLAUDE_CODE' },
+        position: { referenceGroup: sessionGroup, direction: 'within' },
+      });
+    };
+
+    const { container } = render(
+      <DockviewReact
+        components={{ panel: Panel }}
+        defaultTabComponent={WorkspaceDockviewTab}
+        onReady={onReady}
+      />
+    );
+
+    const bridge = installDockviewPointerTabDnd(container);
+
+    try {
+      const notesTitle = screen.getByText('笔记');
+      const notesTab = notesTitle.closest('.dv-tab') as HTMLElement | null;
+      const sessionSurface = container.querySelector(
+        '[data-session-tab="true"]'
+      ) as HTMLElement | null;
+      const sessionTab = sessionSurface?.closest(
+        '.dv-tab'
+      ) as HTMLElement | null;
+      if (!notesTab || !sessionTab || !editorGroup || !sessionGroup) {
+        throw new Error('expected tabs and groups to be mounted');
+      }
+
+      mockElementDimensions(notesTab, {
+        left: 20,
+        top: 4,
+        width: 90,
+        height: 28,
+      });
+      mockElementDimensions(sessionTab, {
+        left: 520,
+        top: 4,
+        width: 64,
+        height: 28,
+      });
+
+      const originalElementFromPoint = document.elementFromPoint;
+      document.elementFromPoint = vi.fn((x: number) => {
+        if (x >= 500) return sessionTab;
+        return notesTab;
+      });
+
+      try {
+        fireEvent.pointerDown(notesTitle, {
+          button: 0,
+          buttons: 1,
+          pointerId: 1,
+          clientX: 40,
+          clientY: 16,
+        });
+
+        fireEvent.pointerMove(window, {
+          buttons: 1,
+          pointerId: 1,
+          clientX: 52,
+          clientY: 16,
+        });
+
+        expect(getPanelData()?.panelId).toBe('notes');
+
+        // Simulate Chromium firing its native dragstart after pointermove
+        // already dispatched our synthetic dragstart and began pointer DnD.
+        const followUpDragStart = new Event('dragstart', {
+          bubbles: true,
+          cancelable: true,
+        });
+        notesTab.dispatchEvent(followUpDragStart);
+
+        expect(followUpDragStart.defaultPrevented).toBe(true);
+        expect(getPanelData()?.panelId).toBe('notes');
+        expect(document.body.style.cursor).toBe('grabbing');
+        expect(
+          document.body.querySelector('[data-dockview-tab-drag-ghost="true"]')
+        ).toBeTruthy();
+
+        fireEvent.pointerMove(window, {
+          buttons: 1,
+          pointerId: 1,
+          clientX: 540,
+          clientY: 16,
+        });
+
+        fireEvent.pointerUp(window, {
+          button: 0,
+          pointerId: 1,
+          clientX: 540,
+          clientY: 16,
+        });
+
+        expect(api?.getPanel('notes')?.group.id).toBe(sessionGroup.id);
+        expect(
+          document.body.querySelector('[data-dockview-tab-drag-ghost="true"]')
+        ).toBeNull();
+      } finally {
+        document.elementFromPoint = originalElementFromPoint;
+      }
+    } finally {
+      bridge.dispose();
+    }
+  });
 });

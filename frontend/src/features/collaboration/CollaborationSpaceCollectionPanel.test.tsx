@@ -20,6 +20,22 @@ vi.mock('./AssistantDetailsCustomizeTab', () => ({
   AssistantDetailsCustomizeTab: () => <div data-testid="customize-tab" />,
 }));
 
+vi.mock('./AssistantDetailsTasksTab', () => ({
+  AssistantDetailsTasksTab: ({
+    initialCreateKind,
+    createRequestNonce,
+  }: {
+    initialCreateKind?: string | null;
+    createRequestNonce?: number;
+  }) => (
+    <div
+      data-testid="tasks-tab"
+      data-initial-create-kind={initialCreateKind ?? ''}
+      data-create-nonce={createRequestNonce ?? ''}
+    />
+  ),
+}));
+
 vi.mock('./AssistantDetailsSessionTab', () => ({
   AssistantDetailsSessionTab: () => <div data-testid="session-tab" />,
 }));
@@ -322,5 +338,72 @@ describe('CollaborationSpaceCollectionDockviewPanel (Assets: Memory / Topics / C
         })
       );
     });
+  });
+
+  it('renders Assistant Details with standalone Tasks tab to the left of Customize', async () => {
+    const user = userEvent.setup();
+    renderPanel({
+      variant: 'assistant',
+      spaceName: 'Moxi',
+      memberId: 'mem-moxi',
+      conversationId: 'conv-moxi',
+    });
+
+    const tabs = screen.getAllByRole('tab');
+    expect(tabs.map((tab) => tab.textContent)).toEqual([
+      '详情',
+      '资产',
+      '任务',
+      '自定义',
+    ]);
+
+    const tasksTab = screen.getByTestId(
+      'collaboration-group-details-tab-tasks'
+    );
+    const customizeTab = screen.getByTestId(
+      'collaboration-group-details-tab-customize'
+    );
+    expect(tasksTab.nextElementSibling).toBe(customizeTab);
+
+    await user.click(tasksTab);
+    expect(screen.getByTestId('tasks-tab')).toBeInTheDocument();
+    expect(screen.queryByTestId('customize-tab')).not.toBeInTheDocument();
+
+    await user.click(customizeTab);
+    expect(screen.getByTestId('customize-tab')).toBeInTheDocument();
+    expect(screen.queryByTestId('tasks-tab')).not.toBeInTheDocument();
+  });
+
+  it('opens Assistant Details directly on Tasks tab with initialTaskCreateKind and clears it after manual tab switch', async () => {
+    const user = userEvent.setup();
+    renderPanel({
+      variant: 'assistant',
+      spaceName: 'Moxi',
+      memberId: 'mem-moxi',
+      conversationId: 'conv-moxi',
+      initialTab: 'tasks',
+      initialTaskCreateKind: 'schedule',
+      navigationNonce: 42,
+    });
+
+    const tasksTabView = screen.getByTestId('tasks-tab');
+    expect(tasksTabView).toHaveAttribute(
+      'data-initial-create-kind',
+      'schedule'
+    );
+    expect(tasksTabView).toHaveAttribute('data-create-nonce', '42');
+
+    // Switch away to Details and back to Tasks manually -> pending create intent cleared
+    await user.click(
+      screen.getByTestId('collaboration-group-details-tab-details')
+    );
+    expect(screen.getByTestId('session-tab')).toBeInTheDocument();
+    await user.click(
+      screen.getByTestId('collaboration-group-details-tab-tasks')
+    );
+    expect(screen.getByTestId('tasks-tab')).toHaveAttribute(
+      'data-initial-create-kind',
+      ''
+    );
   });
 });

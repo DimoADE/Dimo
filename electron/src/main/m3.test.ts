@@ -5,6 +5,7 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+const menuPopupMock = vi.fn();
 const createdWindows: Array<{
   options: Record<string, unknown>;
   emitter: EventEmitter;
@@ -17,6 +18,10 @@ const createdWindows: Array<{
   setBounds: ReturnType<typeof vi.fn>;
   setIgnoreMouseEvents: ReturnType<typeof vi.fn>;
   setZoomFactor: ReturnType<typeof vi.fn>;
+  reload: ReturnType<typeof vi.fn>;
+  reloadIgnoringCache: ReturnType<typeof vi.fn>;
+  inspectElement: ReturnType<typeof vi.fn>;
+  openDevTools: ReturnType<typeof vi.fn>;
 }> = [];
 
 vi.mock('electron', () => {
@@ -26,6 +31,10 @@ vi.mock('electron', () => {
     let destroyed = false;
     let visible = false;
     const setZoomFactor = vi.fn();
+    const reload = vi.fn();
+    const reloadIgnoringCache = vi.fn();
+    const inspectElement = vi.fn();
+    const openDevTools = vi.fn();
     const destroy = vi.fn(() => {
       if (!destroyed) {
         destroyed = true;
@@ -58,6 +67,10 @@ vi.mock('electron', () => {
       setBounds,
       setIgnoreMouseEvents,
       setZoomFactor,
+      reload,
+      reloadIgnoringCache,
+      inspectElement,
+      openDevTools,
     };
     createdWindows.push(record);
     return {
@@ -93,7 +106,10 @@ vi.mock('electron', () => {
         setWindowOpenHandler: vi.fn(),
         isDevToolsOpened: () => false,
         closeDevTools: vi.fn(),
-        openDevTools: vi.fn(),
+        openDevTools,
+        reload,
+        reloadIgnoringCache,
+        inspectElement,
         executeJavaScript: vi.fn().mockResolvedValue(undefined),
       },
     };
@@ -115,7 +131,10 @@ vi.mock('electron', () => {
     },
     BrowserWindow: BrowserWindowMock,
     Menu: {
-      buildFromTemplate: vi.fn((template: unknown) => template),
+      buildFromTemplate: vi.fn((template: unknown) => ({
+        template,
+        popup: menuPopupMock,
+      })),
       setApplicationMenu: vi.fn(),
     },
     Tray: vi.fn(),
@@ -190,6 +209,7 @@ import {
   WindowManager,
   evaluatePermissionRequest,
   isDevToolsShortcut,
+  matchReloadShortcut,
 } from './windows';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
@@ -798,6 +818,150 @@ describe('WindowManager remediation behaviors (hidden settings exit, zoom sync, 
     manager.focusWindow(prewarmed!);
     expect(settingsRecord.show).toHaveBeenCalledTimes(1);
     expect(settingsRecord.focus).toHaveBeenCalledTimes(1);
+  });
+
+  it('matches reload and force-reload shortcuts without hijacking plain Ctrl+R on Windows/Linux', () => {
+    const base = {
+      type: 'keyDown' as const,
+      control: false,
+      shift: false,
+      alt: false,
+      meta: false,
+      isAutoRepeat: false,
+    };
+
+    expect(matchReloadShortcut({ ...base, key: 'F5', code: 'F5' }, 'win32')).toBe(
+      'reload'
+    );
+    expect(
+      matchReloadShortcut({ ...base, key: 'F5', code: 'F5', control: true }, 'win32')
+    ).toBe('force-reload');
+    expect(
+      matchReloadShortcut({ ...base, key: 'F5', code: 'F5', shift: true }, 'linux')
+    ).toBe('force-reload');
+    expect(
+      matchReloadShortcut(
+        { ...base, key: 'R', code: 'KeyR', control: true, shift: true },
+        'win32'
+      )
+    ).toBe('force-reload');
+    expect(
+      matchReloadShortcut({ ...base, key: 'r', code: 'KeyR', control: true }, 'win32')
+    ).toBeNull();
+    expect(
+      matchReloadShortcut({ ...base, key: 'r', code: 'KeyR', meta: true }, 'darwin')
+    ).toBe('reload');
+    expect(
+      matchReloadShortcut(
+        { ...base, key: 'R', code: 'KeyR', meta: true, shift: true },
+        'darwin'
+      )
+    ).toBe('force-reload');
+  });
+
+  it('enables reload shortcuts, DevTools, and fallback context menu in Dev desktop sessions', async () => {
+    createdWindows.length = 0;
+    menuPopupMock.mockClear();
+    const { Menu } = await import('electron');
+    vi.mocked(Menu.buildFromTemplate).mockClear();
+
+    const manager = new WindowManager({
+      preloadPath: '/preload.js',
+      devUrl: 'http://127.0.0.1:5173',
+      platform: 'win32',
+    });
+    expect(manager.isDevSession()).toBe(true);
+    expect(manager.isDeveloperContextEnabled()).toBe(true);
+
+    manager.createMainWindow();
+    const mainRecord = createdWindows[0];
+
+    const f5Event = { preventDefault: vi.fn() };
+    mainRecord.webContentsEmitter.emit('before-input-event', f5Event, {
+      type: 'keyDown',
+      key: 'F5',
+      code: 'F5',
+      control: false,
+      shift: false,
+      alt: false,
+      meta: false,
+      isAutoRepeat: false,
+    });
+    expect(f5Event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(mainRecord.reload).toHaveBeenCalledTimes(1);
+
+    const forceReloadEvent = { preventDefault: vi.fn() };
+    mainRecord.webContentsEmitter.emit('before-input-event', forceReloadEvent, {
+      type: 'keyDown',
+      key: 'R',
+      code: 'KeyR',
+      control: true,
+      shift: true,
+      alt: false,
+      meta: false,
+      isAutoRepeat: false,
+    });
+    expect(forceReloadEvent.preventDefault).toHaveBeenCalledTimes(1);
+    expect(mainRecord.reloadIgnoringCache).toHaveBeenCalledTimes(1);
+
+    const devToolsEvent = { preventDefault: vi.fn() };
+    mainRecord.webContentsEmitter.emit('before-input-event', devToolsEvent, {
+      type: 'keyDown',
+      key: 'F12',
+      code: 'F12',
+      control: false,
+      shift: false,
+      alt: false,
+      meta: false,
+      isAutoRepeat: false,
+    });
+    expect(devToolsEvent.preventDefault).toHaveBeenCalledTimes(1);
+    expect(mainRecord.openDevTools).toHaveBeenCalledTimes(1);
+
+    mainRecord.webContentsEmitter.emit('context-menu', {}, { x: 42, y: 84 });
+    expect(Menu.buildFromTemplate).toHaveBeenCalledTimes(1);
+    expect(menuPopupMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps reload shortcuts and fallback context menu disabled in production when developer mode is off', async () => {
+    createdWindows.length = 0;
+    menuPopupMock.mockClear();
+    const { Menu } = await import('electron');
+    vi.mocked(Menu.buildFromTemplate).mockClear();
+
+    const manager = new WindowManager({
+      preloadPath: '/preload.js',
+      platform: 'win32',
+    });
+    expect(manager.isDevSession()).toBe(false);
+    expect(manager.isDeveloperContextEnabled()).toBe(false);
+
+    manager.createMainWindow();
+    const mainRecord = createdWindows[0];
+
+    const f5Event = { preventDefault: vi.fn() };
+    mainRecord.webContentsEmitter.emit('before-input-event', f5Event, {
+      type: 'keyDown',
+      key: 'F5',
+      code: 'F5',
+      control: false,
+      shift: false,
+      alt: false,
+      meta: false,
+      isAutoRepeat: false,
+    });
+    expect(f5Event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(mainRecord.reload).not.toHaveBeenCalled();
+
+    mainRecord.webContentsEmitter.emit('context-menu', {}, { x: 10, y: 20 });
+    expect(Menu.buildFromTemplate).not.toHaveBeenCalled();
+    expect(menuPopupMock).not.toHaveBeenCalled();
+
+    manager.applyDeveloperMode(true);
+    expect(manager.isDeveloperContextEnabled()).toBe(true);
+    mainRecord.webContentsEmitter.emit('context-menu', {}, { x: 10, y: 20 });
+    expect(Menu.buildFromTemplate).toHaveBeenCalledTimes(1);
+    expect(menuPopupMock).toHaveBeenCalledTimes(1);
   });
 });
 

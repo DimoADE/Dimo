@@ -7,21 +7,40 @@ import {
   type FocusEvent,
   type PointerEvent,
 } from 'react';
-import type { SessionComposerStructuredToken } from '../sessionComposerStructuredTokens';
 import {
+  getComposerHoverTarget,
   getHoverableTokenFromEventTarget,
-  getStructuredHoverToken,
+  type ComposerHoverTarget,
 } from './composerSearch';
+
+export type ActiveComposerHover = {
+  anchor: HTMLElement;
+  target: ComposerHoverTarget;
+};
+
+function isSameHoverTarget(
+  a: ComposerHoverTarget,
+  b: ComposerHoverTarget
+): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === 'pasted_text' && b.kind === 'pasted_text') {
+    return a.text === b.text;
+  }
+  if (a.kind === 'structured' && b.kind === 'structured') {
+    return a.token.raw === b.token.raw;
+  }
+  return false;
+}
 
 export function useSessionComposerHover() {
   const elementTokenTooltipId = useId();
   const quoteTokenTooltipId = useId();
+  const pastedTextTokenTooltipId = useId();
   const hoverHideTimerRef = useRef<number | null>(null);
   const quoteEditingRef = useRef(false);
-  const [activeHoverToken, setActiveHoverToken] = useState<{
-    anchor: HTMLElement;
-    token: SessionComposerStructuredToken;
-  } | null>(null);
+  const [activeHover, setActiveHover] = useState<ActiveComposerHover | null>(
+    null
+  );
 
   const cancelHoverHide = useCallback(() => {
     if (hoverHideTimerRef.current != null) {
@@ -44,26 +63,35 @@ export function useSessionComposerHover() {
     (target: EventTarget | null) => {
       const anchor = getHoverableTokenFromEventTarget(target);
       if (!anchor) return;
-      const token = getStructuredHoverToken(anchor);
-      if (!token) return;
+      const resolved = getComposerHoverTarget(anchor);
+      if (!resolved) return;
       cancelHoverHide();
-      setActiveHoverToken((current) => {
-        if (current?.anchor === anchor && current.token.raw === token.raw) {
+      setActiveHover((current) => {
+        if (
+          current?.anchor === anchor &&
+          isSameHoverTarget(current.target, resolved)
+        ) {
           return current;
         }
         quoteEditingRef.current = false;
-        return { anchor, token };
+        return { anchor, target: resolved };
       });
     },
     [cancelHoverHide]
   );
+
+  const dismissTokenHover = useCallback(() => {
+    cancelHoverHide();
+    quoteEditingRef.current = false;
+    setActiveHover(null);
+  }, [cancelHoverHide]);
 
   const hideTokenHover = useCallback(
     (anchor: HTMLElement, delayMs = 0) => {
       if (quoteEditingRef.current) return;
       const hide = () => {
         if (quoteEditingRef.current) return;
-        setActiveHoverToken((current) =>
+        setActiveHover((current) =>
           current?.anchor === anchor ? null : current
         );
         hoverHideTimerRef.current = null;
@@ -118,33 +146,35 @@ export function useSessionComposerHover() {
   useEffect(() => () => cancelHoverHide(), [cancelHoverHide]);
 
   useEffect(() => {
-    const anchor = activeHoverToken?.anchor;
+    const anchor = activeHover?.anchor;
     if (!anchor) {
       quoteEditingRef.current = false;
       return undefined;
     }
     if (!anchor.isConnected) {
       quoteEditingRef.current = false;
-      setActiveHoverToken(null);
+      setActiveHover(null);
       return undefined;
     }
     const observer = new MutationObserver(() => {
       if (!anchor.isConnected) {
         quoteEditingRef.current = false;
-        setActiveHoverToken(null);
+        setActiveHover(null);
       }
     });
     observer.observe(document.body, { childList: true, subtree: true });
     return () => observer.disconnect();
-  }, [activeHoverToken]);
+  }, [activeHover]);
 
   useEffect(() => {
-    const anchor = activeHoverToken?.anchor;
+    const anchor = activeHover?.anchor;
     if (!anchor) return undefined;
     const tooltipId =
-      activeHoverToken.token.kind === 'quote'
-        ? quoteTokenTooltipId
-        : elementTokenTooltipId;
+      activeHover.target.kind === 'pasted_text'
+        ? pastedTextTokenTooltipId
+        : activeHover.target.token.kind === 'quote'
+          ? quoteTokenTooltipId
+          : elementTokenTooltipId;
 
     const previousDescription = anchor.getAttribute('aria-describedby');
     const descriptionIds = new Set(
@@ -171,12 +201,20 @@ export function useSessionComposerHover() {
         anchor.removeAttribute('aria-describedby');
       }
     };
-  }, [activeHoverToken, elementTokenTooltipId, quoteTokenTooltipId]);
+  }, [
+    activeHover,
+    elementTokenTooltipId,
+    pastedTextTokenTooltipId,
+    quoteTokenTooltipId,
+  ]);
 
   return {
     elementTokenTooltipId,
     quoteTokenTooltipId,
-    activeHoverToken,
+    pastedTextTokenTooltipId,
+    activeHover,
+    showTokenHover,
+    dismissTokenHover,
     cancelHoverHide,
     hideTokenHover,
     setQuoteEditing,

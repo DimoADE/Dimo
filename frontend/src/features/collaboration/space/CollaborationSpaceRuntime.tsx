@@ -5164,6 +5164,54 @@ export function useCollaborationSpaceRuntime(
     workspacePath,
   ]);
 
+  const assistantDetailsNavNonceRef = useRef(0);
+  const openAssistantDetailsForDirectEntry = useCallback(
+    (
+      entry: Extract<ChatListEntry, { type: 'direct' }>,
+      options?: {
+        initialTab?: 'details' | 'collection' | 'tasks' | 'customize';
+        initialTaskCreateKind?: 'event' | 'schedule';
+      }
+    ) => {
+      const threadId = chatEntryThreadId(entry);
+      if (!threadId) return;
+      const conversationId = String(entry.member.conversation_id ?? '').trim();
+      const memberId =
+        entry.member.member_id?.trim() || conversationId || threadId;
+      if (!memberId) return;
+      const name = entry.name || displayName(entry.member);
+      const avatar = getMemberAvatar(conversationId, name);
+      assistantDetailsNavNonceRef.current += 1;
+      openWorkspacePanel({
+        id: spaceCollectionPreviewPanelId(threadId),
+        component: 'space-collection',
+        title: COPY.assistantDetailsButton,
+        params: {
+          variant: 'assistant',
+          spaceId: threadId,
+          spaceName: name,
+          spaceAvatars: [avatar],
+          memberId,
+          conversationId,
+          memberAvatar: avatar,
+          projectId: projectContext?.projectId ?? undefined,
+          workspaceId: workspace || undefined,
+          workspacePath,
+          initialTab: options?.initialTab,
+          initialTaskCreateKind: options?.initialTaskCreateKind ?? null,
+          navigationNonce: assistantDetailsNavNonceRef.current,
+        },
+      });
+    },
+    [
+      getMemberAvatar,
+      openWorkspacePanel,
+      projectContext?.projectId,
+      workspace,
+      workspacePath,
+    ]
+  );
+
   const handleQuoteSelection = useCallback((selectedText: string) => {
     const trimmed = selectedText.trim();
     if (!trimmed) return;
@@ -7679,6 +7727,22 @@ export function useCollaborationSpaceRuntime(
         onHide: () =>
           persistContactChrome(toggleHiddenThread(contactChrome, threadId)),
         onDelete: () => void deleteChatEntry(entry),
+        onCreatePulseTrigger:
+          entry.type === 'direct'
+            ? () =>
+                openAssistantDetailsForDirectEntry(entry, {
+                  initialTab: 'tasks',
+                  initialTaskCreateKind: 'event',
+                })
+            : undefined,
+        onSchedulePulse:
+          entry.type === 'direct'
+            ? () =>
+                openAssistantDetailsForDirectEntry(entry, {
+                  initialTab: 'tasks',
+                  initialTaskCreateKind: 'schedule',
+                })
+            : undefined,
         onStepDownSupervisor: isSupervisor
           ? () => void assignSupervisor(null)
           : undefined,

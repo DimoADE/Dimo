@@ -119,6 +119,65 @@ describe('SessionSettingsSummary', () => {
     expect(trigger).not.toHaveTextContent('Enabled');
   });
 
+  it('includes the active permission mode in the visible summary only when showPermissionInSummary is enabled', () => {
+    const { rerender } = render(
+      <SessionSettingsSummary
+        sessionModes={{
+          current: 'yolo',
+          modes: [
+            { id: 'ask', label: 'Ask' },
+            { id: 'yolo', label: 'YOLO' },
+          ],
+        }}
+        options={[
+          ...OPTIONS,
+          {
+            key: 'sandbox_network',
+            label: 'Network',
+            value: 'enabled',
+            choices: [
+              { value: 'disabled', label: 'Disabled' },
+              { value: 'enabled', label: 'Enabled' },
+            ],
+          },
+        ]}
+        pending={{}}
+        onSelectMode={vi.fn()}
+        onSelectConfigOption={vi.fn()}
+        showPermissionInSummary
+      />
+    );
+
+    const trigger = screen.getByTestId('session-settings-summary');
+    expect(trigger).toHaveTextContent('5.6 Terra · 高 · YOLO');
+    expect(trigger).not.toHaveTextContent('Enabled');
+
+    rerender(
+      <SessionSettingsSummary
+        options={[
+          ...OPTIONS,
+          {
+            key: 'approval_policy',
+            label: 'Approval policy',
+            category: 'permission',
+            value: 'on-request',
+            choices: [
+              { value: 'on-request', label: 'On Request' },
+              { value: 'never', label: 'Never' },
+            ],
+          },
+        ]}
+        pending={{}}
+        onSelectConfigOption={vi.fn()}
+        showPermissionInSummary
+      />
+    );
+
+    expect(screen.getByTestId('session-settings-summary')).toHaveTextContent(
+      '5.6 Terra · 高 · On Request'
+    );
+  });
+
   it('moves the Fast indicator onto the model or agent name without widening the summary', async () => {
     const user = userEvent.setup();
     const { container, rerender } = render(

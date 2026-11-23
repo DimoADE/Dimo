@@ -6,6 +6,7 @@ import {
   useState,
 } from 'react';
 import { getDesktopShell } from '@/lib/desktopShell';
+import type { BrowserSurfaceHost } from './browserPanelLifetime';
 import {
   getElectronBrowserCallbacks,
   subscribeLiveSurfaceGeometry,
@@ -131,16 +132,21 @@ function applyLiveGeometryToDom(
 export interface HostedElectronBrowserWebviewProps {
   tabId: string;
   inlineFallback?: boolean;
+  panelVisible?: boolean;
+  surfaceHost?: BrowserSurfaceHost;
 }
 
 /**
- * Renders a single persistent Electron `<webview>` guest inside the fixed-order
- * root host (or inline fallback in isolated component tests). Never reordered or
- * reparented across Dockview splits or Infinite Canvas node z-index changes.
+ * Renders a single persistent Electron `<webview>` guest either inside the
+ * fixed-order root host (for Dockview tabs that reparent across splits) or
+ * directly inline inside an Infinite Canvas browser card so CSS stacking,
+ * clipping, transforms, and HUD overlays work natively.
  */
 export function HostedElectronBrowserWebview({
   tabId,
   inlineFallback = false,
+  panelVisible = true,
+  surfaceHost = 'dockview',
 }: HostedElectronBrowserWebviewProps) {
   const tab = useElectronBrowserSurfaceStore((state) => state.tabs[tabId]);
   const presentation = useElectronBrowserSurfaceStore(
@@ -148,6 +154,9 @@ export function HostedElectronBrowserWebview({
   );
   const canvasInteracting = useElectronBrowserSurfaceStore(
     (state) => state.canvasInteracting
+  );
+  const overlayDragging = useElectronBrowserSurfaceStore(
+    (state) => state.overlayDragging
   );
 
   const hasTab = Boolean(tab);
@@ -167,6 +176,9 @@ export function HostedElectronBrowserWebview({
     width: 800,
     height: 600,
   });
+  const latestLiveGeometryRef = useRef<LiveSurfaceGeometry | null>(null);
+  const surfaceHostRef = useRef(presentation?.surfaceHost ?? 'dockview');
+  surfaceHostRef.current = presentation?.surfaceHost ?? 'dockview';
 
   const [mountSrc, setMountSrc] = useState<string | null>(() =>
     tabUrl && tabUrl.trim().length > 0 ? tabUrl : null
@@ -218,16 +230,26 @@ export function HostedElectronBrowserWebview({
   // Subscribe to imperative 60fps geometry updates during canvas pan/zoom/drag.
   useLayoutEffect(() => {
     if (inlineFallback || hibernated) {
+      latestLiveGeometryRef.current = null;
       return undefined;
     }
     return subscribeLiveSurfaceGeometry(tabId, (geometry) => {
+      latestLiveGeometryRef.current = geometry;
       if (geometry.rect.width > 0 && geometry.rect.height > 0) {
         lastRectRef.current = geometry.rect;
       }
+      const store = useElectronBrowserSurfaceStore.getState();
+      const effectiveInteractive =
+        geometry.interactive &&
+        !store.overlayDragging &&
+        !(surfaceHostRef.current === 'canvas' && store.canvasInteracting);
       applyLiveGeometryToDom(
         wrapperRef.current,
         webviewRef.current,
-        geometry,
+        {
+          ...geometry,
+          interactive: effectiveInteractive,
+        },
         !hasAttachedRef.current ? true : undefined
       );
     });
@@ -318,9 +340,11 @@ export function HostedElectronBrowserWebview({
 
     const notifyHostPointerInteraction = () => {
       if (disposed) return;
-      const latestPresentation =
-        useElectronBrowserSurfaceStore.getState().presentations[tabId];
-      dispatchHostPointerDown(latestPresentation?.slotElement ?? null);
+      const slotElement = inlineFallback
+        ? (webviewRef.current?.parentElement ?? null)
+        : (useElectronBrowserSurfaceStore.getState().presentations[tabId]
+            ?.slotElement ?? null);
+      dispatchHostPointerDown(slotElement);
       getElectronBrowserCallbacks(tabId)?.onPointerDown?.();
     };
 
@@ -385,13 +409,17 @@ export function HostedElectronBrowserWebview({
           .catch(() => undefined);
       }
     };
-  }, [generation, hasTab, hibernated, profileId, tabId]);
+  }, [generation, hasTab, hibernated, inlineFallback, profileId, tabId]);
 
   if (!tab || hibernated) {
     return null;
   }
 
   if (inlineFallback) {
+    const inlineInteractive =
+      panelVisible &&
+      !overlayDragging &&
+      !(surfaceHost === 'canvas' && canvasInteracting);
     return createElement('webview', {
       key: `${tabId}:${generation}`,
       ref: webviewRef,
@@ -401,29 +429,46 @@ export function HostedElectronBrowserWebview({
       'data-testid': 'electron-browser-webview',
       'data-tab-id': tabId,
       'data-generation': String(generation),
+      'data-surface-host': surfaceHost,
       className: 'flex h-full w-full border-0',
-      style: { display: 'flex', width: '100%', height: '100%', border: 0 },
+      style: {
+        display: 'flex',
+        width: '100%',
+        height: '100%',
+        border: 0,
+        pointerEvents: inlineInteractive ? 'auto' : 'none',
+        visibility: panelVisible ? 'visible' : 'hidden',
+        backgroundColor: tab.backgroundColor,
+      },
     });
   }
 
-  const isVisible = Boolean(presentation?.visible);
+  const liveGeometry =
+    latestLiveGeometryRef.current &&
+    latestLiveGeometryRef.current.geometrySeq > (presentation?.geometrySeq ?? 0)
+      ? latestLiveGeometryRef.current
+      : null;
+
+  const activeGeometry = liveGeometry ?? presentation;
+  const isVisible = Boolean(activeGeometry?.visible);
   const effectiveInteractive =
-    Boolean(presentation?.interactive) &&
+    Boolean(activeGeometry?.interactive) &&
+    !overlayDragging &&
     !(presentation?.surfaceHost === 'canvas' && canvasInteracting);
 
   // Keep unattached `<webview>` guests paintable offscreen on Windows/Linux so
-  // Electron always fires `did-attach`/`dom-ready` and binds `webContentsId`
-  // even when a canvas browser card mounts initially hidden or occluded.
+  // Electron always initializes and binds `webContentsId`.
+  const keepPaintable = !hasAttached;
   const { wrapperStyle, webviewStyle } = computeHostedWebviewStyles({
     visible: isVisible,
-    rect: presentation?.rect ?? lastRectRef.current,
-    clipRect: presentation?.clipRect ?? null,
-    scale: presentation?.scale ?? 1,
-    zIndex: presentation?.zIndex ?? 20,
-    cornerRadius: presentation?.cornerRadius ?? 0,
+    rect: activeGeometry?.rect ?? lastRectRef.current,
+    clipRect: activeGeometry?.clipRect ?? null,
+    scale: activeGeometry?.scale ?? 1,
+    zIndex: activeGeometry?.zIndex ?? 20,
+    cornerRadius: activeGeometry?.cornerRadius ?? 0,
     interactive: effectiveInteractive,
     backgroundColor: tab.backgroundColor,
-    ...(!hasAttached ? { keepPaintableWhenInactive: true } : {}),
+    ...(keepPaintable ? { keepPaintableWhenInactive: true } : {}),
   });
 
   return (

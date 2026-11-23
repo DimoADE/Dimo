@@ -74,8 +74,8 @@ describe('contact row menu', () => {
       '---',
       '复制对话 ID',
       '---',
-      'Create Event Trigger…',
-      'Schedule Pulse…',
+      '创建事件任务…',
+      '创建定时任务…',
       '---',
       '从侧边栏隐藏',
       '删除',
@@ -127,6 +127,8 @@ describe('contact row menu', () => {
   it('keeps screenshot copy as the default', () => {
     expect(CONTACT_ROW_MENU_COPY.renameAssistant).toBe('重命名助手');
     expect(CONTACT_ROW_MENU_COPY.moveTo).toBe('移至');
+    expect(CONTACT_ROW_MENU_COPY.createPulseTrigger).toBe('创建事件任务…');
+    expect(CONTACT_ROW_MENU_COPY.schedulePulse).toBe('创建定时任务…');
     expect(CONTACT_ROW_MENU_COPY.stepDownSupervisor).toBe('卸任主管');
   });
 
@@ -181,8 +183,8 @@ describe('contact row menu', () => {
       '---',
       '复制对话 ID',
       '---',
-      'Create Event Trigger…',
-      'Schedule Pulse…',
+      '创建事件任务…',
+      '创建定时任务…',
       '---',
       '卸任主管',
     ]);

@@ -21,20 +21,25 @@ import { SessionCanvasView, type SessionCanvasApi } from './SessionCanvasView';
 const fitView = vi.fn();
 const setCenter = vi.fn();
 const getViewport = vi.fn(() => ({ x: 0, y: 0, zoom: 1 }));
+const setViewport = vi.fn();
 const screenToFlowPosition = vi.fn(() => ({ x: 40, y: 40 }));
 
 let latestOnNodesChange: ((changes: unknown[]) => void) | undefined;
+let latestOnlyRenderVisibleElements: boolean | undefined;
 
 vi.mock('@xyflow/react', () => ({
   ReactFlowProvider: ({ children }: { children: ReactNode }) => children,
   ReactFlow: ({
     children,
     onNodesChange,
+    onlyRenderVisibleElements,
   }: {
     children: ReactNode;
     onNodesChange?: (changes: unknown[]) => void;
+    onlyRenderVisibleElements?: boolean;
   }) => {
     latestOnNodesChange = onNodesChange;
+    latestOnlyRenderVisibleElements = onlyRenderVisibleElements;
     return <div data-testid="react-flow">{children}</div>;
   },
   Background: () => <div data-testid="canvas-background" />,
@@ -49,7 +54,7 @@ vi.mock('@xyflow/react', () => ({
     setCenter,
     screenToFlowPosition,
     getViewport,
-    setViewport: vi.fn(),
+    setViewport,
   }),
   useStore: (
     selector: (state: {
@@ -112,6 +117,7 @@ describe('SessionCanvasView', () => {
     fitView.mockReset();
     setCenter.mockReset();
     getViewport.mockReset();
+    setViewport.mockReset();
     getViewport.mockReturnValue({ x: 0, y: 0, zoom: 1 });
     vi.mocked(sessionsApi.markViewed).mockClear();
   });
@@ -855,5 +861,113 @@ describe('SessionCanvasView', () => {
     ).toBe(true);
 
     workspace.unmount();
+  });
+
+  it('pans imperatively via translate3d during right-drag without per-frame setViewport or minimap unmount, then commits once on release', () => {
+    const rafQueue: FrameRequestCallback[] = [];
+    const rafSpy = vi
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation((cb) => {
+        rafQueue.push(cb);
+        return rafQueue.length;
+      });
+    const cancelSpy = vi
+      .spyOn(window, 'cancelAnimationFrame')
+      .mockImplementation(() => {});
+
+    try {
+      getViewport.mockReturnValue({ x: 10, y: 20, zoom: 1.25 });
+      const { container } = renderCanvas(
+        <SessionCanvasView
+          projectId="p1"
+          sessions={[session('s1', new Date().toISOString())]}
+          sessionsReady
+          listWidth={280}
+          list={<div>list</div>}
+        />
+      );
+
+      // Normal-sized board disables mid-pan node virtualization.
+      expect(latestOnlyRenderVisibleElements).toBe(false);
+      expect(screen.getByTestId('canvas-minimap')).toBeInTheDocument();
+
+      const surface = container.querySelector('.canvas-surface') as HTMLElement;
+      const viewportEl = document.createElement('div');
+      viewportEl.className = 'react-flow__viewport';
+      const selectionEl = document.createElement('div');
+      selectionEl.className = 'react-flow__nodesselection';
+      surface.appendChild(viewportEl);
+      surface.appendChild(selectionEl);
+
+      surface.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 1,
+          button: 2,
+          clientX: 100,
+          clientY: 100,
+        })
+      );
+      window.dispatchEvent(
+        new PointerEvent('pointermove', {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 1,
+          buttons: 2,
+          clientX: 160,
+          clientY: 140,
+        })
+      );
+      rafQueue.shift()?.(16);
+
+      expect(viewportEl.style.transform).toBe(
+        'translate3d(70px, 60px, 0) scale(1.25)'
+      );
+      expect(selectionEl.style.transform).toBe(
+        'translate3d(70px, 60px, 0) scale(1.25)'
+      );
+      // Zero store/d3-zoom churn during active pan and MiniMap remains mounted
+      expect(setViewport).not.toHaveBeenCalled();
+      expect(screen.getByTestId('canvas-minimap')).toBeInTheDocument();
+
+      window.dispatchEvent(
+        new PointerEvent('pointermove', {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 1,
+          buttons: 2,
+          clientX: 220,
+          clientY: 190,
+        })
+      );
+      rafQueue.shift()?.(32);
+
+      expect(viewportEl.style.transform).toBe(
+        'translate3d(130px, 110px, 0) scale(1.25)'
+      );
+      expect(setViewport).not.toHaveBeenCalled();
+
+      window.dispatchEvent(
+        new PointerEvent('pointerup', {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 1,
+          button: 2,
+          clientX: 220,
+          clientY: 190,
+        })
+      );
+
+      expect(setViewport).toHaveBeenCalledTimes(1);
+      expect(setViewport).toHaveBeenCalledWith({
+        x: 130,
+        y: 110,
+        zoom: 1.25,
+      });
+    } finally {
+      rafSpy.mockRestore();
+      cancelSpy.mockRestore();
+    }
   });
 });

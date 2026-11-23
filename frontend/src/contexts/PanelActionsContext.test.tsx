@@ -463,6 +463,267 @@ describe('PanelActionsContext image preview', () => {
       'data:image/png;base64,AAAA'
     );
   });
+
+  it('opens image preview in the visible tab bar with the fewest tabs instead of revealing a hidden welcome editor column', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const api = createDockview(container, {
+      createComponent: () => ({
+        element: document.createElement('div'),
+        init: () => {},
+        dispose: () => {},
+      }),
+    });
+    api.layout(1200, 600, true);
+
+    const hiddenWelcome = api.addPanel({
+      id: PANEL_IDS.WELCOME,
+      component: PANEL_IDS.WELCOME,
+      title: 'Welcome',
+    });
+    const hiddenEditorGroup = hiddenWelcome.group;
+    (hiddenEditorGroup as { id: string }).id = 'group-editor-1';
+
+    const busySessionGroup = api.addGroup({
+      id: 'group-right',
+      referencePanel: hiddenWelcome,
+      direction: 'right',
+    });
+    busySessionGroup.element?.setAttribute('data-session-dock', 'true');
+    api.addPanel({
+      id: 'ai-chat:s1',
+      component: PANEL_IDS.AI_CHAT,
+      title: 'Session 1',
+      position: { referenceGroup: busySessionGroup, direction: 'within' },
+    });
+    api.addPanel({
+      id: 'ai-chat:s2',
+      component: PANEL_IDS.AI_CHAT,
+      title: 'Session 2',
+      position: { referenceGroup: busySessionGroup, direction: 'within' },
+    });
+
+    const quietSessionGroup = api.addGroup({
+      id: 'group-right-1',
+      referenceGroup: busySessionGroup,
+      direction: 'right',
+    });
+    quietSessionGroup.element?.setAttribute('data-session-dock', 'true');
+    api.addPanel({
+      id: 'ai-chat:s3',
+      component: PANEL_IDS.AI_CHAT,
+      title: 'Session 3',
+      position: { referenceGroup: quietSessionGroup, direction: 'within' },
+    });
+
+    hiddenEditorGroup.api.setVisible(false);
+    syncDockviewGroupRegistry(api);
+
+    let actions: PanelActions | undefined;
+    function Probe() {
+      actions = usePanelActionsContext();
+      return null;
+    }
+    renderWithQueryClient(
+      <PanelActionsProvider>
+        <Probe />
+      </PanelActionsProvider>
+    );
+    act(() => actions?.setDockviewApi(api as unknown as DockviewApi));
+
+    act(() => {
+      actions?.openImagePreview('data:image/png;base64,BBBB', {
+        title: 'shot.png',
+      });
+    });
+
+    expect(hiddenEditorGroup.api.isVisible).toBe(false);
+    expect(busySessionGroup.panels.map((p) => p.id)).toEqual([
+      'ai-chat:s1',
+      'ai-chat:s2',
+    ]);
+    expect(quietSessionGroup.panels.map((p) => p.id)).toEqual([
+      'ai-chat:s3',
+      expect.stringMatching(/^image:/),
+    ]);
+
+    api.dispose();
+    container.remove();
+  });
+
+  it('chooses the least-populated visible tab bar across both editor and session tab bars', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const api = createDockview(container, {
+      createComponent: () => ({
+        element: document.createElement('div'),
+        init: () => {},
+        dispose: () => {},
+      }),
+    });
+    api.layout(1200, 600, true);
+
+    const firstFile = api.addPanel({
+      id: 'file:a.ts',
+      component: PANEL_IDS.PREVIEW,
+      title: 'a.ts',
+    });
+    const busyEditorGroup = firstFile.group;
+    (busyEditorGroup as { id: string }).id = 'group-editor-1';
+    api.addPanel({
+      id: 'file:b.ts',
+      component: PANEL_IDS.PREVIEW,
+      title: 'b.ts',
+      position: { referenceGroup: busyEditorGroup, direction: 'within' },
+    });
+    api.addPanel({
+      id: 'file:c.ts',
+      component: PANEL_IDS.PREVIEW,
+      title: 'c.ts',
+      position: { referenceGroup: busyEditorGroup, direction: 'within' },
+    });
+
+    const quietSessionGroup = api.addGroup({
+      id: 'group-right',
+      referencePanel: firstFile,
+      direction: 'right',
+    });
+    quietSessionGroup.element?.setAttribute('data-session-dock', 'true');
+    api.addPanel({
+      id: 'ai-chat:s1',
+      component: PANEL_IDS.AI_CHAT,
+      title: 'Session 1',
+      position: { referenceGroup: quietSessionGroup, direction: 'within' },
+    });
+    syncDockviewGroupRegistry(api);
+
+    let actions: PanelActions | undefined;
+    function Probe() {
+      actions = usePanelActionsContext();
+      return null;
+    }
+    renderWithQueryClient(
+      <PanelActionsProvider>
+        <Probe />
+      </PanelActionsProvider>
+    );
+    act(() => actions?.setDockviewApi(api as unknown as DockviewApi));
+
+    act(() => {
+      actions?.openImagePreview('data:image/png;base64,CCCC', {
+        title: 'preview.png',
+      });
+    });
+
+    expect(busyEditorGroup.panels).toHaveLength(3);
+    expect(quietSessionGroup.panels.map((p) => p.id)).toEqual([
+      'ai-chat:s1',
+      expect.stringMatching(/^image:/),
+    ]);
+
+    api.dispose();
+    container.remove();
+  });
+
+  it('removes a hidden or bootstrapped welcome anchor when opening an image with no visible tab bars', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const api = createDockview(container, {
+      createComponent: () => ({
+        element: document.createElement('div'),
+        init: () => {},
+        dispose: () => {},
+      }),
+    });
+    api.layout(1200, 600, true);
+
+    const hiddenWelcome = api.addPanel({
+      id: PANEL_IDS.WELCOME,
+      component: PANEL_IDS.WELCOME,
+      title: 'Welcome',
+    });
+    const hiddenEditorGroup = hiddenWelcome.group;
+    (hiddenEditorGroup as { id: string }).id = 'group-editor-1';
+    hiddenEditorGroup.api.setVisible(false);
+    syncDockviewGroupRegistry(api);
+
+    let actions: PanelActions | undefined;
+    function Probe() {
+      actions = usePanelActionsContext();
+      return null;
+    }
+    renderWithQueryClient(
+      <PanelActionsProvider>
+        <Probe />
+      </PanelActionsProvider>
+    );
+    act(() => actions?.setDockviewApi(api as unknown as DockviewApi));
+
+    act(() => {
+      actions?.openImagePreview('data:image/png;base64,DDDD', {
+        title: 'solo.png',
+      });
+    });
+
+    expect(hiddenEditorGroup.api.isVisible).toBe(true);
+    expect(hiddenEditorGroup.panels.map((p) => p.id)).toEqual([
+      expect.stringMatching(/^image:/),
+    ]);
+    expect(api.getPanel(PANEL_IDS.WELCOME)).toBeUndefined();
+
+    api.dispose();
+    container.remove();
+  });
+
+  it('removes the bootstrapped welcome tab when creating a fresh editor tab bar for an image', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const api = createDockview(container, {
+      createComponent: () => ({
+        element: document.createElement('div'),
+        init: () => {},
+        dispose: () => {},
+      }),
+    });
+    api.layout(1200, 600, true);
+
+    const fileTree = api.addPanel({
+      id: PANEL_IDS.FILE_TREE,
+      component: PANEL_IDS.FILE_TREE,
+      title: 'Files',
+    });
+    (fileTree.group as { id: string }).id = 'group-left';
+    fileTree.group.element?.setAttribute('data-left-dock', 'true');
+    syncDockviewGroupRegistry(api);
+
+    let actions: PanelActions | undefined;
+    function Probe() {
+      actions = usePanelActionsContext();
+      return null;
+    }
+    renderWithQueryClient(
+      <PanelActionsProvider>
+        <Probe />
+      </PanelActionsProvider>
+    );
+    act(() => actions?.setDockviewApi(api as unknown as DockviewApi));
+
+    act(() => {
+      actions?.openImagePreview('data:image/png;base64,EEEE', {
+        title: 'fresh.png',
+      });
+    });
+
+    const editorGroup = api.groups.find((group) => isEditorGroup(group));
+    expect(editorGroup).toBeDefined();
+    expect(editorGroup?.panels.map((p) => p.id)).toEqual([
+      expect.stringMatching(/^image:/),
+    ]);
+    expect(api.getPanel(PANEL_IDS.WELCOME)).toBeUndefined();
+
+    api.dispose();
+    container.remove();
+  });
 });
 
 describe('PanelActionsContext terminal visibility', () => {

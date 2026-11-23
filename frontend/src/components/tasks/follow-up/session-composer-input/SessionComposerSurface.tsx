@@ -39,7 +39,15 @@ import {
   getStructuredHoverToken,
 } from './composerSearch';
 import { getSessionComposerEditable } from './sessionComposerDom';
+import {
+  findPastedTextChipBeforeCaret,
+  isPastedTextTokenElement,
+  PASTED_TEXT_TOKEN_KIND,
+  serializeDomNodeWithTokens,
+} from './pastedTextToken';
+import { PastedTextTokenPreview } from './PastedTextTokenPreview';
 import { PreviewElementTokenTooltip } from './PreviewElementTokenTooltip';
+import type { ActiveComposerHover } from './useSessionComposerHover';
 import type { useComposerAtReferencePanel } from '../useComposerAtReferencePanel';
 
 type ScrollFadeState = 'none' | 'top' | 'bottom' | 'both';
@@ -91,12 +99,17 @@ export function SessionComposerSurface({
   isMaterializingSubmitRef: _isMaterializingSubmitRef,
   onAttachImages,
   handleComposerPaste,
-  activeHoverToken,
+  activeHover,
   elementTokenTooltipId,
   quoteTokenTooltipId,
+  pastedTextTokenTooltipId,
+  showTokenHover,
   cancelHoverHide,
   hideTokenHover,
   setQuoteEditing,
+  onExpandPastedTextChip,
+  onRemovePastedTextChip,
+  onUndoPastedTextChip,
 }: {
   dropZoneRef: RefObject<HTMLDivElement | null>;
   handleDragOver: (event: DragEvent<HTMLDivElement>) => void;
@@ -140,15 +153,17 @@ export function SessionComposerSurface({
     event: ClipboardEvent<HTMLDivElement>,
     text?: string
   ) => boolean;
-  activeHoverToken: {
-    anchor: HTMLElement;
-    token: SessionComposerStructuredToken;
-  } | null;
+  activeHover: ActiveComposerHover | null;
   elementTokenTooltipId: string;
   quoteTokenTooltipId: string;
+  pastedTextTokenTooltipId: string;
+  showTokenHover: (target: EventTarget | null) => void;
   cancelHoverHide: () => void;
   hideTokenHover: (anchor: HTMLElement, delayMs?: number) => void;
   setQuoteEditing?: (editing: boolean) => void;
+  onExpandPastedTextChip?: (anchor: HTMLElement) => void;
+  onRemovePastedTextChip?: (anchor: HTMLElement) => void;
+  onUndoPastedTextChip?: () => boolean;
 }) {
   const { t } = useTranslation('tasks');
   const [scrollFade, setScrollFade] = useState<ScrollFadeState>('none');
@@ -156,12 +171,15 @@ export function SessionComposerSurface({
   useEffect(() => {
     if (!value) {
       setScrollFade((prev) => (prev === 'none' ? prev : 'none'));
-      return;
+      return undefined;
     }
-    const editable = getSessionComposerEditable(composerRootRef.current);
-    if (!editable) return;
-    const next = computeScrollFade(editable);
-    setScrollFade((prev) => (prev === next ? prev : next));
+    const rafId = window.requestAnimationFrame(() => {
+      const editable = getSessionComposerEditable(composerRootRef.current);
+      if (!editable) return;
+      const next = computeScrollFade(editable);
+      setScrollFade((prev) => (prev === next ? prev : next));
+    });
+    return () => window.cancelAnimationFrame(rafId);
   }, [composerRootRef, value]);
 
   const handleEditorScrollCapture = (event: UIEvent<HTMLDivElement>) => {
@@ -184,9 +202,43 @@ export function SessionComposerSurface({
   const handleSurfaceClick = (event: MouseEvent<HTMLDivElement>) => {
     const anchor = getHoverableTokenFromEventTarget(event.target);
     if (!anchor) return;
+    if (anchor.dataset.tokenKind === PASTED_TEXT_TOKEN_KIND) {
+      showTokenHover(anchor);
+      return;
+    }
     const token = getStructuredHoverToken(anchor);
     if (token?.kind === 'quote' && hasQuoteSourceAnchor(token.quote)) {
       jumpToQuoteToken(token);
+    }
+  };
+
+  const handleSurfaceCopy = (event: ClipboardEvent<HTMLDivElement>) => {
+    const editor = getSessionComposerEditable(composerRootRef.current);
+    if (!editor) return;
+
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed && selection.rangeCount > 0) {
+      const range = selection.getRangeAt(0);
+      if (!editor.contains(range.commonAncestorContainer)) return;
+      const fragment = range.cloneContents();
+      if (!fragment.querySelector('[data-pasted-text-token]')) return;
+      event.preventDefault();
+      event.clipboardData?.setData(
+        'text/plain',
+        serializeDomNodeWithTokens(fragment)
+      );
+      return;
+    }
+
+    if (
+      document.activeElement instanceof HTMLElement &&
+      isPastedTextTokenElement(document.activeElement) &&
+      editor.contains(document.activeElement)
+    ) {
+      const raw = document.activeElement.dataset.astryxTokenValue ?? '';
+      if (!raw) return;
+      event.preventDefault();
+      event.clipboardData?.setData('text/plain', raw);
     }
   };
 
@@ -224,6 +276,7 @@ export function SessionComposerSurface({
           tryAcceptPromptSuggestionOnTab(event);
         }}
         onClick={handleSurfaceClick}
+        onCopy={handleSurfaceCopy}
         onScrollCapture={handleEditorScrollCapture}
         onPointerOver={handleTokenPointerOver}
         onPointerOut={handleTokenPointerOut}
@@ -253,7 +306,9 @@ export function SessionComposerSurface({
             className
           )}
           maxRows={7}
-          placeholder={isComposing ? '' : effectivePlaceholder}
+          placeholder={
+            isComposing || value.length > 0 ? '' : effectivePlaceholder
+          }
           label={t('composer.inputLabel')}
           hasHistory={false}
           pasteAsToken={false}
@@ -271,11 +326,36 @@ export function SessionComposerSurface({
             if (tryAcceptPromptSuggestionOnTab(event)) {
               return;
             }
-            if (event.key === 'Backspace' || event.key === 'Delete') {
-              const selection = window.getSelection();
+            if (
+              !disabled &&
+              (event.metaKey || event.ctrlKey) &&
+              !event.shiftKey &&
+              !event.altKey &&
+              event.key.toLowerCase() === 'z'
+            ) {
+              if (onUndoPastedTextChip?.()) {
+                event.preventDefault();
+                return;
+              }
+            }
+            if (
+              !disabled &&
+              (event.key === 'Backspace' || event.key === 'Delete')
+            ) {
               const editor = getSessionComposerEditable(
                 composerRootRef.current
               );
+              if (
+                editor &&
+                document.activeElement instanceof HTMLElement &&
+                isPastedTextTokenElement(document.activeElement) &&
+                editor.contains(document.activeElement)
+              ) {
+                event.preventDefault();
+                onRemovePastedTextChip?.(document.activeElement);
+                return;
+              }
+              const selection = window.getSelection();
               if (
                 editor &&
                 selection &&
@@ -292,6 +372,12 @@ export function SessionComposerSurface({
                       );
                 if (insideToken && editor.contains(insideToken)) {
                   event.preventDefault();
+                  if (
+                    insideToken.dataset.tokenKind === PASTED_TEXT_TOKEN_KIND
+                  ) {
+                    onRemovePastedTextChip?.(insideToken);
+                    return;
+                  }
                   const next = insideToken.nextSibling;
                   if (
                     next?.nodeType === Node.TEXT_NODE &&
@@ -302,6 +388,17 @@ export function SessionComposerSurface({
                   insideToken.remove();
                   editor.dispatchEvent(new Event('input', { bubbles: true }));
                   return;
+                }
+                if (event.key === 'Backspace') {
+                  const precedingPastedChip = findPastedTextChipBeforeCaret(
+                    editor,
+                    range
+                  );
+                  if (precedingPastedChip) {
+                    event.preventDefault();
+                    onRemovePastedTextChip?.(precedingPastedChip);
+                    return;
+                  }
                 }
               }
             }
@@ -343,37 +440,68 @@ export function SessionComposerSurface({
           onPaste={handleComposerPaste}
           data-testid="session-composer-editor"
         />
-        {activeHoverToken?.token.kind === 'element' ? (
+        {activeHover?.target.kind === 'structured' &&
+        activeHover.target.token.kind === 'element' ? (
           <PreviewElementTokenTooltip
-            anchor={activeHoverToken.anchor}
+            anchor={activeHover.anchor}
             id={elementTokenTooltipId}
-            token={activeHoverToken.token}
+            token={activeHover.target.token}
           />
         ) : null}
-        {activeHoverToken?.token.kind === 'quote' ? (
+        {activeHover?.target.kind === 'structured' &&
+        activeHover.target.token.kind === 'quote' ? (
           <QuoteTokenPreview
-            anchor={activeHoverToken.anchor}
+            anchor={activeHover.anchor}
             id={quoteTokenTooltipId}
-            text={activeHoverToken.token.value}
-            quoteMeta={activeHoverToken.token.quote}
+            text={activeHover.target.token.value}
+            quoteMeta={activeHover.target.token.quote}
             onJumpToSource={
-              hasQuoteSourceAnchor(activeHoverToken.token.quote)
-                ? () => jumpToQuoteToken(activeHoverToken.token)
+              hasQuoteSourceAnchor(activeHover.target.token.quote)
+                ? () => {
+                    if (activeHover.target.kind === 'structured') {
+                      jumpToQuoteToken(activeHover.target.token);
+                    }
+                  }
                 : undefined
             }
             onUpdateAnnotation={
               !disabled && onUpdateQuoteAnnotation
-                ? (nextNote) =>
-                    onUpdateQuoteAnnotation(
-                      activeHoverToken.anchor,
-                      activeHoverToken.token.raw,
-                      nextNote
-                    )
+                ? (nextNote) => {
+                    if (activeHover.target.kind === 'structured') {
+                      onUpdateQuoteAnnotation(
+                        activeHover.anchor,
+                        activeHover.target.token.raw,
+                        nextNote
+                      );
+                    }
+                  }
                 : undefined
             }
             onEditingChange={setQuoteEditing}
             onPointerEnter={cancelHoverHide}
-            onPointerLeave={() => hideTokenHover(activeHoverToken.anchor, 120)}
+            onPointerLeave={() => hideTokenHover(activeHover.anchor, 120)}
+          />
+        ) : null}
+        {activeHover?.target.kind === 'pasted_text' ? (
+          <PastedTextTokenPreview
+            anchor={activeHover.anchor}
+            id={pastedTextTokenTooltipId}
+            text={activeHover.target.text}
+            lineCount={activeHover.target.lineCount}
+            charCount={activeHover.target.charCount}
+            disabled={disabled}
+            onExpand={
+              onExpandPastedTextChip
+                ? () => onExpandPastedTextChip(activeHover.anchor)
+                : undefined
+            }
+            onRemove={
+              onRemovePastedTextChip
+                ? () => onRemovePastedTextChip(activeHover.anchor)
+                : undefined
+            }
+            onPointerEnter={cancelHoverHide}
+            onPointerLeave={() => hideTokenHover(activeHover.anchor, 120)}
           />
         ) : null}
       </div>

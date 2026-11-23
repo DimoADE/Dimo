@@ -1,17 +1,31 @@
-import { memo, useCallback, useMemo } from 'react';
 import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from 'react';
+import {
+  Check,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Eye,
   Folder,
   FolderGit2,
   GitBranch as GitBranchIcon,
+  Loader2,
+  Search,
+  X,
 } from 'lucide-react';
-import {
-  Selector,
-  SelectorOption,
-  type SelectorOptionData,
-  type SelectorOptionType,
-} from '@astryxdesign/core/Selector';
 import type { GitBranch, GitWorktreeInfo, Workspace } from 'shared/types';
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover';
 import i18n from '@/i18n';
 
 export type GitDiffTarget =
@@ -191,11 +205,17 @@ export function buildDirectoryBranchGroups({
   return groups;
 }
 
-interface OptionMetadata {
-  target: GitDiffTarget;
-  group: DirectoryBranchGroup;
-  collapsed: boolean;
-}
+type VisibleEntry =
+  | {
+      kind: 'directory';
+      group: DirectoryBranchGroup;
+    }
+  | {
+      kind: 'option';
+      target: GitDiffTarget;
+      group: DirectoryBranchGroup;
+      showDirectoryHint: boolean;
+    };
 
 function getTriggerLabel(target: GitDiffTarget, detachedLabel: string): string {
   const branchText = target.branch ?? detachedLabel;
@@ -206,6 +226,24 @@ function getTriggerLabel(target: GitDiffTarget, detachedLabel: string): string {
     return `${branchText} · ${target.directoryLabel}`;
   }
   return branchText;
+}
+
+function matchesSearchQuery(
+  target: GitDiffTarget,
+  group: DirectoryBranchGroup,
+  detachedLabel: string,
+  query: string
+): boolean {
+  const haystack = [
+    target.branch ?? detachedLabel,
+    target.directoryLabel,
+    group.directoryLabel,
+    group.path ?? '',
+    getTriggerLabel(target, detachedLabel),
+  ]
+    .join(' ')
+    .toLowerCase();
+  return haystack.includes(query);
 }
 
 interface GitWorktreeBranchSelectorProps {
@@ -223,165 +261,466 @@ export const GitWorktreeBranchSelector = memo(
     isLoading = false,
   }: GitWorktreeBranchSelectorProps) {
     const detachedLabel = i18n.t('panels:ui.git.detachedHead');
+    const [open, setOpen] = useState(false);
+    const [search, setSearch] = useState('');
+    const [activeGroupId, setActiveGroupId] = useState<string | null>(null);
+    const [highlightedIndex, setHighlightedIndex] = useState(-1);
+    const searchInputRef = useRef<HTMLInputElement>(null);
 
-    const { selectorOptions, metaById, totalOptions } = useMemo(() => {
-      const options: SelectorOptionType[] = [];
-      const map = new Map<string, OptionMetadata>();
-      let count = 0;
+    const activeGroup = useMemo(
+      () =>
+        activeGroupId
+          ? (groups.find((group) => group.id === activeGroupId) ?? null)
+          : null,
+      [activeGroupId, groups]
+    );
 
-      for (const group of groups) {
-        if (group.collapsed && group.options.length === 1) {
-          const target = group.options[0];
-          map.set(target.id, { target, group, collapsed: true });
-          options.push({
-            value: target.id,
-            label: getTriggerLabel(target, detachedLabel),
-          });
-          count += 1;
-          continue;
-        }
+    const totalOptions = useMemo(
+      () => groups.reduce((sum, group) => sum + group.options.length, 0),
+      [groups]
+    );
+    const showSearch = totalOptions > 6;
+    const normalizedQuery = search.trim().toLowerCase();
 
-        const sectionOptions: SelectorOptionData[] = group.options.map(
-          (target) => {
-            map.set(target.id, { target, group, collapsed: false });
-            count += 1;
-            return {
-              value: target.id,
-              label: getTriggerLabel(target, detachedLabel),
-            };
-          }
-        );
-
-        const sectionTitle = group.isExternal
-          ? `${group.directoryLabel} (${i18n.t('panels:ui.git.externalWorktree')})`
-          : group.directoryLabel;
-
-        options.push({
-          type: 'section',
-          title: sectionTitle,
-          options: sectionOptions,
-        });
+    const visibleEntries = useMemo<VisibleEntry[]>(() => {
+      // Level 2: branches inside the clicked directory
+      if (activeGroup) {
+        return activeGroup.options
+          .filter(
+            (target) =>
+              !normalizedQuery ||
+              matchesSearchQuery(
+                target,
+                activeGroup,
+                detachedLabel,
+                normalizedQuery
+              )
+          )
+          .map((target) => ({
+            kind: 'option',
+            target,
+            group: activeGroup,
+            showDirectoryHint: false,
+          }));
       }
 
-      return {
-        selectorOptions: options,
-        metaById: map,
-        totalOptions: count,
-      };
-    }, [groups, detachedLabel]);
-
-    const handleChange = useCallback(
-      (nextId: string) => {
-        const meta = metaById.get(nextId);
-        if (meta) {
-          onSelectTarget(meta.target);
-        }
-      },
-      [metaById, onSelectTarget]
-    );
-
-    const renderOption = useCallback(
-      (option: SelectorOptionData) => {
-        const meta = metaById.get(option.value);
-        if (!meta) {
-          return (
-            <SelectorOption
-              label={
-                <span className="text-[11px] font-normal">
-                  {option.label ?? option.value}
-                </span>
-              }
-            />
-          );
-        }
-
-        const { target, group, collapsed } = meta;
-        const branchText = target.branch ?? detachedLabel;
-
-        if (collapsed) {
-          return (
-            <SelectorOption
-              icon={
-                group.isMain ? (
-                  <Folder className="h-3 w-3" />
-                ) : (
-                  <FolderGit2 className="h-3 w-3" />
-                )
-              }
-              label={
-                <span className="font-mono text-[11px] font-normal">
-                  {branchText}
-                </span>
-              }
-              description={
-                group.isMain ? undefined : (
-                  <span className="text-[10px] text-muted-foreground">
-                    {group.directoryLabel}
-                    {group.isExternal
-                      ? ` · ${i18n.t('panels:ui.git.externalWorktree')}`
-                      : ''}
-                  </span>
-                )
-              }
-            />
-          );
-        }
-
-        const isReadOnly = target.kind === 'branch';
-        return (
-          <SelectorOption
-            icon={
-              isReadOnly ? (
-                <Eye className="h-3 w-3" />
-              ) : (
-                <GitBranchIcon className="h-3 w-3" />
-              )
+      // Global search from Level 1: filter directly across all targets
+      if (normalizedQuery) {
+        const matches: VisibleEntry[] = [];
+        for (const group of groups) {
+          for (const target of group.options) {
+            if (
+              matchesSearchQuery(target, group, detachedLabel, normalizedQuery)
+            ) {
+              matches.push({
+                kind: 'option',
+                target,
+                group,
+                showDirectoryHint: groups.length > 1 || !group.isMain,
+              });
             }
-            label={
-              <span className="font-mono text-[11px] font-normal">
-                {branchText}
-              </span>
-            }
-            endContent={
-              isReadOnly ? (
-                <span className="text-[10px] text-muted-foreground">
-                  {i18n.t('panels:ui.git.readOnlyBranchDiff')}
-                </span>
-              ) : undefined
-            }
-          />
+          }
+        }
+        return matches;
+      }
+
+      // Level 1: directory list (multi-branch directories open Level 2 on click; single-branch worktrees select directly)
+      return groups
+        .filter((group) => group.options.length > 0)
+        .map((group) =>
+          group.collapsed && group.options.length === 1
+            ? {
+                kind: 'option',
+                target: group.options[0],
+                group,
+                showDirectoryHint: !group.isMain,
+              }
+            : {
+                kind: 'directory',
+                group,
+              }
         );
+    }, [activeGroup, detachedLabel, groups, normalizedQuery]);
+
+    useEffect(() => {
+      if (!open) return;
+      if (showSearch) {
+        requestAnimationFrame(() => {
+          searchInputRef.current?.focus();
+        });
+      }
+    }, [open, showSearch, activeGroupId]);
+
+    const handleOpenChange = useCallback((nextOpen: boolean) => {
+      setOpen(nextOpen);
+      if (!nextOpen) {
+        setSearch('');
+        setActiveGroupId(null);
+        setHighlightedIndex(-1);
+      }
+    }, []);
+
+    const handleSelect = useCallback(
+      (target: GitDiffTarget) => {
+        onSelectTarget(target);
+        handleOpenChange(false);
       },
-      [metaById, detachedLabel]
+      [onSelectTarget, handleOpenChange]
     );
 
-    const startIcon =
-      selectedTarget?.kind === 'branch' ? (
-        <Eye className="h-3 w-3" />
-      ) : (
-        <GitBranchIcon className="h-3 w-3" />
+    const handleEnterDirectory = useCallback((groupId: string) => {
+      setActiveGroupId(groupId);
+      setSearch('');
+      setHighlightedIndex(0);
+    }, []);
+
+    const handleBackToDirectories = useCallback(() => {
+      setActiveGroupId(null);
+      setSearch('');
+      setHighlightedIndex(-1);
+    }, []);
+
+    const handleKeyDown = useCallback(
+      (event: KeyboardEvent<HTMLDivElement>) => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          handleOpenChange(false);
+          return;
+        }
+        if (event.key === 'ArrowLeft' && activeGroup && search.length === 0) {
+          event.preventDefault();
+          handleBackToDirectories();
+          return;
+        }
+        if (visibleEntries.length === 0) return;
+
+        if (event.key === 'ArrowDown') {
+          event.preventDefault();
+          setHighlightedIndex((prev) =>
+            prev < 0 ? 0 : (prev + 1) % visibleEntries.length
+          );
+        } else if (event.key === 'ArrowUp') {
+          event.preventDefault();
+          setHighlightedIndex((prev) =>
+            prev <= 0 ? visibleEntries.length - 1 : prev - 1
+          );
+        } else if (event.key === 'ArrowRight' && highlightedIndex >= 0) {
+          const entry = visibleEntries[highlightedIndex];
+          if (entry?.kind === 'directory') {
+            event.preventDefault();
+            handleEnterDirectory(entry.group.id);
+          }
+        } else if (event.key === 'Enter' && highlightedIndex >= 0) {
+          const entry = visibleEntries[highlightedIndex];
+          if (!entry) return;
+          event.preventDefault();
+          if (entry.kind === 'directory') {
+            handleEnterDirectory(entry.group.id);
+          } else {
+            handleSelect(entry.target);
+          }
+        }
+      },
+      [
+        activeGroup,
+        handleBackToDirectories,
+        handleEnterDirectory,
+        handleOpenChange,
+        handleSelect,
+        highlightedIndex,
+        search.length,
+        visibleEntries,
+      ]
+    );
+
+    const triggerLabel = selectedTarget
+      ? getTriggerLabel(selectedTarget, detachedLabel)
+      : detachedLabel;
+
+    const startIcon = isLoading ? (
+      <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />
+    ) : selectedTarget?.kind === 'branch' ? (
+      <Eye className="h-3 w-3 shrink-0 text-muted-foreground" />
+    ) : (
+      <GitBranchIcon className="h-3 w-3 shrink-0 text-muted-foreground" />
+    );
+
+    const readOnlyLabel = i18n.t('panels:ui.git.readOnlyBranchDiff');
+    const worktreeLabel = i18n.t('panels:ui.git.externalWorktree');
+
+    const renderDirectoryRow = (
+      group: DirectoryBranchGroup,
+      entryIndex: number
+    ) => {
+      const selectedInGroup = group.options.find(
+        (option) => option.id === selectedTarget?.id
       );
+      const summaryBranch =
+        selectedInGroup?.branch ?? group.options[0]?.branch ?? detachedLabel;
+      const isHighlighted = entryIndex === highlightedIndex;
+      const stateClass = isHighlighted
+        ? 'bg-accent text-foreground'
+        : selectedInGroup
+          ? 'bg-accent/60 text-foreground'
+          : 'text-foreground hover:bg-accent/60';
+
+      return (
+        <button
+          key={group.id}
+          type="button"
+          role="option"
+          aria-selected={Boolean(selectedInGroup)}
+          aria-haspopup="listbox"
+          data-testid={`git-dir-group-${group.id}`}
+          onMouseEnter={() => setHighlightedIndex(entryIndex)}
+          onClick={() => handleEnterDirectory(group.id)}
+          className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors ${stateClass}`}
+        >
+          {group.isMain ? (
+            <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          ) : (
+            <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          )}
+          <span className="min-w-0 flex-1">
+            <span
+              className="block truncate text-[11px] font-medium leading-snug"
+              title={group.directoryLabel}
+            >
+              {group.directoryLabel}
+            </span>
+            <span
+              className="block truncate font-mono text-[10px] leading-tight text-muted-foreground"
+              title={summaryBranch}
+            >
+              {summaryBranch}
+            </span>
+          </span>
+          <span className="ml-auto flex shrink-0 items-center gap-1.5">
+            {!group.isMain && (
+              <span className="rounded bg-muted/70 px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+                {worktreeLabel}
+              </span>
+            )}
+            <span className="text-[10px] tabular-nums text-muted-foreground">
+              {group.options.length}
+            </span>
+            <ChevronRight
+              aria-hidden="true"
+              className="h-3 w-3 shrink-0 text-muted-foreground"
+            />
+          </span>
+        </button>
+      );
+    };
+
+    const renderOptionRow = (
+      entry: Extract<VisibleEntry, { kind: 'option' }>,
+      entryIndex: number
+    ) => {
+      const { target, group, showDirectoryHint } = entry;
+      const branchText = target.branch ?? detachedLabel;
+      const isSelected = selectedTarget?.id === target.id;
+      const isHighlighted = entryIndex === highlightedIndex;
+      const isReadOnly = target.kind === 'branch';
+      const isCollapsedWorktree = !activeGroup && !normalizedQuery;
+
+      const stateClass = isHighlighted
+        ? 'bg-accent text-foreground'
+        : isSelected
+          ? 'bg-accent/70 text-foreground'
+          : 'text-foreground hover:bg-accent/60';
+
+      return (
+        <button
+          key={target.id}
+          type="button"
+          role="option"
+          aria-selected={isSelected}
+          onMouseEnter={() => setHighlightedIndex(entryIndex)}
+          onClick={() => handleSelect(target)}
+          className={`flex w-full items-center gap-2 rounded-md px-2 py-1 text-left transition-colors ${stateClass}`}
+        >
+          {isCollapsedWorktree ? (
+            group.isMain ? (
+              <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            ) : (
+              <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            )
+          ) : isReadOnly ? (
+            <Eye className="h-3 w-3 shrink-0 text-muted-foreground" />
+          ) : (
+            <GitBranchIcon className="h-3 w-3 shrink-0 text-primary" />
+          )}
+          <span className="min-w-0 flex-1">
+            <span
+              className="block truncate font-mono text-[11px] leading-snug"
+              title={branchText}
+            >
+              {branchText}
+            </span>
+            {showDirectoryHint && (
+              <span
+                className="block truncate text-[10px] leading-tight text-muted-foreground"
+                title={group.directoryLabel}
+              >
+                {group.directoryLabel}
+              </span>
+            )}
+          </span>
+          <span className="ml-auto flex shrink-0 items-center gap-1.5">
+            {isReadOnly && (
+              <span className="rounded bg-muted/70 px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+                {readOnlyLabel}
+              </span>
+            )}
+            {!isReadOnly && !group.isMain && (
+              <span className="rounded bg-muted/70 px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+                {worktreeLabel}
+              </span>
+            )}
+            <span
+              aria-hidden="true"
+              className="flex h-3.5 w-3.5 shrink-0 items-center justify-center"
+            >
+              {isSelected && <Check className="h-3 w-3 text-primary" />}
+            </span>
+          </span>
+        </button>
+      );
+    };
 
     return (
       <div className="min-w-0 flex-1">
-        <Selector
-          label={i18n.t('panels:ui.git.selectDirectoryOrBranch')}
-          isLabelHidden
-          size="sm"
-          width="100%"
-          placement="below"
-          className="git-branch-selector"
-          data-testid="git-worktree-branch-selector"
-          options={selectorOptions}
-          value={selectedTarget?.id}
-          onChange={handleChange}
-          isLoading={isLoading}
-          placeholder={detachedLabel}
-          startIcon={startIcon}
-          hasSearch={totalOptions > 6}
-          searchPlaceholder={i18n.t('panels:ui.git.filterBranches')}
-          renderOption={renderOption}
-        />
+        <Popover open={open} onOpenChange={handleOpenChange}>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              data-testid="git-worktree-branch-selector"
+              aria-label={i18n.t('panels:ui.git.selectDirectoryOrBranch')}
+              aria-expanded={open}
+              aria-haspopup="listbox"
+              title={triggerLabel}
+              className={`astryx-selector git-branch-selector inline-flex h-6 w-full min-w-0 items-center gap-1.5 rounded-full border px-2 text-[11px] transition-colors ${
+                open
+                  ? 'border-primary/50 bg-accent/60 text-foreground'
+                  : 'border-border/60 bg-background/70 text-foreground hover:border-border hover:bg-accent/50'
+              }`}
+            >
+              {startIcon}
+              <span className="min-w-0 flex-1 truncate text-left font-mono leading-none">
+                {triggerLabel}
+              </span>
+              <ChevronDown
+                aria-hidden="true"
+                className={`h-3 w-3 shrink-0 text-muted-foreground transition-transform ${
+                  open ? 'rotate-180' : ''
+                }`}
+              />
+            </button>
+          </PopoverTrigger>
+
+          <PopoverContent
+            align="start"
+            sideOffset={4}
+            onKeyDown={handleKeyDown}
+            className="w-[310px] max-w-[min(360px,calc(100vw-24px))] overflow-hidden p-0"
+          >
+            {activeGroup && (
+              <div className="flex items-center gap-1.5 border-b border-border/40 px-2 py-1.5">
+                <button
+                  type="button"
+                  data-testid="git-branch-selector-back"
+                  aria-label={i18n.t('panels:ui.git.backToDirectories')}
+                  onClick={handleBackToDirectories}
+                  className="inline-flex min-w-0 flex-1 items-center gap-1.5 rounded-sm px-1 py-0.5 text-left text-[11px] font-medium text-foreground transition-colors hover:bg-accent/60"
+                >
+                  <ChevronLeft className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  {activeGroup.isMain ? (
+                    <Folder className="h-3 w-3 shrink-0 text-muted-foreground" />
+                  ) : (
+                    <FolderGit2 className="h-3 w-3 shrink-0 text-muted-foreground" />
+                  )}
+                  <span className="truncate">{activeGroup.directoryLabel}</span>
+                </button>
+                {!activeGroup.isMain && (
+                  <span className="shrink-0 rounded bg-muted/70 px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+                    {worktreeLabel}
+                  </span>
+                )}
+                <span className="shrink-0 pr-1 text-[10px] tabular-nums text-muted-foreground">
+                  {visibleEntries.length}
+                </span>
+              </div>
+            )}
+
+            {showSearch && (
+              <div className="border-b border-border/40 px-2 py-1.5">
+                <div
+                  data-control-frame="true"
+                  className="flex h-7 items-center gap-1.5 rounded-md border border-border/60 bg-background/60 px-2 transition-colors focus-within:border-primary/60"
+                >
+                  <Search className="h-3 w-3 shrink-0 text-muted-foreground" />
+                  <input
+                    ref={searchInputRef}
+                    type="text"
+                    value={search}
+                    onChange={(event) => {
+                      setSearch(event.target.value);
+                      setHighlightedIndex(0);
+                    }}
+                    aria-label={i18n.t('panels:ui.git.filterBranches')}
+                    placeholder={i18n.t('panels:ui.git.filterBranches')}
+                    className="h-full min-w-0 flex-1 rounded-none border-0 bg-transparent p-0 pl-0.5 text-[11px] leading-normal text-foreground shadow-none placeholder:text-[11px] placeholder:text-muted-foreground focus:outline-none"
+                  />
+                  {search.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSearch('');
+                        setHighlightedIndex(-1);
+                        searchInputRef.current?.focus();
+                      }}
+                      aria-label={i18n.t('panels:ui.git.clearSearch')}
+                      className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    >
+                      <X className="h-2.5 w-2.5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div
+              role="listbox"
+              aria-label={i18n.t('panels:ui.git.selectDirectoryOrBranch')}
+              className="max-h-[280px] overflow-y-auto p-1"
+            >
+              {visibleEntries.length === 0 ? (
+                <div className="px-2 py-4 text-center text-[11px] text-muted-foreground">
+                  {i18n.t('panels:ui.git.noMatchingBranches')}
+                </div>
+              ) : activeGroup ? (
+                <div
+                  role="group"
+                  aria-label={activeGroup.directoryLabel}
+                  className="space-y-0.5"
+                >
+                  {visibleEntries.map((entry, idx) =>
+                    entry.kind === 'option' ? renderOptionRow(entry, idx) : null
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-0.5">
+                  {visibleEntries.map((entry, idx) =>
+                    entry.kind === 'directory'
+                      ? renderDirectoryRow(entry.group, idx)
+                      : renderOptionRow(entry, idx)
+                  )}
+                </div>
+              )}
+            </div>
+          </PopoverContent>
+        </Popover>
       </div>
     );
   }

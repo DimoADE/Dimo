@@ -298,6 +298,102 @@ export function restoreEditorCaretOffset(
   selection.addRange(range);
 }
 
+function buildRestoredTokenElement(
+  token: SessionComposerStructuredToken,
+  sourceLength: number
+): HTMLSpanElement {
+  const element = document.createElement('span');
+  element.setAttribute('data-astryx-token', '');
+  element.setAttribute('data-astryx-token-value', token.raw);
+  element.setAttribute('data-astryx-token-source-length', String(sourceLength));
+  element.setAttribute('data-astryx-restored-token', '');
+  element.contentEditable = 'false';
+  appendSessionComposerTokenContents(element, token);
+  decorateStructuredTokenElement(element, token);
+  return element;
+}
+
+function collectNonTokenTextNodes(root: Node, out: Text[]): void {
+  for (const child of Array.from(root.childNodes)) {
+    if (child.nodeType === Node.TEXT_NODE) {
+      out.push(child as Text);
+      continue;
+    }
+    if (child instanceof HTMLElement) {
+      if (child.hasAttribute('data-astryx-token')) continue;
+      collectNonTokenTextNodes(child, out);
+    }
+  }
+}
+
+function reconcileTokensPreservingPastedChips(
+  editor: HTMLElement,
+  bareAgentMentions?: Array<{ agent_kind: string; display_name: string }>,
+  savedCaretOffset?: number | null,
+  spaceMembers?: AtReferenceMember[]
+): void {
+  const options = { bareAgentMentions, spaceMembers };
+
+  for (const tokenEl of Array.from(
+    editor.querySelectorAll<HTMLElement>(
+      '[data-astryx-token]:not([data-token-kind="pasted_text"])'
+    )
+  )) {
+    const raw =
+      tokenEl.dataset.astryxTokenValue ||
+      tokenEl.getAttribute('data-astryx-token') ||
+      '';
+    if (!raw) continue;
+    const matched = getSessionComposerStructuredTokenSegments(
+      raw,
+      options
+    ).find((segment) => segment.kind === 'token');
+    if (matched?.kind === 'token') {
+      tokenEl.setAttribute(
+        'data-astryx-token-source-length',
+        String(matched.end - matched.start)
+      );
+      decorateStructuredTokenElement(tokenEl, matched.token);
+    }
+  }
+
+  const textNodes: Text[] = [];
+  collectNonTokenTextNodes(editor, textNodes);
+  const candidateNodes = textNodes.filter((node) =>
+    mayContainStructuredComposerToken(node.textContent ?? '', options)
+  );
+  if (candidateNodes.length === 0) return;
+
+  const wasFocused = document.activeElement === editor;
+  const caretOffset = wasFocused
+    ? (savedCaretOffset ?? getEditorCaretOffset(editor))
+    : null;
+  let mutated = false;
+
+  for (const textNode of candidateNodes) {
+    const text = textNode.textContent ?? '';
+    const segments = getSessionComposerStructuredTokenSegments(text, options);
+    if (!segments.some((segment) => segment.kind === 'token')) continue;
+
+    const fragment = document.createDocumentFragment();
+    for (const segment of segments) {
+      if (segment.kind === 'text') {
+        appendPlainTextWithLineBreaks(fragment, segment.text);
+        continue;
+      }
+      fragment.append(
+        buildRestoredTokenElement(segment.token, segment.end - segment.start)
+      );
+    }
+    textNode.replaceWith(fragment);
+    mutated = true;
+  }
+
+  if (mutated && wasFocused) {
+    restoreEditorCaretOffset(editor, caretOffset);
+  }
+}
+
 export function restoreStructuredTokens(
   composerRoot: HTMLDivElement,
   value: string,
@@ -305,6 +401,19 @@ export function restoreStructuredTokens(
   savedCaretOffset?: number | null,
   spaceMembers?: AtReferenceMember[]
 ): void {
+  const editor = getSessionComposerEditable(composerRoot);
+  if (!editor) return;
+
+  if (editor.querySelector('[data-token-kind="pasted_text"]')) {
+    reconcileTokensPreservingPastedChips(
+      editor,
+      bareAgentMentions,
+      savedCaretOffset,
+      spaceMembers
+    );
+    return;
+  }
+
   if (
     !mayContainStructuredComposerToken(value, {
       bareAgentMentions,
@@ -313,8 +422,6 @@ export function restoreStructuredTokens(
   ) {
     return;
   }
-  const editor = getSessionComposerEditable(composerRoot);
-  if (!editor) return;
 
   const segments = getSessionComposerStructuredTokenSegments(value, {
     bareAgentMentions,
@@ -359,18 +466,9 @@ export function restoreStructuredTokens(
       continue;
     }
 
-    const token = document.createElement('span');
-    token.setAttribute('data-astryx-token', '');
-    token.setAttribute('data-astryx-token-value', segment.token.raw);
-    token.setAttribute(
-      'data-astryx-token-source-length',
-      String(segment.end - segment.start)
+    fragment.append(
+      buildRestoredTokenElement(segment.token, segment.end - segment.start)
     );
-    token.setAttribute('data-astryx-restored-token', '');
-    token.contentEditable = 'false';
-    appendSessionComposerTokenContents(token, segment.token);
-    decorateStructuredTokenElement(token, segment.token);
-    fragment.append(token);
   }
   editor.replaceChildren(fragment);
   if (hadPortalTokens) {

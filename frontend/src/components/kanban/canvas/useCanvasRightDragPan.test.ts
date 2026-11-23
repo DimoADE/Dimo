@@ -233,7 +233,7 @@ describe('useCanvasRightDragPan', () => {
     surface.remove();
   });
 
-  it('pans after a right-button drag past the slop', () => {
+  it('pans after a right-button drag past the slop with one coalesced emit per frame', () => {
     const rafQueue: FrameRequestCallback[] = [];
     const rafSpy = vi
       .spyOn(window, 'requestAnimationFrame')
@@ -260,30 +260,38 @@ describe('useCanvasRightDragPan', () => {
         pointer('pointermove', { buttons: 2, clientX: 80, clientY: 52 })
       );
 
-      expect(onRightPan).toHaveBeenCalledTimes(1);
-      expect(onRightPan.mock.calls[0]?.[0]).toMatchObject({ x: 40, y: 12 });
       expect(surface.hasAttribute('data-canvas-panning')).toBe(true);
       expect(surface.hasAttribute('data-canvas-drag-panning')).toBe(true);
       expect(onStateChange).toHaveBeenCalledWith(true);
+      // Queued for the current animation frame — no synchronous leading emit
+      expect(onRightPan).toHaveBeenCalledTimes(0);
 
+      // Additional sample in the same frame coalesces into a single emit
       window.dispatchEvent(
         pointer('pointermove', { buttons: 2, clientX: 90, clientY: 52 })
       );
-      // Coalesced until the next animation frame
-      expect(onRightPan).toHaveBeenCalledTimes(1);
+      expect(rafQueue).toHaveLength(1);
       rafQueue.shift()?.(16);
 
-      expect(onRightPan).toHaveBeenCalledTimes(2);
-      expect(onRightPan.mock.calls.at(-1)?.[0]).toMatchObject({
+      expect(onRightPan).toHaveBeenCalledTimes(1);
+      expect(onRightPan.mock.calls[0]?.[0]).toMatchObject({
         x: 50,
         y: 12,
       });
+      // Does not re-arm an idle rAF loop after flushing
+      expect(rafQueue).toHaveLength(0);
+
+      window.dispatchEvent(
+        pointer('pointermove', { buttons: 2, clientX: 110, clientY: 60 })
+      );
+      rafQueue.shift()?.(32);
+      expect(onRightPan).toHaveBeenCalledTimes(2);
       expect(onRightPan.mock.calls[0]?.[0].gestureId).toBe(
-        onRightPan.mock.calls.at(-1)?.[0].gestureId
+        onRightPan.mock.calls[1]?.[0].gestureId
       );
 
       window.dispatchEvent(
-        pointer('pointerup', { button: 2, clientX: 90, clientY: 52 })
+        pointer('pointerup', { button: 2, clientX: 110, clientY: 60 })
       );
       expect(surface.hasAttribute('data-canvas-panning')).toBe(false);
       expect(surface.hasAttribute('data-canvas-drag-panning')).toBe(false);
@@ -315,7 +323,7 @@ describe('useCanvasRightDragPan', () => {
       surface.dispatchEvent(
         pointer('pointerdown', { button: 2, clientX: 100, clientY: 100 })
       );
-      // Leading-edge move past slop
+      // First move past slop
       window.dispatchEvent(
         pointer('pointermove', { buttons: 2, clientX: 120, clientY: 100 })
       );
@@ -329,6 +337,7 @@ describe('useCanvasRightDragPan', () => {
           clientY: 100,
         })
       );
+      rafQueue.shift()?.(16);
       expect(onRightPan).toHaveBeenCalledTimes(1);
       expect(onRightPan).toHaveBeenLastCalledWith(
         expect.objectContaining({ x: 20, y: 0 })
@@ -347,7 +356,7 @@ describe('useCanvasRightDragPan', () => {
       expect(onRightPan).toHaveBeenCalledTimes(1);
 
       // Flush frame -> single coalesced callback with latest delta
-      rafQueue.shift()?.(16);
+      rafQueue.shift()?.(32);
       expect(onRightPan).toHaveBeenCalledTimes(2);
       expect(onRightPan).toHaveBeenLastCalledWith(
         expect.objectContaining({ x: 60, y: 15 })
@@ -400,23 +409,35 @@ describe('useCanvasRightDragPan', () => {
   });
 
   it('pans over a nopan card so right-drag follow stays identical on empty canvas and cards', () => {
-    const { surface, ref } = mountSurface();
-    const onRightPan = vi.fn();
-    const node = document.createElement('div');
-    node.className = 'nopan';
-    surface.appendChild(node);
-    renderHook(() => useCanvasRightDragPan(ref, undefined, onRightPan));
+    const rafQueue: FrameRequestCallback[] = [];
+    const rafSpy = vi
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation((cb) => {
+        rafQueue.push(cb);
+        return rafQueue.length;
+      });
+    try {
+      const { surface, ref } = mountSurface();
+      const onRightPan = vi.fn();
+      const node = document.createElement('div');
+      node.className = 'nopan';
+      surface.appendChild(node);
+      renderHook(() => useCanvasRightDragPan(ref, undefined, onRightPan));
 
-    node.dispatchEvent(
-      pointer('pointerdown', { button: 2, clientX: 40, clientY: 40 })
-    );
-    window.dispatchEvent(
-      pointer('pointermove', { buttons: 2, clientX: 80, clientY: 80 })
-    );
+      node.dispatchEvent(
+        pointer('pointerdown', { button: 2, clientX: 40, clientY: 40 })
+      );
+      window.dispatchEvent(
+        pointer('pointermove', { buttons: 2, clientX: 80, clientY: 80 })
+      );
+      rafQueue.shift()?.(16);
 
-    expect(onRightPan).toHaveBeenCalled();
-    expect(onRightPan.mock.calls[0]?.[0]).toMatchObject({ x: 40, y: 40 });
-    surface.remove();
+      expect(onRightPan).toHaveBeenCalledTimes(1);
+      expect(onRightPan.mock.calls[0]?.[0]).toMatchObject({ x: 40, y: 40 });
+      surface.remove();
+    } finally {
+      rafSpy.mockRestore();
+    }
   });
 
   it('does not pan from a composer or other interactive control', () => {
@@ -438,19 +459,31 @@ describe('useCanvasRightDragPan', () => {
   });
 
   it('claims the selection overlay so a right drag can pan', () => {
-    const { surface, overlay, ref } = mountSurface();
-    const onRightPan = vi.fn();
-    renderHook(() => useCanvasRightDragPan(ref, undefined, onRightPan));
+    const rafQueue: FrameRequestCallback[] = [];
+    const rafSpy = vi
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation((cb) => {
+        rafQueue.push(cb);
+        return rafQueue.length;
+      });
+    try {
+      const { surface, overlay, ref } = mountSurface();
+      const onRightPan = vi.fn();
+      renderHook(() => useCanvasRightDragPan(ref, undefined, onRightPan));
 
-    overlay.dispatchEvent(
-      pointer('pointerdown', { button: 2, clientX: 40, clientY: 40 })
-    );
-    window.dispatchEvent(
-      pointer('pointermove', { buttons: 2, clientX: 90, clientY: 40 })
-    );
+      overlay.dispatchEvent(
+        pointer('pointerdown', { button: 2, clientX: 40, clientY: 40 })
+      );
+      window.dispatchEvent(
+        pointer('pointermove', { buttons: 2, clientX: 90, clientY: 40 })
+      );
+      rafQueue.shift()?.(16);
 
-    expect(onRightPan).toHaveBeenCalledTimes(1);
-    expect(onRightPan.mock.calls[0]?.[0]).toMatchObject({ x: 50, y: 0 });
-    surface.remove();
+      expect(onRightPan).toHaveBeenCalledTimes(1);
+      expect(onRightPan.mock.calls[0]?.[0]).toMatchObject({ x: 50, y: 0 });
+      surface.remove();
+    } finally {
+      rafSpy.mockRestore();
+    }
   });
 });

@@ -6,6 +6,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import { useLayoutStore } from '@/stores/useLayoutStore';
 import { ADDRESS_HISTORY_KEY } from './addressSuggestions';
+import {
+  resetBrowserElementRackForTests,
+  useBrowserElementRackStore,
+} from './browserElementRack';
 import { setBrowserTabOpenHandler } from './openBrowserTab';
 import {
   elementChipLabel,
@@ -96,6 +100,7 @@ describe('HostBrowserPanel', () => {
     overlayOcclusion.reset();
     requestComposerTokenInsert.mockReset();
     requestComposerImageInsert.mockReset();
+    resetBrowserElementRackForTests();
     window.localStorage.clear();
     setBrowserTabOpenHandler(null);
   });
@@ -925,8 +930,16 @@ describe('HostBrowserPanel', () => {
       )
     );
     const pick = screen.getByRole('button', { name: label('pick') });
+    const pickIcon = pick.querySelector('svg');
+    expect(pickIcon).not.toBeNull();
+    expect(pickIcon?.getAttribute('class')).not.toContain('var(--live-read)');
+
     await user.click(pick);
     expect(pick).toHaveAttribute('aria-pressed', 'true');
+    expect(pick.className).not.toMatch(
+      /(?:^|\s)bg-(?:blue|primary|\[hsl\(var\(--live-read\))/
+    );
+    expect(pickIcon?.getAttribute('class')).toContain('var(--live-read)');
     expect(backendCall).toHaveBeenCalledWith(
       'plugin_invoke_contribution',
       expect.objectContaining({
@@ -960,22 +973,21 @@ describe('HostBrowserPanel', () => {
       });
     }
     await waitFor(() =>
-      expect(requestComposerTokenInsert).toHaveBeenCalledTimes(2)
+      expect(useBrowserElementRackStore.getState().items).toHaveLength(2)
     );
-    expect(requestComposerTokenInsert).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({ label: '@a' })
-    );
-    expect(requestComposerTokenInsert).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({ label: '@button' })
-    );
+    expect(
+      useBrowserElementRackStore.getState().items.map((item) => item.label)
+    ).toEqual(['@a', '@button']);
+    expect(requestComposerTokenInsert).not.toHaveBeenCalled();
+    expect(requestComposerImageInsert).not.toHaveBeenCalled();
     expect(pick).toHaveAttribute('aria-pressed', 'true');
-    expect(backendCall).toHaveBeenCalledWith(
-      'plugin_invoke_contribution',
-      expect.objectContaining({
-        input: expect.objectContaining({ operation: 'pick.cloak' }),
-      })
+    await waitFor(() =>
+      expect(backendCall).toHaveBeenCalledWith(
+        'plugin_invoke_contribution',
+        expect.objectContaining({
+          input: expect.objectContaining({ operation: 'pick.cloak' }),
+        })
+      )
     );
     expect(backendCall).not.toHaveBeenCalledWith(
       'plugin_invoke_contribution',
@@ -985,6 +997,7 @@ describe('HostBrowserPanel', () => {
     );
     await user.click(pick);
     expect(pick).toHaveAttribute('aria-pressed', 'false');
+    expect(pickIcon?.getAttribute('class')).not.toContain('var(--live-read)');
     expect(backendCall).toHaveBeenCalledWith(
       'plugin_invoke_contribution',
       expect.objectContaining({

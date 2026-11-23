@@ -14,6 +14,7 @@ import {
   useSlotContributions,
 } from '@dimoai/plugin-sdk';
 import { useTranslation } from 'react-i18next';
+import { desktopApi } from '@/lib/api/misc';
 import {
   readClipboardViaBridge,
   writeClipboardViaBridge,
@@ -32,6 +33,65 @@ import type {
   OpenProductContextMenuInput,
   ProductContextMenuItem,
 } from './contextMenuTypes';
+
+const DEVELOPER_MODE_CHANGED_EVENT = 'developer-mode-changed';
+
+type DesktopDeveloperState = {
+  isDev: boolean;
+  developerMode: boolean;
+};
+
+function readDesktopDeveloperState(): DesktopDeveloperState {
+  if (typeof window === 'undefined' || !window.dimoDesktop) {
+    return { isDev: false, developerMode: false };
+  }
+  return {
+    isDev: Boolean(window.dimoDesktop.isDev),
+    developerMode: Boolean(window.dimoDesktop.isDeveloperMode?.()),
+  };
+}
+
+function buildDeveloperMenuItems(
+  x: number,
+  y: number,
+  t: (key: string) => string
+): ProductContextMenuItem[] {
+  return [
+    {
+      id: 'reload',
+      label: t('contextMenu.reload'),
+      onSelect: () => {
+        void desktopApi.reloadWindow().catch(() => {
+          window.location.reload();
+        });
+      },
+    },
+    {
+      id: 'force-reload',
+      label: t('contextMenu.forceReload'),
+      onSelect: () => {
+        void desktopApi.forceReloadWindow().catch(() => {
+          window.location.reload();
+        });
+      },
+    },
+    { type: 'separator', id: 'dev-tools-sep' },
+    {
+      id: 'inspect-element',
+      label: t('contextMenu.inspectElement'),
+      onSelect: () => {
+        void desktopApi.inspectElement(x, y).catch(() => undefined);
+      },
+    },
+    {
+      id: 'devtools',
+      label: t('contextMenu.openDevTools'),
+      onSelect: () => {
+        void desktopApi.openDeveloperTools().catch(() => undefined);
+      },
+    },
+  ];
+}
 
 type AppContextMenuValue = {
   open: (input: OpenProductContextMenuInput) => void;
@@ -227,6 +287,9 @@ function withPluginItems(
 export function AppContextMenuHost({ children }: { children: ReactNode }) {
   const { t } = useTranslation('common');
   const [menu, setMenu] = useState<OpenProductContextMenuInput | null>(null);
+  const [desktopDevState, setDesktopDevState] = useState<DesktopDeveloperState>(
+    () => readDesktopDeveloperState()
+  );
   const targetRef = useRef<EventTarget | null>(null);
   const messageMenuContribs = useSlotContributions('message.context-menu');
   const fileTreeMenuContribs = useSlotContributions('file-tree.context-menu');
@@ -234,6 +297,58 @@ export function AppContextMenuHost({ children }: { children: ReactNode }) {
     () => [...messageMenuContribs, ...fileTreeMenuContribs],
     [messageMenuContribs, fileTreeMenuContribs]
   );
+
+  useEffect(() => {
+    const bridge =
+      typeof window !== 'undefined' ? window.dimoDesktop : undefined;
+    if (!bridge) {
+      return;
+    }
+    setDesktopDevState(readDesktopDeveloperState());
+    let cancelled = false;
+    if (typeof bridge.isDeveloperMode !== 'function') {
+      void desktopApi
+        .getDeveloperMode()
+        .then((enabled) => {
+          if (!cancelled) {
+            setDesktopDevState((prev) => ({
+              ...prev,
+              developerMode: Boolean(enabled),
+            }));
+          }
+        })
+        .catch(() => undefined);
+    }
+    let unlisten: (() => void) | null = null;
+    void bridge.events
+      ?.listen?.(DEVELOPER_MODE_CHANGED_EVENT, (payload) => {
+        const enabled =
+          typeof payload === 'object' &&
+          payload !== null &&
+          'enabled' in payload
+            ? Boolean((payload as { enabled?: unknown }).enabled)
+            : Boolean(bridge.isDeveloperMode?.());
+        setDesktopDevState((prev) => ({
+          ...prev,
+          developerMode: enabled,
+        }));
+      })
+      .then((fn) => {
+        if (cancelled) {
+          fn();
+        } else {
+          unlisten = fn;
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
+  const developerMenuEnabled =
+    desktopDevState.isDev || desktopDevState.developerMode;
 
   const close = useCallback(() => setMenu(null), []);
 
@@ -275,6 +390,23 @@ export function AppContextMenuHost({ children }: { children: ReactNode }) {
   useEffect(() => {
     const onCapture = (event: MouseEvent) => {
       event.preventDefault();
+      if (
+        developerMenuEnabled &&
+        event.shiftKey &&
+        !isForbiddenContextMenuTarget(event.target)
+      ) {
+        event.stopPropagation();
+        targetRef.current = event.target;
+        open({
+          x: event.clientX,
+          y: event.clientY,
+          items: withSelectionCopy(
+            buildDeveloperMenuItems(event.clientX, event.clientY, t),
+            event.target,
+            t('contextMenu.copy')
+          ),
+        });
+      }
     };
     const onBubble = (event: MouseEvent) => {
       if (isForbiddenContextMenuTarget(event.target)) {
@@ -294,6 +426,24 @@ export function AppContextMenuHost({ children }: { children: ReactNode }) {
         allPluginMenuContribs,
         event.target
       );
+      if (developerMenuEnabled) {
+        targetRef.current = event.target;
+        const devItems = buildDeveloperMenuItems(
+          event.clientX,
+          event.clientY,
+          t
+        );
+        open({
+          x: event.clientX,
+          y: event.clientY,
+          items: withSelectionCopy(
+            withPluginItems(devItems, pluginItems),
+            event.target,
+            t('contextMenu.copy')
+          ),
+        });
+        return;
+      }
       if (pluginItems.length > 0) {
         targetRef.current = event.target;
         open({
@@ -311,7 +461,43 @@ export function AppContextMenuHost({ children }: { children: ReactNode }) {
       document.removeEventListener('contextmenu', onCapture, true);
       document.removeEventListener('contextmenu', onBubble);
     };
-  }, [allPluginMenuContribs, close, open, t]);
+  }, [allPluginMenuContribs, close, developerMenuEnabled, open, t]);
+
+  useEffect(() => {
+    if (!developerMenuEnabled) {
+      return;
+    }
+    const isMac =
+      typeof navigator !== 'undefined' &&
+      /mac/i.test(navigator.platform || navigator.userAgent);
+    if (isMac) {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        !event.ctrlKey ||
+        event.shiftKey ||
+        event.altKey ||
+        event.metaKey ||
+        event.repeat
+      ) {
+        return;
+      }
+      const isKeyR = event.code === 'KeyR' || event.key.toLowerCase() === 'r';
+      if (!isKeyR || isForbiddenContextMenuTarget(event.target)) {
+        return;
+      }
+      event.preventDefault();
+      void desktopApi.reloadWindow().catch(() => {
+        window.location.reload();
+      });
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [developerMenuEnabled]);
 
   const value = useMemo(
     () => ({ open, close, openSurfaceMenu }),

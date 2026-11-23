@@ -67,13 +67,10 @@ export const CONTACT_ROW_MENU_COPY: ContactRowMenuCopy = {
     return i18n.t('panels:contactRowMenu.copyThreadId');
   },
   get createPulseTrigger() {
-    return i18n.t(
-      'panels:contactRowMenu.createPulseTrigger',
-      'Create Event Trigger…'
-    );
+    return i18n.t('panels:contactRowMenu.createPulseTrigger');
   },
   get schedulePulse() {
-    return i18n.t('panels:contactRowMenu.schedulePulse', 'Schedule Pulse…');
+    return i18n.t('panels:contactRowMenu.schedulePulse');
   },
   get hideFromSidebar() {
     return i18n.t('panels:contactRowMenu.hideFromSidebar');
@@ -186,7 +183,8 @@ export function buildContactRowMenuItems({
       { type: 'separator', id: 'sep-pulse' },
       {
         id: 'create-pulse-trigger',
-        label: copy.createPulseTrigger ?? 'Create Event Trigger…',
+        label:
+          copy.createPulseTrigger ?? CONTACT_ROW_MENU_COPY.createPulseTrigger!,
         icon: Zap,
         onSelect:
           onCreatePulseTrigger ??
@@ -201,7 +199,7 @@ export function buildContactRowMenuItems({
       },
       {
         id: 'schedule-pulse',
-        label: copy.schedulePulse ?? 'Schedule Pulse…',
+        label: copy.schedulePulse ?? CONTACT_ROW_MENU_COPY.schedulePulse!,
         icon: CalendarClock,
         onSelect:
           onSchedulePulse ??

@@ -33,6 +33,7 @@ import {
   isDangerousPermissionsMode,
   presentableSessionModes,
 } from './SessionModeSelector';
+import { resolveComposerPermissionControl } from './ComposerContextFooter';
 import i18n from '@/i18n';
 
 type ConfigRow = {
@@ -177,10 +178,13 @@ export function resolveSessionModelDisplayLabel(
 
 /**
  * A compact, human-readable entry point for the session choices that agents
- * advertise over ACP. The closed state shows only the Agent icon, active
- * model/agent name (with Fast rainbow flow when active), and reasoning effort;
- * the open state preserves one clear action per row and, in the main composer,
- * hosts a left agent-selection rail alongside the selected agent's settings.
+ * advertise over ACP. By default the closed state shows only the Agent icon,
+ * active model/agent name (with Fast rainbow flow when active), and reasoning
+ * effort; callers without a separate permission indicator (such as session
+ * creation) can opt into `showPermissionInSummary` to include the active
+ * permission/mode label. The open state preserves one clear action per row
+ * and, in the main composer, hosts a left agent-selection rail alongside the
+ * selected agent's settings.
  */
 export function SessionSettingsSummary({
   sessionModes,
@@ -200,6 +204,7 @@ export function SessionSettingsSummary({
   agentRail = null,
   providerInstanceConfig = null,
   controlsLoading = false,
+  showPermissionInSummary = false,
 }: {
   sessionModes?: ConversationSessionModesState;
   selectedMode?: string | null;
@@ -218,6 +223,7 @@ export function SessionSettingsSummary({
   agentRail?: SessionAgentRailConfig | null;
   providerInstanceConfig?: SessionProviderInstanceConfig | null;
   controlsLoading?: boolean;
+  showPermissionInSummary?: boolean;
 }) {
   const { t } = useTranslation(['tasks', 'common']);
   const activeModeId = selectedMode ?? sessionModes?.current ?? null;
@@ -381,12 +387,24 @@ export function SessionSettingsSummary({
     (Boolean(onSelectMode) && presentableModes.length > 0) ||
     configRows.length > 0;
 
+  const permissionControl = showPermissionInSummary
+    ? resolveComposerPermissionControl({
+        sessionModes,
+        selectedMode,
+        sessionConfigOptions: options,
+        selectedConfigValues: pending,
+        dangerousOperationsAllowed,
+        defaultTitle: t('sessionModeSelector.title'),
+      })
+    : null;
+
   if (
     !showPersonaOnly &&
     !showAgentRail &&
     !showInstanceRow &&
     !hasSessionControls &&
     summary.length === 0 &&
+    !permissionControl &&
     !resolvedAgentId
   ) {
     return null;
@@ -424,13 +442,27 @@ export function SessionSettingsSummary({
           },
         ]
       : []),
+    ...(permissionControl
+      ? [
+          {
+            key:
+              permissionControl.source === 'mode'
+                ? 'session-mode'
+                : (permissionControl.optionKey ?? 'session-permission'),
+            label: permissionControl.activeLabel,
+            isPrimaryName: false,
+          },
+        ]
+      : []),
   ];
   const summaryText =
     summary.length > 0
       ? summary.map((item) => item.label).join(' · ')
-      : resolvedAgentId
-        ? selectedAgentLabel
-        : '';
+      : permissionControl
+        ? permissionControl.activeLabel
+        : resolvedAgentId
+          ? selectedAgentLabel
+          : '';
   const triggerLabel =
     showPersonaOnly && persona
       ? persona.name

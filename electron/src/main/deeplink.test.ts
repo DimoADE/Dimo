@@ -128,6 +128,10 @@ vi.mock('electron', () => {
 
   return {
     BrowserWindow: BrowserWindowMock,
+    Menu: {
+      buildFromTemplate: vi.fn(() => ({ popup: vi.fn() })),
+      setApplicationMenu: vi.fn(),
+    },
     contextBridge: {
       executeInMainWorld: preloadMocks.executeInMainWorld,
       exposeInMainWorld: preloadMocks.exposeInMainWorld,

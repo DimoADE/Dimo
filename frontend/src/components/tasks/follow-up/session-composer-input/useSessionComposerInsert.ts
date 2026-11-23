@@ -25,6 +25,12 @@ import {
   getCurrentDraggedAnnotatedImage,
   subscribeAnnotatedImageDrag,
 } from '@/components/previews/imagePreviewDrag';
+import {
+  BROWSER_ELEMENT_DROP_EVENT,
+  clearBrowserElementDrag,
+  subscribeBrowserElementDrag,
+  type StagedBrowserElement,
+} from '@/features/host-browser/browserElementRack';
 import { useComposerSelectionStore } from '@/stores/useComposerSelectionStore';
 import { getSessionComposerStructuredTokenSegments } from '../sessionComposerStructuredTokens';
 import { toSessionComposerChatToken } from '../SessionComposerStructuredText';
@@ -101,9 +107,8 @@ export function useSessionComposerInsert({
         );
         return;
       }
-      prepareEmptyComposerForTokenInsert(
-        getSessionComposerEditable(composerRootRef.current)
-      );
+      const editable = getSessionComposerEditable(composerRootRef.current);
+      prepareEmptyComposerForTokenInsert(editable);
       const structured = getSessionComposerStructuredTokenSegments(
         token.value,
         { spaceMembers }
@@ -120,7 +125,11 @@ export function useSessionComposerInsert({
               variant: 'blue',
             }
       );
-      onChange(handle.getValue());
+      if (editable) {
+        editable.dispatchEvent(new Event('input', { bubbles: true }));
+      } else {
+        onChange(handle.getValue());
+      }
     },
     [composerHandleRef, composerRootRef, onChange, spaceMembers]
   );
@@ -320,6 +329,35 @@ export function useSessionComposerInsert({
       handleAnnotatedImageDrop as EventListener
     );
 
+    const handleBrowserElementDrop = (event: Event) => {
+      if (disabled) return;
+      const item = (event as CustomEvent<StagedBrowserElement | null>).detail;
+      if (!item || typeof item.tokenValue !== 'string' || !item.tokenValue) {
+        return;
+      }
+      event.preventDefault();
+      insertStructuredTokenAtCaret({
+        value: item.tokenValue,
+        label: item.label || item.tokenValue,
+      });
+      if (item.imageFile instanceof File) {
+        onAttachImages([prepareImageFileForUpload(item.imageFile)]);
+      } else if (item.imagePromise) {
+        void item.imagePromise
+          .then((file) => {
+            if (!mountedRef.current || !(file instanceof File)) return;
+            onAttachImages([prepareImageFileForUpload(file)]);
+          })
+          .catch(() => undefined);
+      }
+      clearBrowserElementDrag();
+      setComposerDropActive(false);
+    };
+    dropZone.addEventListener(
+      BROWSER_ELEMENT_DROP_EVENT,
+      handleBrowserElementDrop as EventListener
+    );
+
     return () => {
       dropZone.removeEventListener(
         'vibe-file-reference-drop',
@@ -329,10 +367,16 @@ export function useSessionComposerInsert({
         ANNOTATED_IMAGE_DROP_EVENT,
         handleAnnotatedImageDrop as EventListener
       );
+      dropZone.removeEventListener(
+        BROWSER_ELEMENT_DROP_EVENT,
+        handleBrowserElementDrop as EventListener
+      );
     };
   }, [
+    disabled,
     dropZoneRef,
     insertDroppedFileReference,
+    insertStructuredTokenAtCaret,
     onAttachImages,
     setComposerDropActive,
   ]);
@@ -352,6 +396,28 @@ export function useSessionComposerInsert({
       );
     });
   }, [dropZoneRef, setComposerDropActive]);
+
+  useEffect(() => {
+    let wasDragging = false;
+    return subscribeBrowserElementDrag((state) => {
+      if (!state.isDragging) {
+        if (wasDragging) {
+          wasDragging = false;
+          setComposerDropActive(false);
+        }
+        return;
+      }
+      wasDragging = true;
+      const zone = dropZoneRef.current;
+      if (disabled || !zone || !state.pointer) {
+        setComposerDropActive(false);
+        return;
+      }
+      setComposerDropActive(
+        isPointInElement(zone, state.pointer.x, state.pointer.y)
+      );
+    });
+  }, [disabled, dropZoneRef, setComposerDropActive]);
 
   useEffect(() => {
     if (disabled) {

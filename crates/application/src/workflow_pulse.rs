@@ -363,6 +363,7 @@ impl WorkflowAgentDispatcher {
                 mailbox_policy: bot.mailbox_policy,
                 thread_key: topic_key.clone(),
                 event_id,
+                rule_id: None,
                 prompt_text: prompt,
                 status: "queued".to_string(),
                 created_at: now_iso.clone(),

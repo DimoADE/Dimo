@@ -8,7 +8,7 @@ import {
   buildBotPulseProposalSpec,
   buildGroupPulseProposalSpec,
 } from './collaborationPulseEvents';
-import { AssistantDetailsCustomizeTab } from './AssistantDetailsCustomizeTab';
+import { AssistantDetailsTasksTab } from './AssistantDetailsTasksTab';
 import { PulseRuleProposalCard } from './PulseRuleProposalCard';
 import { BotAutomationsPanel } from './BotAutomationsPanel';
 import { GroupPulsePanel } from './GroupPulsePanel';
@@ -23,6 +23,8 @@ vi.mock('@/lib/api/pulse', () => ({
     deleteRule: vi.fn(),
     subscribeThread: vi.fn(),
     unsubscribeThread: vi.fn(),
+    emitEventEnvelope: vi.fn(),
+    promoteObservedCandidate: vi.fn(),
   },
 }));
 
@@ -203,7 +205,7 @@ describe('Collaboration Pulse UI (Track F5 / R4)', () => {
     }
   });
 
-  it('renders BotAutomationsPanel via usePulseDeckSnapshot, surfaces inline error alerts with retry, and propagates workspaceId from AssistantDetailsCustomizeTab', async () => {
+  it('renders BotAutomationsPanel via usePulseDeckSnapshot, surfaces inline error alerts with retry, and propagates workspaceId from AssistantDetailsTasksTab', async () => {
     const user = userEvent.setup();
     const rule = makeSavedRule();
     vi.mocked(pulseApi.deckSnapshot).mockResolvedValue({
@@ -230,7 +232,7 @@ describe('Collaboration Pulse UI (Track F5 / R4)', () => {
     expect(await screen.findByText(rule.spec.name)).toBeInTheDocument();
     expect(pulseApi.listRules).not.toHaveBeenCalled();
 
-    const autoBtn = screen.getByRole('button', { name: 'Auto' });
+    const autoBtn = screen.getByTestId('bot-rule-mode-rule-1-auto');
     await user.click(autoBtn);
 
     // Inline error alert surfaces failure instead of silently swallowing
@@ -247,7 +249,7 @@ describe('Collaboration Pulse UI (Track F5 / R4)', () => {
 
     unmount();
 
-    // Verify AssistantDetailsCustomizeTab passes workspaceId to BotAutomationsPanel
+    // Verify AssistantDetailsTasksTab wraps BotAutomationsPanel and propagates workspaceId
     vi.mocked(collaborationCall).mockResolvedValue({
       config: { agent_id: 'claude-code', workspace_id: 'ws-member-cfg' },
     });
@@ -260,15 +262,13 @@ describe('Collaboration Pulse UI (Track F5 / R4)', () => {
     });
     render(
       <QueryClientProvider client={testQueryClient}>
-        <AssistantDetailsCustomizeTab
-          memberId="bot-1"
-          initialName="Triage Bot"
-          initialAvatar={{ preset: 'spark', color: 'blue' } as never}
-        />
+        <AssistantDetailsTasksTab memberId="bot-1" botName="Triage Bot" />
       </QueryClientProvider>
     );
 
-    await user.click(screen.getByTestId('assistant-details-tab-automations'));
+    expect(
+      screen.getByTestId('collaboration-assistant-details-tasks')
+    ).toHaveClass('collaboration-assistant-details-tasks');
     await user.click(await screen.findByTestId('bot-automations-new-trigger'));
     await user.click(screen.getByTestId('pulse-save-rule-btn'));
 
@@ -356,5 +356,225 @@ describe('Collaboration Pulse UI (Track F5 / R4)', () => {
         'space-core'
       );
     });
+  });
+
+  it('resets PulseRuleProposalCard when switching directly between Event Trigger and Schedule, and supports editing, test trigger, and observed candidate promotion', async () => {
+    const user = userEvent.setup();
+    const baseEventSpec = buildBotPulseProposalSpec({
+      memberId: 'bot-1',
+      botName: 'Triage Bot',
+      sourceKind: 'jira',
+      evalMode: 'observe',
+      description: 'Triage P0 bugs',
+    });
+    const eventRule = makeSavedRule({
+      id: 'rule-event',
+      spec: {
+        ...baseEventSpec,
+        filter: {
+          ...baseEventSpec.filter,
+          sourceKinds: ['jira'],
+          eventTypes: ['jira.issue.updated'],
+          conditions: [
+            { op: 'not_bot_actor' },
+            { op: 'contains', pointer: '/summary', needle: 'P0' },
+          ],
+        },
+        taskMeta: {
+          lastRunStatus: 'failed',
+          lastRunAt: '2026-11-23T10:15:00Z',
+          lastRunSummary: 'Workspace missing',
+        },
+      },
+    });
+    const scheduleRule = makeSavedRule({
+      id: 'rule-cron',
+      nextFireAt: '2026-11-24T01:00:00Z',
+      spec: buildBotPulseProposalSpec({
+        memberId: 'bot-1',
+        botName: 'Triage Bot',
+        sourceKind: 'time_cron',
+        evalMode: 'auto',
+        description: 'Daily standup summary',
+      }),
+    });
+
+    vi.mocked(pulseApi.deckSnapshot).mockResolvedValue({
+      engineActive: true,
+      activeTicketCount: 0,
+      pendingUserInteractionCount: 0,
+      sources: [],
+      rules: [eventRule, scheduleRule],
+      observedCandidates: [
+        {
+          id: 'cand-1',
+          ruleId: 'rule-event',
+          ruleName: eventRule.spec.name,
+          eventId: 'evt-1',
+          sourceKind: 'jira',
+          eventType: 'jira.issue.updated',
+          summary: 'P0 outage detected',
+          occurredAt: '2026-11-23T11:00:00Z',
+          promoted: false,
+        },
+      ],
+      subscriptions: [],
+      pendingInteractions: [],
+    });
+    vi.mocked(pulseApi.saveRule).mockImplementation(async ({ id, spec }) =>
+      makeSavedRule({ id: id ?? 'rule-new', revision: 3, spec })
+    );
+    vi.mocked(pulseApi.emitEventEnvelope).mockImplementation(
+      async (env) => env
+    );
+    vi.mocked(pulseApi.promoteObservedCandidate).mockResolvedValue(undefined);
+
+    render(
+      <BotAutomationsPanel
+        memberId="bot-1"
+        botName="Triage Bot"
+        workspaceId="ws-1"
+      />
+    );
+
+    expect(
+      await screen.findByTestId('bot-pulse-rule-rule-event')
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId('bot-rule-observe-hint-rule-event')
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId('bot-rule-last-run-rule-event')
+    ).toHaveTextContent('Workspace missing');
+    expect(
+      screen.getByTestId('bot-rule-next-fire-rule-cron')
+    ).toBeInTheDocument();
+
+    // 1. Switch directly from Event Trigger to Schedule without canceling first
+    await user.click(screen.getByTestId('bot-automations-new-trigger'));
+    expect(
+      screen.getByTestId('pulse-source-webhook_standard').className
+    ).toContain('bg-primary');
+    await user.click(screen.getByTestId('bot-automations-new-schedule'));
+    expect(screen.getByTestId('pulse-source-time_cron').className).toContain(
+      'bg-primary'
+    );
+    expect(screen.getByLabelText('Cron 表达式')).toBeInTheDocument();
+    const tzInput = screen.getByLabelText('时区') as HTMLInputElement;
+    expect(tzInput.value.trim().length).toBeGreaterThan(0);
+
+    // 2. Edit an existing rule -> passes rule.id on save
+    await user.click(screen.getByTestId('bot-rule-edit-rule-event'));
+    const nameInput = screen.getByLabelText('规则名称');
+    await user.clear(nameInput);
+    await user.type(nameInput, 'Updated P0 Triage');
+    await user.click(screen.getByTestId('pulse-save-rule-btn'));
+    await waitFor(() => {
+      expect(pulseApi.saveRule).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'rule-event',
+          spec: expect.objectContaining({ name: 'Updated P0 Triage' }),
+        })
+      );
+    });
+
+    // 3. Test trigger emits matching envelope for event rule and temporal:{id} for schedule rule
+    await user.click(screen.getByTestId('bot-rule-test-rule-event'));
+    await waitFor(() => {
+      expect(pulseApi.emitEventEnvelope).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: 'jira.issue.updated',
+          source: expect.objectContaining({ kind: 'jira' }),
+          payload: expect.objectContaining({ summary: 'P0' }),
+        })
+      );
+    });
+
+    await user.click(screen.getByTestId('bot-rule-test-rule-cron'));
+    await waitFor(() => {
+      expect(pulseApi.emitEventEnvelope).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: 'pulse.cron.tick',
+          source: expect.objectContaining({
+            kind: 'time_cron',
+            instanceId: 'temporal:rule-cron',
+          }),
+        })
+      );
+    });
+
+    // 4. Switch conversationScope inline
+    await user.click(
+      screen.getByTestId('bot-rule-scope-rule-event-per_thread_topic')
+    );
+    await waitFor(() => {
+      expect(pulseApi.saveRule).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'rule-event',
+          spec: expect.objectContaining({
+            targets: expect.arrayContaining([
+              expect.objectContaining({
+                kind: 'bot',
+                memberId: 'bot-1',
+                conversationScope: 'per_thread_topic',
+              }),
+            ]),
+          }),
+        })
+      );
+    });
+
+    // 5. Promote pending observed candidate inline
+    expect(
+      screen.getByTestId('bot-observed-candidate-cand-1')
+    ).toBeInTheDocument();
+    await user.click(screen.getByTestId('bot-promote-candidate-cand-1'));
+    await waitFor(() => {
+      expect(pulseApi.promoteObservedCandidate).toHaveBeenCalledWith('cand-1');
+    });
+  });
+
+  it('localizes BotAutomationsPanel copy cleanly between zh-CN and en', async () => {
+    const { act } = await import('@testing-library/react');
+    const i18n = (await import('@/i18n')).default;
+    vi.mocked(pulseApi.deckSnapshot).mockResolvedValue({
+      engineActive: true,
+      activeTicketCount: 0,
+      pendingUserInteractionCount: 0,
+      sources: [],
+      rules: [],
+      observedCandidates: [],
+      subscriptions: [],
+      pendingInteractions: [],
+    });
+
+    try {
+      await act(async () => {
+        await i18n.changeLanguage('zh-CN');
+      });
+      render(<BotAutomationsPanel memberId="bot-1" botName="Moxi" />);
+      expect(await screen.findByText('Bot 任务')).toBeInTheDocument();
+      expect(
+        screen.getByTestId('bot-automations-new-trigger')
+      ).toHaveTextContent('事件任务');
+      expect(
+        screen.getByTestId('bot-automations-new-schedule')
+      ).toHaveTextContent('定时任务');
+
+      await act(async () => {
+        await i18n.changeLanguage('en');
+      });
+      expect(screen.getByText('Bot Tasks')).toBeInTheDocument();
+      expect(
+        screen.getByTestId('bot-automations-new-trigger')
+      ).toHaveTextContent('Event Task');
+      expect(
+        screen.getByTestId('bot-automations-new-schedule')
+      ).toHaveTextContent('Scheduled Task');
+    } finally {
+      await act(async () => {
+        await i18n.changeLanguage('zh-CN');
+      });
+    }
   });
 });

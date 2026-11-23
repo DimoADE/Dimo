@@ -161,6 +161,9 @@ export const COPY = {
   get assistantCollectionTab() {
     return i18n.t('panels:collabCopy.assistantCollectionTab');
   },
+  get assistantTasksTab() {
+    return i18n.t('panels:collabCopy.assistantTasksTab');
+  },
   get assistantCustomizeTab() {
     return i18n.t('panels:collabCopy.assistantCustomizeTab');
   },

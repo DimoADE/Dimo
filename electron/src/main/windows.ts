@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import {
   BrowserWindow,
+  Menu,
   nativeImage,
   session,
   type BrowserWindowConstructorOptions,
@@ -189,6 +190,36 @@ export function isDevToolsShortcut(
   return input.control && input.shift && !input.alt && !input.meta;
 }
 
+export function matchReloadShortcut(
+  input: Pick<
+    Input,
+    'type' | 'key' | 'code' | 'control' | 'shift' | 'alt' | 'meta' | 'isAutoRepeat'
+  >,
+  platform: NodeJS.Platform = process.platform
+): 'reload' | 'force-reload' | null {
+  if (input.type !== 'keyDown' || input.isAutoRepeat) {
+    return null;
+  }
+  const isF5 = input.key === 'F5' || input.code === 'F5';
+  if (isF5 && !input.alt && !input.meta) {
+    return input.control || input.shift ? 'force-reload' : 'reload';
+  }
+  const isKeyR = input.code === 'KeyR' || input.key.toLowerCase() === 'r';
+  if (!isKeyR) {
+    return null;
+  }
+  if (platform === 'darwin') {
+    if (input.meta && !input.control && !input.alt) {
+      return input.shift ? 'force-reload' : 'reload';
+    }
+    return null;
+  }
+  if (input.control && input.shift && !input.alt && !input.meta) {
+    return 'force-reload';
+  }
+  return null;
+}
+
 const HIDDEN_SETTINGS_IDLE_DESTROY_MS = 15 * 60_000;
 const RESIZE_NOTIFY_COALESCE_MS = 32;
 
@@ -318,13 +349,21 @@ export class WindowManager {
     return this.trayEnabled;
   }
 
+  isDevSession(): boolean {
+    return Boolean(this.options.devUrl) && !this.options.smokeMode;
+  }
+
   isDeveloperModeEnabled(): boolean {
     return this.developerModeEnabled;
   }
 
+  isDeveloperContextEnabled(): boolean {
+    return this.developerModeEnabled || this.isDevSession();
+  }
+
   applyDeveloperMode(enabled: boolean): void {
     this.developerModeEnabled = enabled;
-    if (!enabled) {
+    if (!this.isDeveloperContextEnabled()) {
       for (const win of this.allWindows()) {
         if (win.webContents.isDevToolsOpened()) {
           win.webContents.closeDevTools();
@@ -906,20 +945,80 @@ export class WindowManager {
       this.options.onWindowClosed?.(label, this.windows.has(label));
     });
 
-    // Gate F12 / Ctrl+Shift+I / Cmd+Option+I on developer mode.
+    // Gate DevTools & reload shortcuts on Dev desktop or developer mode.
     win.webContents.on('before-input-event', (event, input) => {
-      if (!isDevToolsShortcut(input)) {
+      if (isDevToolsShortcut(input, this.platform)) {
+        event.preventDefault();
+        if (!this.isDeveloperContextEnabled()) {
+          return;
+        }
+        if (win.webContents.isDevToolsOpened()) {
+          win.webContents.closeDevTools();
+        } else {
+          win.webContents.openDevTools({ mode: 'detach' });
+        }
         return;
       }
-      event.preventDefault();
-      if (!this.developerModeEnabled) {
+
+      const reloadKind = matchReloadShortcut(input, this.platform);
+      if (reloadKind) {
+        event.preventDefault();
+        if (!this.isDeveloperContextEnabled()) {
+          return;
+        }
+        if (reloadKind === 'force-reload') {
+          win.webContents.reloadIgnoringCache();
+        } else {
+          win.webContents.reload();
+        }
+      }
+    });
+
+    // Fallback native developer context menu when the renderer does not intercept
+    // `contextmenu` (e.g., blank error screen or crashed Vite dev bundle).
+    win.webContents.on('context-menu', (_event, params) => {
+      if (!this.isDeveloperContextEnabled()) {
         return;
       }
-      if (win.webContents.isDevToolsOpened()) {
-        win.webContents.closeDevTools();
-      } else {
-        win.webContents.openDevTools({ mode: 'detach' });
-      }
+      const menu = Menu?.buildFromTemplate?.([
+        {
+          label: 'Reload',
+          click: () => {
+            if (!win.isDestroyed()) {
+              win.webContents.reload();
+            }
+          },
+        },
+        {
+          label: 'Force Reload',
+          click: () => {
+            if (!win.isDestroyed()) {
+              win.webContents.reloadIgnoringCache();
+            }
+          },
+        },
+        { type: 'separator' },
+        {
+          label: 'Inspect Element',
+          click: () => {
+            if (!win.isDestroyed()) {
+              win.webContents.inspectElement(params.x, params.y);
+            }
+          },
+        },
+        {
+          label: 'Toggle Developer Tools',
+          click: () => {
+            if (win.isDestroyed()) return;
+            if (win.webContents.isDevToolsOpened()) {
+              win.webContents.closeDevTools();
+            } else {
+              win.webContents.openDevTools({ mode: 'detach' });
+            }
+          },
+        },
+      ]);
+      menu?.popup?.({ window: win });
     });
 
     // Guard against untrusted popups or top-level navigations away from app origin.

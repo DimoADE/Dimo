@@ -747,6 +747,7 @@ export function SessionCreationForm({
                 providerInstanceConfig={null}
                 disabled={isSubmitting}
                 dropdownSide={dropdownSide}
+                showPermissionInSummary
               />
               {sessionDefaultsChanged ? (
                 <Button

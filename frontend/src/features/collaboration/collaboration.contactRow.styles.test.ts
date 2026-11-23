@@ -240,4 +240,13 @@ describe('collaboration contact row chrome', () => {
     expect(spaceList['margin-right']?.value).toBe('-0.5rem');
     expect(spaceList['padding-right']?.value).toBe('0.5rem');
   });
+
+  it('sizes contact row timestamps to content so bot names do not truncate early', () => {
+    const age = declarationsFor(
+      '.collaboration-contact-row-main .workspace-session-age'
+    );
+    expect(age.width?.value).toBe('auto');
+    expect(age.flex?.value).toBe('0 0 auto');
+    expect(age['white-space']?.value).toBe('nowrap');
+  });
 });

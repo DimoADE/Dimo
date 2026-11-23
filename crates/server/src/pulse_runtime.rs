@@ -85,6 +85,7 @@ impl ServerApplicationDomains {
             let mut interval = tokio::time::interval(Duration::from_secs(15));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             interval.tick().await;
+            let mut after_turn_rx = conversations::subscribe_after_turn_events();
             let mut drain_pending = true;
             loop {
                 let woken = pulse_outbox_wake().notified();
@@ -102,18 +103,38 @@ impl ServerApplicationDomains {
                     drop(host);
                 }
 
-                let outbox_woke = tokio::select! {
-                    _ = interval.tick() => false,
-                    _ = &mut woken => true,
+                enum WakeKind {
+                    Tick,
+                    Outbox,
+                    TurnSettled,
+                }
+
+                let wake_kind = tokio::select! {
+                    _ = interval.tick() => WakeKind::Tick,
+                    _ = &mut woken => WakeKind::Outbox,
+                    turn_evt = after_turn_rx.recv() => match turn_evt {
+                        Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            WakeKind::TurnSettled
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => WakeKind::Tick,
+                    },
                 };
                 let Some(host) = weak.upgrade() else {
                     break;
                 };
                 if host.automation_ownership.current() {
-                    if outbox_woke {
-                        drain_pending = true;
-                    } else if let Err(error) = host.run_pulse_temporal_tick().await {
-                        tracing::warn!(?error, "background Pulse temporal tick failed");
+                    match wake_kind {
+                        WakeKind::Outbox => {
+                            drain_pending = true;
+                        }
+                        WakeKind::TurnSettled => {
+                            host.drain_all_queued_bot_mailboxes().await;
+                        }
+                        WakeKind::Tick => {
+                            if let Err(error) = host.run_pulse_temporal_tick().await {
+                                tracing::warn!(?error, "background Pulse temporal tick failed");
+                            }
+                        }
                     }
                 }
                 drop(host);
@@ -339,17 +360,52 @@ impl ServerApplicationDomains {
             DomainCommand::PulseRuleSetMode => {
                 let payload = unwrap_input(&args);
                 let input: PulseRuleSetModeArgs = decode_args(payload)?;
-                let updated = engine
+                let existing = engine
                     .store()
-                    .set_rule_mode(&input.id, input.eval_mode, &now_iso)
+                    .get_rule(&input.id)
                     .await
                     .map_err(map_sqlx_error)?
                     .ok_or_else(|| {
                         ApplicationError::not_found(format!("pulse rule `{}`", input.id))
                     })?;
-                if input.eval_mode == PulseEvalMode::Off {
+                if input.eval_mode == PulseEvalMode::Auto
+                    && existing.draft_only
+                    && is_untrusted_webhook_principal(principal)
+                {
+                    return Err(ApplicationError::forbidden(
+                        "untrusted webhook principal cannot promote draft rule to Auto",
+                    ));
+                }
+                let next_enabled = input.eval_mode != PulseEvalMode::Off;
+                let promote_draft = next_enabled && !is_untrusted_webhook_principal(principal);
+                let next_fire_owned = if next_enabled
+                    && (!existing.draft_only || promote_draft)
+                    && let Some(temporal) = &existing.spec.temporal
+                {
+                    TemporalEvaluator::compute_next_fire_at(temporal, now)
+                        .map_err(|err| ApplicationError::bad_request(err.to_string()))?
+                        .map(|dt| dt.to_rfc3339())
+                } else {
+                    None
+                };
+                if !next_enabled {
                     engine.disarm_rule_sla(&input.id);
                 }
+                let updated = engine
+                    .store()
+                    .set_rule_mode_with_state(
+                        &input.id,
+                        input.eval_mode,
+                        next_enabled,
+                        promote_draft,
+                        Some(next_fire_owned.as_deref()),
+                        &now_iso,
+                    )
+                    .await
+                    .map_err(map_sqlx_error)?
+                    .ok_or_else(|| {
+                        ApplicationError::not_found(format!("pulse rule `{}`", input.id))
+                    })?;
                 self.emit_pulse_deck_changed();
                 to_json_value(updated)
             }
@@ -426,7 +482,10 @@ impl ServerApplicationDomains {
                     (principal, unwrap_input(&args))
                 };
                 let envelope = build_emitted_envelope(emit_principal, payload, now)?;
-                ensure_sdk_source_exists(engine, &envelope.source.instance_id, &now_iso).await?;
+                if envelope.source.kind == EventSourceKind::SdkCustom {
+                    ensure_sdk_source_exists(engine, &envelope.source.instance_id, &now_iso)
+                        .await?;
+                }
                 let outcome = engine
                     .ingest_event(envelope.clone(), now)
                     .await

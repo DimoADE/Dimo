@@ -1069,6 +1069,16 @@
     color: var(--color-text-purple);
   }
 
+  .legacy-design
+    .session-composer-editor
+    [data-astryx-restored-token][data-token-kind='pasted_text'] {
+    background: var(--surface-control);
+    color: var(--text-primary);
+    border: 1px solid var(--border-subtle);
+    cursor: pointer;
+    max-width: 14rem;
+  }
+
   .legacy-design .session-composer-editor [data-preview-element-token] {
     cursor: help;
     max-width: 5.5rem;

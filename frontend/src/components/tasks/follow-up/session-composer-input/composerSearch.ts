@@ -86,13 +86,26 @@ export function parsePreviewElementTokenDetails(
   return { dom, selector, source, html };
 }
 
+export type ComposerHoverTarget =
+  | {
+      kind: 'structured';
+      token: SessionComposerStructuredToken;
+    }
+  | {
+      kind: 'pasted_text';
+      text: string;
+      lineCount: number;
+      charCount: number;
+    };
+
 export function getHoverableTokenFromEventTarget(
   target: EventTarget | null
 ): HTMLElement | null {
   return target instanceof Element
     ? target.closest<HTMLElement>(
         '[data-astryx-token][data-token-kind="element"],' +
-          ' [data-astryx-token][data-token-kind="quote"]'
+          ' [data-astryx-token][data-token-kind="quote"],' +
+          ' [data-astryx-token][data-token-kind="pasted_text"]'
       )
     : null;
 }
@@ -104,6 +117,25 @@ export function getStructuredHoverToken(
   if (!raw) return null;
   const token = getTokenFromInsertText(raw);
   return token?.kind === 'element' || token?.kind === 'quote' ? token : null;
+}
+
+export function getComposerHoverTarget(
+  element: HTMLElement
+): ComposerHoverTarget | null {
+  if (element.dataset.tokenKind === 'pasted_text') {
+    const text = element.dataset.astryxTokenValue ?? '';
+    if (!text) return null;
+    const lineCount = Number(element.dataset.pastedLineCount) || 1;
+    const charCount = Number(element.dataset.pastedCharCount) || text.length;
+    return {
+      kind: 'pasted_text',
+      text,
+      lineCount,
+      charCount,
+    };
+  }
+  const token = getStructuredHoverToken(element);
+  return token ? { kind: 'structured', token } : null;
 }
 
 export function rectsOverlap(

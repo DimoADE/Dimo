@@ -79,6 +79,7 @@ pub(super) struct BotMailboxRow {
     pub(super) mailbox_policy: String,
     pub(super) thread_key: Option<String>,
     pub(super) event_id: String,
+    pub(super) rule_id: Option<String>,
     pub(super) prompt_text: String,
     pub(super) status: String,
     pub(super) created_at: String,
@@ -137,7 +138,7 @@ pub(super) const SUBSCRIPTION_COLUMNS: &str =
 pub(super) const CANDIDATE_COLUMNS: &str = "id,rule_id,rule_name,event_id,event_type,source_kind,thread_key,\
     summary,envelope_json,occurred_at,promoted";
 pub(super) const MAILBOX_COLUMNS: &str = "id,member_id,conversation_scope,mailbox_policy,thread_key,event_id,\
-    prompt_text,status,created_at,claimed_at";
+    rule_id,prompt_text,status,created_at,claimed_at";
 pub(super) const INTERACTION_COLUMNS: &str = "id,rule_id,workflow_run_id,step_id,kind,severity,title,body,\
     approval_options_json,form_schema_json,resolution_json,status,sla_deadline_at,\
     created_at,resolved_at";
@@ -253,6 +254,7 @@ pub(super) fn parse_mailbox_row(row: BotMailboxRow) -> Result<PulseBotMailboxIte
         mailbox_policy: decode_enum_str(&row.mailbox_policy)?,
         thread_key: row.thread_key,
         event_id: row.event_id,
+        rule_id: row.rule_id,
         prompt_text: row.prompt_text,
         status: row.status,
         created_at: row.created_at,

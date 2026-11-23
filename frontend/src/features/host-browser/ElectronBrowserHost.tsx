@@ -18,6 +18,7 @@ import {
 export function ElectronBrowserHost() {
   const isElectron = hasElectronDesktopRuntime();
   const tabOrder = useElectronBrowserSurfaceStore((state) => state.tabOrder);
+  const tabs = useElectronBrowserSurfaceStore((state) => state.tabs);
 
   useEffect(() => {
     if (!isElectron) {
@@ -33,13 +34,15 @@ export function ElectronBrowserHost() {
     return null;
   }
 
+  const hostedTabIds = tabOrder.filter((tabId) => !tabs[tabId]?.inline);
+
   return (
     <div
       data-testid="electron-browser-host"
-      aria-hidden={tabOrder.length === 0 || undefined}
+      aria-hidden={hostedTabIds.length === 0 || undefined}
       style={{ display: 'contents' }}
     >
-      {tabOrder.map((tabId) => (
+      {hostedTabIds.map((tabId) => (
         <HostedElectronBrowserWebview key={tabId} tabId={tabId} />
       ))}
     </div>

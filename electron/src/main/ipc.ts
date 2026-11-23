@@ -1,6 +1,7 @@
 import { ipcMain, type IpcMainInvokeEvent } from 'electron';
 
 import {
+  DEVELOPER_MODE_CHANGED_EVENT,
   HOST_CLIENT_MUTATING_COMMANDS,
   IPC_CHANNELS,
   SERVER_DESKTOP_COMMANDS,
@@ -132,6 +133,8 @@ export function registerIpcHandlers(context: IpcContext): void {
       backend: sidecar.getConnectionOrNull(),
       sidecarStatus: sidecar.getStatus(),
       gpuMode: getGpuMode?.() ?? 'hardware',
+      developerMode: windows.isDeveloperModeEnabled(),
+      isDev: windows.isDevSession(),
     };
     event.returnValue = payload;
   });
@@ -459,22 +462,74 @@ export function registerIpcHandlers(context: IpcContext): void {
             )
           );
           windows.applyDeveloperMode(persisted);
+          windows.broadcastEvent(DEVELOPER_MODE_CHANGED_EVENT, {
+            enabled: persisted,
+          });
           return persisted;
         }
         case 'open_developer_tools':
         case 'open_devtools': {
-          if (!windows.isDeveloperModeEnabled()) {
+          if (!windows.isDeveloperContextEnabled()) {
             const persisted = Boolean(
               await sidecar
                 .invokeDesktopCommand('get_developer_mode', {}, callerLabel)
                 .catch(() => false)
             );
             windows.applyDeveloperMode(persisted);
-            if (!persisted) {
+            if (!windows.isDeveloperContextEnabled()) {
               throw new Error('Developer mode is off');
             }
           }
           event.sender.openDevTools({ mode: 'detach' });
+          return null;
+        }
+        case 'inspect_element': {
+          if (!windows.isDeveloperContextEnabled()) {
+            const persisted = Boolean(
+              await sidecar
+                .invokeDesktopCommand('get_developer_mode', {}, callerLabel)
+                .catch(() => false)
+            );
+            windows.applyDeveloperMode(persisted);
+            if (!windows.isDeveloperContextEnabled()) {
+              throw new Error('Developer mode is off');
+            }
+          }
+          const rawX = Number(args?.x);
+          const rawY = Number(args?.y);
+          const x = Number.isFinite(rawX) ? Math.round(rawX) : 0;
+          const y = Number.isFinite(rawY) ? Math.round(rawY) : 0;
+          event.sender.inspectElement(x, y);
+          return null;
+        }
+        case 'reload_window': {
+          if (!windows.isDeveloperContextEnabled()) {
+            const persisted = Boolean(
+              await sidecar
+                .invokeDesktopCommand('get_developer_mode', {}, callerLabel)
+                .catch(() => false)
+            );
+            windows.applyDeveloperMode(persisted);
+            if (!windows.isDeveloperContextEnabled()) {
+              throw new Error('Developer mode is off');
+            }
+          }
+          event.sender.reload();
+          return null;
+        }
+        case 'force_reload_window': {
+          if (!windows.isDeveloperContextEnabled()) {
+            const persisted = Boolean(
+              await sidecar
+                .invokeDesktopCommand('get_developer_mode', {}, callerLabel)
+                .catch(() => false)
+            );
+            windows.applyDeveloperMode(persisted);
+            if (!windows.isDeveloperContextEnabled()) {
+              throw new Error('Developer mode is off');
+            }
+          }
+          event.sender.reloadIgnoringCache();
           return null;
         }
         case 'take_pending_model_router_import': {

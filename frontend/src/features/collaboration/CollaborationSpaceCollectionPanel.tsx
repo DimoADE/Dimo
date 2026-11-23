@@ -64,6 +64,7 @@ import {
 } from './MemberBotAvatar';
 import { AssistantDetailsCustomizeTab } from './AssistantDetailsCustomizeTab';
 import { AssistantDetailsSessionTab } from './AssistantDetailsSessionTab';
+import { AssistantDetailsTasksTab } from './AssistantDetailsTasksTab';
 import { GroupAvatar } from './GroupAvatar';
 import {
   COLLABORATION_MEMBERS_CHANGED_EVENT,
@@ -274,6 +275,9 @@ export type SpaceCollectionPanelParams = {
   memberId?: string;
   conversationId?: string;
   memberAvatar?: MemberBotAvatarConfig;
+  initialTab?: 'details' | 'collection' | 'tasks' | 'members' | 'customize';
+  initialTaskCreateKind?: 'event' | 'schedule' | null;
+  navigationNonce?: number;
 };
 
 export function spaceCollectionPreviewPanelId(spaceId: string): string {
@@ -368,11 +372,33 @@ export function CollaborationSpaceCollectionDockviewPanel(
     memberId,
     conversationId,
     memberAvatar,
+    initialTab,
+    initialTaskCreateKind,
+    navigationNonce,
   } = props.params;
   const isAssistant = variant === 'assistant';
   const [detailsTab, setDetailsTab] = useState<
-    'details' | 'collection' | 'members' | 'customize'
-  >(isAssistant ? 'details' : 'members');
+    'details' | 'collection' | 'tasks' | 'members' | 'customize'
+  >(initialTab ?? (isAssistant ? 'details' : 'members'));
+  const [pendingTaskCreate, setPendingTaskCreate] = useState<{
+    kind: 'event' | 'schedule';
+    nonce: number;
+  } | null>(() =>
+    initialTaskCreateKind
+      ? { kind: initialTaskCreateKind, nonce: navigationNonce ?? 0 }
+      : null
+  );
+  useEffect(() => {
+    if (initialTab) {
+      setDetailsTab(initialTab);
+    }
+    if (initialTaskCreateKind) {
+      setPendingTaskCreate({
+        kind: initialTaskCreateKind,
+        nonce: navigationNonce ?? Date.now(),
+      });
+    }
+  }, [initialTab, initialTaskCreateKind, navigationNonce]);
   const [heroName, setHeroName] = useState(spaceName ?? '');
   const [heroAvatar, setHeroAvatar] = useState<MemberBotAvatarConfig | null>(
     memberAvatar ?? null
@@ -1096,6 +1122,7 @@ export function CollaborationSpaceCollectionDockviewPanel(
             ? ([
                 ['details', COPY.assistantDetailsTab],
                 ['collection', COPY.assistantCollectionTab],
+                ['tasks', COPY.assistantTasksTab],
                 ['customize', COPY.assistantCustomizeTab],
               ] as const)
             : ([
@@ -1111,7 +1138,12 @@ export function CollaborationSpaceCollectionDockviewPanel(
               aria-selected={detailsTab === id}
               data-testid={`collaboration-group-details-tab-${id}`}
               className="collaboration-group-details-tab"
-              onClick={() => setDetailsTab(id)}
+              onClick={() => {
+                if (id !== 'tasks') {
+                  setPendingTaskCreate(null);
+                }
+                setDetailsTab(id);
+              }}
             >
               {label}
             </button>
@@ -1133,6 +1165,16 @@ export function CollaborationSpaceCollectionDockviewPanel(
         ) : (
           <GroupDetailsUsageTab spaceId={spaceId} getAvatar={getAvatar} />
         )
+      ) : null}
+
+      {detailsTab === 'tasks' && isAssistant && memberId ? (
+        <AssistantDetailsTasksTab
+          memberId={memberId}
+          botName={heroName || spaceName || ''}
+          workspaceId={workspaceId}
+          initialCreateKind={pendingTaskCreate?.kind ?? null}
+          createRequestNonce={pendingTaskCreate?.nonce}
+        />
       ) : null}
 
       {detailsTab === 'customize' && isAssistant && memberId ? (

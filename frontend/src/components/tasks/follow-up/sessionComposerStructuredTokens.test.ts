@@ -16,6 +16,10 @@ import {
   serializeSessionComposerBackendMessage,
   updateQuoteTokenAnnotation,
 } from './sessionComposerStructuredTokens';
+import {
+  createAgentMentionCodeContextScanner,
+  isAgentMentionCodeContext,
+} from './AgentMention';
 
 describe('session composer structured commands', () => {
   it('formats file, slash, dollar, tag, and plugin action commands with the explicit command contract', () => {
@@ -573,5 +577,61 @@ describe('session composer structured commands', () => {
         bareAgentMentions: [{ agent_kind: 'codex', display_name: 'Codex' }],
       })
     ).toBe(true);
+    expect(
+      mayContainStructuredComposerToken(
+        'const arr = [1, 2, 3]; // [INFO] log line without link'
+      )
+    ).toBe(false);
+  });
+
+  it('matches isAgentMentionCodeContext at every index across fences, indents, and inline backticks', () => {
+    const doc = [
+      'plain text &Codex and `inline &Codex` plus ``double ` &Codex`` text',
+      '    indented &Codex code line',
+      '\ttabbed &Codex code line',
+      '```ts',
+      'const x = "&Codex";',
+      '```   ',
+      'after fence &Codex',
+      '````md',
+      '``` not closed',
+      '&Codex still inside',
+      '```` trailing text does not close',
+      '&Codex still inside 2',
+      '````',
+      '~~~',
+      'tilde fence &Codex',
+      '~~~',
+      'unclosed `backtick &Codex',
+      'next line &Codex',
+    ].join('\n');
+
+    const isCode = createAgentMentionCodeContextScanner(doc);
+    for (let index = 0; index <= doc.length; index += 1) {
+      expect(isCode(index), `mismatch at index ${index}`).toBe(
+        isAgentMentionCodeContext(doc, index)
+      );
+    }
+  });
+
+  it('scans large multi-hundred-line documents with brackets and mentions in linear time', () => {
+    const lines = Array.from(
+      { length: 800 },
+      (_, idx) =>
+        `[2026-11-23 12:00:${String(idx % 60).padStart(2, '0')}] [INFO] worker[0] [tag](https://example.com/${idx}) @user_${idx} &amp;`
+    );
+    const largeDoc = lines.join('\n');
+    const bareAgentMentions = [{ agent_kind: 'codex', display_name: 'Codex' }];
+    const spaceMembers = [{ id: 'm1', nickname: '小A' }];
+
+    const start = performance.now();
+    const segments = getSessionComposerStructuredTokenSegments(largeDoc, {
+      bareAgentMentions,
+      spaceMembers,
+    });
+    const elapsedMs = performance.now() - start;
+
+    expect(segments).toEqual([{ kind: 'text', text: largeDoc }]);
+    expect(elapsedMs).toBeLessThan(150);
   });
 });

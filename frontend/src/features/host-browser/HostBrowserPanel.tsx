@@ -53,10 +53,14 @@ import { useCanvasNodeSurfaceInfo } from '@/components/kanban/canvas/CanvasNodeS
 import { ElectronBrowserWebview } from './ElectronBrowserWebview';
 import { openInSystemBrowser } from '@/hooks/useOpenLink';
 import { writeClipboardViaBridge } from '@/vscode/bridge';
+import { requestComposerImageInsert } from '@/lib/composerInsert';
+import { BrowserElementRackOverlay } from './BrowserElementRackOverlay';
 import {
-  requestComposerImageInsert,
-  requestComposerTokenInsert,
-} from '@/lib/composerInsert';
+  attachPickedBrowserElementImage,
+  clearStagedBrowserElements,
+  setPickedBrowserElementImagePromise,
+  stagePickedBrowserElement,
+} from './browserElementRack';
 import { formatSessionComposerCommand } from '@/components/tasks/follow-up/sessionComposerStructuredTokens';
 import {
   completeBrowserAddress,
@@ -339,35 +343,45 @@ export function elementChipLabel(payload: BrowserHostEvent['payload']): string {
   return `@${tag}`;
 }
 
-function insertPickedElement(payload: BrowserHostEvent['payload']) {
+function stagePickedElement(
+  payload: BrowserHostEvent['payload'],
+  tabId: string | null
+): string {
   const label = elementChipLabel(payload);
   const markdown =
     [payload?.html, payload?.href, payload?.text, payload?.selector]
       .filter((part): part is string => Boolean(part && part.trim()))
       .join('\n') || label;
-  requestComposerTokenInsert({
+  const description =
+    payload?.text?.trim() ||
+    payload?.label?.trim() ||
+    payload?.selector?.trim() ||
+    '';
+  return stagePickedBrowserElement({
+    tabId,
     label,
-    value: formatSessionComposerCommand({
+    tokenValue: formatSessionComposerCommand({
       type: '@',
       key: label,
       value: markdown,
     }),
+    selector: payload?.selector,
+    description,
   });
 }
 
-async function insertPickedElementImage(
+async function capturePickedElementImage(
   payload: BrowserHostEvent['payload'],
   capture: () => Promise<FreezePayload | null>,
   cloak?: (hidden: boolean) => Promise<void>
-) {
+): Promise<File | null> {
   try {
     await cloak?.(true);
-    const file = await fileFromPickedFrame(await capture(), {
+    return await fileFromPickedFrame(await capture(), {
       rect: payload?.rect,
       viewport: payload?.viewport,
       tag: payload?.tag,
     });
-    if (file) requestComposerImageInsert(file);
   } finally {
     await cloak?.(false);
   }
@@ -715,11 +729,11 @@ export function HostBrowserPanel({
       if (seenPickKeysRef.current.has(key)) return;
       seenPickKeysRef.current.add(key);
     }
-    insertPickedElement(payload);
     const tabId = tabIdRef.current;
-    pickHandoffRef.current = pickHandoffRef.current
+    const stagedId = stagePickedElement(payload, tabId);
+    const imageTask = pickHandoffRef.current
       .then(() =>
-        insertPickedElementImage(
+        capturePickedElementImage(
           payload,
           () =>
             tabId
@@ -734,7 +748,15 @@ export function HostBrowserPanel({
           }
         )
       )
-      .catch(() => undefined);
+      .then((file) => {
+        if (file) {
+          attachPickedBrowserElementImage(stagedId, file);
+        }
+        return file;
+      })
+      .catch(() => null);
+    setPickedBrowserElementImagePromise(stagedId, imageTask);
+    pickHandoffRef.current = imageTask.then(() => undefined);
   };
   acceptPickedElementRef.current = acceptPickedElement;
 
@@ -992,6 +1014,7 @@ export function HostBrowserPanel({
           return;
         }
         if (previousTabId && previousTabId !== created.tabId) {
+          clearStagedBrowserElements(previousTabId);
           void closeBrowserTabOnce(dispatchRef.current, previousTabId);
         }
         markBrowserTabOpen(created.tabId);
@@ -1437,6 +1460,7 @@ export function HostBrowserPanel({
             forgetBrowserSurface(
               browserPanelSurfaceKey(projectKeyRef.current, panelId, hostKind)
             );
+            clearStagedBrowserElements(tabId);
             void closeBrowserTabOnce(dispatch, tabId);
           }, 50);
         }
@@ -1448,6 +1472,7 @@ export function HostBrowserPanel({
         );
       }
       tabIdRef.current = null;
+      clearStagedBrowserElements(tabId);
       void closeBrowserTabOnce(dispatch, tabId);
     };
   }, [dispatch, panelId]);
@@ -2080,7 +2105,8 @@ export function HostBrowserPanel({
               type="button"
               className={cn(
                 FIELD_BTN,
-                picking && 'text-primary hover:text-primary/80'
+                picking &&
+                  'text-[color:hsl(var(--live-read))] hover:text-[color:hsl(var(--live-read)/0.85)]'
               )}
               title={t('browserPanel.pick')}
               aria-label={t('browserPanel.pick')}
@@ -2088,7 +2114,12 @@ export function HostBrowserPanel({
               disabled={!tab}
               onClick={togglePick}
             >
-              <MousePointerClick className="h-3.5 w-3.5" />
+              <MousePointerClick
+                className={cn(
+                  'h-3.5 w-3.5 transition-colors',
+                  picking && 'text-[color:hsl(var(--live-read))]'
+                )}
+              />
             </button>
             <BrowserAgentShareControl
               origin={tab?.origin || tab?.url}
@@ -2353,6 +2384,14 @@ export function HostBrowserPanel({
               alt=""
               draggable={false}
               className="pointer-events-none absolute inset-0 h-full w-full select-none object-fill"
+            />
+          ) : null}
+          {tab ? (
+            <BrowserElementRackOverlay
+              tabId={tab.tabId}
+              surfaceHost={surfaceHost}
+              hostRef={hostRef}
+              panelVisible={panelVisible}
             />
           ) : null}
         </div>

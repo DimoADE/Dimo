@@ -419,6 +419,9 @@ const DESKTOP_SHELL_COMMANDS: &[&str] = &[
     "get_developer_mode",
     "set_developer_mode",
     "open_developer_tools",
+    "inspect_element",
+    "reload_window",
+    "force_reload_window",
 ];
 
 fn workspace_root() -> PathBuf {

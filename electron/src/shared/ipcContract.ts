@@ -5,6 +5,7 @@ export const DEFAULT_APP_USER_MODEL_ID = 'com.dimo.app';
 export const SIDECAR_EXITED_EVENT = 'sidecar-exited';
 export const SIDECAR_RESTARTED_EVENT = 'sidecar-restarted';
 export const GPU_MODE_CHANGED_EVENT = 'gpu-mode-changed';
+export const DEVELOPER_MODE_CHANGED_EVENT = 'developer-mode-changed';
 export const SYSTEM_POWER_RESUMED_EVENT = 'system-power-resumed';
 
 export type SidecarRuntimeStatus = 'running' | 'restarting' | 'stopped';
@@ -28,6 +29,8 @@ export interface BootstrapPayload {
   backend: ElectronBackendConnectionInfo | null;
   sidecarStatus?: SidecarRuntimeStatus;
   gpuMode?: DesktopGpuMode;
+  developerMode?: boolean;
+  isDev?: boolean;
 }
 
 export const IPC_CHANNELS = {

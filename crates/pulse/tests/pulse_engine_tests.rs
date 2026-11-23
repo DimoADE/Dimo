@@ -1234,6 +1234,7 @@ async fn thread_subscription_o1_routing_bot_mailbox_fifo_coalesce_and_observe_pr
                 mailbox_policy: BotMailboxPolicy::CoalesceBatch,
                 thread_key: Some("feishu:chat:ops".to_string()),
                 event_id: format!("ev-b-{idx}"),
+                rule_id: None,
                 prompt_text: format!("Alert #{idx}"),
                 status: "queued".to_string(),
                 created_at: (now + Duration::seconds(30 + idx)).to_rfc3339(),

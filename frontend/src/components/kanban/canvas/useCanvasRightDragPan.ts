@@ -194,16 +194,7 @@ export function useCanvasRightDragPan(
       const pending = session.pendingDelta;
       session.pendingDelta = null;
       if (!pending || !session.panning) return;
-      if (
-        pending.x === session.lastEmittedX &&
-        pending.y === session.lastEmittedY
-      ) {
-        return;
-      }
       emitPanDelta(session, pending.x, pending.y);
-      // Keep the frame gate armed so burst events within this frame wait
-      // until the next vsync instead of issuing synchronous viewport updates.
-      session.rafId = window.requestAnimationFrame(flushRightPanFrame);
     };
 
     const endRight = () => {
@@ -280,11 +271,9 @@ export function useCanvasRightDragPan(
         onRightPanStateChangeRef.current?.(true);
       }
       event.preventDefault();
+      session.pendingDelta = { x: dx, y: dy };
       if (session.rafId === null) {
-        emitPanDelta(session, dx, dy);
         session.rafId = window.requestAnimationFrame(flushRightPanFrame);
-      } else {
-        session.pendingDelta = { x: dx, y: dy };
       }
     };
 
