@@ -302,11 +302,7 @@ jobs:
           path: frontend/dist
 
       - name: Build Rust desktop sidecars
-        run: |
-          cargo build --release --target ${{ matrix.target }} \
-            -p server --bin dimo-server \
-            -p dimo-mcp --bin dimo-mcp \
-            -p dimo-workflow-mcp --bin dimo-workflow-mcp
+        run: cargo build --release --target ${{ matrix.target }} -p server --bin dimo-server -p dimo-mcp --bin dimo-mcp -p dimo-workflow-mcp --bin dimo-workflow-mcp
 
       - name: Stage Electron sidecar binaries
         run: node scripts/stage-host-sidecars.js --electron --target ${{ matrix.target }} --profile release
@@ -358,12 +354,13 @@ jobs:
 
       - name: Package Electron desktop installers
         timeout-minutes: 140
+        shell: bash
         env:
           NODE_OPTIONS: --max-old-space-size=6144
           CSC_NAME: ${{ runner.os == 'macOS' && needs.prepare-release.outputs.apple_signing_enabled == 'true' && env.APPLE_CSC_NAME || '' }}
           CSC_KEYCHAIN: ${{ runner.os == 'macOS' && needs.prepare-release.outputs.apple_signing_enabled == 'true' && env.CSC_KEYCHAIN || '' }}
-          CSC_LINK: ${{ runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'pfx' && secrets.WINDOWS_CERTIFICATE || '' }}
-          CSC_KEY_PASSWORD: ${{ runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'pfx' && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
+          WIN_CSC_LINK: ${{ runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'pfx' && secrets.WINDOWS_CERTIFICATE || '' }}
+          WIN_CSC_KEY_PASSWORD: ${{ runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'pfx' && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
           CSC_IDENTITY_AUTO_DISCOVERY: ${{ (runner.os == 'macOS' && needs.prepare-release.outputs.apple_signing_enabled == 'true') || (runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'pfx') }}
           EVSIGN_LICENSE_KEY: ${{ runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'evsign' && secrets.EVSIGN_LICENSE_KEY || '' }}
           EVSIGN_SIGN_PASSWORD: ${{ runner.os == 'Windows' && needs.prepare-release.outputs.windows_signing_method == 'evsign' && secrets.EVSIGN_SIGN_PASSWORD || '' }}
@@ -372,7 +369,13 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
-        run: pnpm --filter @dimo/electron exec electron-builder ${{ matrix.electron_flag }} --config electron-builder.yml --publish never
+        run: |
+          for var in CSC_NAME CSC_KEYCHAIN CSC_LINK CSC_KEY_PASSWORD WIN_CSC_LINK WIN_CSC_KEY_PASSWORD EVSIGN_LICENSE_KEY EVSIGN_SIGN_PASSWORD EVSIGN_PUBLISHER_NAME APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH APPLE_SIGNING_IDENTITY; do
+            if [ -z "${!var:-}" ]; then
+              unset "$var"
+            fi
+          done
+          pnpm --filter @dimo/electron exec electron-builder ${{ matrix.electron_flag }} --config electron-builder.yml --publish never
 
       - name: Sign Windows bridge payload with Tauri updater key
         if: runner.os == 'Windows'

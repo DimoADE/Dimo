@@ -91,6 +91,15 @@ test("Electron packaging assets and hook scripts exist", () => {
   );
   assert.match(afterSignSource, /await\s+import\(['"]@electron\/notarize['"]\)/);
   assert.doesNotMatch(afterSignSource, /require\(['"]@electron\/notarize['"]\)/);
+
+  const electronPkg = JSON.parse(
+    fs.readFileSync(path.join(ELECTRON_DIR, "package.json"), "utf8"),
+  );
+  assert.match(
+    electronPkg.homepage || "",
+    /^https:\/\//,
+    "electron/package.json must specify homepage for Linux .deb packaging",
+  );
 });
 
 test("Windows NSIS custom hook scopes staged companion termination to $INSTDIR and guards HKLM cleanup", () => {
