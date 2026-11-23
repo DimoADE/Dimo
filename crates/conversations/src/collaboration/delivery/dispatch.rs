@@ -186,7 +186,7 @@ pub(crate) async fn deliver_pending(
     let mut in_flight = in_flight_delivery_count(pool, space_id).await?;
     let mut receipts = Vec::new();
     for delivery in pending {
-        let Ok(conversation_id) = Uuid::parse_str(&delivery.conversation_id) else {
+        let Ok(mut conversation_id) = Uuid::parse_str(&delivery.conversation_id) else {
             continue;
         };
         let delivery_message_id = delivery.space_message_id.clone();
@@ -269,30 +269,31 @@ pub(crate) async fn deliver_pending(
             });
             continue;
         }
-        let Some(target) = load_session(pool, conversation_id).await? else {
-            mark_delivery_failed(pool, &delivery_message_id, conversation_id).await?;
-            receipts.push(DeliveryReceipt {
-                conversation_id,
-                nickname,
-                delivered: "failed".to_string(),
-                state: delivery.receipt_state.clone(),
-                input_id: None,
-                error_code: Some("not_found".to_string()),
-            });
-            continue;
+        let target = match load_session(pool, conversation_id).await? {
+            Some(session) if session.deleted_at.is_none() && session.status != "archived" => {
+                session
+            }
+            _ => match try_heal_dead_seat(pool, space_id, &delivery_message_id, conversation_id)
+                .await?
+            {
+                Some((healed_id, healed_session)) => {
+                    conversation_id = healed_id;
+                    healed_session
+                }
+                None => {
+                    mark_delivery_failed(pool, &delivery_message_id, conversation_id).await?;
+                    receipts.push(DeliveryReceipt {
+                        conversation_id,
+                        nickname,
+                        delivered: "failed".to_string(),
+                        state: delivery.receipt_state.clone(),
+                        input_id: None,
+                        error_code: Some("not_found".to_string()),
+                    });
+                    continue;
+                }
+            },
         };
-        if target.deleted_at.is_some() || target.status == "archived" {
-            mark_delivery_failed(pool, &delivery_message_id, conversation_id).await?;
-            receipts.push(DeliveryReceipt {
-                conversation_id,
-                nickname,
-                delivered: "failed".to_string(),
-                state: delivery.receipt_state.clone(),
-                input_id: None,
-                error_code: Some("not_found".to_string()),
-            });
-            continue;
-        }
         let current_round_slot = delivery
             .round_id
             .as_deref()
@@ -852,10 +853,98 @@ pub(crate) async fn missed_group_context(
     ))
 }
 
+/// Higher truncation limit for pinned root/parent task messages so child bots
+/// keep Master's or User's full task specification even in busy groups.
+pub(crate) const PINNED_ROOT_CONTEXT_CHARS: usize = 4000;
+
+async fn try_heal_dead_seat(
+    pool: &SqlitePool,
+    space_id: &str,
+    delivery_message_id: &str,
+    old_conversation_id: Uuid,
+) -> Result<Option<(Uuid, SessionHead)>, CollaborationError> {
+    let binding = identity::binding_of_conversation(pool, old_conversation_id)
+        .await
+        .map_err(db)?;
+    let Some(binding) = binding.filter(|b| b.status == "active") else {
+        return Ok(None);
+    };
+    let still_in_space: Option<i64> = sqlx::query_scalar(
+        r#"SELECT 1 FROM collaboration_space_members
+           WHERE space_id = ? AND conversation_id = ? AND kind = 'agent'
+           LIMIT 1"#,
+    )
+    .bind(space_id)
+    .bind(old_conversation_id.to_string())
+    .fetch_optional(pool)
+    .await
+    .map_err(db)?;
+    if still_in_space.is_none() && binding.thread_id != space_id {
+        return Ok(None);
+    }
+
+    let healed_id = match resolve_session(pool, &binding.member_id, &binding.thread_id).await {
+        Ok(id) => id,
+        Err(error) => {
+            tracing::warn!(
+                %space_id,
+                old_conversation_id = %old_conversation_id,
+                member_id = %binding.member_id,
+                %error,
+                "failed to heal dead collaboration seat during delivery"
+            );
+            return Ok(None);
+        }
+    };
+    let Some(healed_session) = load_session(pool, healed_id).await? else {
+        return Ok(None);
+    };
+    if healed_session.deleted_at.is_some() || healed_session.status == "archived" {
+        return Ok(None);
+    }
+    if healed_id != old_conversation_id {
+        sqlx::query(
+            r#"UPDATE collaboration_space_members
+               SET conversation_id = ?
+               WHERE space_id = ? AND conversation_id = ?"#,
+        )
+        .bind(healed_id.to_string())
+        .bind(space_id)
+        .bind(old_conversation_id.to_string())
+        .execute(pool)
+        .await
+        .map_err(db)?;
+        sqlx::query(
+            r#"UPDATE collaboration_space_deliveries
+               SET conversation_id = ?
+               WHERE space_message_id = ?
+                 AND conversation_id = ?
+                 AND NOT EXISTS (
+                   SELECT 1 FROM collaboration_space_deliveries d2
+                   WHERE d2.space_message_id = collaboration_space_deliveries.space_message_id
+                     AND d2.conversation_id = ?
+                 )"#,
+        )
+        .bind(healed_id.to_string())
+        .bind(delivery_message_id)
+        .bind(old_conversation_id.to_string())
+        .bind(healed_id.to_string())
+        .execute(pool)
+        .await
+        .map_err(db)?;
+    }
+    Ok(Some((healed_id, healed_session)))
+}
+
 /// Split incremental group messages since `from_seq` around `trigger_seq` so
 /// messages before `#trigger_seq` appear above the trigger envelope and
 /// messages after `#trigger_seq` (e.g. earlier speakers' replies in the same
 /// sequential round) appear below the trigger envelope in chronological order.
+///
+/// Always pins the trigger's root/parent task ancestor(s) verbatim at the top
+/// of the pre-trigger missed context (with [`PINNED_ROOT_CONTEXT_CHARS`]) when
+/// they fall outside the latest `MISSED_CONTEXT_VERBATIM` window or within the
+/// current missed window, avoiding duplicates.
 pub(crate) async fn split_missed_group_context(
     pool: &SqlitePool,
     space_id: &str,
@@ -865,12 +954,16 @@ pub(crate) async fn split_missed_group_context(
 ) -> Result<(Option<String>, Option<String>), CollaborationError> {
     let lines =
         fetch_missed_group_lines(pool, space_id, conversation_id, from_seq, trigger_seq).await?;
-    if lines.is_empty() {
+    let pinned =
+        fetch_pinned_task_ancestors(pool, space_id, conversation_id, from_seq, trigger_seq).await?;
+    if lines.is_empty() && pinned.is_empty() {
         return Ok((None, None));
     }
+    let pinned_seqs: std::collections::HashSet<i64> =
+        pinned.iter().map(|(seq, _, _)| *seq).collect();
     let pre: Vec<(i64, String, String)> = lines
         .iter()
-        .filter(|(seq, _, _)| *seq < trigger_seq)
+        .filter(|(seq, _, _)| *seq < trigger_seq && !pinned_seqs.contains(seq))
         .cloned()
         .collect();
     let post: Vec<(i64, String, String)> = lines
@@ -878,21 +971,150 @@ pub(crate) async fn split_missed_group_context(
         .filter(|(seq, _, _)| *seq > trigger_seq)
         .cloned()
         .collect();
-    match (pre.is_empty(), post.is_empty()) {
-        (true, true) => Ok((None, None)),
-        (false, true) => Ok((
-            format_missed_group_block("[上次发言后的群内新消息]", &pre),
+    let has_pre = !pinned.is_empty() || !pre.is_empty();
+    match (has_pre, post.is_empty()) {
+        (false, true) => Ok((None, None)),
+        (true, true) => Ok((
+            format_missed_group_block_with_pinned("[上次发言后的群内新消息]", &pinned, &pre),
             None,
         )),
-        (true, false) => Ok((
+        (false, false) => Ok((
             None,
             format_missed_group_block("[上次发言后的群内新消息]", &post),
         )),
-        (false, false) => Ok((
-            format_missed_group_block("[上次发言后的群内新消息]", &pre),
+        (true, false) => Ok((
+            format_missed_group_block_with_pinned("[上次发言后的群内新消息]", &pinned, &pre),
             format_missed_group_block("[本轮新增群内消息]", &post),
         )),
     }
+}
+
+async fn fetch_pinned_task_ancestors(
+    pool: &SqlitePool,
+    space_id: &str,
+    conversation_id: Uuid,
+    from_seq: i64,
+    trigger_seq: i64,
+) -> Result<Vec<(i64, String, String)>, CollaborationError> {
+    let trigger_row: Option<(String, Option<String>, String)> = sqlx::query_as(
+        r#"SELECT id, root_id, envelope_json
+           FROM collaboration_space_messages
+           WHERE space_id = ? AND seq = ?
+           LIMIT 1"#,
+    )
+    .bind(space_id)
+    .bind(trigger_seq)
+    .fetch_optional(pool)
+    .await
+    .map_err(db)?;
+    let Some((trigger_id, trigger_root_id, trigger_raw)) = trigger_row else {
+        return Ok(Vec::new());
+    };
+    let trigger_parsed = parse_space_envelope_str(&trigger_raw);
+    let mut target_ids: Vec<String> = Vec::new();
+    let mut push_unique = |id: &str| {
+        let trimmed = id.trim();
+        if !trimmed.is_empty()
+            && trimmed != trigger_id
+            && !target_ids.iter().any(|existing| existing == trimmed)
+        {
+            target_ids.push(trimmed.to_string());
+        }
+    };
+    if let Some(ref root) = trigger_root_id {
+        push_unique(root);
+    }
+    if let Some(ref parent) = trigger_parsed.reply_to {
+        push_unique(parent);
+    }
+    // If `root_id` was not recorded or matched the trigger itself, walk `reply_to`
+    // up to 16 hops to recover the thread's original task root as well.
+    let needs_walk = trigger_root_id
+        .as_deref()
+        .map(str::trim)
+        .is_none_or(|r| r.is_empty() || r == trigger_id);
+    if needs_walk && let Some(mut cursor) = trigger_parsed.reply_to.clone() {
+        let mut seen_walk = std::collections::HashSet::new();
+        seen_walk.insert(trigger_id.clone());
+        let mut root_candidate: Option<String> = None;
+        for _ in 0..16 {
+            if !seen_walk.insert(cursor.clone()) {
+                break;
+            }
+            let raw: Option<String> = sqlx::query_scalar(
+                r#"SELECT envelope_json FROM collaboration_space_messages
+                   WHERE space_id = ? AND id = ?
+                   LIMIT 1"#,
+            )
+            .bind(space_id)
+            .bind(&cursor)
+            .fetch_optional(pool)
+            .await
+            .map_err(db)?;
+            let Some(raw) = raw else {
+                break;
+            };
+            root_candidate = Some(cursor.clone());
+            let parsed = parse_space_envelope_str(&raw);
+            let Some(next) = parsed
+                .reply_to
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+            else {
+                break;
+            };
+            cursor = next;
+        }
+        if let Some(root) = root_candidate {
+            push_unique(&root);
+        }
+    }
+    if target_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let nickname = member_nickname(pool, space_id, conversation_id)
+        .await
+        .ok()
+        .flatten();
+    let mut pinned: Vec<(i64, String, String)> = Vec::new();
+    for anc_id in target_ids {
+        let row: Option<(i64, String, String)> = sqlx::query_as(
+            r#"SELECT seq, origin, envelope_json
+               FROM collaboration_space_messages
+               WHERE space_id = ? AND id = ?
+               LIMIT 1"#,
+        )
+        .bind(space_id)
+        .bind(&anc_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(db)?;
+        let Some((anc_seq, origin, raw)) = row else {
+            continue;
+        };
+        if origin == "system" || anc_seq >= trigger_seq {
+            continue;
+        }
+        // Pin when the ancestor is in the missed window (`anc_seq > from_seq`) OR
+        // when > `MISSED_CONTEXT_VERBATIM` messages have intervened since it was posted.
+        if anc_seq <= from_seq && trigger_seq - anc_seq <= MISSED_CONTEXT_VERBATIM as i64 {
+            continue;
+        }
+        let parsed = parse_space_envelope_str(&raw);
+        if envelope_sender_is_conversation(&parsed, conversation_id, nickname.as_deref()) {
+            continue;
+        }
+        let who = if parsed.sender.is_empty() {
+            "Bot".to_string()
+        } else {
+            parsed.sender
+        };
+        pinned.push((anc_seq, who, parsed.content));
+    }
+    pinned.sort_by_key(|(seq, _, _)| *seq);
+    pinned.dedup_by_key(|(seq, _, _)| *seq);
+    Ok(pinned)
 }
 
 async fn fetch_missed_group_lines(
@@ -935,12 +1157,33 @@ async fn fetch_missed_group_lines(
     Ok(lines)
 }
 
+fn truncate_missed_message(content: &str, max_chars: usize) -> String {
+    if content.chars().count() > max_chars {
+        content.chars().take(max_chars).collect::<String>()
+            + "…（完整内容请调用 read_space_messages）"
+    } else {
+        content.to_string()
+    }
+}
+
 fn format_missed_group_block(header: &str, lines: &[(i64, String, String)]) -> Option<String> {
-    if lines.is_empty() {
+    format_missed_group_block_with_pinned(header, &[], lines)
+}
+
+fn format_missed_group_block_with_pinned(
+    header: &str,
+    pinned: &[(i64, String, String)],
+    lines: &[(i64, String, String)],
+) -> Option<String> {
+    if pinned.is_empty() && lines.is_empty() {
         return None;
     }
-    let older = lines.len().saturating_sub(MISSED_CONTEXT_VERBATIM);
     let mut out = Vec::new();
+    for (seq, who, content) in pinned {
+        let content = truncate_missed_message(content, PINNED_ROOT_CONTEXT_CHARS);
+        out.push(format!("[#{seq}] {who}: {content}"));
+    }
+    let older = lines.len().saturating_sub(MISSED_CONTEXT_VERBATIM);
     if older > 0 {
         let collapsed = &lines[..older];
         let mut who: Vec<&str> = Vec::new();
@@ -957,14 +1200,7 @@ fn format_missed_group_block(header: &str, lines: &[(i64, String, String)]) -> O
         ));
     }
     for (seq, who, content) in &lines[older..] {
-        let mut content = content.clone();
-        if content.chars().count() > MISSED_CONTEXT_MESSAGE_CHARS {
-            content = content
-                .chars()
-                .take(MISSED_CONTEXT_MESSAGE_CHARS)
-                .collect::<String>()
-                + "…（完整内容请调用 read_space_messages）";
-        }
+        let content = truncate_missed_message(content, MISSED_CONTEXT_MESSAGE_CHARS);
         out.push(format!("[#{seq}] {who}: {content}"));
     }
     Some(format!("{header}\n{}", out.join("\n")))
@@ -1104,4 +1340,225 @@ pub async fn redeliver_deferred(
     }
 
     Ok(retried)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::collaboration::{
+        PostToSpace, post_to_space,
+        test_support::{create_session, setup_pool, space_of},
+    };
+
+    #[tokio::test]
+    async fn split_missed_group_context_pins_root_task_verbatim_past_15_messages_and_preserves_over_1500_chars()
+     {
+        let pool = setup_pool().await;
+        let ws = Uuid::new_v4();
+        let master = Uuid::new_v4();
+        let peer = Uuid::new_v4();
+        let child = Uuid::new_v4();
+        create_session(&pool, master, ws, Some("Master")).await;
+        create_session(&pool, peer, ws, Some("Peer")).await;
+        create_session(&pool, child, ws, Some("Child")).await;
+
+        let space_id = space_of(&pool, master).await;
+        for (cid, name) in [(peer, "Peer"), (child, "Child")] {
+            crate::collaboration::add_space_member(
+                &pool,
+                master,
+                &space_id,
+                cid,
+                name,
+                Uuid::new_v4(),
+            )
+            .await
+            .expect("add member");
+        }
+
+        // 1. Root task message (#1) with > 1500 chars (2200+ chars) and a unique tail marker.
+        let body_filler = "任务需求背景与验收标准说明。".repeat(160);
+        let root_spec = format!("ROOT_SPEC_HEADER_81 {body_filler} END_OF_ROOT_SPEC_TOKEN_81");
+        assert!(
+            root_spec.chars().count() > MISSED_CONTEXT_MESSAGE_CHARS,
+            "root spec must exceed 1500 chars"
+        );
+        assert!(
+            root_spec.chars().count() < PINNED_ROOT_CONTEXT_CHARS,
+            "root spec should fit inside pinned cap"
+        );
+
+        let root_post = post_to_space(
+            &pool,
+            PostToSpace {
+                caller_id: Some(master),
+                space_id: space_id.clone(),
+                content: root_spec,
+                summary: None,
+                to: vec!["Peer".to_string()],
+                in_reply_to: None,
+                operation_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("post root task");
+
+        // 2. Intervene with 18 messages (> MISSED_CONTEXT_VERBATIM = 15) from Peer/Master.
+        for i in 1..=18 {
+            let sender = if i % 2 == 0 { master } else { peer };
+            post_to_space(
+                &pool,
+                PostToSpace {
+                    caller_id: Some(sender),
+                    space_id: space_id.clone(),
+                    content: format!("Intervening chatter round {i}"),
+                    summary: None,
+                    to: Vec::new(),
+                    in_reply_to: Some(root_post.message_id.clone()),
+                    operation_id: Uuid::new_v4(),
+                },
+            )
+            .await
+            .expect("post intervening message");
+        }
+
+        // 3. Final @Child mention replying to the root task (#20).
+        let trigger_post = post_to_space(
+            &pool,
+            PostToSpace {
+                caller_id: Some(master),
+                space_id: space_id.clone(),
+                content: "@Child please implement the plan now".to_string(),
+                summary: None,
+                to: vec!["Child".to_string()],
+                in_reply_to: Some(root_post.message_id.clone()),
+                operation_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("post trigger mention");
+
+        let (pre, post) = split_missed_group_context(&pool, &space_id, child, 0, trigger_post.seq)
+            .await
+            .expect("split missed context");
+        assert!(post.is_none());
+        let pre = pre.expect("expected pre-trigger missed context");
+
+        // Root task (#1) must be pinned verbatim at the top, not folded or truncated at 1500 chars.
+        let first_content_line = pre.lines().nth(1).expect("first line after header");
+        assert!(
+            first_content_line.starts_with(&format!("[#{}]", root_post.seq)),
+            "root task must be pinned at top of missed context, got: {first_content_line}"
+        );
+        assert!(
+            pre.contains("ROOT_SPEC_HEADER_81") && pre.contains("END_OF_ROOT_SPEC_TOKEN_81"),
+            "pinned root task must preserve >1500 chars verbatim"
+        );
+        assert_eq!(
+            pre.matches("ROOT_SPEC_HEADER_81").count(),
+            1,
+            "pinned root task must not be duplicated"
+        );
+        // Older intervening chatter should still be collapsed cleanly without folding #1.
+        assert!(
+            pre.contains("已折叠"),
+            "older intervening messages beyond verbatim window should be folded: {pre}"
+        );
+        assert!(
+            !pre.contains("root_id"),
+            "rendered context must never leak internal root_id field"
+        );
+    }
+
+    #[tokio::test]
+    async fn deliver_pending_heals_soft_deleted_and_archived_group_seats_before_not_found() {
+        let pool = setup_pool().await;
+        let ws = Uuid::new_v4();
+        let leader = Uuid::new_v4();
+        let worker = Uuid::new_v4();
+        create_session(&pool, leader, ws, Some("Leader")).await;
+        create_session(&pool, worker, ws, Some("Worker")).await;
+
+        let space_id = space_of(&pool, leader).await;
+        let added = crate::collaboration::add_space_member(
+            &pool,
+            leader,
+            &space_id,
+            worker,
+            "Worker",
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("add worker seat");
+        let seat_cid = Uuid::parse_str(added.conversation_id.as_deref().unwrap()).unwrap();
+
+        // 1. Soft-delete the worker's seat session row before posting a mention.
+        sqlx::query("UPDATE sessions SET deleted_at = datetime('now') WHERE id = ?")
+            .bind(seat_cid)
+            .execute(&pool)
+            .await
+            .expect("soft-delete worker seat");
+
+        let post1 = post_to_space(
+            &pool,
+            PostToSpace {
+                caller_id: Some(leader),
+                space_id: space_id.clone(),
+                content: "@Worker please handle task 1".to_string(),
+                summary: None,
+                to: vec!["Worker".to_string()],
+                in_reply_to: None,
+                operation_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("post after soft-delete");
+
+        let receipt1 = post1
+            .receipts
+            .iter()
+            .find(|r| r.nickname == "Worker")
+            .expect("worker receipt 1");
+        assert_ne!(
+            receipt1.delivered, "failed",
+            "soft-deleted seat should self-heal instead of failing with not_found: {receipt1:?}"
+        );
+        assert_eq!(receipt1.error_code, None);
+        assert_ne!(receipt1.conversation_id, seat_cid);
+        let healed_cid_1 = receipt1.conversation_id;
+
+        // 2. Archive the healed seat session row and post again -> heals again!
+        sqlx::query("UPDATE sessions SET status = 'archived' WHERE id = ?")
+            .bind(healed_cid_1)
+            .execute(&pool)
+            .await
+            .expect("archive healed seat");
+
+        let post2 = post_to_space(
+            &pool,
+            PostToSpace {
+                caller_id: Some(leader),
+                space_id: space_id.clone(),
+                content: "@Worker please handle task 2".to_string(),
+                summary: None,
+                to: vec!["Worker".to_string()],
+                in_reply_to: None,
+                operation_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("post after archive");
+
+        let receipt2 = post2
+            .receipts
+            .iter()
+            .find(|r| r.nickname == "Worker")
+            .expect("worker receipt 2");
+        assert_ne!(
+            receipt2.delivered, "failed",
+            "archived seat should self-heal instead of failing with not_found: {receipt2:?}"
+        );
+        assert_eq!(receipt2.error_code, None);
+        assert_ne!(receipt2.conversation_id, healed_cid_1);
+    }
 }

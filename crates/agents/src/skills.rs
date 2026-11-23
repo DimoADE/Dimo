@@ -4,7 +4,7 @@
 //! directory containing `SKILL.md` (or, for Codex, a flat `{id}.md` file).
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     future::Future,
     path::{Path, PathBuf},
 };
@@ -736,6 +736,269 @@ async fn list_skills_in_dir(dir: &SkillDir, allow_md: bool) -> Vec<AgentSkillIte
         }
     }
     items
+}
+
+/// Codex CLI's hardcoded filesystem scan limits when discovering skills.
+pub const CODEX_MAX_SKILLS_ENTRIES: usize = 20_000;
+pub const CODEX_MAX_SKILLS_DIRS: usize = 2_000;
+pub const CODEX_MAX_SCAN_DEPTH: usize = 6;
+
+const CODEX_SKILLS_TRAVERSAL_BUDGET_MARKER: &str = "Codex CLI's scan budget";
+const CODEX_SKILLS_TRAVERSAL_GENERIC_MARKER: &str = "Codex CLI hit its skills scan traversal limit";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexSkillSubdirWeight {
+    pub name: String,
+    pub entries: usize,
+    pub dirs: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexSkillsTraversalOverflow {
+    pub root: PathBuf,
+    pub entries_scanned: usize,
+    pub dirs_scanned: usize,
+    pub max_entries: usize,
+    pub max_dirs: usize,
+    pub max_depth: usize,
+    pub heaviest_subdirs: Vec<CodexSkillSubdirWeight>,
+}
+
+impl CodexSkillsTraversalOverflow {
+    pub fn format_diagnostic(&self) -> String {
+        let root_display = display_path(&self.root);
+        let limit_detail = if self.entries_scanned > self.max_entries {
+            format!(
+                "exceeded {} entries (Codex limit: {})",
+                self.max_entries, self.max_entries
+            )
+        } else {
+            format!(
+                "exceeded {} directories (Codex limit: {})",
+                self.max_dirs, self.max_dirs
+            )
+        };
+        if self.heaviest_subdirs.is_empty() {
+            format!(
+                "Skills directory `{root_display}` exceeded {CODEX_SKILLS_TRAVERSAL_BUDGET_MARKER} ({limit_detail}). Remove or relocate oversized folders (such as `node_modules`, `.venv`, build caches, or symlinks to large trees) from `{root_display}` (or `~/.agents/skills`) and retry."
+            )
+        } else {
+            let offenders = self
+                .heaviest_subdirs
+                .iter()
+                .map(|sub| {
+                    format!(
+                        "`{}` ({} entries, {} dirs)",
+                        sub.name, sub.entries, sub.dirs
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "Skills directory `{root_display}` exceeded {CODEX_SKILLS_TRAVERSAL_BUDGET_MARKER} ({limit_detail}). Top heaviest subdirectories: {offenders}. Remove or relocate oversized folders (such as `node_modules`, `.venv`, build caches, or symlinks to large trees) from `{root_display}` (or `~/.agents/skills`) and retry."
+            )
+        }
+    }
+}
+
+/// Fast, bounded preflight walker mirroring Codex CLI's skills traversal limits.
+/// Stops immediately once `CODEX_MAX_SKILLS_ENTRIES` or `CODEX_MAX_SKILLS_DIRS`
+/// is exceeded, follows directory symlinks/junctions with a canonical-path
+/// cycle guard, and reports the heaviest immediate subdirectories under `root`.
+pub fn check_codex_skills_traversal_budget(root: &Path) -> Option<CodexSkillsTraversalOverflow> {
+    check_codex_skills_traversal_budget_with_limits(
+        root,
+        CODEX_MAX_SKILLS_ENTRIES,
+        CODEX_MAX_SKILLS_DIRS,
+        CODEX_MAX_SCAN_DEPTH,
+    )
+}
+
+pub(crate) fn check_codex_skills_traversal_budget_with_limits(
+    root: &Path,
+    max_entries: usize,
+    max_dirs: usize,
+    max_depth: usize,
+) -> Option<CodexSkillsTraversalOverflow> {
+    if !std::fs::metadata(root).is_ok_and(|meta| meta.is_dir()) {
+        return None;
+    }
+
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    let root_canonical = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    visited.insert(root_canonical);
+
+    let mut queue: VecDeque<(PathBuf, usize, Option<String>)> = VecDeque::new();
+    queue.push_back((root.to_path_buf(), 0, None));
+
+    let mut subdir_weights: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut entries_scanned: usize = 0;
+    let mut dirs_scanned: usize = 0;
+    let mut overflowed = false;
+
+    while let Some((dir_path, depth, top_subdir)) = queue.pop_front() {
+        let Ok(read_dir) = std::fs::read_dir(&dir_path) else {
+            continue;
+        };
+        for entry in read_dir {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            entries_scanned = entries_scanned.saturating_add(1);
+            let entry_path = entry.path();
+            let is_dir = std::fs::metadata(&entry_path).is_ok_and(|meta| meta.is_dir());
+
+            let child_top = match (&top_subdir, is_dir) {
+                (Some(name), _) => Some(name.clone()),
+                (None, true) => Some(entry.file_name().to_string_lossy().into_owned()),
+                (None, false) => None,
+            };
+
+            if let Some(ref name) = child_top {
+                let weight = subdir_weights.entry(name.clone()).or_insert((0, 0));
+                weight.0 = weight.0.saturating_add(1);
+                if is_dir {
+                    weight.1 = weight.1.saturating_add(1);
+                }
+            }
+
+            if is_dir {
+                dirs_scanned = dirs_scanned.saturating_add(1);
+                let next_depth = depth.saturating_add(1);
+                if next_depth < max_depth {
+                    let canonical =
+                        std::fs::canonicalize(&entry_path).unwrap_or_else(|_| entry_path.clone());
+                    if visited.insert(canonical) {
+                        queue.push_back((entry_path, next_depth, child_top));
+                    }
+                }
+            }
+
+            if entries_scanned > max_entries || dirs_scanned > max_dirs {
+                overflowed = true;
+                break;
+            }
+        }
+        if overflowed {
+            break;
+        }
+    }
+
+    if !overflowed {
+        return None;
+    }
+
+    let mut heaviest_subdirs: Vec<CodexSkillSubdirWeight> = subdir_weights
+        .into_iter()
+        .map(|(name, (entries, dirs))| CodexSkillSubdirWeight {
+            name,
+            entries,
+            dirs,
+        })
+        .collect();
+    heaviest_subdirs.sort_by(|a, b| {
+        b.entries
+            .cmp(&a.entries)
+            .then_with(|| b.dirs.cmp(&a.dirs))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    heaviest_subdirs.truncate(3);
+
+    Some(CodexSkillsTraversalOverflow {
+        root: root.to_path_buf(),
+        entries_scanned,
+        dirs_scanned,
+        max_entries,
+        max_dirs,
+        max_depth,
+        heaviest_subdirs,
+    })
+}
+
+pub fn is_codex_skills_traversal_limit_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("skills scan reached its traversal limit")
+        || (lower.contains("skills") && lower.contains("traversal limit"))
+}
+
+pub fn codex_extra_skill_roots(
+    working_dir: &Path,
+    isolation_env: Option<&HashMap<String, String>>,
+    spec_env: &HashMap<String, String>,
+) -> Vec<PathBuf> {
+    let mut roots = vec![
+        working_dir.join(".agents").join("skills"),
+        working_dir.join(".codex").join("skills"),
+    ];
+    for env_map in isolation_env.into_iter().chain(std::iter::once(spec_env)) {
+        if let Some(codex_home) = env_map
+            .get("CODEX_HOME")
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty())
+        {
+            roots.push(PathBuf::from(codex_home).join("skills"));
+        }
+    }
+    roots
+}
+
+pub fn enrich_codex_skills_traversal_error(
+    message: &str,
+    extra_roots: &[PathBuf],
+) -> Option<String> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join(".agents").join("skills"));
+    }
+    if let Some(codex) = codex_skills_home() {
+        roots.push(codex.join("skills"));
+    }
+    roots.extend(extra_roots.iter().cloned());
+
+    let mut deduped = Vec::new();
+    let mut seen = HashSet::new();
+    for root in roots {
+        if seen.insert(root.clone()) {
+            deduped.push(root);
+        }
+    }
+
+    enrich_codex_skills_traversal_error_with_limits(
+        message,
+        &deduped,
+        CODEX_MAX_SKILLS_ENTRIES,
+        CODEX_MAX_SKILLS_DIRS,
+        CODEX_MAX_SCAN_DEPTH,
+    )
+}
+
+pub(crate) fn enrich_codex_skills_traversal_error_with_limits(
+    message: &str,
+    roots: &[PathBuf],
+    max_entries: usize,
+    max_dirs: usize,
+    max_depth: usize,
+) -> Option<String> {
+    if !is_codex_skills_traversal_limit_error(message) {
+        return None;
+    }
+    if message.contains(CODEX_SKILLS_TRAVERSAL_BUDGET_MARKER)
+        || message.contains(CODEX_SKILLS_TRAVERSAL_GENERIC_MARKER)
+    {
+        return None;
+    }
+
+    for root in roots {
+        if let Some(overflow) =
+            check_codex_skills_traversal_budget_with_limits(root, max_entries, max_dirs, max_depth)
+        {
+            return Some(format!("{message}\n\n{}", overflow.format_diagnostic()));
+        }
+    }
+
+    Some(format!(
+        "{message}\n\n{CODEX_SKILLS_TRAVERSAL_GENERIC_MARKER} ({max_entries} entries / {max_dirs} dirs). Check `~/.agents/skills` (and `~/.codex/skills` or project `.agents/skills`) for oversized subdirectories such as `node_modules`, `.venv`, build caches, or symlinks to large folders, remove or relocate them, and retry."
+    ))
 }
 
 fn scope_rank(scope: AgentSkillScope) -> u8 {
@@ -3746,6 +4009,89 @@ mod tests {
             !codex_dir
                 .join("dimo-workflow-creator/.dimo-plugin-owner")
                 .exists()
+        );
+    }
+
+    #[test]
+    fn codex_skills_traversal_budget_detects_entry_and_dir_overflows_and_ranks_heaviest_subdirs() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("skills");
+        let small = root.join("small-skill");
+        let heavy = root.join("bloated-skill");
+        std::fs::create_dir_all(&small).unwrap();
+        std::fs::create_dir_all(heavy.join("node_modules/pkg")).unwrap();
+        std::fs::write(small.join("SKILL.md"), "ok").unwrap();
+        for idx in 0..8 {
+            std::fs::write(heavy.join(format!("file-{idx}.txt")), "x").unwrap();
+        }
+
+        // Under budget returns None.
+        assert!(check_codex_skills_traversal_budget_with_limits(&root, 100, 100, 6).is_none());
+
+        // Entry overflow stops promptly and flags `bloated-skill` first.
+        let overflow = check_codex_skills_traversal_budget_with_limits(&root, 6, 100, 6)
+            .expect("should detect entry overflow");
+        assert!(overflow.entries_scanned > 6);
+        assert_eq!(overflow.heaviest_subdirs[0].name, "bloated-skill");
+        let diag = overflow.format_diagnostic();
+        assert!(diag.contains("bloated-skill"));
+        assert!(diag.contains("~/.agents/skills"));
+
+        // Dir overflow stops promptly when max_dirs is exceeded.
+        let dir_overflow = check_codex_skills_traversal_budget_with_limits(&root, 100, 2, 6)
+            .expect("should detect dir overflow");
+        assert!(dir_overflow.dirs_scanned > 2);
+        assert!(dir_overflow.format_diagnostic().contains("directories"));
+    }
+
+    #[test]
+    fn codex_skills_traversal_budget_respects_max_depth_and_guards_symlink_cycles() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("skills");
+        let deep = root.join("skill-a/d2/d3/d4");
+        std::fs::create_dir_all(&deep).unwrap();
+        for idx in 0..10 {
+            std::fs::write(deep.join(format!("deep-{idx}.txt")), "x").unwrap();
+        }
+
+        // With max_depth = 2, entries at depth 4/5 are never visited so budget is not exceeded.
+        assert!(check_codex_skills_traversal_budget_with_limits(&root, 8, 8, 2).is_none());
+        // With max_depth = 6, those deep entries are visited and trigger overflow.
+        assert!(check_codex_skills_traversal_budget_with_limits(&root, 8, 8, 6).is_some());
+
+        // Directory symlink cycle back to root must not loop infinitely.
+        let cycle_root = temp.path().join("cycle-skills");
+        let sub = cycle_root.join("looping");
+        std::fs::create_dir_all(&sub).unwrap();
+        let _ = symlink_dir(&cycle_root, &sub.join("back-to-root"));
+        assert!(check_codex_skills_traversal_budget_with_limits(&cycle_root, 50, 50, 6).is_none());
+    }
+
+    #[test]
+    fn codex_skills_traversal_error_enrichment_lists_offenders_and_is_idempotent() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("skills");
+        let heavy = root.join("huge-vendor");
+        std::fs::create_dir_all(&heavy).unwrap();
+        for idx in 0..6 {
+            std::fs::write(heavy.join(format!("f-{idx}.txt")), "x").unwrap();
+        }
+
+        let raw = "failed to load skills: skills scan reached its traversal limit";
+        let enriched = enrich_codex_skills_traversal_error_with_limits(raw, &[root], 4, 10, 6)
+            .expect("should enrich traversal limit error");
+        assert!(enriched.contains("huge-vendor"));
+        assert!(enriched.contains("~/.agents/skills"));
+
+        // Second enrichment pass must be a no-op (idempotent).
+        assert!(
+            enrich_codex_skills_traversal_error_with_limits(&enriched, &[], 4, 10, 6).is_none()
+        );
+
+        // Unrelated errors are untouched.
+        assert!(
+            enrich_codex_skills_traversal_error_with_limits("random rpc error", &[], 4, 10, 6)
+                .is_none()
         );
     }
 }

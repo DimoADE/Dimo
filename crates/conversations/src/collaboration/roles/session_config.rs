@@ -157,6 +157,7 @@ pub(crate) async fn write_member_session_config(
         .execute(pool)
         .await
         .map_err(db)?;
+        let mut agent_changed = false;
         if !resolved_agent.is_empty()
             && let Ok(parsed_agent) = AgentId::parse(&resolved_agent)
             && let Some(existing_session) = db::models::session::Session::find_by_id(pool, cid)
@@ -164,6 +165,7 @@ pub(crate) async fn write_member_session_config(
                 .map_err(db)?
             && existing_session.agent_id.as_ref() != Some(&parsed_agent)
         {
+            agent_changed = true;
             if existing_session.agent_id.is_some() {
                 crate::runtime_events::flush_conversation_persistence(cid).await;
             }
@@ -173,6 +175,7 @@ pub(crate) async fn write_member_session_config(
                            WHEN agent_id IS NOT NULL AND agent_id != ?1 THEN NULL
                            ELSE external_session_id
                        END,
+                       model = NULL,
                        agent_id = ?1,
                        agent_type = ?1,
                        executor = ?1,
@@ -185,9 +188,72 @@ pub(crate) async fn write_member_session_config(
             .await
             .map_err(db)?;
         }
+        let has_explicit_model = overrides.iter().any(|item| item.key == "model");
+        if agent_changed || !has_explicit_model {
+            clear_stale_seat_binding_model(pool, cid, agent_changed).await?;
+        }
         remember_creation_session_controls(pool, cid, mode_trimmed.as_deref(), overrides.clone())
             .await;
     }
+    Ok(())
+}
+
+async fn clear_stale_seat_binding_model(
+    pool: &SqlitePool,
+    conversation_id: Uuid,
+    clear_all_config: bool,
+) -> Result<(), CollaborationError> {
+    if let Some(binding) =
+        db::models::conversation::ConversationAgentBindingRecord::active_for_conversation(
+            pool,
+            conversation_id,
+        )
+        .await
+        .map_err(db)?
+    {
+        if clear_all_config {
+            sqlx::query(
+                r#"UPDATE conversation_agent_bindings
+                   SET config_selection_json = '{}',
+                       updated_at = datetime('now', 'subsec')
+                   WHERE id = ?"#,
+            )
+            .bind(binding.id)
+            .execute(pool)
+            .await
+            .map_err(db)?;
+        } else {
+            let trimmed = binding.config_selection_json.trim();
+            if !trimmed.is_empty()
+                && let Ok(mut map) =
+                    serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(trimmed)
+                && map.remove("model").is_some()
+                && let Ok(updated_json) = serde_json::to_string(&map)
+            {
+                sqlx::query(
+                    r#"UPDATE conversation_agent_bindings
+                       SET config_selection_json = ?,
+                           updated_at = datetime('now', 'subsec')
+                       WHERE id = ?"#,
+                )
+                .bind(&updated_json)
+                .bind(binding.id)
+                .execute(pool)
+                .await
+                .map_err(db)?;
+            }
+        }
+    }
+    sqlx::query(
+        r#"UPDATE sessions
+           SET model = NULL,
+               updated_at = datetime('now', 'subsec')
+           WHERE id = ?"#,
+    )
+    .bind(conversation_id)
+    .execute(pool)
+    .await
+    .map_err(db)?;
     Ok(())
 }
 
@@ -1049,4 +1115,173 @@ pub(crate) async fn member_nickname(
     .fetch_optional(pool)
     .await
     .map_err(db)
+}
+
+#[cfg(test)]
+mod tests {
+    use agents::AgentSessionConfigOverride;
+    use db::models::{
+        agent_management::SessionDefaultRepository, conversation::ConversationAgentBindingRecord,
+    };
+
+    use super::*;
+    use crate::collaboration::test_support::{create_session, session_controls_of, setup_pool};
+
+    #[tokio::test]
+    async fn existing_seat_clears_stale_inherited_model_and_preserves_explicit_overrides() {
+        let pool = setup_pool().await;
+        let ws = Uuid::new_v4();
+        let seat_cid = Uuid::new_v4();
+        create_session(&pool, seat_cid, ws, Some("OpenCodeSeat")).await;
+
+        let opencode = AgentId::parse("opencode").expect("opencode agent id");
+        sqlx::query(
+            "UPDATE sessions SET agent_id = ?, agent_type = ?, executor = ?, model = 'stale-provider/old-model' WHERE id = ?",
+        )
+        .bind(opencode.as_str())
+        .bind(opencode.as_str())
+        .bind(opencode.as_str())
+        .bind(seat_cid)
+        .execute(&pool)
+        .await
+        .expect("set opencode session");
+
+        // Create a collaboration member with NO explicit model override (`config_values = '{}'`).
+        let member_id = Uuid::new_v4().to_string();
+        let thread_id = format!("group-{}", Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO collaboration_members (id, name, agent, config_values, created_at) VALUES (?, 'Reviewer', 'opencode', '{}', datetime('now'))",
+        )
+        .bind(&member_id)
+        .execute(&pool)
+        .await
+        .expect("insert collaboration_members");
+        sqlx::query(
+            "INSERT INTO collaboration_thread_members (thread_id, member_id, conversation_id, status, joined_at) VALUES (?, ?, ?, 'active', datetime('now'))",
+        )
+        .bind(&thread_id)
+        .bind(&member_id)
+        .bind(seat_cid.to_string())
+        .execute(&pool)
+        .await
+        .expect("insert thread member");
+
+        // Seed a stale observed model on the seat's active binding AND an updated global default.
+        let binding_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO conversation_agent_bindings
+               (id, conversation_id, agent_id, agent_type, working_dir, acp_session_id, status, config_selection_json)
+               VALUES (?, ?, ?, ?, '/workspace', 'oc-old-1', 'ready', ?)"#,
+        )
+        .bind(binding_id)
+        .bind(seat_cid)
+        .bind(opencode.as_str())
+        .bind(opencode.as_str())
+        .bind(r#"{"model":"stale-provider/old-model","reasoning_effort":"high"}"#)
+        .execute(&pool)
+        .await
+        .expect("insert active binding");
+        ConversationAgentBindingRecord::activate(&pool, seat_cid, binding_id)
+            .await
+            .expect("activate binding");
+
+        let defaults_repo = SessionDefaultRepository::new(pool.clone());
+        defaults_repo
+            .upsert(&opencode, "model", r#""new-provider/fresh-model""#)
+            .await
+            .expect("set updated agent default");
+
+        // 1. Background persistence on a seat without explicit model must NOT overwrite
+        //    global agent_session_defaults or persist the stale model.
+        remember_creation_session_controls(
+            &pool,
+            seat_cid,
+            None,
+            vec![AgentSessionConfigOverride {
+                key: "model".to_string(),
+                value: "stale-provider/old-model".to_string(),
+            }],
+        )
+        .await;
+        let current_defaults = defaults_repo
+            .list_for_agent(&opencode)
+            .await
+            .expect("list defaults");
+        let default_model = current_defaults
+            .iter()
+            .find(|r| r.option_id == "model")
+            .map(|r| r.value_json.as_str());
+        assert_eq!(
+            default_model,
+            Some(r#""new-provider/fresh-model""#),
+            "seat background sync must not clobber global agent_session_defaults"
+        );
+
+        // 2. Syncing member config with empty config_values clears the stale inherited model
+        //    while keeping non-model keys (like reasoning_effort).
+        write_member_session_config(
+            &pool,
+            &member_id,
+            &MemberSessionConfig {
+                agent_id: Some("opencode".to_string()),
+                mode_id: None,
+                config_values: json!({}),
+                persona_prompt: Some("Review carefully.".to_string()),
+            },
+        )
+        .await
+        .expect("write empty member config");
+
+        let (_, config_json) = session_controls_of(&pool, seat_cid).await;
+        let parsed: Value =
+            serde_json::from_str(config_json.as_deref().unwrap_or("{}")).expect("json");
+        assert!(
+            parsed.get("model").is_none(),
+            "stale inherited model must be cleared when member has no model override: {parsed}"
+        );
+        assert_eq!(parsed.get("reasoning_effort"), Some(&json!("high")));
+        let session_model: Option<String> =
+            sqlx::query_scalar("SELECT model FROM sessions WHERE id = ?")
+                .bind(seat_cid)
+                .fetch_one(&pool)
+                .await
+                .expect("read sessions.model");
+        assert_eq!(session_model, None);
+
+        // 3. Explicit member model override IS written and preserved on the seat's binding,
+        //    still without clobbering global agent_session_defaults.
+        write_member_session_config(
+            &pool,
+            &member_id,
+            &MemberSessionConfig {
+                agent_id: Some("opencode".to_string()),
+                mode_id: None,
+                config_values: json!({ "model": "explicit-provider/pinned-model" }),
+                persona_prompt: Some("Review carefully.".to_string()),
+            },
+        )
+        .await
+        .expect("write explicit member model");
+
+        let (_, config_json_after) = session_controls_of(&pool, seat_cid).await;
+        let parsed_after: Value =
+            serde_json::from_str(config_json_after.as_deref().unwrap_or("{}")).expect("json");
+        assert_eq!(
+            parsed_after.get("model"),
+            Some(&json!("explicit-provider/pinned-model")),
+            "explicit member model override must be preserved on seat binding"
+        );
+        let current_defaults_after = defaults_repo
+            .list_for_agent(&opencode)
+            .await
+            .expect("list defaults after");
+        assert_eq!(
+            current_defaults_after
+                .iter()
+                .find(|r| r.option_id == "model")
+                .map(|r| r.value_json.as_str()),
+            Some(r#""new-provider/fresh-model""#),
+            "explicit seat override must not clobber global agent_session_defaults"
+        );
+    }
 }

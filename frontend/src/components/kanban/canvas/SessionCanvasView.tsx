@@ -10,8 +10,6 @@ import {
   type ReactNode,
 } from 'react';
 import {
-  Background,
-  BackgroundVariant,
   ConnectionMode,
   Panel,
   ReactFlow,
@@ -26,7 +24,7 @@ import {
   type NodeTypes,
   type Viewport,
 } from '@xyflow/react';
-import { Map as MapIcon, Wand2, X } from 'lucide-react';
+import { Map as MapIcon, Wand2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { KanbanProjectSessionRecord } from '@/hooks/useKanbanProjectSessions';
 import { useQueryClient } from '@tanstack/react-query';
@@ -52,6 +50,13 @@ import {
 import { ProductContextMenu } from '@/components/context-menu/ProductContextMenu';
 import type { ProductContextMenuItem } from '@/components/context-menu/contextMenuTypes';
 import { cn } from '@/lib/utils';
+import { CanvasDotBackground } from './CanvasDotBackground';
+import {
+  CanvasLinksLayer,
+  type CanvasConnectingState,
+  type CanvasDragOverlayMap,
+  type CanvasDragOverlayStore,
+} from './CanvasLinksLayer';
 import { CanvasModifierWheelZoom } from './CanvasModifierWheelZoom';
 import { FloatingSessionList } from './FloatingSessionList';
 import { ImportRecentSessionsDialog } from './ImportRecentSessionsDialog';
@@ -108,7 +113,10 @@ import {
   snapshotCanvasNodes,
 } from './canvasHistory';
 import { SessionCanvasHistoryDock } from './SessionCanvasHistoryDock';
-import { SessionCanvasViewportPanel } from './SessionCanvasViewportPanel';
+import {
+  SessionCanvasViewportPanel,
+  type CanvasBooleanExternalStore,
+} from './SessionCanvasViewportPanel';
 import {
   BOARD_DOT_GAP,
   CANVAS_HANDLE_SIDES,
@@ -373,21 +381,6 @@ function toFlowNode(
   };
 }
 
-function linkAnchor(
-  nodes: readonly SessionCanvasNode[],
-  node: SessionCanvasNode,
-  side?: CanvasHandleSide
-): { x: number; y: number } {
-  const rect = worldRect(nodes, node);
-  if (side) {
-    return handleAnchor(rect, side);
-  }
-  if (node.expanded) {
-    return { x: rect.x + rect.width / 2, y: rect.y + CARD_HEIGHT / 2 };
-  }
-  return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
-}
-
 function nearestHandleSide(
   rect: { x: number; y: number; width: number; height: number },
   point: { x: number; y: number }
@@ -481,7 +474,16 @@ function SessionCanvasFlow({
     },
     [getViewport, setViewport]
   );
-  useCanvasRightDragPan(surfaceRef, onMiddleClick, onRightPan);
+  const onRightPanStateChangeRef = useRef<(panning: boolean) => void>(() => {});
+  const onRightPanStateChange = useCallback((panning: boolean) => {
+    onRightPanStateChangeRef.current(panning);
+  }, []);
+  useCanvasRightDragPan(
+    surfaceRef,
+    onMiddleClick,
+    onRightPan,
+    onRightPanStateChange
+  );
   useCanvasMarqueeTextGuard(surfaceRef);
 
   const dockPosition = useCanvasDockPosition();
@@ -508,10 +510,51 @@ function SessionCanvasFlow({
   const zoomRef = useRef(documentState.viewport?.zoom ?? 1);
   const pendingViewport = useRef<Viewport | null>(documentState.viewport);
   const saveTimer = useRef<number | null>(null);
+  const isPanningRef = useRef(false);
+  const isRightPanningRef = useRef(false);
+  const minimapSuspendedRef = useRef(false);
+  const minimapSuspendedListenersRef = useRef(new Set<() => void>());
+  const setMinimapSuspended = useCallback((suspended: boolean) => {
+    if (minimapSuspendedRef.current === suspended) return;
+    minimapSuspendedRef.current = suspended;
+    for (const listener of minimapSuspendedListenersRef.current) {
+      listener();
+    }
+  }, []);
+  const suspendMinimapStore = useMemo<CanvasBooleanExternalStore>(
+    () => ({
+      getSnapshot: () => minimapSuspendedRef.current,
+      subscribe: (listener) => {
+        minimapSuspendedListenersRef.current.add(listener);
+        return () => {
+          minimapSuspendedListenersRef.current.delete(listener);
+        };
+      },
+    }),
+    []
+  );
   const documentRef = useRef(documentState);
   documentRef.current = documentState;
-  const dragOverlayRef = useRef<ReadonlyMap<string, { x: number; y: number }>>(
-    new Map()
+  const dragOverlayRef = useRef<CanvasDragOverlayMap>(new Map());
+  const dragOverlayListenersRef = useRef(new Set<() => void>());
+  const updateDragOverlay = useCallback((next: CanvasDragOverlayMap) => {
+    if (next === dragOverlayRef.current) return;
+    dragOverlayRef.current = next;
+    for (const listener of dragOverlayListenersRef.current) {
+      listener();
+    }
+  }, []);
+  const dragOverlayStore = useMemo<CanvasDragOverlayStore>(
+    () => ({
+      getSnapshot: () => dragOverlayRef.current,
+      subscribe: (listener) => {
+        dragOverlayListenersRef.current.add(listener);
+        return () => {
+          dragOverlayListenersRef.current.delete(listener);
+        };
+      },
+    }),
+    []
   );
   const draggedIdRef = useRef<string | null>(null);
   const stableFlowNodesRef = useRef<Node[] | null>(null);
@@ -599,9 +642,6 @@ function SessionCanvasFlow({
   selectedIdsRef.current = selectedIds;
   const [dropHint, setDropHint] = useState<CanvasDropHint | null>(null);
   const [draggedId, setDraggedId] = useState<string | null>(null);
-  const [dragOverlay, setDragOverlay] = useState<
-    ReadonlyMap<string, { x: number; y: number }>
-  >(() => new Map());
   const [alignGuides, setAlignGuides] = useState<AlignmentGuide[]>([]);
   const [, setHistoryVersion] = useState(0);
   const historyByCanvasRef = useRef(
@@ -799,8 +839,7 @@ function SessionCanvasFlow({
         setSelectionMenu(null);
         setDropHint(null);
         setDraggedId(null);
-        setDragOverlay(new Map());
-        dragOverlayRef.current = new Map();
+        updateDragOverlay(new Map());
         draggedIdRef.current = null;
         dragFreezeKeyRef.current = null;
         stableFlowNodesRef.current = null;
@@ -825,7 +864,7 @@ function SessionCanvasFlow({
         sourceInstanceId: instanceIdRef.current,
       });
     },
-    [fitView, projectId, setViewport]
+    [fitView, projectId, setViewport, updateDragOverlay]
   );
 
   const handleSelectCanvas = useCallback(
@@ -1044,11 +1083,6 @@ function SessionCanvasFlow({
     [draggedId, dropHint, nodes]
   );
 
-  const liveNodes = useMemo(
-    () => applyDragOverlayToCanvasNodes(layoutNodes, dragOverlay),
-    [dragOverlay, layoutNodes]
-  );
-
   const flowData = useMemo(
     () => buildCanvasFlowData(layoutNodes, runningSessionIds, reviewSessionIds),
     [layoutNodes, runningSessionIds, reviewSessionIds]
@@ -1104,17 +1138,11 @@ function SessionCanvasFlow({
       ? stableFlowNodesRef.current
       : structuralRfNodes;
 
-  const [hoveredLinkId, setHoveredLinkId] = useState<string | null>(null);
-  const [connectingState, setConnectingState] = useState<{
-    sourceId: string;
-    sourceHandle: CanvasHandleSide;
-    currentFlowPoint: { x: number; y: number };
-    hoveredTarget: { nodeId: string; side: CanvasHandleSide } | null;
-  } | null>(null);
+  const [connectingState, setConnectingState] =
+    useState<CanvasConnectingState | null>(null);
   const connectingRef = useRef(connectingState);
   connectingRef.current = connectingState;
   useEffect(() => {
-    setHoveredLinkId(null);
     setConnectingState(null);
   }, [workspaceState.activeCanvasId]);
 
@@ -1193,7 +1221,6 @@ function SessionCanvasFlow({
         links: nextLinks,
         dismissedAutoLinks: [...dismissedSet],
       });
-      setHoveredLinkId((prev) => (prev === link.id ? null : prev));
     },
     [autoSessionLinks, persist]
   );
@@ -2205,7 +2232,7 @@ function SessionCanvasFlow({
       beginHandleConnect,
       completeHandleConnect,
       hoverHandleTarget,
-      isConnectingLink: connectingState != null,
+      isConnectingLink: isConnecting,
       openOrFocusPanelNode,
       openOrFocusSessionNode,
       duplicateCanvasNode,
@@ -2236,7 +2263,7 @@ function SessionCanvasFlow({
       beginHandleConnect,
       completeHandleConnect,
       hoverHandleTarget,
-      connectingState,
+      isConnecting,
       openOrFocusPanelNode,
       openOrFocusSessionNode,
       duplicateCanvasNode,
@@ -2302,8 +2329,7 @@ function SessionCanvasFlow({
         dragOverlayRef.current
       );
       if (nextOverlay !== dragOverlayRef.current) {
-        dragOverlayRef.current = nextOverlay;
-        setDragOverlay(nextOverlay);
+        updateDragOverlay(nextOverlay);
         publishCanvasDragPositions(flowStore, nextOverlay);
       }
       setSelectedIds((current) => {
@@ -2335,7 +2361,7 @@ function SessionCanvasFlow({
         return resolved;
       });
     },
-    [flowStore]
+    [flowStore, updateDragOverlay]
   );
 
   const handleNodeDragStart = useCallback((_event: unknown, dragged: Node) => {
@@ -2438,8 +2464,7 @@ function SessionCanvasFlow({
       setAlignGuides([]);
       setDropHint(null);
       setDraggedId(null);
-      setDragOverlay(new Map());
-      dragOverlayRef.current = new Map();
+      updateDragOverlay(new Map());
       if (!instanceId) return;
       const committed = applyAlignmentDeltaToOverlay(overlay, commitSnap);
       updateNodes((items) => {
@@ -2458,7 +2483,7 @@ function SessionCanvasFlow({
         );
       });
     },
-    [updateNodes]
+    [updateDragOverlay, updateNodes]
   );
 
   const handleNodeDoubleClick = useCallback(
@@ -2617,37 +2642,91 @@ function SessionCanvasFlow({
     undoCanvas,
   ]);
 
-  const handleMove = useCallback((_event: unknown, viewport: Viewport) => {
+  const scheduleViewportSave = useCallback(() => {
+    if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      saveTimer.current = null;
+      if (!pendingViewportDirtyRef.current || !pendingViewport.current) return;
+      const next: SessionCanvasViewport = pendingViewport.current;
+      persist({ ...documentRef.current, viewport: next });
+    }, VIEWPORT_SAVE_DELAY_MS);
+  }, [persist]);
+
+  onRightPanStateChangeRef.current = (panning) => {
+    isRightPanningRef.current = panning;
+    if (panning) {
+      isPanningRef.current = true;
+      setCanvasBrowserInteracting(true);
+      setMinimapSuspended(true);
+      return;
+    }
+    isPanningRef.current = false;
+    setCanvasBrowserInteracting(false);
+    setMinimapSuspended(false);
+    const viewport = pendingViewport.current ?? getViewport();
+    pendingViewport.current = viewport;
+    pendingViewportDirtyRef.current = true;
     zoomRef.current = viewport.zoom;
-    surfaceRef.current?.setAttribute('data-canvas-panning', '');
-    setCanvasBrowserInteracting(true);
     notifyCanvasBrowserViewportChange(viewport.zoom);
-  }, []);
+    scheduleViewportSave();
+  };
+
+  const handleMove = useCallback(
+    (event: unknown, viewport: Viewport) => {
+      zoomRef.current = viewport.zoom;
+      if (!isPanningRef.current) {
+        isPanningRef.current = true;
+        surfaceRef.current?.setAttribute('data-canvas-panning', '');
+        setCanvasBrowserInteracting(true);
+        const eventTarget =
+          event && typeof event === 'object' && 'target' in event
+            ? (event as { target?: EventTarget | null }).target
+            : null;
+        const fromMinimap =
+          eventTarget instanceof Element &&
+          Boolean(eventTarget.closest('.react-flow__minimap'));
+        if (!fromMinimap) {
+          setMinimapSuspended(true);
+        }
+      }
+      notifyCanvasBrowserViewportChange(viewport.zoom);
+    },
+    [setMinimapSuspended]
+  );
 
   const handleMoveEnd = useCallback(
     (_event: unknown, viewport: Viewport) => {
-      surfaceRef.current?.removeAttribute('data-canvas-panning');
       pendingViewport.current = viewport;
       pendingViewportDirtyRef.current = true;
       zoomRef.current = viewport.zoom;
-      setCanvasBrowserInteracting(false);
       notifyCanvasBrowserViewportChange(viewport.zoom);
-      if (saveTimer.current != null) window.clearTimeout(saveTimer.current);
-      saveTimer.current = window.setTimeout(() => {
-        saveTimer.current = null;
-        if (!pendingViewportDirtyRef.current || !pendingViewport.current)
-          return;
-        const next: SessionCanvasViewport = pendingViewport.current;
-        persist({ ...documentRef.current, viewport: next });
-      }, VIEWPORT_SAVE_DELAY_MS);
+      if (isRightPanningRef.current) {
+        return;
+      }
+      isPanningRef.current = false;
+      surfaceRef.current?.removeAttribute('data-canvas-panning');
+      setCanvasBrowserInteracting(false);
+      setMinimapSuspended(false);
+      scheduleViewportSave();
+    },
+    [scheduleViewportSave, setMinimapSuspended]
+  );
+
+  const handleMapVisibleChange = useCallback(
+    (visible: boolean) => {
+      persist({ ...documentRef.current, minimapVisible: visible });
     },
     [persist]
   );
 
   useEffect(
     () => () => {
+      isRightPanningRef.current = false;
+      isPanningRef.current = false;
       surfaceRef.current?.removeAttribute('data-canvas-panning');
+      surfaceRef.current?.removeAttribute('data-canvas-drag-panning');
       setCanvasBrowserInteracting(false);
+      setMinimapSuspended(false);
       if (saveTimer.current != null) {
         window.clearTimeout(saveTimer.current);
         saveTimer.current = null;
@@ -2680,7 +2759,7 @@ function SessionCanvasFlow({
       }
       flushCanvasDocumentPersist();
     },
-    [projectId]
+    [projectId, setMinimapSuspended]
   );
 
   const empty = nodes.length === 0;
@@ -2718,35 +2797,6 @@ function SessionCanvasFlow({
     ],
     [canGroup, deleteSelection, selectedIds, t, updateNodes]
   );
-
-  const connectingPreview = useMemo(() => {
-    if (!connectingState) return null;
-    const sourceNode = nodeById(liveNodes, connectingState.sourceId);
-    if (!sourceNode) return null;
-    const start = linkAnchor(
-      liveNodes,
-      sourceNode,
-      connectingState.sourceHandle
-    );
-    if (
-      connectingState.hoveredTarget &&
-      connectingState.hoveredTarget.nodeId !== connectingState.sourceId
-    ) {
-      const targetNode = nodeById(
-        liveNodes,
-        connectingState.hoveredTarget.nodeId
-      );
-      if (targetNode) {
-        const end = linkAnchor(
-          liveNodes,
-          targetNode,
-          connectingState.hoveredTarget.side
-        );
-        return { start, end };
-      }
-    }
-    return { start, end: connectingState.currentFlowPoint };
-  }, [connectingState, liveNodes]);
 
   const handleNativeDrop = useCallback(
     (event: React.DragEvent<HTMLDivElement>) => {
@@ -2851,8 +2901,7 @@ function SessionCanvasFlow({
               minZoom={CANVAS_MIN_ZOOM}
               maxZoom={CANVAS_MAX_ZOOM}
             />
-            <Background
-              variant={BackgroundVariant.Dots}
+            <CanvasDotBackground
               gap={BOARD_DOT_GAP}
               size={1.5}
               className="canvas-dots"
@@ -2883,111 +2932,16 @@ function SessionCanvasFlow({
                 })}
               </ViewportPortal>
             ) : null}
-            {sessionLinks.length > 0 || connectingPreview ? (
-              <ViewportPortal>
-                <svg
-                  className="pointer-events-none absolute overflow-visible"
-                  width={1}
-                  height={1}
-                >
-                  {sessionLinks.map((link) => {
-                    const from = nodeById(liveNodes, link.sourceId);
-                    const to = nodeById(liveNodes, link.targetId);
-                    if (!from || !to) return null;
-                    const start = linkAnchor(
-                      liveNodes,
-                      from,
-                      link.sourceHandle
-                    );
-                    const end = linkAnchor(liveNodes, to, link.targetHandle);
-                    return (
-                      <g key={link.id}>
-                        <line
-                          className="canvas-session-link"
-                          x1={start.x}
-                          y1={start.y}
-                          x2={end.x}
-                          y2={end.y}
-                          strokeDasharray="6 4"
-                          strokeWidth={hoveredLinkId === link.id ? 2.4 : 1.75}
-                        />
-                        <line
-                          data-testid={`canvas-link-hit-${link.id}`}
-                          x1={start.x}
-                          y1={start.y}
-                          x2={end.x}
-                          y2={end.y}
-                          stroke="transparent"
-                          strokeWidth={16}
-                          style={{ pointerEvents: 'stroke', cursor: 'pointer' }}
-                          onMouseEnter={() => setHoveredLinkId(link.id)}
-                          onMouseLeave={() =>
-                            setHoveredLinkId((prev) =>
-                              prev === link.id ? null : prev
-                            )
-                          }
-                        />
-                      </g>
-                    );
-                  })}
-                  {connectingPreview ? (
-                    <line
-                      data-testid="canvas-link-preview"
-                      className="canvas-session-link"
-                      x1={connectingPreview.start.x}
-                      y1={connectingPreview.start.y}
-                      x2={connectingPreview.end.x}
-                      y2={connectingPreview.end.y}
-                      strokeDasharray="4 4"
-                      strokeWidth={2}
-                    />
-                  ) : null}
-                </svg>
-                {sessionLinks.map((link) => {
-                  const from = nodeById(liveNodes, link.sourceId);
-                  const to = nodeById(liveNodes, link.targetId);
-                  if (!from || !to) return null;
-                  const start = linkAnchor(liveNodes, from, link.sourceHandle);
-                  const end = linkAnchor(liveNodes, to, link.targetHandle);
-                  const midX = (start.x + end.x) / 2;
-                  const midY = (start.y + end.y) / 2;
-                  const isHovered = hoveredLinkId === link.id;
-                  return (
-                    <button
-                      key={`disconnect-${link.id}`}
-                      type="button"
-                      data-testid={`canvas-link-disconnect-${link.id}`}
-                      aria-label={t('hubCanvas.disconnectLink')}
-                      title={t('hubCanvas.disconnectLink')}
-                      onMouseEnter={() => setHoveredLinkId(link.id)}
-                      onMouseLeave={() =>
-                        setHoveredLinkId((prev) =>
-                          prev === link.id ? null : prev
-                        )
-                      }
-                      onPointerDown={(event) => {
-                        event.stopPropagation();
-                      }}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        disconnectLink(link);
-                      }}
-                      className={cn(
-                        'nodrag nopan pointer-events-auto absolute z-30 flex size-5 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border border-border bg-popover text-muted-foreground shadow-sm transition-opacity hover:border-destructive/60 hover:bg-destructive hover:text-destructive-foreground',
-                        isHovered
-                          ? 'opacity-100'
-                          : 'opacity-0 hover:opacity-100 focus:opacity-100'
-                      )}
-                      style={{
-                        left: midX,
-                        top: midY,
-                      }}
-                    >
-                      <X className="size-3" />
-                    </button>
-                  );
-                })}
-              </ViewportPortal>
+            {sessionLinks.length > 0 || connectingState ? (
+              <CanvasLinksLayer
+                activeCanvasId={workspaceState.activeCanvasId}
+                layoutNodes={layoutNodes}
+                dragOverlayStore={dragOverlayStore}
+                sessionLinks={sessionLinks}
+                connectingState={connectingState}
+                disconnectLinkLabel={t('hubCanvas.disconnectLink')}
+                onDisconnectLink={disconnectLink}
+              />
             ) : null}
             {dropHint?.type === 'merge' ? (
               <ViewportPortal>
@@ -3063,6 +3017,7 @@ function SessionCanvasFlow({
             ) : null}
             <SessionCanvasViewportPanel
               mapVisible={documentState.minimapVisible}
+              suspendMinimapStore={suspendMinimapStore}
               position={viewportPosition}
               leftOffsetPx={
                 !hideSessionList && listVisible ? listWidth + 24 : undefined
@@ -3073,9 +3028,7 @@ function SessionCanvasFlow({
               onCreateCanvas={handleCreateCanvas}
               onRenameCanvas={handleRenameCanvas}
               onDeleteCanvas={handleDeleteCanvas}
-              onMapVisibleChange={(visible) =>
-                persist({ ...documentRef.current, minimapVisible: visible })
-              }
+              onMapVisibleChange={handleMapVisibleChange}
             />
           </ReactFlow>
         </div>

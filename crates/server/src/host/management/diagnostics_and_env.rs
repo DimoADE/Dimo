@@ -174,9 +174,229 @@ pub(super) async fn probe_profile_dependencies(
     items
 }
 
-pub(crate) async fn discover_profile_acp(agent_id: &AgentId) -> Option<PathBuf> {
+pub(super) const OPENCLAW_DEFAULT_GATEWAY_ENDPOINT: &str = "127.0.0.1:18789";
+pub(super) const OPENCLAW_GATEWAY_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CandidateProbeFailure {
+    pub path: PathBuf,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct ProfileAcpDiscovery {
+    pub path: Option<PathBuf>,
+    pub failed_candidate: Option<CandidateProbeFailure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct OpenClawGatewayEndpoint {
+    pub display: String,
+    pub connect_addr: String,
+    pub is_local: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct OpenClawGatewayProbe {
+    pub endpoint: OpenClawGatewayEndpoint,
+    pub reachable: bool,
+    pub error: Option<String>,
+}
+
+pub(super) fn parse_openclaw_gateway_endpoint(raw: &str) -> Option<OpenClawGatewayEndpoint> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (default_port, rest) = if let Some(rest) = trimmed.strip_prefix("wss://") {
+        (443u16, rest)
+    } else if let Some(rest) = trimmed.strip_prefix("https://") {
+        (443u16, rest)
+    } else if let Some(rest) = trimmed.strip_prefix("ws://") {
+        (80u16, rest)
+    } else if let Some(rest) = trimmed.strip_prefix("http://") {
+        (80u16, rest)
+    } else {
+        (18789u16, trimmed)
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("").trim();
+    let authority = authority
+        .rsplit_once('@')
+        .map(|(_, host_port)| host_port)
+        .unwrap_or(authority);
+    if authority.is_empty() {
+        return None;
+    }
+    let (host, port) = if let Some(bracketed) = authority.strip_prefix('[') {
+        let (host, after) = bracketed.split_once(']')?;
+        let port = match after.strip_prefix(':') {
+            Some(port_str) => port_str.parse::<u16>().ok()?,
+            None if after.is_empty() => default_port,
+            None => return None,
+        };
+        (host, port)
+    } else if let Some((host, port_str)) = authority.rsplit_once(':') {
+        if host.contains(':') {
+            (authority, default_port)
+        } else {
+            let port = port_str.parse::<u16>().ok()?;
+            (host, port)
+        }
+    } else {
+        (authority, default_port)
+    };
+    let host = host.trim();
+    if host.is_empty() {
+        return None;
+    }
+    let host_lower = host.to_ascii_lowercase();
+    let is_local = matches!(
+        host_lower.as_str(),
+        "127.0.0.1" | "localhost" | "::1" | "0.0.0.0"
+    );
+    let connect_host = if host_lower == "0.0.0.0" {
+        "127.0.0.1"
+    } else {
+        host
+    };
+    let connect_addr = if connect_host.contains(':') {
+        format!("[{connect_host}]:{port}")
+    } else {
+        format!("{connect_host}:{port}")
+    };
+    Some(OpenClawGatewayEndpoint {
+        display: trimmed.to_string(),
+        connect_addr,
+        is_local,
+    })
+}
+
+pub(super) async fn resolve_openclaw_gateway_endpoint(
+    home: Option<&Path>,
+    environment: &HashMap<String, String>,
+) -> OpenClawGatewayEndpoint {
+    if let Some(raw) = environment.get("OPENCLAW_GATEWAY_URL")
+        && let Some(parsed) = parse_openclaw_gateway_endpoint(raw)
+    {
+        return parsed;
+    }
+    let openclaw_home = environment
+        .get("OPENCLAW_HOME")
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("OPENCLAW_HOME")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| home.map(|home| home.join(".openclaw")));
+    if let Some(openclaw_home) = openclaw_home {
+        let config_path = openclaw_home.join("openclaw.json");
+        if let Ok(bytes) = tokio::fs::read(&config_path).await
+            && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes)
+            && let Some(raw) = json
+                .pointer("/gateway/remote/url")
+                .and_then(serde_json::Value::as_str)
+            && let Some(parsed) = parse_openclaw_gateway_endpoint(raw)
+        {
+            return parsed;
+        }
+    }
+    OpenClawGatewayEndpoint {
+        display: OPENCLAW_DEFAULT_GATEWAY_ENDPOINT.to_string(),
+        connect_addr: OPENCLAW_DEFAULT_GATEWAY_ENDPOINT.to_string(),
+        is_local: true,
+    }
+}
+
+pub(super) async fn probe_openclaw_gateway_endpoint(
+    endpoint: OpenClawGatewayEndpoint,
+) -> OpenClawGatewayProbe {
+    match tokio::time::timeout(
+        OPENCLAW_GATEWAY_PROBE_TIMEOUT,
+        tokio::net::TcpStream::connect(&endpoint.connect_addr),
+    )
+    .await
+    {
+        Ok(Ok(_stream)) => OpenClawGatewayProbe {
+            endpoint,
+            reachable: true,
+            error: None,
+        },
+        Ok(Err(error)) => OpenClawGatewayProbe {
+            endpoint,
+            reachable: false,
+            error: Some(error.to_string()),
+        },
+        Err(_) => OpenClawGatewayProbe {
+            endpoint,
+            reachable: false,
+            error: Some(format!(
+                "connection timed out after {}ms",
+                OPENCLAW_GATEWAY_PROBE_TIMEOUT.as_millis()
+            )),
+        },
+    }
+}
+
+pub(super) async fn probe_openclaw_gateway(
+    home: Option<&Path>,
+    environment: &HashMap<String, String>,
+) -> OpenClawGatewayProbe {
+    let endpoint = resolve_openclaw_gateway_endpoint(home, environment).await;
+    probe_openclaw_gateway_endpoint(endpoint).await
+}
+
+pub(super) async fn probe_candidate_executable_health(
+    path: &Path,
+    version_args: &[&str],
+) -> Result<(), String> {
+    if version_args.is_empty() {
+        return Ok(());
+    }
+    let mut command = utils::process::new_hidden_tokio_command(path, version_args.iter().copied());
+    if std::env::var_os("HERMES_NPM_AUTO_SETUP").is_none() {
+        command.env("HERMES_NPM_AUTO_SETUP", "0");
+    }
+    match utils::process::run_command_output_with_timeout(&mut command, DIAGNOSTIC_COMMAND_TIMEOUT)
+        .await
+    {
+        Ok(output) => {
+            if output.status.success() {
+                return Ok(());
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if agents::probe_output_indicates_broken_executable(&stdout, &stderr) {
+                let line = stderr
+                    .lines()
+                    .chain(stdout.lines())
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .unwrap_or("executable failed to run");
+                return Err(redact_operation_output(line));
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let message = error.to_string();
+            if message.contains("timed out") {
+                Ok(())
+            } else {
+                Err(redact_operation_output(&message))
+            }
+        }
+    }
+}
+
+pub(super) async fn discover_profile_acp_with_diagnostics(
+    agent_id: &AgentId,
+) -> ProfileAcpDiscovery {
     let catalog = BuiltInProfileCatalog::management();
-    let profile = catalog.profile(agent_id)?;
+    let Some(profile) = catalog.profile(agent_id) else {
+        return ProfileAcpDiscovery::default();
+    };
+    let mut failed_candidate: Option<CandidateProbeFailure> = None;
     for candidate in profile.external_candidates {
         if !matches!(
             candidate.component,
@@ -184,25 +404,46 @@ pub(crate) async fn discover_profile_acp(agent_id: &AgentId) -> Option<PathBuf> 
         ) {
             continue;
         }
-        if let Some(path) = resolve_on_path(candidate.executable).await
-            && !agents::launch_program_is_legacy_acp_shim(agent_id, &path)
-        {
-            return Some(path);
-        }
+        let mut paths = utils::shell::resolve_executable_paths(candidate.executable).await;
         if is_native_engine_profile(agent_id)
             && let Some(home) = dirs::home_dir()
             && let Some(path) = agents::resolve_native_engine_cli(agent_id.as_str(), &home)
-            && !agents::launch_program_is_legacy_acp_shim(agent_id, &path)
+            && !paths.contains(&path)
         {
-            return Some(path);
+            paths.push(path);
         }
         if let Some(path) = discover_executable_in_common_locations(candidate.executable)
-            && !agents::launch_program_is_legacy_acp_shim(agent_id, &path)
+            && !paths.contains(&path)
         {
-            return Some(path);
+            paths.push(path);
+        }
+        for path in paths {
+            if agents::launch_program_is_legacy_acp_shim(agent_id, &path) {
+                continue;
+            }
+            match probe_candidate_executable_health(&path, candidate.version_args).await {
+                Ok(()) => {
+                    return ProfileAcpDiscovery {
+                        path: Some(path),
+                        failed_candidate,
+                    };
+                }
+                Err(detail) => {
+                    if failed_candidate.is_none() {
+                        failed_candidate = Some(CandidateProbeFailure { path, detail });
+                    }
+                }
+            }
         }
     }
-    None
+    ProfileAcpDiscovery {
+        path: None,
+        failed_candidate,
+    }
+}
+
+pub(crate) async fn discover_profile_acp(agent_id: &AgentId) -> Option<PathBuf> {
+    discover_profile_acp_with_diagnostics(agent_id).await.path
 }
 
 pub(super) fn discover_executable_in_common_locations(executable: &str) -> Option<PathBuf> {
@@ -669,6 +910,7 @@ pub(super) async fn build_environment_diagnostics(
     agent_id: AgentId,
     profile: &BuiltInProfile,
     installed: &[InstalledComponent],
+    environment: &HashMap<String, String>,
 ) -> AgentEnvironmentDiagnosticsView {
     let native_engine = is_native_engine_profile(&agent_id);
     let app_path = std::env::var_os("PATH").unwrap_or_default();
@@ -692,19 +934,33 @@ pub(super) async fn build_environment_diagnostics(
         .map(|candidate| candidate.executable)
         .unwrap_or(profile.agent_id.as_str());
     let mut matched_target = None;
-    for candidate in &primary_candidates {
-        if let Some(path) = resolve_on_path(candidate.executable)
-            .await
-            .filter(|path| !agents::launch_program_is_legacy_acp_shim(&agent_id, path))
-        {
-            matched_target = Some((candidate.executable, path));
-            break;
+    let mut failed_target: Option<(&str, CandidateProbeFailure)> = None;
+    'candidates: for candidate in &primary_candidates {
+        for path in utils::shell::resolve_executable_paths(candidate.executable).await {
+            if agents::launch_program_is_legacy_acp_shim(&agent_id, &path) {
+                continue;
+            }
+            match probe_candidate_executable_health(&path, candidate.version_args).await {
+                Ok(()) => {
+                    matched_target = Some((candidate.executable, path));
+                    break 'candidates;
+                }
+                Err(detail) => {
+                    if failed_target.is_none() {
+                        failed_target =
+                            Some((candidate.executable, CandidateProbeFailure { path, detail }));
+                    }
+                }
+            }
         }
     }
     let (target_command, target_on_app_path) = match matched_target {
         Some((command, path)) => (command, Some(path)),
         None => (
-            default_target_command,
+            failed_target
+                .as_ref()
+                .map(|(command, _)| *command)
+                .unwrap_or(default_target_command),
             native_engine
                 .then(dirs::home_dir)
                 .flatten()
@@ -867,7 +1123,17 @@ pub(super) async fn build_environment_diagnostics(
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| {
-                if managed_launchable {
+                if let Some((_, failure)) = failed_target.as_ref() {
+                    if managed_launchable {
+                        format!(
+                            "user environment (external candidate failed: {} · {})",
+                            failure.path.display(),
+                            failure.detail
+                        )
+                    } else {
+                        format!("FAILED · {} · {}", failure.path.display(), failure.detail)
+                    }
+                } else if managed_launchable {
                     "user environment".to_string()
                 } else {
                     "NOT RESOLVED".to_string()
@@ -880,6 +1146,42 @@ pub(super) async fn build_environment_diagnostics(
         },
         managed_launchable.then_some("agents.environmentDiagnosticManagedLaunch"),
     ));
+    if let Some((_, failure)) = failed_target.as_ref() {
+        installation_checks.push(check(
+            "external_candidate_probe",
+            "agents.environmentDiagnosticExternalCandidateProbe",
+            format!("{} · {}", failure.path.display(), failure.detail),
+            if launchable {
+                AgentEnvironmentDiagnosticLevel::Warning
+            } else {
+                AgentEnvironmentDiagnosticLevel::Error
+            },
+            None,
+        ));
+    }
+    if agent_id.as_str() == "openclaw" {
+        let gateway = probe_openclaw_gateway(dirs::home_dir().as_deref(), environment).await;
+        installation_checks.push(check(
+            "openclaw_gateway",
+            "agents.environmentDiagnosticOpenclawGateway",
+            if gateway.reachable {
+                format!("LISTENING · {}", gateway.endpoint.display)
+            } else {
+                format!(
+                    "NOT LISTENING · {} · {} (CLI readiness is separate from gateway service)",
+                    gateway.endpoint.display,
+                    gateway.error.as_deref().unwrap_or("connection refused")
+                )
+            },
+            if gateway.reachable {
+                AgentEnvironmentDiagnosticLevel::Ok
+            } else {
+                AgentEnvironmentDiagnosticLevel::Warning
+            },
+            (!gateway.reachable)
+                .then_some("agents.environmentDiagnosticOpenclawGatewayNotListening"),
+        ));
+    }
     if let Some(relation) = agents::acp_adapter_relation(agent_id.as_str()) {
         let vendor_cli = agents::resolve_vendor_cli(relation.native_cmd, relation.extra_dirs).await;
         installation_checks.push(vendor_cli_diagnostic_check(
@@ -1400,5 +1702,88 @@ mod tests {
         assert!(assignments.contains("OPENAI_BASE_URL"));
         assert!(!assignments.contains("OPENAI_API_KEY"));
         assert!(!assignments.contains("sk-secret"));
+    }
+
+    #[tokio::test]
+    async fn openclaw_gateway_endpoint_resolves_env_config_and_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+
+        let default_ep = resolve_openclaw_gateway_endpoint(Some(home), &HashMap::new()).await;
+        assert_eq!(default_ep.connect_addr, OPENCLAW_DEFAULT_GATEWAY_ENDPOINT);
+        assert!(default_ep.is_local);
+
+        let openclaw_dir = home.join(".openclaw");
+        tokio::fs::create_dir_all(&openclaw_dir).await.unwrap();
+        tokio::fs::write(
+            openclaw_dir.join("openclaw.json"),
+            br#"{"gateway":{"remote":{"url":"ws://127.0.0.1:19999/ws"}}}"#,
+        )
+        .await
+        .unwrap();
+        let from_config = resolve_openclaw_gateway_endpoint(Some(home), &HashMap::new()).await;
+        assert_eq!(from_config.connect_addr, "127.0.0.1:19999");
+        assert!(from_config.is_local);
+
+        let env = HashMap::from([(
+            "OPENCLAW_GATEWAY_URL".to_string(),
+            "https://gw.example.com:8443/acp".to_string(),
+        )]);
+        let from_env = resolve_openclaw_gateway_endpoint(Some(home), &env).await;
+        assert_eq!(from_env.connect_addr, "gw.example.com:8443");
+        assert!(!from_env.is_local);
+    }
+
+    #[tokio::test]
+    async fn openclaw_gateway_tcp_probe_distinguishes_listening_from_closed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let listening_ep = parse_openclaw_gateway_endpoint(&format!("ws://{addr}")).unwrap();
+        let listening_probe = probe_openclaw_gateway_endpoint(listening_ep).await;
+        assert!(listening_probe.reachable);
+        assert!(listening_probe.error.is_none());
+
+        drop(listener);
+        let closed_ep = parse_openclaw_gateway_endpoint(&format!("ws://{addr}")).unwrap();
+        let closed_probe = probe_openclaw_gateway_endpoint(closed_ep).await;
+        assert!(!closed_probe.reachable);
+        assert!(closed_probe.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn probe_candidate_executable_health_rejects_broken_darwin_arm64_enoent() {
+        let temp = tempfile::tempdir().unwrap();
+        #[cfg(windows)]
+        let script = {
+            let path = temp.path().join("grok.cmd");
+            tokio::fs::write(
+                &path,
+                "@echo off\r\necho Error: spawn C:\\x\\vendor\\darwin-arm64\\grok ENOENT 1>&2\r\nexit /b 1\r\n",
+            )
+            .await
+            .unwrap();
+            path
+        };
+        #[cfg(not(windows))]
+        let script = {
+            use std::os::unix::fs::PermissionsExt;
+            let path = temp.path().join("grok");
+            tokio::fs::write(
+                &path,
+                "#!/bin/sh\necho 'Error: spawn /opt/vendor/darwin-arm64/grok ENOENT' >&2\nexit 1\n",
+            )
+            .await
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+
+        let err = probe_candidate_executable_health(&script, &["--version"])
+            .await
+            .expect_err("broken darwin-arm64 ENOENT executable must be rejected");
+        assert!(
+            err.contains("ENOENT") && err.contains("darwin-arm64"),
+            "unexpected probe error detail: {err}"
+        );
     }
 }

@@ -10,6 +10,10 @@ import {
   RIGHT_GROUP_PREFIX,
 } from '@/utils/dockviewGroupPolicy';
 import { gridLocationFromElement } from '@/utils/dockviewEditorSplit';
+import {
+  isDockviewSashResizing,
+  subscribeDockviewSashResize,
+} from '@/utils/dockviewSashResizeState';
 import { settleDockviewGroupWidths } from '@/utils/dockviewStartupSizing';
 
 type DockviewGroup = NonNullable<ReturnType<DockviewApi['getGroup']>>;
@@ -833,12 +837,21 @@ export function installEditorColumnWidthRebalance(
   } | null = null;
   const groupDisposables = new Map<DockviewGroup, Array<{ dispose(): void }>>();
 
+  let deferredRefreshAfterSashDrag = false;
   const scheduleSnapshotRefresh = () => {
-    if (refreshQueued || disposed) return;
+    if (disposed) return;
+    if (isDockviewSashResizing()) {
+      deferredRefreshAfterSashDrag = true;
+      return;
+    }
+    if (refreshQueued) return;
     refreshQueued = true;
     queueMicrotask(() => {
       refreshQueued = false;
-      if (disposed) return;
+      if (disposed || isDockviewSashResizing()) {
+        if (!disposed) deferredRefreshAfterSashDrag = true;
+        return;
+      }
       const next = captureZoneColumnWidths(api);
       if (
         next.length > 0 ||
@@ -848,6 +861,12 @@ export function installEditorColumnWidthRebalance(
       }
     });
   };
+
+  const unsubscribeSashResize = subscribeDockviewSashResize((resizing) => {
+    if (resizing || disposed || !deferredRefreshAfterSashDrag) return;
+    deferredRefreshAfterSashDrag = false;
+    scheduleSnapshotRefresh();
+  });
 
   const scheduleClearDropHint = () => {
     if (clearDropHintQueued || disposed) return;
@@ -960,6 +979,7 @@ export function installEditorColumnWidthRebalance(
   return {
     dispose() {
       disposed = true;
+      unsubscribeSashResize();
       willDropDisposable?.dispose();
       addGroupDisposable.dispose();
       movePanelDisposable?.dispose();

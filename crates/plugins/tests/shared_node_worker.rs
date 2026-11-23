@@ -729,3 +729,80 @@ async fn shared_node_async_timeout_isolates_faulty_slot_and_hard_crash_recovers_
     assert_eq!(survivor_probe["pid"], json!(recovered_pid));
     assert_eq!(survivor_probe["index"], json!(1));
 }
+
+#[tokio::test]
+async fn shared_node_worker_does_not_lock_first_mounted_plugin_directory() {
+    let Some(node) = node_executable() else {
+        return;
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let pkg1_dir = root.path().join("plugin-1");
+    let pkg2_dir = root.path().join("plugin-2");
+    write_shared_worker_package(&pkg1_dir, 1, "1.0.0", true);
+    write_shared_worker_package(&pkg2_dir, 2, "1.0.0", true);
+
+    let control = PluginControlPlane::new(Arc::new(InMemoryPluginRegistry::default()));
+    for dir in [&pkg1_dir, &pkg2_dir] {
+        control
+            .import(
+                PluginPackage::inspect(dir, PluginSourceKind::DeveloperLink).unwrap(),
+                ConflictDecision::Reject,
+            )
+            .await
+            .unwrap();
+    }
+
+    let broker = Arc::new(RecordingBroker::default());
+    control
+        .activate_and_enable(&node, "dev.dimo.shared-1", &[], broker.clone())
+        .await
+        .unwrap();
+    control
+        .activate_and_enable(&node, "dev.dimo.shared-2", &[], broker.clone())
+        .await
+        .unwrap();
+
+    let shared_pid = control
+        .shared_node_worker_pid()
+        .await
+        .expect("shared node worker pid");
+    let lease1 = control.activation_lease("dev.dimo.shared-1").await.unwrap();
+    let lease2 = control.activation_lease("dev.dimo.shared-2").await.unwrap();
+
+    let probe1 = lease1.invoke("ping.w1", json!({})).await.unwrap();
+    let probe2 = lease2.invoke("ping.w2", json!({})).await.unwrap();
+    assert_eq!(probe1["pid"], json!(shared_pid));
+    assert_eq!(probe2["pid"], json!(shared_pid));
+    assert_eq!(
+        PathBuf::from(probe1["cwd"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        pkg1_dir.canonicalize().unwrap()
+    );
+    assert_eq!(
+        PathBuf::from(probe2["cwd"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        pkg2_dir.canonicalize().unwrap()
+    );
+
+    // Uninstall the first-mounted plugin and remove its package directory while
+    // plugin 2 remains active in the exact same shared Node OS process.
+    drop(lease1);
+    control.uninstall("dev.dimo.shared-1").await.unwrap();
+    std::fs::remove_dir_all(&pkg1_dir).expect(
+        "first mounted plugin directory must be removable while sibling plugins remain active in the shared Node process",
+    );
+
+    assert_eq!(
+        control.shared_node_worker_pid().await,
+        Some(shared_pid),
+        "sibling plugin must keep running in the same shared Node process"
+    );
+    let after = lease2
+        .invoke("ping.w2", json!({ "after": "remove_pkg1" }))
+        .await
+        .unwrap();
+    assert_eq!(after["pid"], json!(shared_pid));
+}

@@ -233,6 +233,154 @@ pub async fn flush_and_read_existing_transcript_turns(
     read_existing_transcript_turns_with_external(conversation_id, external_session_id)
 }
 
+fn candidate_agent_dirs_for_agent(agent_id: Option<&str>) -> Vec<String> {
+    let mut dirs = Vec::new();
+    if let Some(raw) = agent_id.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(kind) = AgentKind::from_lenient(raw) {
+            let canonical = kind.as_str().to_string();
+            if safe_component(&canonical) && !dirs.contains(&canonical) {
+                dirs.push(canonical);
+            }
+        }
+        if safe_component(raw) && !dirs.iter().any(|d| d == raw) {
+            dirs.push(raw.to_string());
+        }
+    }
+    dirs
+}
+
+/// Flush and read on-disk ACP JSONL turns for a specific `(agent_id, session_id)` binding,
+/// checking the binding's own `acp-transcripts/<agent_dir>/` first before scanning other
+/// directories for that exact `session_id`. Marks visited `(agent_dir, sid)` chains so
+/// callers collecting across multiple historical bindings never double-read a file.
+pub(crate) async fn flush_and_read_transcript_turns_for_binding(
+    agent_id: Option<&str>,
+    session_id: &str,
+    visited_chains: &mut std::collections::HashSet<(String, String)>,
+) -> Option<Vec<MessageTurn>> {
+    isolate_test_transcripts();
+    let sid = session_id.trim();
+    if sid.is_empty() || !safe_component(sid) {
+        return None;
+    }
+    let root = dimo_acp_transcripts_root();
+    let mut dirs = candidate_agent_dirs_for_agent(agent_id);
+    if let Ok(entries) = std::fs::read_dir(&root) {
+        let mut extra_dirs: Vec<String> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let ft = entry.file_type().ok()?;
+                if !ft.is_dir() {
+                    return None;
+                }
+                entry.file_name().to_str().map(str::to_string)
+            })
+            .filter(|dir| !dirs.contains(dir))
+            .collect();
+        extra_dirs.sort();
+        dirs.extend(extra_dirs);
+    }
+
+    let mut fallback: Option<(String, Vec<String>, Vec<MessageTurn>)> = None;
+    for agent_dir in dirs {
+        if visited_chains.contains(&(agent_dir.clone(), sid.to_string())) {
+            continue;
+        }
+        let ancestors = acp_transcript::continuation_ancestors_in(&root, &agent_dir, sid);
+        let _ = acp_transcript::flush_in(&root, &agent_dir, sid).await;
+        for ancestor in &ancestors {
+            let _ = acp_transcript::flush_in(&root, &agent_dir, ancestor).await;
+        }
+        let chain = acp_transcript::read_chain_in(&root, &agent_dir, sid);
+        if chain.entries.is_empty() {
+            continue;
+        }
+        let kind = AgentKind::from_lenient(&agent_dir)
+            .or_else(|| agent_id.and_then(AgentKind::from_lenient));
+        let turns = project_turns_for(&chain.entries, kind);
+        if turns.is_empty() {
+            continue;
+        }
+        if chain
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.k, EntryKind::Update | EntryKind::TurnEnd))
+        {
+            visited_chains.insert((agent_dir.clone(), sid.to_string()));
+            for ancestor in ancestors {
+                visited_chains.insert((agent_dir.clone(), ancestor));
+            }
+            return Some(turns);
+        }
+        if fallback.is_none() {
+            fallback = Some((agent_dir, ancestors, turns));
+        }
+    }
+
+    if let Some((agent_dir, ancestors, turns)) = fallback {
+        visited_chains.insert((agent_dir.clone(), sid.to_string()));
+        for ancestor in ancestors {
+            visited_chains.insert((agent_dir.clone(), ancestor));
+        }
+        return Some(turns);
+    }
+    None
+}
+
+/// Flush and collect ALL on-disk ACP JSONL transcript chunks keyed by `conversation_id`
+/// across every `acp-transcripts/<agent_dir>/` directory without stopping at the first match.
+pub(crate) async fn flush_and_read_all_transcript_turns_for_conversation(
+    conversation_id: Uuid,
+    visited_chains: &mut std::collections::HashSet<(String, String)>,
+) -> Vec<Vec<MessageTurn>> {
+    isolate_test_transcripts();
+    let root = dimo_acp_transcripts_root();
+    let candidates = transcript_session_id_candidates(conversation_id, None);
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let ft = entry.file_type().ok()?;
+            if !ft.is_dir() {
+                return None;
+            }
+            entry.file_name().to_str().map(str::to_string)
+        })
+        .collect();
+    dirs.sort();
+
+    let mut collected = Vec::new();
+    for agent_dir in dirs {
+        let kind = AgentKind::from_lenient(&agent_dir);
+        for sid in &candidates {
+            if visited_chains.contains(&(agent_dir.clone(), sid.clone())) {
+                continue;
+            }
+            let ancestors = acp_transcript::continuation_ancestors_in(&root, &agent_dir, sid);
+            let _ = acp_transcript::flush_in(&root, &agent_dir, sid).await;
+            for ancestor in &ancestors {
+                let _ = acp_transcript::flush_in(&root, &agent_dir, ancestor).await;
+            }
+            let chain = acp_transcript::read_chain_in(&root, &agent_dir, sid);
+            if chain.entries.is_empty() {
+                continue;
+            }
+            let turns = project_turns_for(&chain.entries, kind);
+            if turns.is_empty() {
+                continue;
+            }
+            visited_chains.insert((agent_dir.clone(), sid.clone()));
+            for ancestor in ancestors {
+                visited_chains.insert((agent_dir.clone(), ancestor));
+            }
+            collected.push(turns);
+        }
+    }
+    collected
+}
+
 fn transcript_session_id_candidates(
     conversation_id: Uuid,
     external_session_id: Option<&str>,
@@ -663,88 +811,120 @@ async fn load_turns(
     })
     .collect();
 
-    let mut candidates: Vec<String> = Vec::new();
-    let mut push_candidate = |sid: &str| {
+    let binding_dir_and_kind = |agent_id: &agents::AgentId| -> (String, Option<AgentKind>) {
+        let binding_kind = AgentKind::from_lenient(agent_id.as_ref());
+        let (dir, _) = transcript_identity_with_agent(summary, Some(agent_id), binding_kind);
+        (dir, binding_kind)
+    };
+
+    let mut candidates: Vec<(String, Option<AgentKind>, String)> = Vec::new();
+    let mut push_candidate = |dir: &str, cand_kind: Option<AgentKind>, sid: &str| {
         let trimmed = sid.trim();
         if !trimmed.is_empty()
             && safe_component(trimmed)
-            && !candidates.iter().any(|existing| existing == trimmed)
+            && !candidates.iter().any(|(existing_dir, _, existing_sid)| {
+                existing_dir == dir && existing_sid == trimmed
+            })
         {
-            candidates.push(trimmed.to_string());
+            candidates.push((dir.to_string(), cand_kind, trimmed.to_string()));
         }
     };
     if let Some(legacy_sid) = legacy_external_session_id(summary) {
-        push_candidate(&legacy_sid);
+        push_candidate(&agent_dir, kind, &legacy_sid);
     }
     for binding in bindings.iter().rev() {
+        let (b_dir, b_kind) = binding_dir_and_kind(&binding.agent_id);
         if let Some(acp_sid) = binding.acp_session_id.as_deref() {
-            push_candidate(acp_sid);
+            push_candidate(&b_dir, b_kind, acp_sid);
         }
     }
     for ancestor in &recovered_ancestors {
-        push_candidate(ancestor);
+        let (anc_dir, anc_kind) = bindings
+            .iter()
+            .find(|b| b.acp_session_id.as_deref().map(str::trim) == Some(ancestor.as_str()))
+            .map(|b| binding_dir_and_kind(&b.agent_id))
+            .unwrap_or_else(|| (agent_dir.clone(), kind));
+        push_candidate(&anc_dir, anc_kind, ancestor);
     }
-    push_candidate(&session_id);
-    push_candidate(&summary.id.to_string());
+    push_candidate(&agent_dir, kind, &session_id);
+    push_candidate(&agent_dir, kind, &summary.id.to_string());
+    for binding in bindings.iter().rev() {
+        let (b_dir, b_kind) = binding_dir_and_kind(&binding.agent_id);
+        push_candidate(&b_dir, b_kind, &session_id);
+        push_candidate(&b_dir, b_kind, &summary.id.to_string());
+    }
 
-    for sid in &candidates {
-        let _ = acp_transcript::flush_in(&root, &agent_dir, sid).await;
-        for ancestor in acp_transcript::continuation_ancestors_in(&root, &agent_dir, sid) {
-            let _ = acp_transcript::flush_in(&root, &agent_dir, &ancestor).await;
+    for (cand_dir, _, sid) in &candidates {
+        let _ = acp_transcript::flush_in(&root, cand_dir, sid).await;
+        for ancestor in acp_transcript::continuation_ancestors_in(&root, cand_dir, sid) {
+            let _ = acp_transcript::flush_in(&root, cand_dir, &ancestor).await;
         }
     }
 
     let stitch_recovered_ancestors =
-        |head_sid: &str, mut entries: Vec<acp_transcript::TranscriptEntry>| {
+        |head_dir: &str, head_sid: &str, mut entries: Vec<acp_transcript::TranscriptEntry>| {
             if recovered_ancestors.is_empty() && bindings.len() <= 1 {
                 return entries;
             }
-            let mut visited: std::collections::HashSet<String> =
-                acp_transcript::continuation_ancestors_in(&root, &agent_dir, head_sid)
+            let mut visited: std::collections::HashSet<(String, String)> =
+                acp_transcript::continuation_ancestors_in(&root, head_dir, head_sid)
                     .into_iter()
+                    .map(|anc| (head_dir.to_string(), anc))
                     .collect();
-            visited.insert(head_sid.to_string());
-            if visited.contains(&session_id) {
+            visited.insert((head_dir.to_string(), head_sid.to_string()));
+            if visited.contains(&(head_dir.to_string(), session_id.clone()))
+                && bindings
+                    .iter()
+                    .all(|b| binding_dir_and_kind(&b.agent_id).0 == head_dir)
+            {
                 return entries;
             }
-            let mut chronological_ancestors: Vec<String> = Vec::new();
+            let mut chronological_ancestors: Vec<(String, String)> = Vec::new();
             for binding in &bindings {
                 let Some(acp_sid) = binding.acp_session_id.as_deref().map(str::trim) else {
                     continue;
                 };
-                if acp_sid == head_sid {
+                let (b_dir, _) = binding_dir_and_kind(&binding.agent_id);
+                if acp_sid == head_sid && b_dir == head_dir {
                     break;
                 }
                 if !acp_sid.is_empty()
                     && safe_component(acp_sid)
                     && !chronological_ancestors
                         .iter()
-                        .any(|existing| existing == acp_sid)
+                        .any(|(d, s)| d == &b_dir && s == acp_sid)
                 {
-                    chronological_ancestors.push(acp_sid.to_string());
+                    chronological_ancestors.push((b_dir, acp_sid.to_string()));
                 }
             }
             // `recovered_ancestors` is newest -> oldest; iterate in reverse for chronological order.
             for ancestor_sid in recovered_ancestors.iter().rev() {
+                let anc_dir = bindings
+                    .iter()
+                    .find(|b| {
+                        b.acp_session_id.as_deref().map(str::trim) == Some(ancestor_sid.as_str())
+                    })
+                    .map(|b| binding_dir_and_kind(&b.agent_id).0)
+                    .unwrap_or_else(|| agent_dir.clone());
                 if !chronological_ancestors
                     .iter()
-                    .any(|existing| existing == ancestor_sid)
+                    .any(|(d, s)| d == &anc_dir && s == ancestor_sid)
                 {
-                    chronological_ancestors.push(ancestor_sid.clone());
+                    chronological_ancestors.push((anc_dir, ancestor_sid.clone()));
                 }
             }
             let mut prefix_entries = Vec::new();
-            for ancestor_sid in &chronological_ancestors {
-                if !visited.insert(ancestor_sid.clone()) {
+            for (anc_dir, ancestor_sid) in &chronological_ancestors {
+                if !visited.insert((anc_dir.clone(), ancestor_sid.clone())) {
                     continue;
                 }
                 for chained in
-                    acp_transcript::continuation_ancestors_in(&root, &agent_dir, ancestor_sid)
+                    acp_transcript::continuation_ancestors_in(&root, anc_dir, ancestor_sid)
                 {
-                    visited.insert(chained);
+                    visited.insert((anc_dir.clone(), chained));
                 }
                 let mut ancestor_chain =
-                    acp_transcript::read_chain_in(&root, &agent_dir, ancestor_sid);
+                    acp_transcript::read_chain_in(&root, anc_dir, ancestor_sid);
                 if ancestor_chain
                     .entries
                     .iter()
@@ -755,10 +935,10 @@ async fn load_turns(
             }
             if prefix_entries.is_empty()
                 && head_sid != session_id
-                && visited.insert(session_id.clone())
+                && visited.insert((head_dir.to_string(), session_id.clone()))
             {
                 let mut preserved_chain =
-                    acp_transcript::read_chain_in(&root, &agent_dir, &session_id);
+                    acp_transcript::read_chain_in(&root, head_dir, &session_id);
                 if preserved_chain
                     .entries
                     .iter()
@@ -775,22 +955,22 @@ async fn load_turns(
             }
         };
 
-    for sid in &candidates {
-        let existing = acp_transcript::read_chain_in(&root, &agent_dir, sid);
+    for (cand_dir, cand_kind, sid) in &candidates {
+        let existing = acp_transcript::read_chain_in(&root, cand_dir, sid);
         if existing
             .entries
             .iter()
             .any(|entry| matches!(entry.k, EntryKind::Update | EntryKind::TurnEnd))
         {
-            let entries = stitch_recovered_ancestors(sid, existing.entries);
-            return Ok(project_turns_for(&entries, kind));
+            let entries = stitch_recovered_ancestors(cand_dir, sid, existing.entries);
+            return Ok(project_turns_for(&entries, cand_kind.or(kind)));
         }
     }
-    for sid in &candidates {
-        let existing = acp_transcript::read_chain_in(&root, &agent_dir, sid);
+    for (cand_dir, cand_kind, sid) in &candidates {
+        let existing = acp_transcript::read_chain_in(&root, cand_dir, sid);
         if !existing.entries.is_empty() {
-            let entries = stitch_recovered_ancestors(sid, existing.entries);
-            return Ok(project_turns_for(&entries, kind));
+            let entries = stitch_recovered_ancestors(cand_dir, sid, existing.entries);
+            return Ok(project_turns_for(&entries, cand_kind.or(kind)));
         }
     }
 
@@ -826,9 +1006,8 @@ async fn load_turns(
     }
     // A file that exists — even a header claimed by an in-flight session/load
     // replay or session bind — is the transcript. Overwriting it would duplicate history.
-    if candidates.iter().any(|sid| {
-        acp_transcript::transcript_path_in(&root, &agent_dir, sid)
-            .is_some_and(|path| path.is_file())
+    if candidates.iter().any(|(cand_dir, _, sid)| {
+        acp_transcript::transcript_path_in(&root, cand_dir, sid).is_some_and(|path| path.is_file())
     }) {
         return Ok(extracted);
     }

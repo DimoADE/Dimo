@@ -788,6 +788,12 @@ async fn try_adopt_with_options(
     let Some(profile) = catalog.profile(agent_id) else {
         return Ok(None);
     };
+    let requires_separate_runtime = matches!(profile.topology, ProfileTopology::AdapterBacked)
+        && !profile.adapter_bundles_runtime()
+        && profile
+            .external_candidates
+            .iter()
+            .any(|candidate| candidate.component == ProfileComponent::AgentRuntime);
     let mut components = Vec::new();
     for kind in [
         ProfileComponent::AgentRuntime,
@@ -850,7 +856,9 @@ async fn try_adopt_with_options(
         }
         match resolved {
             Some(component) => components.push(component),
-            None if kind == ProfileComponent::AgentRuntime => continue,
+            None if kind == ProfileComponent::AgentRuntime && !requires_separate_runtime => {
+                continue;
+            }
             None => return Ok(None),
         }
     }

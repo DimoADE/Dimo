@@ -1,5 +1,6 @@
 import {
   Suspense,
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -9,6 +10,7 @@ import {
   useState,
   type ComponentType,
   type ReactNode,
+  type RefObject,
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useParams } from 'react-router-dom';
@@ -98,6 +100,7 @@ import { useTabsToCanvasHandoff } from '@/components/layout/useTabsToCanvasHando
 import { useDockviewPanelActionsBinding } from '@/hooks/useDockviewPanelActionsBinding';
 import { OptionalCollaborationSpaceProvider } from '@/features/collaboration/space/SpaceContext';
 import { useWorkspaceStageInsets } from '@/components/layout/useWorkspaceStageInsets';
+import type { CanvasStageInsets } from '@/components/layout/canvasStageInsets';
 import { registerWorkspaceStageCreationHost } from '@/components/layout/workspaceStageCreationHost';
 import {
   getLiveDockviewApi,
@@ -139,6 +142,56 @@ const LazyWorkspaceCanvasStage = lazy(() =>
   import('@/components/kanban/KanbanSessionHub').then((module) => ({
     default: module.KanbanSessionHub,
   }))
+);
+
+interface WorkspaceStageCreationOverlayProps {
+  canvasInsets: CanvasStageInsets | null;
+  enabled: boolean;
+  apiRef: RefObject<DockviewApi | null>;
+  readyDockviewApi: DockviewApi | null;
+  dockviewRootRef: RefObject<HTMLDivElement | null>;
+  arrangement: LayoutArrangement;
+  isDockviewMounted: boolean;
+  serializedLayout: unknown;
+  hostRef: (node: HTMLDivElement | null) => void;
+}
+
+const WorkspaceStageCreationOverlay = memo(
+  function WorkspaceStageCreationOverlay({
+    canvasInsets,
+    enabled,
+    apiRef,
+    readyDockviewApi,
+    dockviewRootRef,
+    arrangement,
+    isDockviewMounted,
+    serializedLayout,
+    hostRef,
+  }: WorkspaceStageCreationOverlayProps) {
+    const measuredInsets = useWorkspaceStageInsets({
+      enabled: enabled && canvasInsets === null,
+      apiRef,
+      readyDockviewApi,
+      dockviewRootRef,
+      arrangement,
+      isDockviewMounted,
+      serializedLayout,
+    });
+    const insets = canvasInsets ?? measuredInsets;
+
+    return (
+      <div
+        ref={hostRef}
+        data-testid="workspace-stage-creation-overlay"
+        className="workspace-stage-creation-overlay pointer-events-none absolute top-0 bottom-0 z-20 min-w-0 overflow-hidden rounded-xl"
+        style={{
+          left: insets.left,
+          right: insets.right,
+          width: `calc(100% - ${insets.left + insets.right}px)`,
+        }}
+      />
+    );
+  }
 );
 
 export function IDELayout({
@@ -932,8 +985,7 @@ export function IDELayout({
   }, [setChromeOccluded]);
 
   const canvasStageInsets = useWorkspaceStageInsets({
-    enabled:
-      hasProject && isLayoutScopeReady && effectiveActiveTab === 'workspace',
+    enabled: isLayoutScopeReady && isWorkspaceCanvasMode,
     apiRef,
     readyDockviewApi,
     dockviewRootRef,
@@ -1061,15 +1113,16 @@ export function IDELayout({
           ) : null}
 
           {showStageCreationOverlay ? (
-            <div
-              ref={setStageCreationHostNode}
-              data-testid="workspace-stage-creation-overlay"
-              className="workspace-stage-creation-overlay pointer-events-none absolute top-0 bottom-0 z-20 min-w-0 overflow-hidden rounded-xl"
-              style={{
-                left: canvasStageInsets.left,
-                right: canvasStageInsets.right,
-                width: `calc(100% - ${canvasStageInsets.left + canvasStageInsets.right}px)`,
-              }}
+            <WorkspaceStageCreationOverlay
+              canvasInsets={isWorkspaceCanvasMode ? canvasStageInsets : null}
+              enabled={isLayoutScopeReady}
+              apiRef={apiRef}
+              readyDockviewApi={readyDockviewApi}
+              dockviewRootRef={dockviewRootRef}
+              arrangement={arrangement}
+              isDockviewMounted={isDockviewMounted}
+              serializedLayout={serializedLayout}
+              hostRef={setStageCreationHostNode}
             />
           ) : null}
 

@@ -531,10 +531,15 @@ impl AgentConnectionRunner {
         if let Err(error) = outcome {
             let turn_error = turn_error_event_from_connection_failure(&error);
             let status_message = turn_error.message.clone();
+            let error_detail = error.to_string();
             if let Some(tx) = ready.lock().await.take() {
                 let _ = tx.send(Err(error));
             }
-            self.emit_connection_status(AgentConnectionStatus::Failed, Some(status_message), None);
+            self.emit_connection_status(
+                AgentConnectionStatus::Failed,
+                Some(status_message.clone()),
+                None,
+            );
             // If a prompt was still in flight when the connection died (the agent
             // crashed, the transport dropped, or prompt setup like session/new
             // failed and propagated out of run_prompt), emit a turn-terminal Error
@@ -555,7 +560,10 @@ impl AgentConnectionRunner {
                 None => {
                     tracing::warn!(
                         agent_id = %self.snapshot.agent_id.as_str(),
-                        "ACP connection ended without an in-flight turn"
+                        connection_id = %self.snapshot.connection_id,
+                        error = %status_message,
+                        detail = %error_detail,
+                        "ACP connection ended while idle (no in-flight turn)"
                     );
                 }
             }

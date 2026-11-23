@@ -56,6 +56,9 @@ const attempt: WorkspaceWithSession = {
 };
 
 let viewportHeight = 0;
+let viewportWidth = 600;
+let rowHeight = 128;
+let dynamicLayoutMode = false;
 const resizeObservers = new Set<() => void>();
 const layoutMocks: { mockRestore: () => void }[] = [];
 const scrollToDescriptor = Object.getOwnPropertyDescriptor(
@@ -91,6 +94,9 @@ function historyView(
 
 beforeEach(() => {
   viewportHeight = 0;
+  viewportWidth = 600;
+  rowHeight = 128;
+  dynamicLayoutMode = false;
   history.view = historyView(20);
   queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -125,14 +131,29 @@ beforeEach(() => {
           ? viewportHeight
           : 120;
       }),
-    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(600),
-    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(128),
+    vi
+      .spyOn(HTMLElement.prototype, 'clientWidth', 'get')
+      .mockImplementation(() => viewportWidth),
+    vi
+      .spyOn(HTMLElement.prototype, 'offsetHeight', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        if (!dynamicLayoutMode) return 128;
+        if (this.hasAttribute('data-index')) return rowHeight;
+        const rows = this.querySelectorAll(':scope > [data-index]');
+        if (rows.length > 0) return rows.length * rowHeight;
+        return rowHeight;
+      }),
     vi
       .spyOn(HTMLElement.prototype, 'scrollHeight', 'get')
       .mockImplementation(function (this: HTMLElement) {
-        return this.dataset.panel === 'conversation-logs' && viewportHeight > 0
-          ? 2560
-          : 0;
+        if (this.dataset.panel !== 'conversation-logs' || viewportHeight <= 0) {
+          return 0;
+        }
+        if (!dynamicLayoutMode) return 2560;
+        const list = this.querySelector<HTMLElement>('[style*="height:"]');
+        const parsed = list ? parseFloat(list.style.height) : NaN;
+        if (Number.isFinite(parsed) && parsed > 0) return parsed;
+        return (history.view?.items.length ?? 20) * rowHeight;
       })
   );
   Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
@@ -312,5 +333,69 @@ describe('opening a conversation', () => {
     await nextFrame();
 
     expect(viewport.scrollTop).toBeLessThan(200);
+  });
+
+  it('synchronously realigns list height, window transform, and scrollTop on rapid narrow-to-wide resize', async () => {
+    dynamicLayoutMode = true;
+    viewportHeight = 400;
+    viewportWidth = 340;
+    rowHeight = 240;
+    const { container } = render(timelineElement());
+    const viewport = container.querySelector<HTMLElement>(
+      '[data-panel="conversation-logs"]'
+    );
+    if (!viewport) throw new Error('Conversation viewport was not rendered');
+    await waitFor(() =>
+      expect(viewport.scrollTop).toBeGreaterThanOrEqual(4000)
+    );
+    // Deliver the browser's settled scroll event at the bottom before dragging.
+    viewport.scrollTop = Math.max(0, viewport.scrollHeight - viewportHeight);
+    fireEvent.scroll(viewport);
+    await nextFrame();
+
+    const list = viewport.querySelector<HTMLElement>('[style*="height:"]');
+    const virtualWindow = list?.firstElementChild as HTMLElement | null;
+    if (!list || !virtualWindow) {
+      throw new Error('Virtual list container was not rendered');
+    }
+
+    // Simulate rapid sash drag from narrow (tall wrapped rows) to wide (short unwrapped rows)
+    // and assert geometry is aligned synchronously before the next animation frame paints.
+    act(() => {
+      viewportWidth = 960;
+      rowHeight = 96;
+      Array.from(resizeObservers).forEach((notify) => notify());
+    });
+
+    const match = /translateY\((-?\d+(?:\.\d+)?)px\)/.exec(
+      virtualWindow.style.transform
+    );
+    const windowTop = match ? Number(match[1]) : 0;
+    const windowBottom = windowTop + virtualWindow.offsetHeight;
+    const viewTop = viewport.scrollTop;
+    const viewBottom = viewTop + viewportHeight;
+
+    // Viewport must intersect the painted window immediately (zero blank white frame).
+    expect(windowBottom).toBeGreaterThan(viewTop + 1);
+    expect(windowTop).toBeLessThan(viewBottom - 1);
+    expect(parseFloat(list.style.height)).toBeLessThan(3000);
+    expect(viewport.scrollTop).toBeLessThanOrEqual(
+      Math.max(0, viewport.scrollHeight - viewportHeight) + 1
+    );
+
+    // Rebound rapidly from wide back to narrow and confirm the painted window still covers the viewport.
+    act(() => {
+      viewportWidth = 320;
+      rowHeight = 260;
+      Array.from(resizeObservers).forEach((notify) => notify());
+    });
+
+    const reboundMatch = /translateY\((-?\d+(?:\.\d+)?)px\)/.exec(
+      virtualWindow.style.transform
+    );
+    const reboundTop = reboundMatch ? Number(reboundMatch[1]) : 0;
+    const reboundBottom = reboundTop + virtualWindow.offsetHeight;
+    expect(reboundBottom).toBeGreaterThan(viewport.scrollTop + 1);
+    expect(reboundTop).toBeLessThan(viewport.scrollTop + viewportHeight - 1);
   });
 });

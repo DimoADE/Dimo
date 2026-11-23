@@ -1491,3 +1491,26 @@
   border-radius: var(--radius);
   background-color: hsl(var(--primary) / 0.08) !important;
 }
+
+/* During active Dockview sash drags, suspend expensive compositor blur
+   readbacks on tab bars and pointer hit-testing inside panel bodies so rapid
+   column width dragging stays responsive. */
+.workspace-stage-host[data-dockview-sash-resizing='true'] {
+  user-select: none;
+}
+
+.workspace-stage-host[data-dockview-sash-resizing='true']
+  .dv-tabs-and-actions-container {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+.workspace-stage-host[data-dockview-sash-resizing='true']
+  .dv-content-container {
+  pointer-events: none !important;
+}
+
+.workspace-stage-host[data-dockview-sash-resizing='true'] .dv-sash,
+.workspace-stage-host[data-dockview-sash-resizing='true'] .dv-sash::after {
+  transition: none !important;
+}

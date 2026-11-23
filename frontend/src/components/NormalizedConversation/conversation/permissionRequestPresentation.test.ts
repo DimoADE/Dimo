@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { AgentPermissionOption } from 'shared/types';
 import {
   permissionPreviewText,
+  resolveCommandPrefixOptions,
   resolvePermissionAllowOption,
 } from './permissionRequestPresentation';
 
@@ -21,6 +22,18 @@ describe('resolvePermissionAllowOption', () => {
 
   it('prefers allow_once for a one-shot approval', () => {
     expect(resolvePermissionAllowOption(options, 'once')?.id).toBe('once');
+  });
+
+  it('prefers plain allow_once over engine command-prefix options for once scope', () => {
+    const withPrefix = [
+      option('allow-prefix-0', 'allow_once'),
+      option('accept', 'allow_once'),
+      option('decline', 'reject_once'),
+    ];
+    expect(resolvePermissionAllowOption(withPrefix, 'once')?.id).toBe('accept');
+    expect(resolveCommandPrefixOptions(withPrefix).map((o) => o.id)).toEqual([
+      'allow-prefix-0',
+    ]);
   });
 
   it('prefers allow_always for session and always-all scopes', () => {

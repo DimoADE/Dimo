@@ -87,6 +87,72 @@ pub fn codex_approval_options() -> Vec<AgentPermissionOption> {
     ]
 }
 
+const CODEX_COMMAND_PREFIX_OPTION_PREFIX: &str = "allow-prefix-";
+
+fn execpolicy_amendment_prefix(value: &Value) -> Option<Vec<&str>> {
+    let items = value
+        .pointer("/acceptWithExecpolicyAmendment/execpolicy_amendment")?
+        .as_array()?;
+    if items.is_empty() {
+        return None;
+    }
+    items.iter().map(Value::as_str).collect()
+}
+
+fn format_command_prefix(tokens: &[&str]) -> String {
+    tokens
+        .iter()
+        .map(|token| {
+            if token.is_empty()
+                || token
+                    .chars()
+                    .any(|ch| ch.is_whitespace() || ch == '"' || ch == '\'')
+            {
+                serde_json::to_string(token).unwrap_or_else(|_| (*token).to_string())
+            } else {
+                (*token).to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub(crate) fn command_approval_options(params: &Value) -> Vec<AgentPermissionOption> {
+    let Some(decisions) = params.get("availableDecisions").and_then(Value::as_array) else {
+        return codex_approval_options();
+    };
+    let defaults = codex_approval_options();
+    let options: Vec<AgentPermissionOption> = decisions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| {
+            if let Some(id) = value.as_str() {
+                if id == "cancel" {
+                    return Some(AgentPermissionOption {
+                        id: id.to_string(),
+                        label: "Cancel".to_string(),
+                        kind: AgentPermissionOptionKind::RejectOnce,
+                        description: None,
+                    });
+                }
+                return defaults.iter().find(|option| option.id == id).cloned();
+            }
+            let tokens = execpolicy_amendment_prefix(value)?;
+            Some(AgentPermissionOption {
+                id: format!("{CODEX_COMMAND_PREFIX_OPTION_PREFIX}{index}"),
+                label: "Remember command prefix".to_string(),
+                description: Some(format_command_prefix(&tokens)),
+                kind: AgentPermissionOptionKind::AllowOnce,
+            })
+        })
+        .collect();
+    if options.is_empty() {
+        defaults
+    } else {
+        options
+    }
+}
+
 pub fn default_codex_models() -> Vec<EngineModelInfo> {
     vec![
         EngineModelInfo {
@@ -357,7 +423,11 @@ pub fn parse_codex_server_request(
                 tool_name,
                 input: params.clone(),
                 decision_reason,
-                options: codex_approval_options(),
+                options: if default_tool == "commandExecution" {
+                    command_approval_options(params)
+                } else {
+                    codex_approval_options()
+                },
             };
             Some((permission_id, record, event))
         }
@@ -457,6 +527,24 @@ pub fn build_codex_server_request_result(
             None => json!({ "answers": synthesize_default_user_input_answers(&pending.params) }),
         };
         return (result, "accept".to_string());
+    }
+
+    if let Some(index) = decision
+        .option_id
+        .as_deref()
+        .and_then(|id| id.strip_prefix(CODEX_COMMAND_PREFIX_OPTION_PREFIX))
+    {
+        let advertised = (!decision.interrupt
+            && decision.approved
+            && pending.method == "item/commandExecution/requestApproval")
+            .then(|| index.parse::<usize>().ok())
+            .flatten()
+            .and_then(|i| pending.params.get("availableDecisions")?.get(i))
+            .filter(|value| execpolicy_amendment_prefix(value).is_some());
+        return match advertised {
+            Some(rule) => (json!({ "decision": rule }), "accept".to_string()),
+            None => (json!({ "decision": "cancel" }), "cancel".to_string()),
+        };
     }
 
     let codex_decision = if decision.interrupt {
@@ -1308,159 +1396,4 @@ pub(super) fn codex_accepts_model_id(model_id: &str, env: &HashMap<String, Strin
         && !lower.starts_with("claude-")
         && !lower.starts_with("gemini-")
         && !matches!(lower.as_str(), "opus" | "sonnet" | "haiku" | "fable")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn approval_params(persist: Value) -> Value {
-        json!({
-            "threadId": "thr",
-            "turnId": "turn",
-            "serverName": "dimo",
-            "mode": "form",
-            "message": "Allow the dimo MCP server to run tool \"list_spaces\"?",
-            "_meta": {
-                "codex_approval_kind": "mcp_tool_call",
-                "tool_name": "list_spaces",
-                "persist": persist
-            },
-            "requestedSchema": { "type": "object", "properties": {} }
-        })
-    }
-
-    fn decision(
-        option_id: Option<&str>,
-        approved: bool,
-        interrupt: bool,
-    ) -> EnginePermissionDecision {
-        EnginePermissionDecision {
-            permission_id: "perm".to_string(),
-            approved,
-            option_id: option_id.map(str::to_string),
-            updated_input: None,
-            message: None,
-            interrupt,
-        }
-    }
-
-    fn pending(method: &str) -> PendingCodexServerRequest {
-        PendingCodexServerRequest {
-            raw_rpc_id: json!("rpc-1"),
-            method: method.to_string(),
-            thread_id: "thr".to_string(),
-            prompt_id: Some("turn".to_string()),
-            params: json!({}),
-        }
-    }
-
-    #[test]
-    fn mcp_tool_approval_elicitation_becomes_a_permission_card() {
-        let params = approval_params(json!(["session", "always"]));
-        let (permission_id, _record, event) =
-            parse_codex_server_request("mcpServer/elicitation/request", &json!("srv-1"), &params)
-                .expect("approval elicitation");
-        assert_eq!(permission_id, "codex-mcp-elicitation-srv-1");
-        match event {
-            EngineEvent::PermissionRequested {
-                tool_name,
-                decision_reason,
-                options,
-                ..
-            } => {
-                assert_eq!(tool_name, "dimo/list_spaces");
-                assert_eq!(
-                    decision_reason.as_deref(),
-                    Some("Allow the dimo MCP server to run tool \"list_spaces\"?")
-                );
-                let ids: Vec<_> = options.iter().map(|option| option.id.as_str()).collect();
-                assert_eq!(
-                    ids,
-                    ["accept", "acceptForSession", "acceptAlways", "decline"]
-                );
-            }
-            other => panic!("expected PermissionRequested, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn filled_form_and_url_elicitations_stay_unhandled() {
-        let mut form = approval_params(json!("session"));
-        form["requestedSchema"]["properties"] = json!({
-            "confirmed": { "type": "boolean" }
-        });
-        assert!(
-            parse_codex_server_request("mcpServer/elicitation/request", &json!(1), &form).is_none()
-        );
-
-        let url = json!({
-            "threadId": "thr",
-            "serverName": "dimo",
-            "mode": "url",
-            "message": "Sign in",
-            "url": "https://example.test",
-            "elicitationId": "e1",
-            "_meta": { "codex_approval_kind": "mcp_tool_call" }
-        });
-        assert!(
-            parse_codex_server_request("mcpServer/elicitation/request", &json!(2), &url).is_none()
-        );
-
-        let mut needs_input = approval_params(json!("session"));
-        needs_input["_meta"]["codex_requires_user_input"] = json!(true);
-        assert!(
-            parse_codex_server_request("mcpServer/elicitation/request", &json!(3), &needs_input)
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn mcp_tool_approval_reply_uses_action_not_decision() {
-        let pending = pending("mcpServer/elicitation/request");
-        let (accept, behavior) =
-            build_codex_server_request_result(&pending, &decision(Some("accept"), true, false));
-        assert_eq!(behavior, "accept");
-        assert_eq!(accept, json!({ "action": "accept", "content": {} }));
-
-        let (session, _) = build_codex_server_request_result(
-            &pending,
-            &decision(Some("acceptForSession"), true, false),
-        );
-        assert_eq!(
-            session,
-            json!({
-                "action": "accept",
-                "content": {},
-                "_meta": { "persist": "session" }
-            })
-        );
-
-        let (always, _) = build_codex_server_request_result(
-            &pending,
-            &decision(Some("acceptAlways"), true, false),
-        );
-        assert_eq!(always["_meta"]["persist"], "always");
-        assert!(always.get("decision").is_none());
-
-        let (decline, behavior) =
-            build_codex_server_request_result(&pending, &decision(Some("decline"), false, false));
-        assert_eq!(behavior, "decline");
-        assert_eq!(decline, json!({ "action": "decline" }));
-
-        let (cancel, behavior) =
-            build_codex_server_request_result(&pending, &decision(None, false, true));
-        assert_eq!(behavior, "cancel");
-        assert_eq!(cancel, json!({ "action": "cancel" }));
-    }
-
-    #[test]
-    fn command_approval_reply_keeps_decision_field() {
-        let (result, behavior) = build_codex_server_request_result(
-            &pending("item/commandExecution/requestApproval"),
-            &decision(Some("accept"), true, false),
-        );
-        assert_eq!(behavior, "accept");
-        assert_eq!(result, json!({ "decision": "accept" }));
-    }
 }

@@ -42,6 +42,10 @@ pub(super) fn antigravity_settings_path(gemini_home: &Path) -> PathBuf {
     gemini_home.join("antigravity-acp").join("settings.json")
 }
 
+pub(super) fn antigravity_env_path(gemini_home: &Path) -> PathBuf {
+    gemini_home.join("antigravity-acp").join(GEMINI_ENV_FILE)
+}
+
 pub(super) async fn native_gemini_draft(
     gemini_home: &Path,
     agent_id: &AgentId,
@@ -84,18 +88,21 @@ pub(super) async fn native_gemini_draft(
             skip_reason: None,
         }));
     }
+    let env_map = read_dotenv_map(&antigravity_env_path(gemini_home)).await?;
     let path = antigravity_settings_path(gemini_home);
     let document = read_json_object_or_empty(&path)
         .await
         .map_err(|error| error.to_string())?;
     let empty_env = Value::Object(Default::default());
-    let env = document.get("env").unwrap_or(&empty_env);
-    let api_url = json_text(
-        env,
+    let json_env = document.get("env").unwrap_or(&empty_env);
+    let api_url = env_or_json_text(
+        &env_map,
+        json_env,
         &["GOOGLE_GEMINI_BASE_URL", "GEMINI_BASE_URL", "API_BASE_URL"],
     );
-    let api_key = json_text(
-        env,
+    let api_key = env_or_json_text(
+        &env_map,
+        json_env,
         &["GEMINI_API_KEY", "GOOGLE_GEMINI_API_KEY", "GOOGLE_API_KEY"],
     );
     if api_url.is_empty() && api_key.is_empty() {
@@ -106,7 +113,7 @@ pub(super) async fn native_gemini_draft(
         name: "当前原生配置".to_string(),
         api_url,
         api_key,
-        model: json_text(env, &["GEMINI_MODEL"]),
+        model: env_or_json_text(&env_map, json_env, &["GEMINI_MODEL"]),
         skip_reason: None,
     }))
 }
@@ -127,6 +134,7 @@ pub(super) const GEMINI_ENV_KEYS: &[&str] = &[
 ];
 
 pub(super) const ANTIGRAVITY_AUTH_TYPE_BACKUP_KEY: &str = "auth.type";
+pub(super) const ANTIGRAVITY_ENV_FILE: &str = "antigravity-acp/.env";
 pub(super) const GEMINI_ENV_FILE: &str = ".env";
 pub(super) const GEMINI_SECURITY_AUTH_TYPE_KEY: &str = "security.auth.selectedType";
 pub(super) const GEMINI_MODEL_NAME_KEY: &str = "model.name";
@@ -280,6 +288,35 @@ pub(super) async fn restore_gemini_state(
     write_json(&settings_path, &document, true).await
 }
 
+pub(super) async fn capture_antigravity_state(
+    gemini_home: &Path,
+    backup: &mut ProviderProjectionBackup,
+) -> Result<(), crate::host::native::NativeError> {
+    let settings_path = antigravity_settings_path(gemini_home);
+    capture_antigravity_auth_type(&settings_path, backup).await?;
+    capture_text_file(
+        &antigravity_env_path(gemini_home),
+        ANTIGRAVITY_ENV_FILE,
+        backup,
+    )
+    .await
+}
+
+pub(super) async fn restore_antigravity_state(
+    gemini_home: &Path,
+    backup: &ProviderProjectionBackup,
+) -> Result<(), crate::host::native::NativeError> {
+    restore_text_file(
+        &antigravity_env_path(gemini_home),
+        ANTIGRAVITY_ENV_FILE,
+        backup,
+        true,
+    )
+    .await?;
+    let settings_path = antigravity_settings_path(gemini_home);
+    restore_antigravity_auth_type(&settings_path, backup).await
+}
+
 pub(super) async fn capture_antigravity_auth_type(
     path: &Path,
     backup: &mut ProviderProjectionBackup,
@@ -301,7 +338,9 @@ pub(super) async fn restore_antigravity_auth_type(
     backup: &ProviderProjectionBackup,
 ) -> Result<(), crate::host::native::NativeError> {
     let mut document = read_json_object_or_empty(path).await?;
-    let auth = object_entry(document.as_object_mut().expect("object"), "auth")?;
+    let root = document.as_object_mut().expect("object");
+    root.remove("env");
+    let auth = object_entry(root, "auth")?;
     match backup
         .json_values
         .get(ANTIGRAVITY_AUTH_TYPE_BACKUP_KEY)
@@ -325,32 +364,62 @@ pub(super) async fn apply_antigravity(
     gemini_home: &Path,
     provider: &StoredProvider,
 ) -> Result<(), crate::host::native::NativeError> {
-    let path = antigravity_settings_path(gemini_home);
     let filesystem = TokioNativeFileSystem;
-    let original = filesystem.read(&path).await?;
-    let mut document = parse_json_object_bytes(&path, original.as_deref())?;
+    let env_path = antigravity_env_path(gemini_home);
+    let env_original = filesystem.read(&env_path).await?;
+    let mut env_entries = env_original
+        .as_deref()
+        .map(|bytes| parse_dotenv_entries(&String::from_utf8_lossy(bytes)))
+        .unwrap_or_default();
+    env_entries.retain(|(key, _)| !GEMINI_ENV_KEYS.contains(&key.as_str()));
+    if !provider.api_url.trim().is_empty() {
+        env_entries.push((
+            "GOOGLE_GEMINI_BASE_URL".to_string(),
+            provider.api_url.trim().to_string(),
+        ));
+    }
+    if !provider.api_key.trim().is_empty() {
+        env_entries.push((
+            "GEMINI_API_KEY".to_string(),
+            provider.api_key.trim().to_string(),
+        ));
+    }
+    let default_model = model_default(&provider.model).trim().to_string();
+    if !default_model.is_empty() {
+        env_entries.push(("GEMINI_MODEL".to_string(), default_model));
+    }
+    let env_bytes = serialize_dotenv(&env_entries).into_bytes();
+
+    let settings_path = antigravity_settings_path(gemini_home);
+    let settings_original = filesystem.read(&settings_path).await?;
+    let mut document = parse_json_object_bytes(&settings_path, settings_original.as_deref())?;
     let root = document.as_object_mut().expect("object");
+    // `agy_acp_server` rejects `"env"` inside `antigravity-acp/settings.json`;
+    // strip any stale `"env"` key and persist credentials in `.env` instead.
+    root.remove("env");
     let auth = object_entry(root, "auth")?;
     auth.insert(
         "type".to_string(),
         Value::String("gemini-api-key".to_string()),
     );
-    let env = object_entry(root, "env")?;
-    for key in GEMINI_ENV_KEYS {
-        env.remove(*key);
-    }
-    insert_string(env, "GOOGLE_GEMINI_BASE_URL", &provider.api_url);
-    insert_string(env, "GEMINI_API_KEY", &provider.api_key);
-    insert_string(env, "GEMINI_MODEL", &model_default(&provider.model));
-    apply_projection_mutations(&[NativeFileMutation {
-        path,
-        expected: original,
-        replacement: Some(
-            serde_json::to_vec_pretty(&document)
-                .map_err(|error| format!("序列化原生配置失败：{error}"))?,
-        ),
-        sensitive: true,
-    }])
+
+    apply_projection_mutations(&[
+        NativeFileMutation {
+            path: env_path,
+            expected: env_original,
+            replacement: Some(env_bytes),
+            sensitive: true,
+        },
+        NativeFileMutation {
+            path: settings_path,
+            expected: settings_original,
+            replacement: Some(
+                serde_json::to_vec_pretty(&document)
+                    .map_err(|error| format!("序列化原生配置失败：{error}"))?,
+            ),
+            sensitive: true,
+        },
+    ])
     .await
 }
 

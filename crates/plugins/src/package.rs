@@ -11,12 +11,16 @@ use serde_json::{Map, Value};
 pub use crate::digest::package_content_digest;
 use crate::{
     PluginError, PluginId,
-    digest::{copy_snapshot_directory, remove_snapshot_path, validate_storage_segment},
+    digest::{
+        activate_staged_snapshot, copy_snapshot_directory, find_existing_snapshot_config,
+        prune_stale_snapshot_dirs, remove_snapshot_path, validate_storage_segment,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PackageFormat {
+    #[serde(alias = "vibe_x")]
     Dimo,
     Codex,
     ClaudeCode,
@@ -1228,41 +1232,54 @@ impl PluginPackage {
         if opened.root().canonicalize().ok().as_ref() == Some(&target) {
             return Self::inspect_tree(&target, source_kind);
         }
-        let staging = storage_root.join(format!(".{}.incoming", incoming.id.as_str()));
-        if staging.exists() {
-            remove_snapshot_path(&staging)?;
+        prune_stale_snapshot_dirs(&storage_root, incoming.id.as_str());
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        let suffix = &suffix[..8];
+        let staging = storage_root.join(format!(".{}.incoming.{suffix}", incoming.id.as_str()));
+        if let Err(error) = copy_snapshot_directory(opened.root(), &staging) {
+            let _ = remove_snapshot_path(&staging);
+            return Err(error);
         }
-        copy_snapshot_directory(opened.root(), &staging)?;
-        let installed_config = target.join("config.json");
-        if installed_config.is_file() {
-            let previous = fs::read_to_string(&installed_config)
-                .map_err(|error| PluginError::io("read installed Plugin config", error))?;
-            let previous: Value = serde_json::from_str(&previous).map_err(|error| {
-                PluginError::invalid_manifest(format!("installed config.json is invalid: {error}"))
-            })?;
-            let preserved = incoming
-                .adopt_installed_config(&previous)
-                .inspect_err(|_| {
-                    let _ = remove_snapshot_path(&staging);
+        if let Some(installed_config) =
+            find_existing_snapshot_config(&storage_root, &target, incoming.id.as_str())
+        {
+            let preserve = (|| -> Result<(), PluginError> {
+                let previous = fs::read_to_string(&installed_config)
+                    .map_err(|error| PluginError::io("read installed Plugin config", error))?;
+                let previous: Value = serde_json::from_str(&previous).map_err(|error| {
+                    PluginError::invalid_manifest(format!(
+                        "installed config.json is invalid: {error}"
+                    ))
                 })?;
-            fs::write(
-                staging.join("config.json"),
-                format!(
-                    "{}\n",
-                    serde_json::to_string_pretty(&preserved)
-                        .map_err(|error| { PluginError::invalid_manifest(error.to_string()) })?
-                ),
-            )
-            .map_err(|error| PluginError::io("preserve installed Plugin config", error))?;
+                let preserved = incoming.adopt_installed_config(&previous)?;
+                fs::write(
+                    staging.join("config.json"),
+                    format!(
+                        "{}\n",
+                        serde_json::to_string_pretty(&preserved)
+                            .map_err(|error| PluginError::invalid_manifest(error.to_string()))?
+                    ),
+                )
+                .map_err(|error| PluginError::io("preserve installed Plugin config", error))
+            })();
+            if let Err(error) = preserve {
+                let _ = remove_snapshot_path(&staging);
+                return Err(error);
+            }
         }
         // Validate the complete staged tree before replacing a prior snapshot.
-        Self::inspect_tree(&staging, source_kind)?;
-        if target.exists() {
-            remove_snapshot_path(&target)?;
+        if let Err(error) = Self::inspect_tree(&staging, source_kind) {
+            let _ = remove_snapshot_path(&staging);
+            return Err(error);
         }
-        fs::rename(&staging, &target)
-            .map_err(|error| PluginError::io("activate plugin snapshot", error))?;
-        Self::inspect_tree(&target, source_kind)
+        let activated = activate_staged_snapshot(
+            &storage_root,
+            incoming.id.as_str(),
+            &staging,
+            &target,
+            suffix,
+        )?;
+        Self::inspect_tree(&activated, source_kind)
     }
 
     pub fn inspect(root: &Path, source_kind: PluginSourceKind) -> Result<Self, PluginError> {
@@ -4250,5 +4267,38 @@ fn invalid_invocation_warning(id: Option<String>) -> PackageWarning {
         code: "invocation_invalid".to_owned(),
         message: "ignored invalid PluginAction or Plugin Command contribution".to_owned(),
         contribution: id,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_vibe_x_package_format_deserializes_as_dimo_and_serializes_as_dimo() {
+        let mut package = PluginPackage::for_test(
+            "dimo.legacy-format",
+            "Legacy Format",
+            "1.0.0",
+            PluginSourceKind::Snapshot,
+            Path::new("/tmp/legacy-format"),
+        );
+        package.formats = vec![PackageFormat::Dimo, PackageFormat::Codex];
+
+        let mut value = serde_json::to_value(&package).expect("serialize package");
+        value["formats"] = serde_json::json!(["vibe_x", "codex"]);
+
+        let decoded: PluginPackage =
+            serde_json::from_value(value).expect("deserialize legacy vibe_x formats");
+        assert_eq!(
+            decoded.formats,
+            vec![PackageFormat::Dimo, PackageFormat::Codex]
+        );
+
+        let reserialized = serde_json::to_value(&decoded).expect("re-serialize package");
+        assert_eq!(
+            reserialized["formats"],
+            serde_json::json!(["dimo", "codex"])
+        );
     }
 }

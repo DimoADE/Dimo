@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { SessionComposerFrame } from './SessionComposerFrame';
 
 describe('SessionComposerFrame', () => {
-  it('places status notices above the outer cockpit frame', () => {
+  it('places status notices in the composer stack behind the body', () => {
     render(
       <SessionComposerFrame status={<div data-testid="status-notices" />}>
         <div data-testid="composer-content" />
@@ -11,13 +11,14 @@ describe('SessionComposerFrame', () => {
     );
 
     const status = screen.getByTestId('status-notices');
-    const frame = screen.getByTestId('composer-cockpit-frame');
     const body = screen.getByTestId('session-composer-body');
     const anchor = screen.getByTestId('session-composer-anchor');
 
-    expect(status.parentElement).toBe(frame.parentElement);
-    expect(status.nextElementSibling).toBe(frame);
-    expect(frame).toContainElement(anchor);
+    expect(
+      screen.queryByTestId('composer-cockpit-frame')
+    ).not.toBeInTheDocument();
+    expect(status.parentElement).toBe(anchor.parentElement);
+    expect(status.nextElementSibling).toBe(anchor);
     expect(body.parentElement).toBe(anchor);
     expect(body).toHaveClass('rounded-[var(--radius-composer,0.75rem)]');
     expect(body).not.toContainElement(status);
@@ -122,7 +123,7 @@ describe('SessionComposerFrame', () => {
     expect(document.activeElement).toBe(button);
   });
 
-  it('encloses tabs, the intact rounded composer body, and footer inside one outer cockpit frame', () => {
+  it('mounts tabs above and footer directly below the intact rounded composer body without an outer cockpit frame', () => {
     render(
       <SessionComposerFrame
         tabs={
@@ -145,21 +146,24 @@ describe('SessionComposerFrame', () => {
       </SessionComposerFrame>
     );
 
-    const frame = screen.getByTestId('composer-cockpit-frame');
+    const stack = screen.getByTestId('session-composer-stack');
     const anchor = screen.getByTestId('session-composer-anchor');
     const body = screen.getByTestId('session-composer-body');
     const tabs = screen.getByTestId('cockpit-tabs');
     const tabButton = screen.getByTestId('cockpit-tab-btn');
     const footer = screen.getByTestId('cockpit-footer');
 
+    expect(
+      screen.queryByTestId('composer-cockpit-frame')
+    ).not.toBeInTheDocument();
     expect(body).toHaveClass('rounded-[var(--radius-composer,0.75rem)]');
     expect(body).not.toContainElement(tabs);
     expect(body).not.toContainElement(footer);
-    expect(tabs.parentElement).toBe(frame);
-    expect(footer.parentElement).toBe(frame);
-    expect(anchor.parentElement?.parentElement).toBe(frame);
-    expect(tabs.nextElementSibling).toBe(anchor.parentElement);
-    expect(anchor.parentElement?.nextElementSibling).toBe(footer);
+    expect(tabs.parentElement).toBe(stack);
+    expect(anchor.parentElement).toBe(stack);
+    expect(footer.parentElement).toBe(stack);
+    expect(tabs.nextElementSibling).toBe(anchor);
+    expect(anchor.nextElementSibling).toBe(footer);
 
     tabButton.focus();
     fireEvent.click(tabButton);

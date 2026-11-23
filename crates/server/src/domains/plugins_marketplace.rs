@@ -155,7 +155,7 @@ impl ServerApplicationDomains {
         for url in &github_urls {
             match download_marketplace_archive(url).await {
                 Ok(archive) => {
-                    match self
+                    let result = self
                         .plugin_control_import(json!({
                             "path": archive.to_string_lossy(),
                             "developerLink": false,
@@ -164,10 +164,19 @@ impl ServerApplicationDomains {
                             "gitRef": args.tag.clone().or_else(|| Some("main".to_owned())),
                             "locked": true,
                         }))
-                        .await
-                    {
+                        .await;
+                    let _ = std::fs::remove_file(&archive);
+                    match result {
                         Ok(result) => return Ok(result),
-                        Err(error) => import_error = Some(error),
+                        Err(error) => {
+                            let is_legacy_api_error = is_legacy_plugin_api_error(&error);
+                            if import_error.is_none() {
+                                import_error = Some(error);
+                            }
+                            if !is_legacy_api_error {
+                                break;
+                            }
+                        }
                     }
                 }
                 Err(error) => {
@@ -185,7 +194,7 @@ impl ServerApplicationDomains {
         {
             match download_marketplace_archive(&url).await {
                 Ok(archive) => {
-                    match self
+                    let result = self
                         .plugin_control_import(json!({
                             "path": archive.to_string_lossy(),
                             "developerLink": false,
@@ -195,10 +204,15 @@ impl ServerApplicationDomains {
                             "locked": true,
                             "showTree": listing.show_tree,
                         }))
-                        .await
-                    {
+                        .await;
+                    let _ = std::fs::remove_file(&archive);
+                    match result {
                         Ok(result) => return Ok(result),
-                        Err(error) => import_error = Some(error),
+                        Err(error) => {
+                            if import_error.is_none() {
+                                import_error = Some(error);
+                            }
+                        }
                     }
                 }
                 Err(error) => {
@@ -1111,4 +1125,8 @@ fn is_remote_safe_plugin_host_call(capability: &str, operation: &str) -> bool {
         "plugin.self" => matches!(operation, "status" | "doctor"),
         _ => false,
     }
+}
+
+pub(crate) fn is_legacy_plugin_api_error(error: &ApplicationError) -> bool {
+    error.to_string().contains("unsupported plugin apiVersion")
 }

@@ -615,6 +615,12 @@ impl ServerApplicationDomains {
         };
         let incoming =
             plugins::PluginPackage::inspect(&source, source_kind).map_err(plugin_error)?;
+        if incoming.api_version != "2.0" {
+            return Err(ApplicationError::bad_request(format!(
+                "unsupported plugin apiVersion `{}`; Dimo v2 plugin architecture requires apiVersion \"2.0\"",
+                incoming.api_version
+            )));
+        }
         let existing = self
             .plugin_control_plane
             .plugin(incoming.id.as_str())

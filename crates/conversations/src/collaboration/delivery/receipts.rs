@@ -277,16 +277,31 @@ pub(crate) async fn active_turn_id(
     pool: &SqlitePool,
     conversation_id: Uuid,
 ) -> Result<Option<Uuid>, CollaborationError> {
-    sqlx::query_scalar(
-        r#"SELECT id FROM conversation_turns
-           WHERE conversation_id = ?
-             AND status IN ('pending', 'queued', 'running', 'blocked')
-           ORDER BY ordinal DESC LIMIT 1"#,
+    let row: Option<(Uuid, String)> = sqlx::query_as(
+        r#"SELECT t.id, t.status
+           FROM sessions s
+           JOIN conversation_turns t ON t.id = s.active_turn_id
+           WHERE s.id = ?
+             AND t.conversation_id = s.id
+             AND t.status IN ('pending', 'queued', 'running', 'blocked')
+           LIMIT 1"#,
     )
     .bind(conversation_id)
     .fetch_optional(pool)
     .await
-    .map_err(db)
+    .map_err(db)?;
+
+    let Some((turn_id, status)) = row else {
+        return Ok(None);
+    };
+    if status == "blocked"
+        && crate::service::turn_is_auth_blocked(pool, turn_id)
+            .await
+            .map_err(db)?
+    {
+        return Ok(None);
+    }
+    Ok(Some(turn_id))
 }
 
 pub(crate) fn digest_text(text: &str) -> String {
@@ -1155,4 +1170,216 @@ pub(crate) fn is_polite_ack_only(text: &str) -> bool {
             | "收到谢谢"
             | "无需回复"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use agents::conversation::{ConversationEvent, TurnBlockedReason};
+    use db::models::conversation_event::{AppendConversationEvent, insert_conversation_event};
+
+    use super::*;
+    use crate::collaboration::{
+        PostToSpace, post_to_space_with,
+        test_support::{create_session, mark_running, setup_pool, space_of},
+    };
+
+    async fn insert_blocked_turn(
+        pool: &SqlitePool,
+        conversation_id: Uuid,
+        set_active_turn: bool,
+        reason: Option<TurnBlockedReason>,
+    ) -> Uuid {
+        let turn_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO conversation_turns
+               (id, conversation_id, ordinal, role, status, input_blocks_json)
+               VALUES (?, ?, 1, 'user_prompt', 'blocked', '[]')"#,
+        )
+        .bind(turn_id)
+        .bind(conversation_id)
+        .execute(pool)
+        .await
+        .expect("insert blocked turn");
+
+        if set_active_turn {
+            sqlx::query("UPDATE sessions SET active_turn_id = ? WHERE id = ?")
+                .bind(turn_id)
+                .bind(conversation_id)
+                .execute(pool)
+                .await
+                .expect("set active_turn_id");
+        } else {
+            sqlx::query("UPDATE sessions SET active_turn_id = NULL WHERE id = ?")
+                .bind(conversation_id)
+                .execute(pool)
+                .await
+                .expect("clear active_turn_id");
+        }
+
+        if let Some(reason) = reason {
+            let event = ConversationEvent::TurnBlocked { reason };
+            let normalized_json = serde_json::to_string(&event).expect("serialize TurnBlocked");
+            let mut conn = pool.acquire().await.expect("acquire conn");
+            insert_conversation_event(
+                &mut conn,
+                AppendConversationEvent {
+                    id: Uuid::new_v4(),
+                    conversation_id,
+                    turn_id: Some(turn_id),
+                    binding_id: None,
+                    connection_id: None,
+                    prompt_id: None,
+                    source: "acp",
+                    event_kind: "turn_blocked",
+                    normalized_json: &normalized_json,
+                    raw_json: None,
+                    idempotency_key: None,
+                },
+            )
+            .await
+            .expect("append turn_blocked event");
+        }
+
+        turn_id
+    }
+
+    struct FakeDispatcher {
+        turn_id: Uuid,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::collaboration::IdleTurnDispatcher for FakeDispatcher {
+        async fn start_if_idle(&self, _conversation_id: Uuid) -> Result<Option<Uuid>, String> {
+            Ok(Some(self.turn_id))
+        }
+    }
+
+    #[tokio::test]
+    async fn released_auth_blocked_turn_does_not_deadlock_next_collaboration_delivery_into_queued()
+    {
+        let pool = setup_pool().await;
+        let ws = Uuid::new_v4();
+        let leader = Uuid::new_v4();
+        let worker = Uuid::new_v4();
+        create_session(&pool, leader, ws, Some("Leader")).await;
+        create_session(&pool, worker, ws, Some("Worker")).await;
+
+        let space_id = space_of(&pool, leader).await;
+        crate::collaboration::add_space_member(
+            &pool,
+            leader,
+            &space_id,
+            worker,
+            "Worker",
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("add worker to space");
+
+        // Simulate an OpenCode auth-blocked turn where `sessions.active_turn_id` was released to NULL.
+        let _blocked_turn = insert_blocked_turn(
+            &pool,
+            worker,
+            false,
+            Some(TurnBlockedReason::Authentication {
+                message: "invalid provider token".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            active_turn_id(&pool, worker).await.expect("active_turn_id"),
+            None,
+            "released auth-blocked turn with active_turn_id = NULL must not report busy"
+        );
+
+        let delivery_ctx = DeliveryContext {
+            publisher: None,
+            dispatcher: Some(std::sync::Arc::new(FakeDispatcher {
+                turn_id: Uuid::new_v4(),
+            })),
+            interruptor: None,
+            space_changed: None,
+        };
+
+        let result = post_to_space_with(
+            &pool,
+            PostToSpace {
+                caller_id: Some(leader),
+                space_id: space_id.clone(),
+                content: "@Worker please continue after provider switch".to_string(),
+                summary: None,
+                to: vec!["Worker".to_string()],
+                in_reply_to: None,
+                operation_id: Uuid::new_v4(),
+            },
+            &delivery_ctx,
+        )
+        .await
+        .expect("post to space");
+
+        let receipt = result
+            .receipts
+            .iter()
+            .find(|r| r.conversation_id == worker)
+            .expect("worker receipt");
+        assert_ne!(
+            receipt.state, "queued",
+            "delivery must NOT be stuck in queued after released auth-blocked turn: {receipt:?}"
+        );
+        assert_eq!(receipt.delivered, "dispatched");
+        assert_eq!(receipt.state, "processing");
+    }
+
+    #[tokio::test]
+    async fn active_turn_id_ignores_auth_blocked_but_respects_live_running_or_question_blocked() {
+        let pool = setup_pool().await;
+        let ws = Uuid::new_v4();
+
+        // 1. Auth-blocked turn still linked by active_turn_id -> NOT blocking.
+        let auth_conv = Uuid::new_v4();
+        create_session(&pool, auth_conv, ws, Some("AuthSeat")).await;
+        let _auth_turn = insert_blocked_turn(
+            &pool,
+            auth_conv,
+            true,
+            Some(TurnBlockedReason::Authentication {
+                message: "auth required".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            active_turn_id(&pool, auth_conv).await.unwrap(),
+            None,
+            "auth-blocked turn must not block subsequent deliveries"
+        );
+
+        // 2. Non-auth blocked turn (e.g. pending permission) linked by active_turn_id -> STILL blocking.
+        let perm_conv = Uuid::new_v4();
+        create_session(&pool, perm_conv, ws, Some("PermSeat")).await;
+        let perm_turn = insert_blocked_turn(
+            &pool,
+            perm_conv,
+            true,
+            Some(TurnBlockedReason::Permission {
+                permission_id: "perm-1".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            active_turn_id(&pool, perm_conv).await.unwrap(),
+            Some(perm_turn),
+            "live permission-blocked turn must still block"
+        );
+
+        // 3. Running turn linked by active_turn_id -> STILL blocking.
+        let running_conv = Uuid::new_v4();
+        create_session(&pool, running_conv, ws, Some("RunningSeat")).await;
+        let running_turn = mark_running(&pool, running_conv).await;
+        assert_eq!(
+            active_turn_id(&pool, running_conv).await.unwrap(),
+            Some(running_turn),
+            "live running turn must still block"
+        );
+    }
 }

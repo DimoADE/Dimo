@@ -216,3 +216,116 @@ pub(crate) fn remove_snapshot_path(path: &Path) -> Result<(), PluginError> {
             .map_err(|error| PluginError::io("remove plugin snapshot directory", error))
     }
 }
+
+pub(crate) fn prune_stale_snapshot_dirs(storage_root: &Path, plugin_id: &str) {
+    let incoming_exact = format!(".{plugin_id}.incoming");
+    let incoming_prefix = format!(".{plugin_id}.incoming.");
+    let superseded_prefix = format!(".{plugin_id}.superseded.");
+    let Ok(entries) = fs::read_dir(storage_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name == incoming_exact
+            || name.starts_with(&incoming_prefix)
+            || name.starts_with(&superseded_prefix)
+        {
+            let _ = remove_snapshot_path(&entry.path());
+        }
+    }
+}
+
+pub(crate) fn find_existing_snapshot_config(
+    storage_root: &Path,
+    target: &Path,
+    plugin_id: &str,
+) -> Option<PathBuf> {
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    let direct = target.join("config.json");
+    if direct.is_file() {
+        let mtime = fs::metadata(&direct)
+            .and_then(|meta| meta.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        best = Some((mtime, direct));
+    }
+    let sibling_prefix = format!("{plugin_id}-");
+    if let Ok(entries) = fs::read_dir(storage_root) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !name.starts_with(&sibling_prefix) {
+                continue;
+            }
+            let candidate = entry.path().join("config.json");
+            if !candidate.is_file() {
+                continue;
+            }
+            let mtime = fs::metadata(&candidate)
+                .and_then(|meta| meta.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            if best.as_ref().is_none_or(|(prev, _)| mtime > *prev) {
+                best = Some((mtime, candidate));
+            }
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+pub(crate) fn activate_staged_snapshot(
+    storage_root: &Path,
+    plugin_id: &str,
+    staging: &Path,
+    target: &Path,
+    suffix: &str,
+) -> Result<PathBuf, PluginError> {
+    if !target.exists() {
+        return match fs::rename(staging, target) {
+            Ok(()) => Ok(target.to_path_buf()),
+            Err(error) => {
+                let _ = remove_snapshot_path(staging);
+                Err(PluginError::io("activate plugin snapshot", error))
+            }
+        };
+    }
+
+    // Move the prior snapshot aside atomically instead of deleting it in place.
+    // On Windows, an open directory handle or running helper binary inside
+    // `target` makes `remove_dir_all` partially delete files and fail with
+    // sharing/access errors. When `target` is locked, activate into a sibling
+    // snapshot directory so installation still succeeds cleanly.
+    let superseded = storage_root.join(format!(".{plugin_id}.superseded.{suffix}"));
+    match fs::rename(target, &superseded) {
+        Ok(()) => match fs::rename(staging, target) {
+            Ok(()) => {
+                let _ = remove_snapshot_path(&superseded);
+                Ok(target.to_path_buf())
+            }
+            Err(error) => {
+                let _ = fs::rename(&superseded, target);
+                let _ = remove_snapshot_path(staging);
+                Err(PluginError::io("activate plugin snapshot", error))
+            }
+        },
+        Err(lock_error) => {
+            tracing::warn!(
+                plugin_id,
+                target = %target.display(),
+                error = %lock_error,
+                "existing plugin snapshot directory is locked; activating into a sibling snapshot directory"
+            );
+            let sibling = storage_root.join(format!("{plugin_id}-{suffix}"));
+            match fs::rename(staging, &sibling) {
+                Ok(()) => Ok(sibling),
+                Err(error) => {
+                    let _ = remove_snapshot_path(staging);
+                    Err(PluginError::io("activate plugin snapshot", error))
+                }
+            }
+        }
+    }
+}

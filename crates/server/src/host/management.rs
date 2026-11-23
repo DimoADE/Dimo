@@ -46,8 +46,9 @@ use self::{
     },
     diagnostics_and_env::{
         InstalledComponent, apply_environment_patch, build_environment_diagnostics,
-        execute_non_antigravity_action, management_action_kind, management_program_names,
-        parse_agent_env, probe_profile_dependencies, project_agent_environment,
+        discover_profile_acp_with_diagnostics, execute_non_antigravity_action,
+        management_action_kind, management_program_names, parse_agent_env, probe_openclaw_gateway,
+        probe_profile_dependencies, project_agent_environment,
         resolve_management_program_from_components, spawn_antigravity_login_flow,
     },
     native_preflight::{
@@ -387,15 +388,33 @@ pub async fn preflight(
         && !legacy_shim_locked;
     let mut acp_error = None;
     let mut discovered_acp_path = None;
+    let mut failed_acp_path = None;
     if !acp_ok {
-        if (native_engine
+        if native_engine
             || view.lifecycle != AgentLifecycleState::Uninstalled
             || !has_managed_installer
-            || agent_id.as_str() == "kiro")
-            && let Some(path) = discover_profile_acp(&agent_id).await
+            || agent_id.as_str() == "kiro"
         {
-            acp_ok = true;
-            discovered_acp_path = Some(path);
+            let discovery = discover_profile_acp_with_diagnostics(&agent_id).await;
+            if let Some(path) = discovery.path {
+                acp_ok = true;
+                discovered_acp_path = Some(path);
+            } else if legacy_shim_locked {
+                acp_error = Some(LEGACY_SHIM_REPAIR_DETAIL.to_string());
+            } else if let Some(failure) = discovery.failed_candidate {
+                acp_error = Some(format!(
+                    "外部候选可执行文件无法运行：{} ({})",
+                    failure.path.display(),
+                    failure.detail
+                ));
+                failed_acp_path = Some(failure.path);
+            } else if acp.is_some() {
+                acp_error = Some(if native_engine {
+                    "已记录安装路径，但找不到原生引擎 CLI 可执行文件。".to_string()
+                } else {
+                    "ACP executable is missing on disk".to_string()
+                });
+            }
         } else if legacy_shim_locked {
             acp_error = Some(LEGACY_SHIM_REPAIR_DETAIL.to_string());
         } else if acp.is_some() {
@@ -463,19 +482,42 @@ pub async fn preflight(
         )
         .await;
     }
-    let runtime_ok =
-        runtime.is_some_and(|component| component.exists) || view.local_runtime.is_some() || acp_ok;
+    let profile = catalog.profile(&agent_id);
+    let requires_separate_runtime = profile.is_some_and(|profile| {
+        matches!(profile.topology, agents::ProfileTopology::AdapterBacked)
+            && !profile.adapter_bundles_runtime()
+            && profile
+                .external_candidates
+                .iter()
+                .any(|candidate| candidate.component == ProfileComponent::AgentRuntime)
+    });
+    let resolved_separate_runtime = if requires_separate_runtime {
+        resolve_required_agent_runtime(
+            &agent_id,
+            profile.expect("profile checked"),
+            &components,
+            discovered_acp_path.as_deref(),
+            &env,
+        )
+        .await
+    } else {
+        None
+    };
+    let runtime_ok = if requires_separate_runtime {
+        resolved_separate_runtime.is_some()
+    } else {
+        runtime.is_some_and(|component| component.exists) || view.local_runtime.is_some() || acp_ok
+    };
 
-    let dependency_items = if let Some(profile) = catalog.profile(&agent_id) {
+    let dependency_items = if let Some(profile) = profile {
         probe_profile_dependencies(profile).await
     } else {
         Vec::new()
     };
 
     let authentication = observed_authentication(pool, &agent_id, &env).await;
-    let authentication_required = catalog
-        .profile(&agent_id)
-        .is_some_and(|profile| profile.authentication_required_by_default);
+    let authentication_required =
+        profile.is_some_and(|profile| profile.authentication_required_by_default);
     let (auth_mode_item, auth_mode_ready) =
         match auth_mode_preflight_item(pool, &agent_id, &env, authentication).await? {
             Some(item) => {
@@ -486,7 +528,8 @@ pub async fn preflight(
         };
 
     let dependencies_ok = dependency_items.iter().all(|item| item.status != "fail");
-    let lifecycle = if !acp_ok || !dependencies_ok {
+    let runtime_ready = !requires_separate_runtime || runtime_ok;
+    let lifecycle = if !acp_ok || !runtime_ready || !dependencies_ok {
         AgentLifecycleState::NeedsRepair
     } else if !auth_mode_ready
         || (authentication_required
@@ -506,7 +549,7 @@ pub async fn preflight(
             lifecycle,
             authentication,
             runtime_ok,
-            acp_ok && dependencies_ok,
+            acp_ok && runtime_ready && dependencies_ok,
             authentication_required,
         )
         .await
@@ -531,7 +574,8 @@ pub async fn preflight(
         });
     let primary_item_path = valid_acp
         .map(|component| component.path.display().to_string())
-        .or_else(|| discovered_acp_path.map(|path| path.display().to_string()));
+        .or_else(|| discovered_acp_path.map(|path| path.display().to_string()))
+        .or_else(|| failed_acp_path.map(|path| path.display().to_string()));
     let external_installer_url = (!has_managed_installer && agent_id.as_str() == "kiro")
         .then_some("https://kiro.dev/docs/getting-started/installation/");
     let adapter_relation = agents::acp_adapter_relation(agent_id.as_str());
@@ -557,6 +601,58 @@ pub async fn preflight(
             repairable: has_managed_installer,
         },
     )];
+    if requires_separate_runtime {
+        let runtime_cmd = profile
+            .and_then(|profile| {
+                profile
+                    .external_candidates
+                    .iter()
+                    .find(|candidate| candidate.component == ProfileComponent::AgentRuntime)
+                    .map(|candidate| candidate.executable)
+            })
+            .unwrap_or(agent_id.as_str());
+        items.push(AgentPreflightItemView {
+            id: "agent_runtime".to_string(),
+            label: "Agent 运行时".to_string(),
+            status: if runtime_ok { "pass" } else { "fail" }.to_string(),
+            detail: if runtime_ok {
+                String::new()
+            } else {
+                format!("缺少必需的 Agent 运行时 CLI `{runtime_cmd}`，请重新安装或修复。")
+            },
+            version: runtime.map(|component| component.version.clone()),
+            path: resolved_separate_runtime.map(|path| path.display().to_string()),
+            source: None,
+            repairable: has_managed_installer,
+            update_available: false,
+            available_version: None,
+            update_group: None,
+        });
+    }
+    if agent_id.as_str() == "openclaw" && acp_ok {
+        let gateway = probe_openclaw_gateway(dirs::home_dir().as_deref(), &env).await;
+        items.push(AgentPreflightItemView {
+            id: "openclaw.gateway".to_string(),
+            label: "OpenClaw Gateway".to_string(),
+            status: if gateway.reachable { "pass" } else { "warning" }.to_string(),
+            detail: if gateway.reachable {
+                format!("Gateway 已就绪 ({})", gateway.endpoint.display)
+            } else {
+                format!(
+                    "OpenClaw CLI 已安装，但本地 Gateway ({}) 未在监听；请先启动 OpenClaw Gateway 或配置 gateway.remote.url ({})",
+                    gateway.endpoint.display,
+                    gateway.error.as_deref().unwrap_or("connection refused")
+                )
+            },
+            version: None,
+            path: Some(gateway.endpoint.display),
+            source: None,
+            repairable: false,
+            update_available: false,
+            available_version: None,
+            update_group: None,
+        });
+    }
     items.extend(dependency_items);
     items.extend(auth_mode_item);
     Ok(AgentPreflightView {
@@ -564,6 +660,56 @@ pub async fn preflight(
         checked_at: Utc::now().to_rfc3339(),
         items,
     })
+}
+
+async fn resolve_required_agent_runtime(
+    agent_id: &AgentId,
+    profile: &agents::BuiltInProfile,
+    components: &[InstalledComponent],
+    discovered_acp_path: Option<&Path>,
+    env: &HashMap<String, String>,
+) -> Option<PathBuf> {
+    if let Some(component) = components
+        .iter()
+        .find(|component| component.kind == "agent_runtime" && component.exists)
+    {
+        return Some(component.path.clone());
+    }
+    if agent_id.as_str() == "pi" {
+        let command = env
+            .get("PI_ACP_PI_COMMAND")
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("pi");
+        if let Some(path) = agents::pi_trust::resolve_pi_command_in_env(command, env) {
+            return Some(path);
+        }
+    }
+    let mut component_paths = components
+        .iter()
+        .map(|component| component.path.display().to_string())
+        .collect::<Vec<_>>();
+    if let Some(path) = discovered_acp_path {
+        component_paths.push(path.display().to_string());
+    }
+    for candidate in profile
+        .external_candidates
+        .iter()
+        .filter(|candidate| candidate.component == ProfileComponent::AgentRuntime)
+    {
+        if let Some(path) = resolve_management_program_from_components(
+            agent_id,
+            candidate.executable,
+            env,
+            &component_paths,
+        )
+        .await
+        {
+            return Some(path);
+        }
+    }
+    None
 }
 
 async fn reconcile_legacy_shim_lock(
@@ -665,7 +811,8 @@ pub async fn environment_diagnostics(
         .ok_or_else(|| ApplicationError::bad_request("环境诊断当前只适用于内置 Agent"))?;
     require_membership(pool, &agent_id).await?;
     let installed = installed_components(pool, &agent_id).await?;
-    Ok(build_environment_diagnostics(agent_id, profile, &installed).await)
+    let environment = read_agent_environment(pool, &agent_id).await?;
+    Ok(build_environment_diagnostics(agent_id, profile, &installed, &environment).await)
 }
 
 pub async fn actions(

@@ -1822,3 +1822,165 @@ async fn user_plugins_dir_auto_discovers_enables_hot_reloads_and_removes_plugins
             .any(|item| item.plugin_id == "user.pomodoro")
     );
 }
+
+#[test]
+fn materialize_replaces_existing_snapshot_cleanly_and_prunes_stale_staging() {
+    let first = tempfile::tempdir().expect("first package");
+    let second = tempfile::tempdir().expect("second package");
+    let storage = tempfile::tempdir().expect("snapshot storage");
+    for (root, version) in [(first.path(), "2.0.0"), (second.path(), "2.1.0")] {
+        write(
+            &root.join(".dimo-plugin/plugin.json"),
+            &format!(
+                r#"{{
+                  "manifestVersion":4,"apiVersion":"2.0",
+                  "id":"dimo.snapshot-swap","publisher":"dimo","name":"Snapshot Swap","version":"{version}",
+                  "readme":"README.md","content":{{"root":"contents","index":".dimo-plugin/content.index.json"}},
+                  "config":{{"schema":{{"type":"object","properties":{{"timeout":{{"type":"integer"}}}},"additionalProperties":false}}}},
+                  "engines":{{"dimo":">=0.1.3 <1.0.0","pluginSdk":"^2.0.0"}},
+                  "integrations":[]
+                }}"#
+            ),
+        );
+        write(
+            &root.join("README.md"),
+            "---\nsummary: Snapshot swap test.\n---\n# Snapshot Swap\n",
+        );
+        write(&root.join("config.json"), r#"{"timeout":10}"#);
+        write(
+            &root.join(".dimo-plugin/content.index.json"),
+            r#"{"schemaVersion":1,"items":[]}"#,
+        );
+    }
+
+    let installed =
+        PluginPackage::materialize(first.path(), storage.path(), PluginSourceKind::Snapshot)
+            .expect("install first snapshot");
+    installed
+        .write_config(serde_json::json!({ "timeout": 42 }))
+        .expect("persist user config");
+
+    // Seed stale staging and superseded directories that should be pruned on next materialize.
+    fs::create_dir_all(storage.path().join(".dimo.snapshot-swap.incoming")).unwrap();
+    fs::create_dir_all(
+        storage
+            .path()
+            .join(".dimo.snapshot-swap.superseded.deadbeef"),
+    )
+    .unwrap();
+
+    let updated =
+        PluginPackage::materialize(second.path(), storage.path(), PluginSourceKind::Snapshot)
+            .expect("replace unlocked snapshot");
+    assert_eq!(updated.version, "2.1.0");
+    assert_eq!(
+        updated.source.path,
+        storage
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("dimo.snapshot-swap")
+    );
+    assert_eq!(
+        updated.product_detail().unwrap().config,
+        serde_json::json!({ "timeout": 42 })
+    );
+
+    let names: Vec<String> = fs::read_dir(storage.path())
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .collect();
+    assert_eq!(names, vec!["dimo.snapshot-swap".to_owned()]);
+}
+
+#[cfg(windows)]
+#[test]
+fn materialize_falls_back_to_sibling_snapshot_when_target_is_locked() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let first = tempfile::tempdir().expect("first package");
+    let second = tempfile::tempdir().expect("second package");
+    let storage = tempfile::tempdir().expect("snapshot storage");
+    for (root, version) in [(first.path(), "2.0.0"), (second.path(), "2.2.0")] {
+        write(
+            &root.join(".dimo-plugin/plugin.json"),
+            &format!(
+                r#"{{
+                  "manifestVersion":4,"apiVersion":"2.0",
+                  "id":"dimo.locked-swap","publisher":"dimo","name":"Locked Swap","version":"{version}",
+                  "readme":"README.md","content":{{"root":"contents","index":".dimo-plugin/content.index.json"}},
+                  "config":{{"schema":{{"type":"object","properties":{{"timeout":{{"type":"integer"}}}},"additionalProperties":false}}}},
+                  "engines":{{"dimo":">=0.1.3 <1.0.0","pluginSdk":"^2.0.0"}},
+                  "integrations":[]
+                }}"#
+            ),
+        );
+        write(
+            &root.join("README.md"),
+            "---\nsummary: Locked swap test.\n---\n# Locked Swap\n",
+        );
+        write(&root.join("config.json"), r#"{"timeout":10}"#);
+        write(&root.join("bin/helper.bin"), "binary-placeholder");
+        write(
+            &root.join(".dimo-plugin/content.index.json"),
+            r#"{"schemaVersion":1,"items":[]}"#,
+        );
+    }
+
+    let installed =
+        PluginPackage::materialize(first.path(), storage.path(), PluginSourceKind::Snapshot)
+            .expect("install first snapshot");
+    installed
+        .write_config(serde_json::json!({ "timeout": 99 }))
+        .expect("persist user config");
+
+    // Hold an exclusive Windows handle (share_mode = 0) on a file inside the
+    // existing snapshot directory so renaming/removing `target` fails with Win32
+    // sharing violation — reproducing a running plugin helper binary or locked CWD.
+    let _lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(0)
+        .open(installed.source.path.join("bin/helper.bin"))
+        .expect("acquire exclusive handle inside snapshot");
+
+    let updated =
+        PluginPackage::materialize(second.path(), storage.path(), PluginSourceKind::Snapshot)
+            .expect("locked target must fall back to sibling snapshot instead of failing");
+    assert_eq!(updated.version, "2.2.0");
+    assert_ne!(updated.source.path, installed.source.path);
+    assert!(
+        updated
+            .source
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("dimo.locked-swap-")),
+        "expected sibling snapshot dir, got {}",
+        updated.source.path.display()
+    );
+    assert_eq!(
+        updated.product_detail().unwrap().config,
+        serde_json::json!({ "timeout": 99 })
+    );
+    // Locked original snapshot must not have been partially destroyed.
+    assert!(
+        installed
+            .source
+            .path
+            .join(".dimo-plugin/plugin.json")
+            .is_file()
+    );
+    // No temporary `.incoming*` directory may be leaked behind.
+    let leaked_incoming: Vec<String> = fs::read_dir(storage.path())
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|name| name.contains(".incoming"))
+        .collect();
+    assert!(
+        leaked_incoming.is_empty(),
+        "unexpected leftover incoming dirs: {leaked_incoming:?}"
+    );
+}

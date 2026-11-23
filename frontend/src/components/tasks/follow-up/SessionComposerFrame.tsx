@@ -89,31 +89,24 @@ export function SessionComposerFrame({
       >
         {status}
         {overlay}
+        {tabs}
+        {drawer}
         <div
-          className="composer-cockpit-frame"
-          data-testid="composer-cockpit-frame"
+          className="session-composer-anchor relative"
+          data-testid="session-composer-anchor"
         >
-          {tabs}
-          <div className="composer-cockpit-core">
-            {drawer}
-            <div
-              className="session-composer-anchor relative"
-              data-testid="session-composer-anchor"
-            >
-              <div
-                className="composer-shell session-composer-body relative z-10 flex flex-col gap-0.5 overflow-visible rounded-[var(--radius-composer,0.75rem)] px-3 py-2"
-                data-testid="session-composer-body"
-                data-typeahead-surface="composer"
-                onClick={handleComposerBodyClick}
-                onFocus={onFocus}
-                onBlur={onBlur}
-              >
-                {children}
-              </div>
-            </div>
+          <div
+            className="composer-shell session-composer-body relative z-10 flex flex-col gap-0.5 overflow-visible rounded-[var(--radius-composer,0.75rem)] px-3 py-2"
+            data-testid="session-composer-body"
+            data-typeahead-surface="composer"
+            onClick={handleComposerBodyClick}
+            onFocus={onFocus}
+            onBlur={onBlur}
+          >
+            {children}
           </div>
-          {footer}
         </div>
+        {footer}
       </div>
     </div>
   );

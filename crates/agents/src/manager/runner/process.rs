@@ -183,16 +183,50 @@ pub(in crate::manager) fn turn_error_event_from_connection_failure(
     }
 }
 
-pub(in crate::manager) fn handshake_timeout() -> Duration {
-    handshake_timeout_from_env_value(std::env::var(HANDSHAKE_TIMEOUT_ENV).ok().as_deref())
+pub(in crate::manager) const ANTIGRAVITY_DEFAULT_HANDSHAKE_TIMEOUT_SECS: u64 = 120;
+pub(in crate::manager) const ANTIGRAVITY_DEFAULT_SESSION_PREP_TIMEOUT_SECS: u64 = 120;
+
+pub(in crate::manager) fn default_handshake_timeout_for_agent(agent_id: &AgentId) -> Duration {
+    if AgentKind::Antigravity.matches_id(agent_id.as_str()) {
+        Duration::from_secs(ANTIGRAVITY_DEFAULT_HANDSHAKE_TIMEOUT_SECS)
+    } else {
+        Duration::from_secs(DEFAULT_HANDSHAKE_TIMEOUT_SECS)
+    }
 }
 
+pub(in crate::manager) fn handshake_timeout_for_agent(
+    agent_id: &AgentId,
+    env: &HashMap<String, String>,
+) -> Duration {
+    positive_timeout_secs(env.get(HANDSHAKE_TIMEOUT_ENV).map(String::as_str))
+        .or_else(|| positive_timeout_secs(std::env::var(HANDSHAKE_TIMEOUT_ENV).ok().as_deref()))
+        .unwrap_or_else(|| default_handshake_timeout_for_agent(agent_id))
+}
+
+#[cfg(test)]
 pub(in crate::manager) fn handshake_timeout_from_env_value(value: Option<&str>) -> Duration {
     positive_timeout_secs(value).unwrap_or(Duration::from_secs(DEFAULT_HANDSHAKE_TIMEOUT_SECS))
 }
 
+pub(in crate::manager) fn default_session_prep_timeout_for_agent(agent_id: &AgentId) -> Duration {
+    if AgentKind::Antigravity.matches_id(agent_id.as_str()) {
+        Duration::from_secs(ANTIGRAVITY_DEFAULT_SESSION_PREP_TIMEOUT_SECS)
+    } else {
+        Duration::from_secs(DEFAULT_SESSION_PREP_TIMEOUT_SECS)
+    }
+}
+
 pub(in crate::manager) fn session_prep_timeout() -> Duration {
     session_prep_timeout_from_env_value(std::env::var(SESSION_PREP_TIMEOUT_ENV).ok().as_deref())
+}
+
+pub(in crate::manager) fn session_prep_timeout_for_agent(
+    agent_id: &AgentId,
+    env: &HashMap<String, String>,
+) -> Duration {
+    positive_timeout_secs(env.get(SESSION_PREP_TIMEOUT_ENV).map(String::as_str))
+        .or_else(|| positive_timeout_secs(std::env::var(SESSION_PREP_TIMEOUT_ENV).ok().as_deref()))
+        .unwrap_or_else(|| default_session_prep_timeout_for_agent(agent_id))
 }
 
 pub(in crate::manager) fn session_prep_timeout_from_env_value(value: Option<&str>) -> Duration {
@@ -259,5 +293,68 @@ pub(in crate::manager) async fn await_command_result<T>(
         Ok(Ok(result)) => result,
         Ok(Err(_)) => Err(AgentError::Runtime(closed_message.into())),
         Err(_) => Err(AgentError::Runtime(timeout_message)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn antigravity_defaults_to_120s_handshake_and_session_prep_timeouts() {
+        let agy = AgentId::parse("antigravity").unwrap();
+        let codex = AgentId::parse("codex").unwrap();
+        let empty = HashMap::new();
+
+        assert_eq!(
+            default_handshake_timeout_for_agent(&agy),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            default_handshake_timeout_for_agent(&codex),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            default_session_prep_timeout_for_agent(&agy),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            default_session_prep_timeout_for_agent(&codex),
+            Duration::from_secs(60)
+        );
+        if std::env::var_os(HANDSHAKE_TIMEOUT_ENV).is_none() {
+            assert_eq!(
+                handshake_timeout_for_agent(&agy, &empty),
+                Duration::from_secs(120)
+            );
+            assert_eq!(
+                handshake_timeout_for_agent(&codex, &empty),
+                Duration::from_secs(60)
+            );
+        }
+        if std::env::var_os(SESSION_PREP_TIMEOUT_ENV).is_none() {
+            assert_eq!(
+                session_prep_timeout_for_agent(&agy, &empty),
+                Duration::from_secs(120)
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_env_overrides_handshake_and_session_prep_timeouts() {
+        let agy = AgentId::parse("antigravity").unwrap();
+        let env = HashMap::from([
+            (HANDSHAKE_TIMEOUT_ENV.to_string(), "180".to_string()),
+            (SESSION_PREP_TIMEOUT_ENV.to_string(), "95".to_string()),
+        ]);
+
+        assert_eq!(
+            handshake_timeout_for_agent(&agy, &env),
+            Duration::from_secs(180)
+        );
+        assert_eq!(
+            session_prep_timeout_for_agent(&agy, &env),
+            Duration::from_secs(95)
+        );
     }
 }

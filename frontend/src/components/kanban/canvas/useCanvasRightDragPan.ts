@@ -68,12 +68,15 @@ function isRightPanTarget(
 export function useCanvasRightDragPan(
   surfaceRef: RefObject<HTMLElement | null>,
   onMiddleClick?: (event: PointerEvent | MouseEvent) => void,
-  onRightPan?: (delta: CanvasRightPanDelta) => void
+  onRightPan?: (delta: CanvasRightPanDelta) => void,
+  onRightPanStateChange?: (panning: boolean) => void
 ): void {
   const onMiddleClickRef = useRef(onMiddleClick);
   onMiddleClickRef.current = onMiddleClick;
   const onRightPanRef = useRef(onRightPan);
   onRightPanRef.current = onRightPan;
+  const onRightPanStateChangeRef = useRef(onRightPanStateChange);
+  onRightPanStateChangeRef.current = onRightPanStateChange;
 
   useEffect(() => {
     const surface = surfaceRef.current;
@@ -84,11 +87,17 @@ export function useCanvasRightDragPan(
     let middleStartY = 0;
     let rightGestureId = 0;
     let rightSession: {
-      pointerId: number | null;
+      inputKind: 'pointer' | 'mouse';
+      activePointerId: number | null;
+      capturedPointerId: number | null;
       gestureId: number;
       startX: number;
       startY: number;
       panning: boolean;
+      lastEmittedX: number;
+      lastEmittedY: number;
+      pendingDelta: { x: number; y: number } | null;
+      rafId: number | null;
     } | null = null;
 
     const onContextMenu = (event: MouseEvent) => {
@@ -141,32 +150,82 @@ export function useCanvasRightDragPan(
 
     const captureRightPointer = (event: PointerEvent | MouseEvent) => {
       if (!rightSession || !('pointerId' in event)) return;
-      rightSession.pointerId = event.pointerId;
+      rightSession.activePointerId = event.pointerId;
       try {
         surface.setPointerCapture(event.pointerId);
+        rightSession.capturedPointerId = event.pointerId;
       } catch {
-        rightSession.pointerId = null;
+        rightSession.capturedPointerId = null;
       }
     };
 
     const releaseRightPointer = () => {
-      if (!rightSession || rightSession.pointerId == null) return;
-      if (surface.hasPointerCapture?.(rightSession.pointerId)) {
+      if (!rightSession || rightSession.capturedPointerId == null) return;
+      if (surface.hasPointerCapture?.(rightSession.capturedPointerId)) {
         try {
-          surface.releasePointerCapture(rightSession.pointerId);
+          surface.releasePointerCapture(rightSession.capturedPointerId);
         } catch {
           /* already released */
         }
       }
     };
 
-    const endRight = () => {
-      if (!rightSession) return;
-      if (rightSession.panning) {
-        surface.removeAttribute('data-canvas-panning');
+    const emitPanDelta = (
+      session: NonNullable<typeof rightSession>,
+      dx: number,
+      dy: number
+    ) => {
+      if (dx === session.lastEmittedX && dy === session.lastEmittedY) {
+        return;
       }
+      session.lastEmittedX = dx;
+      session.lastEmittedY = dy;
+      onRightPanRef.current?.({
+        x: dx,
+        y: dy,
+        gestureId: session.gestureId,
+      });
+    };
+
+    const flushRightPanFrame = () => {
+      const session = rightSession;
+      if (!session) return;
+      session.rafId = null;
+      const pending = session.pendingDelta;
+      session.pendingDelta = null;
+      if (!pending || !session.panning) return;
+      if (
+        pending.x === session.lastEmittedX &&
+        pending.y === session.lastEmittedY
+      ) {
+        return;
+      }
+      emitPanDelta(session, pending.x, pending.y);
+      // Keep the frame gate armed so burst events within this frame wait
+      // until the next vsync instead of issuing synchronous viewport updates.
+      session.rafId = window.requestAnimationFrame(flushRightPanFrame);
+    };
+
+    const endRight = () => {
+      const session = rightSession;
+      if (!session) return;
+      if (session.rafId != null) {
+        window.cancelAnimationFrame(session.rafId);
+        session.rafId = null;
+      }
+      if (session.panning && session.pendingDelta) {
+        const pending = session.pendingDelta;
+        session.pendingDelta = null;
+        emitPanDelta(session, pending.x, pending.y);
+      }
+      const wasPanning = session.panning;
       releaseRightPointer();
       rightSession = null;
+      if (wasPanning) {
+        surface.removeAttribute('data-canvas-panning');
+        surface.removeAttribute('data-canvas-drag-panning');
+        onRightPanStateChangeRef.current?.(false);
+      }
     };
 
     const beginRight = (event: PointerEvent | MouseEvent) => {
@@ -177,38 +236,70 @@ export function useCanvasRightDragPan(
       if (rightSession) return;
       rightGestureId += 1;
       rightSession = {
-        pointerId: null,
+        inputKind: event.type.startsWith('pointer') ? 'pointer' : 'mouse',
+        activePointerId: null,
+        capturedPointerId: null,
         gestureId: rightGestureId,
         startX: event.clientX,
         startY: event.clientY,
         panning: false,
+        lastEmittedX: Number.NaN,
+        lastEmittedY: Number.NaN,
+        pendingDelta: null,
+        rafId: null,
       };
       captureRightPointer(event);
     };
 
     const moveRight = (event: PointerEvent | MouseEvent) => {
-      if (!rightSession) return;
+      const session = rightSession;
+      if (!session) return;
+      // Browsers dispatch both pointermove and mousemove for each hardware
+      // sample. Ignore mousemove once a gesture was claimed via pointerdown.
+      if (session.inputKind === 'pointer') {
+        if (event.type === 'mousemove') return;
+        if (
+          'pointerId' in event &&
+          session.activePointerId != null &&
+          event.pointerId !== session.activePointerId
+        ) {
+          return;
+        }
+      }
       if ((event.buttons & RIGHT_BUTTON_MASK) === 0) {
         endRight();
         return;
       }
-      const dx = event.clientX - rightSession.startX;
-      const dy = event.clientY - rightSession.startY;
-      if (!rightSession.panning) {
+      const dx = event.clientX - session.startX;
+      const dy = event.clientY - session.startY;
+      if (!session.panning) {
         if (Math.hypot(dx, dy) <= RIGHT_PAN_SLOP_PX) return;
-        rightSession.panning = true;
+        session.panning = true;
         surface.setAttribute('data-canvas-panning', '');
+        surface.setAttribute('data-canvas-drag-panning', '');
+        onRightPanStateChangeRef.current?.(true);
       }
       event.preventDefault();
-      onRightPanRef.current?.({
-        x: dx,
-        y: dy,
-        gestureId: rightSession.gestureId,
-      });
+      if (session.rafId === null) {
+        emitPanDelta(session, dx, dy);
+        session.rafId = window.requestAnimationFrame(flushRightPanFrame);
+      } else {
+        session.pendingDelta = { x: dx, y: dy };
+      }
     };
 
     const finishRight = (event: PointerEvent | MouseEvent) => {
-      if (!rightSession) return;
+      const session = rightSession;
+      if (!session) return;
+      if (
+        session.inputKind === 'pointer' &&
+        event.type === 'pointerup' &&
+        'pointerId' in event &&
+        session.activePointerId != null &&
+        event.pointerId !== session.activePointerId
+      ) {
+        return;
+      }
       if (event.type !== 'pointercancel' && event.button !== RIGHT_BUTTON) {
         return;
       }

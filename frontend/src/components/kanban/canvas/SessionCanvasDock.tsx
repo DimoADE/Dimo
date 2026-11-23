@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react';
+import { memo, useMemo, useState, type ReactNode } from 'react';
 import {
   Activity,
   Bot,
@@ -105,7 +105,7 @@ function DockDivider({ vertical }: { vertical?: boolean }) {
   );
 }
 
-export function SessionCanvasDock({
+export const SessionCanvasDock = memo(function SessionCanvasDock({
   selectedCount,
   selectedExpanded,
   selectedIsGroup = false,
@@ -488,4 +488,4 @@ export function SessionCanvasDock({
       ) : null}
     </div>
   );
-}
+});

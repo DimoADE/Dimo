@@ -273,7 +273,12 @@ impl CodexAppServer {
         );
         if let Err(err) = server.handshake().await {
             let _ = server.shutdown().await;
-            return Err(err);
+            let roots = crate::skills::codex_extra_skill_roots(
+                &spec.working_dir,
+                Some(&isolation_env),
+                &spec.env,
+            );
+            return Err(enrich_codex_engine_error(err, &roots));
         }
         let bg_server = Arc::clone(&server);
         tokio::spawn(async move {
@@ -455,37 +460,38 @@ impl CodexAppServer {
         self.write_line(&payload).await
     }
 
+    fn take_server_request(
+        &self,
+        id: &str,
+        kind: &str,
+    ) -> Result<PendingCodexServerRequest, EngineError> {
+        self.server_requests
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(id))
+            .ok_or_else(|| {
+                EngineError::InvalidRequest(format!(
+                    "unknown or already-resolved Codex {kind} request `{id}`"
+                ))
+            })
+    }
+
     pub async fn respond_server_request(
         &self,
         decision: &EnginePermissionDecision,
     ) -> Result<(), EngineError> {
-        let pending_req = self
-            .server_requests
-            .lock()
-            .ok()
-            .and_then(|mut map| map.remove(&decision.permission_id))
-            .ok_or_else(|| {
-                EngineError::InvalidRequest(format!(
-                    "unknown or already-resolved Codex server request `{}`",
-                    decision.permission_id
-                ))
-            })?;
-
+        let pending_req = self.take_server_request(&decision.permission_id, "server")?;
         let (result_obj, behavior) = build_codex_server_request_result(&pending_req, decision);
-        let response = json!({
-            "jsonrpc": "2.0",
-            "id": pending_req.raw_rpc_id,
-            "result": result_obj,
-        });
-        self.write_line(&response).await?;
-
-        let resolved = EngineEvent::PermissionResolved {
+        self.write_line(
+            &json!({ "jsonrpc": "2.0", "id": pending_req.raw_rpc_id, "result": result_obj }),
+        )
+        .await?;
+        self.publish_event(EngineEvent::PermissionResolved {
             permission_id: decision.permission_id.clone(),
             prompt_id: pending_req.prompt_id,
             session_id: (!pending_req.thread_id.is_empty()).then_some(pending_req.thread_id),
             behavior,
-        };
-        self.publish_event(resolved);
+        });
         Ok(())
     }
 
@@ -495,24 +501,12 @@ impl CodexAppServer {
         answers: &Value,
         cancelled: bool,
     ) -> Result<(), EngineError> {
-        let pending_req = self
-            .server_requests
-            .lock()
-            .ok()
-            .and_then(|mut map| map.remove(request_id))
-            .ok_or_else(|| {
-                EngineError::InvalidRequest(format!(
-                    "unknown or already-resolved Codex question request `{request_id}`"
-                ))
-            })?;
-
+        let pending_req = self.take_server_request(request_id, "question")?;
         let result_obj = build_codex_question_result(&pending_req, answers, cancelled);
-        let response = json!({
-            "jsonrpc": "2.0",
-            "id": pending_req.raw_rpc_id,
-            "result": result_obj,
-        });
-        self.write_line(&response).await
+        self.write_line(
+            &json!({ "jsonrpc": "2.0", "id": pending_req.raw_rpc_id, "result": result_obj }),
+        )
+        .await
     }
 
     pub(crate) fn publish_event(&self, event: EngineEvent) {
@@ -522,6 +516,20 @@ impl CodexAppServer {
 
     async fn write_line(&self, message: &Value) -> Result<(), EngineError> {
         super::write_jsonrpc_frame(&self.writer, message).await
+    }
+
+    fn finish_thread_init(
+        &self,
+        thread_id: String,
+        model: Option<String>,
+    ) -> (String, Option<EngineEvent>) {
+        self.mark_thread_loaded(&thread_id);
+        let init_ev = EngineEvent::SessionInitialized {
+            session_id: Some(thread_id.clone()),
+            model,
+            slash_commands: vec!["compact".into(), "review".into(), "init".into()],
+        };
+        (thread_id, Some(init_ev))
     }
 
     pub async fn ensure_thread(
@@ -536,6 +544,20 @@ impl CodexAppServer {
         let config_obj = mcp_servers
             .filter(|v| v.as_object().is_some_and(|m| !m.is_empty()))
             .map(|mcp| json!({ "mcp_servers": mcp }));
+        let extra_roots = working_dir_skill_roots(working_dir);
+        let build_params = |thread_id: Option<&str>| {
+            let mut p = json!({ "cwd": working_dir.to_string_lossy(), "model": model });
+            if let Some(id) = thread_id {
+                p["threadId"] = json!(id);
+            }
+            if let Some(ap) = approval_policy {
+                p["approvalPolicy"] = json!(ap);
+            }
+            if let Some(cfg) = config_obj.clone() {
+                p["config"] = cfg;
+            }
+            p
+        };
 
         if let Some(id) = existing_thread_id
             .map(str::trim)
@@ -544,45 +566,34 @@ impl CodexAppServer {
             if self.is_thread_loaded(id) {
                 return Ok((id.to_string(), None));
             }
-
-            let mut resume_params = json!({
-                "threadId": id,
-                "cwd": working_dir.to_string_lossy(),
-                "model": model,
-            });
-            if let Some(ap) = approval_policy {
-                resume_params["approvalPolicy"] = json!(ap);
+            match self.request("thread/resume", build_params(Some(id))).await {
+                Ok(res) => {
+                    let resumed_model = nested_or_str(&res, "thread", "model", "model")
+                        .or_else(|| model.map(str::to_string));
+                    return Ok(self.finish_thread_init(id.to_string(), resumed_model));
+                }
+                Err(EngineError::Rpc { code: -32601, .. }) => {
+                    return Ok(self.finish_thread_init(id.to_string(), model.map(str::to_string)));
+                }
+                Err(EngineError::Rpc {
+                    code: -32603,
+                    ref message,
+                }) if is_unrecoverable_codex_rollout_error(message) => {
+                    tracing::warn!(
+                        workspace_id = %self.workspace_id,
+                        stale_thread_id = %id,
+                        error = %message,
+                        "codex thread/resume hit unrecoverable rollout error; falling back to thread/start"
+                    );
+                }
+                Err(err) => return Err(enrich_codex_engine_error(err, &extra_roots)),
             }
-            if let Some(cfg) = config_obj {
-                resume_params["config"] = cfg;
-            }
-
-            let resumed_model = match self.request("thread/resume", resume_params).await {
-                Ok(res) => nested_or_str(&res, "thread", "model", "model")
-                    .or_else(|| model.map(str::to_string)),
-                Err(EngineError::Rpc { code: -32601, .. }) => model.map(str::to_string),
-                Err(err) => return Err(err),
-            };
-            self.mark_thread_loaded(id);
-            let init_ev = EngineEvent::SessionInitialized {
-                session_id: Some(id.to_string()),
-                model: resumed_model,
-                slash_commands: vec!["compact".into(), "review".into(), "init".into()],
-            };
-            return Ok((id.to_string(), Some(init_ev)));
         }
 
-        let mut params = json!({
-            "cwd": working_dir.to_string_lossy(),
-            "model": model,
-        });
-        if let Some(ap) = approval_policy {
-            params["approvalPolicy"] = json!(ap);
-        }
-        if let Some(cfg) = config_obj {
-            params["config"] = cfg;
-        }
-        let result = self.request("thread/start", params).await?;
+        let result = self
+            .request("thread/start", build_params(None))
+            .await
+            .map_err(|err| enrich_codex_engine_error(err, &extra_roots))?;
         let thread_id = nested_or_str(&result, "thread", "id", "threadId").ok_or_else(|| {
             EngineError::Transport(format_bounded_diagnostic(
                 "thread/start response did not include threadId",
@@ -592,13 +603,7 @@ impl CodexAppServer {
         })?;
         let started_model = nested_or_str(&result, "thread", "model", "model")
             .or_else(|| model.map(str::to_string));
-        self.mark_thread_loaded(&thread_id);
-        let init_ev = EngineEvent::SessionInitialized {
-            session_id: Some(thread_id.clone()),
-            model: started_model,
-            slash_commands: vec!["compact".into(), "review".into(), "init".into()],
-        };
-        Ok((thread_id, Some(init_ev)))
+        Ok(self.finish_thread_init(thread_id, started_model))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -615,15 +620,10 @@ impl CodexAppServer {
         mode: PromptMode,
     ) -> Result<Value, EngineError> {
         let input = serialize_codex_input_items(blocks, mode);
-        let pid = prompt_id.to_string();
         let (approval_policy, sandbox_policy) =
             build_codex_turn_policy(permission_mode, working_dir, additional_directories);
-
         let mut params = json!({
-            "threadId": thread_id,
-            "promptId": pid,
-            "input": input,
-            "model": model,
+            "threadId": thread_id, "promptId": prompt_id.to_string(), "input": input, "model": model,
         });
         if let Some(eff) = effort.map(str::trim).filter(|s| !s.is_empty()) {
             params["effort"] = json!(eff);
@@ -634,7 +634,9 @@ impl CodexAppServer {
         if let Some(sp) = sandbox_policy {
             params["sandboxPolicy"] = sp;
         }
-        self.request("turn/start", params).await
+        self.request("turn/start", params)
+            .await
+            .map_err(|err| enrich_codex_engine_error(err, &working_dir_skill_roots(working_dir)))
     }
 
     pub async fn steer_turn(
@@ -666,12 +668,8 @@ impl CodexAppServer {
         thread_id: &str,
         turn_id: Option<&str>,
     ) -> Result<(), EngineError> {
-        let _ = self
-            .request(
-                "turn/interrupt",
-                json!({ "threadId": thread_id, "turnId": turn_id }),
-            )
-            .await?;
+        let params = json!({ "threadId": thread_id, "turnId": turn_id });
+        let _ = self.request("turn/interrupt", params).await?;
         Ok(())
     }
 
@@ -681,25 +679,21 @@ impl CodexAppServer {
         new_thread_id: Option<&str>,
         before_turn_id: Option<&str>,
     ) -> Result<EngineForkReceipt, EngineError> {
-        if let Some(cp) = before_turn_id
-            && cp.trim().is_empty()
-        {
-            return Err(EngineError::InvalidRequest(
-                "fork_session checkpoint_point (`beforeTurnId`) cannot be empty".to_string(),
-            ));
-        }
+        ensure_non_empty_checkpoint(
+            before_turn_id,
+            "fork_session checkpoint_point (`beforeTurnId`) cannot be empty",
+        )?;
 
-        let params = json!({
-            "threadId": source_thread_id,
-            "newThreadId": new_thread_id,
-            "beforeTurnId": before_turn_id,
-        });
-        let result = self.request("thread/fork", params).await?;
+        let result = self
+            .request(
+                "thread/fork",
+                json!({ "threadId": source_thread_id, "newThreadId": new_thread_id, "beforeTurnId": before_turn_id }),
+            )
+            .await?;
         let forked_id = nested_or_str(&result, "thread", "id", "threadId")
             .or_else(|| new_thread_id.map(str::to_string))
             .ok_or_else(|| EngineError::Transport("thread/fork missing threadId".into()))?;
         self.mark_thread_loaded(&forked_id);
-
         let checkpoint_point = before_turn_id.map(str::to_string);
         self.publish_event(EngineEvent::SessionForked {
             source_session_id: source_thread_id.to_string(),
@@ -719,26 +713,19 @@ impl CodexAppServer {
         before_turn_id: Option<&str>,
         turn_ordinal: i32,
     ) -> Result<(), EngineError> {
-        if let Some(cp) = before_turn_id
-            && cp.trim().is_empty()
-        {
-            return Err(EngineError::InvalidRequest(
-                "revert_to `beforeTurnId` cannot be empty".to_string(),
-            ));
-        }
+        ensure_non_empty_checkpoint(before_turn_id, "revert_to `beforeTurnId` cannot be empty")?;
         if before_turn_id.is_none() && turn_ordinal <= 0 {
             return Err(EngineError::InvalidRequest(
                 "revert_to requires a non-empty `beforeTurnId` or positive `turn_ordinal`"
                     .to_string(),
             ));
         }
-
-        let params = json!({
-            "threadId": thread_id,
-            "beforeTurnId": before_turn_id,
-            "turnOrdinal": turn_ordinal,
-        });
-        let _ = self.request("thread/rollback", params).await?;
+        let _ = self
+            .request(
+                "thread/rollback",
+                json!({ "threadId": thread_id, "beforeTurnId": before_turn_id, "turnOrdinal": turn_ordinal }),
+            )
+            .await?;
         self.publish_event(EngineEvent::SessionReverted {
             session_id: thread_id.to_string(),
             checkpoint_point: before_turn_id.map(str::to_string),
@@ -753,13 +740,12 @@ impl CodexAppServer {
         before_turn_id: Option<&str>,
         limit: Option<usize>,
     ) -> Result<CodexTurnsPage, EngineError> {
-        let params = json!({
-            "threadId": thread_id,
-            "paginated": paginated,
-            "beforeTurnId": before_turn_id,
-            "limit": limit,
-        });
-        let result = self.request("thread/turns/list", params).await?;
+        let result = self
+            .request(
+                "thread/turns/list",
+                json!({ "threadId": thread_id, "paginated": paginated, "beforeTurnId": before_turn_id, "limit": limit }),
+            )
+            .await?;
         let turns = result
             .get("turns")
             .or_else(|| result.get("data"))
@@ -942,46 +928,67 @@ async fn run_reader_loop<R>(
     turn_router.fail_active_turns("codex app-server exited", &stderr_tail);
 }
 
+fn ensure_non_empty_checkpoint(value: Option<&str>, message: &str) -> Result<(), EngineError> {
+    if value.is_some_and(|cp| cp.trim().is_empty()) {
+        return Err(EngineError::InvalidRequest(message.to_string()));
+    }
+    Ok(())
+}
+
+fn is_unrecoverable_codex_rollout_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("rollout")
+        || lower.contains("is empty")
+        || lower.contains("failed to read thread")
+        || lower.contains("no such file")
+        || (lower.contains("not found") && !lower.contains("model"))
+}
+
+fn working_dir_skill_roots(working_dir: &Path) -> [PathBuf; 2] {
+    [
+        working_dir.join(".agents").join("skills"),
+        working_dir.join(".codex").join("skills"),
+    ]
+}
+
+fn enrich_codex_engine_error(err: EngineError, extra_roots: &[PathBuf]) -> EngineError {
+    let enrich = |msg: String| {
+        crate::skills::enrich_codex_skills_traversal_error(&msg, extra_roots).unwrap_or(msg)
+    };
+    match err {
+        EngineError::Rpc { code, message } => EngineError::Rpc {
+            code,
+            message: enrich(message),
+        },
+        EngineError::Transport(message) => EngineError::Transport(enrich(message)),
+        other => other,
+    }
+}
+
 pub async fn resolve_codex_binary(spec: &EngineStartSpec) -> Result<PathBuf, EngineError> {
-    if let Some(val) = spec
-        .env
-        .get("DIMO_CODEX_PATH")
-        .map(String::as_str)
-        .map(str::trim)
-        && !val.is_empty()
-    {
-        let p = PathBuf::from(val);
-        if p.is_file() {
-            return Ok(p);
-        }
-        return Err(EngineError::BinaryNotFound(format!(
-            "DIMO_CODEX_PATH `{val}` not found"
-        )));
-    }
-    if let Some(val) = std::env::var_os("DIMO_CODEX_PATH").filter(|s| !s.is_empty()) {
+    let env_val = |key: &str| {
+        spec.env
+            .get(key)
+            .cloned()
+            .or_else(|| std::env::var(key).ok())
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    if let Some(val) = env_val("DIMO_CODEX_PATH") {
         let p = PathBuf::from(&val);
-        if p.is_file() {
-            return Ok(p);
-        }
-        return Err(EngineError::BinaryNotFound(format!(
-            "DIMO_CODEX_PATH `{}` not found",
-            val.to_string_lossy()
-        )));
+        return if p.is_file() {
+            Ok(p)
+        } else {
+            Err(EngineError::BinaryNotFound(format!(
+                "DIMO_CODEX_PATH `{val}` not found"
+            )))
+        };
     }
-    let key = "CODEX_PATH";
-    if let Some(val) = spec.env.get(key).map(String::as_str).map(str::trim)
-        && !val.is_empty()
+    if let Some(p) = env_val("CODEX_PATH")
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
     {
-        let p = PathBuf::from(val);
-        if p.is_file() {
-            return Ok(p);
-        }
-    }
-    if let Some(val) = std::env::var_os(key).filter(|s| !s.is_empty()) {
-        let p = PathBuf::from(val);
-        if p.is_file() {
-            return Ok(p);
-        }
+        return Ok(p);
     }
 
     let bins: &[&str] = if cfg!(windows) {
@@ -989,53 +996,40 @@ pub async fn resolve_codex_binary(spec: &EngineStartSpec) -> Result<PathBuf, Eng
     } else {
         &["codex"]
     };
+    let find_in = |dir: &Path| bins.iter().map(|n| dir.join(n)).find(|p| p.is_file());
 
-    if let Some(spec_path) = spec.env.get("PATH").or_else(|| spec.env.get("Path")) {
-        for dir in std::env::split_paths(spec_path) {
-            for name in bins {
-                let candidate = dir.join(name);
-                if candidate.is_file() {
-                    return Ok(candidate);
-                }
-            }
-        }
+    if let Some(spec_path) = spec.env.get("PATH").or_else(|| spec.env.get("Path"))
+        && let Some(found) = std::env::split_paths(spec_path).find_map(|d| find_in(&d))
+    {
+        return Ok(found);
     }
-
     for name in bins {
         if let Some(found) = workspace_utils::shell::resolve_executable_path(name).await {
             return Ok(found);
         }
     }
 
-    let home = spec
-        .env
-        .get("USERPROFILE")
-        .or_else(|| spec.env.get("HOME"))
-        .cloned()
-        .or_else(|| std::env::var("USERPROFILE").ok())
-        .or_else(|| std::env::var("HOME").ok());
-    let mut fallback_dirs = Vec::new();
-    if let Some(h) = home {
-        fallback_dirs.push(PathBuf::from(h).join(".local/bin"));
-    }
+    let mut fallback_dirs: Vec<PathBuf> = env_val("USERPROFILE")
+        .or_else(|| env_val("HOME"))
+        .into_iter()
+        .map(|h| PathBuf::from(h).join(".local/bin"))
+        .collect();
     if cfg!(windows) {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            fallback_dirs.push(PathBuf::from(appdata).join("npm"));
-        }
-        if let Ok(local) = std::env::var("LOCALAPPDATA") {
-            fallback_dirs.push(PathBuf::from(local).join("Programs/OpenAI/Codex/bin"));
-        }
+        fallback_dirs.extend(
+            std::env::var("APPDATA")
+                .ok()
+                .map(|d| PathBuf::from(d).join("npm")),
+        );
+        fallback_dirs.extend(
+            std::env::var("LOCALAPPDATA")
+                .ok()
+                .map(|d| PathBuf::from(d).join("Programs/OpenAI/Codex/bin")),
+        );
     }
-    for dir in fallback_dirs {
-        for name in bins {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-        }
-    }
-
-    Err(EngineError::BinaryNotFound("codex CLI not found".into()))
+    fallback_dirs
+        .iter()
+        .find_map(|dir| find_in(dir))
+        .ok_or_else(|| EngineError::BinaryNotFound("codex CLI not found".into()))
 }
 
 struct CodexHandleContext {
@@ -1075,7 +1069,11 @@ impl CodexNativeDriver {
             None,
             tail,
         );
-        server.handshake().await?;
+        let roots = crate::skills::codex_extra_skill_roots(&spec.working_dir, None, &spec.env);
+        server
+            .handshake()
+            .await
+            .map_err(|err| enrich_codex_engine_error(err, &roots))?;
         let driver = Self::new();
         let handle = driver.bind_existing_server(spec, server, None);
         Ok((driver, handle))
@@ -1374,13 +1372,10 @@ impl NativeEngineDriver for CodexNativeDriver {
         handle: &EngineHandle,
         request: EngineForkRequest,
     ) -> Result<EngineForkReceipt, EngineError> {
-        if let Some(ref cp) = request.checkpoint_point
-            && cp.trim().is_empty()
-        {
-            return Err(EngineError::InvalidRequest(
-                "fork_session checkpoint_point cannot be empty".into(),
-            ));
-        }
+        ensure_non_empty_checkpoint(
+            request.checkpoint_point.as_deref(),
+            "fork_session checkpoint_point cannot be empty",
+        )?;
         let (_, server) = self.ensure_server_for_handle(handle).await?;
         let source = request
             .source_session_id
@@ -1403,13 +1398,10 @@ impl NativeEngineDriver for CodexNativeDriver {
         handle: &EngineHandle,
         checkpoint: EngineCheckpoint,
     ) -> Result<(), EngineError> {
-        if let Some(ref cp) = checkpoint.external_session_point
-            && cp.trim().is_empty()
-        {
-            return Err(EngineError::InvalidRequest(
-                "revert_to external_session_point cannot be empty".into(),
-            ));
-        }
+        ensure_non_empty_checkpoint(
+            checkpoint.external_session_point.as_deref(),
+            "revert_to external_session_point cannot be empty",
+        )?;
         let (_, server) = self.ensure_server_for_handle(handle).await?;
         let thread_id = checkpoint
             .session_id
@@ -1455,12 +1447,12 @@ impl NativeEngineDriver for CodexNativeDriver {
     }
 
     fn rate_limits(&self, handle: &EngineHandle) -> Option<EngineRateLimits> {
-        let ctx = self
-            .handles
+        self.handles
             .read()
-            .ok()
-            .and_then(|map| map.get(&handle.connection_id).cloned())?;
-        ctx.server.latest_rate_limits()
+            .ok()?
+            .get(&handle.connection_id)?
+            .server
+            .latest_rate_limits()
     }
 
     fn cache_status(&self, _handle: &EngineHandle) -> Option<EngineCacheStatus> {
@@ -1472,7 +1464,7 @@ impl NativeEngineDriver for CodexNativeDriver {
             .handles
             .write()
             .ok()
-            .and_then(|mut map| map.remove(&handle.connection_id));
+            .and_then(|mut m| m.remove(&handle.connection_id));
         if let Some(ctx) = removed {
             let should_shutdown = {
                 let mut guard = global_codex_servers().write().await;

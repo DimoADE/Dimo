@@ -136,12 +136,25 @@ function DockviewTerminalPanel(props: IDockviewPanelProps) {
   }, [defaultShell, workspaceId]);
 
   useEffect(() => {
+    let dimRefitRaf: number | null = null;
+    const scheduleDimensionRefit = () => {
+      if (typeof requestAnimationFrame !== 'function') {
+        setPanelRefitVersion((value) => value + 1);
+        return;
+      }
+      if (dimRefitRaf !== null) return;
+      dimRefitRaf = requestAnimationFrame(() => {
+        dimRefitRaf = null;
+        setPanelRefitVersion((value) => value + 1);
+      });
+    };
+
     const disposeVisibility = props.api.onDidVisibilityChange(() => {
       setPanelRefitVersion((value) => value + 1);
     });
-    const disposeDimensions = props.api.onDidDimensionsChange(() => {
-      setPanelRefitVersion((value) => value + 1);
-    });
+    const disposeDimensions = props.api.onDidDimensionsChange(
+      scheduleDimensionRefit
+    );
     const disposeActive = props.api.onDidActiveChange(() => {
       setPanelRefitVersion((value) => value + 1);
     });
@@ -152,6 +165,9 @@ function DockviewTerminalPanel(props: IDockviewPanelProps) {
     });
 
     return () => {
+      if (dimRefitRaf !== null && typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(dimRefitRaf);
+      }
       disposeVisibility.dispose();
       disposeDimensions.dispose();
       disposeActive.dispose();

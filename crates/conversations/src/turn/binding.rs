@@ -456,7 +456,20 @@ impl ConversationSessionService {
                 }
             })
             .collect::<Vec<_>>();
-        session_control_preferences(binding, &agent_defaults)
+        let member_config = match binding {
+            Some(binding) => crate::collaboration::load_conversation_member_session_config(
+                pool,
+                binding.conversation_id,
+            )
+            .await
+            .ok()
+            .flatten(),
+            None => None,
+        };
+        if let (Some(binding), Some(cfg)) = (binding, member_config.as_ref()) {
+            prune_stale_seat_inherited_model(pool, binding, cfg).await;
+        }
+        session_control_preferences_for_member(binding, &agent_defaults, member_config.as_ref())
     }
 
     /// Belt-and-suspenders after establish: preferred controls are already applied
@@ -473,7 +486,17 @@ impl ConversationSessionService {
         binding: Option<&ConversationAgentBindingRecord>,
     ) {
         let remembered_mode = binding_mode_selection(binding);
-        let remembered_config = binding_config_selection(binding);
+        let mut remembered_config = binding_config_selection(binding);
+        if remembered_config.iter().any(|item| item.key == "model") {
+            let pool = &self.ctx.deployment.db().pool;
+            if let Ok(Some(member_cfg)) =
+                crate::collaboration::load_conversation_member_session_config(pool, conversation_id)
+                    .await
+                && !seat_has_explicit_config_key(&member_cfg, "model")
+            {
+                remembered_config.retain(|item| item.key != "model");
+            }
+        }
         if remembered_mode.is_none() && remembered_config.is_empty() {
             return;
         }
@@ -1250,6 +1273,39 @@ pub async fn remember_creation_session_controls(
     persist_confirmed_session_controls(pool, conversation_id, mode, &config_overrides).await;
 }
 
+async fn prune_stale_seat_inherited_model(
+    pool: &SqlitePool,
+    binding: &ConversationAgentBindingRecord,
+    member_config: &crate::collaboration::MemberSessionConfig,
+) {
+    if seat_has_explicit_config_key(member_config, "model") {
+        return;
+    }
+    let Some(updated_json) =
+        remove_config_selection_keys(&binding.config_selection_json, &["model"])
+    else {
+        return;
+    };
+    if let Err(error) = sqlx::query(
+        r#"UPDATE conversation_agent_bindings
+           SET config_selection_json = ?,
+               updated_at = datetime('now', 'subsec')
+           WHERE id = ?"#,
+    )
+    .bind(&updated_json)
+    .bind(binding.id)
+    .execute(pool)
+    .await
+    {
+        tracing::warn!(
+            binding_id = %binding.id,
+            conversation_id = %binding.conversation_id,
+            %error,
+            "failed to prune stale inherited model from collaboration seat binding"
+        );
+    }
+}
+
 /// Persist a confirmed mode / config selection onto the conversation's active
 /// binding, returning any SQLite error on the conversation-scoped binding write.
 /// Global per-agent `agent_session_defaults` (only used as initial default for
@@ -1259,6 +1315,17 @@ pub(super) async fn persist_confirmed_session_controls_strict(
     conversation_id: Uuid,
     mode: Option<&str>,
     config_overrides: &[AgentSessionConfigOverride],
+) -> Result<(), sqlx::Error> {
+    persist_confirmed_session_controls_inner(pool, conversation_id, mode, config_overrides, true)
+        .await
+}
+
+async fn persist_confirmed_session_controls_inner(
+    pool: &SqlitePool,
+    conversation_id: Uuid,
+    mode: Option<&str>,
+    config_overrides: &[AgentSessionConfigOverride],
+    update_agent_defaults: bool,
 ) -> Result<(), sqlx::Error> {
     let config_selection_json = (!config_overrides.is_empty())
         .then(|| {
@@ -1290,6 +1357,9 @@ pub(super) async fn persist_confirmed_session_controls_strict(
         config_selection_json.as_deref(),
     )
     .await?;
+    if !update_agent_defaults {
+        return Ok(());
+    }
     // Last-used per Agent, same store new sessions already read (CodeG
     // `selector-prefs` per agentType). A rejected upsert must not fail the pick.
     if let Ok(Some(binding)) =
@@ -1334,15 +1404,42 @@ pub(super) async fn persist_confirmed_session_controls_strict(
 /// Best-effort wrapper around `persist_confirmed_session_controls_strict` for
 /// background callers (e.g. turn start or conversation creation metadata) where
 /// failing to remember a selection must not fail an already-accepted action.
+///
+/// For collaboration seats (`collaboration_members`), background turn-start or
+/// creation syncs must not persist an inherited/observed `"model"` when the
+/// member has no explicit `"model"` override, and must not overwrite global
+/// `agent_session_defaults`.
 pub(super) async fn persist_confirmed_session_controls(
     pool: &SqlitePool,
     conversation_id: Uuid,
     mode: Option<&str>,
     config_overrides: &[AgentSessionConfigOverride],
 ) {
-    if let Err(error) =
-        persist_confirmed_session_controls_strict(pool, conversation_id, mode, config_overrides)
+    let member_config =
+        crate::collaboration::load_conversation_member_session_config(pool, conversation_id)
             .await
+            .ok()
+            .flatten();
+    let (filtered_overrides, update_agent_defaults) = match member_config.as_ref() {
+        Some(cfg) => {
+            let keep_model = seat_has_explicit_config_key(cfg, "model");
+            let filtered: Vec<AgentSessionConfigOverride> = config_overrides
+                .iter()
+                .filter(|item| keep_model || item.key != "model")
+                .cloned()
+                .collect();
+            (filtered, false)
+        }
+        None => (config_overrides.to_vec(), true),
+    };
+    if let Err(error) = persist_confirmed_session_controls_inner(
+        pool,
+        conversation_id,
+        mode,
+        &filtered_overrides,
+        update_agent_defaults,
+    )
+    .await
     {
         tracing::warn!(
             %conversation_id,

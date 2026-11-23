@@ -740,6 +740,9 @@ impl DeterministicHandoffService {
         if switched {
             crate::runtime_events::flush_conversation_persistence(conversation_id).await;
         }
+        // Migrate any legacy JSONL / vendor transcript history into SQLite before
+        // `sessions.agent_id` is overwritten or `sessions.external_session_id` is cleared.
+        let _ = crate::ensure_legacy_jsonl_migrated_on_pool(pool, conversation_id).await?;
 
         let last_turn_row: Option<(Uuid, Option<String>)> = sqlx::query_as(
             r#"SELECT t.id, b.agent_id

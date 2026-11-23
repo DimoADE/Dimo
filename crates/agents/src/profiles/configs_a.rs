@@ -1163,18 +1163,6 @@ pub(super) const ANTIGRAVITY_FIELDS: &[NativeConfigField] = &[
         &["auth", "type"],
         ANTIGRAVITY_AUTH_OPTIONS,
     )),
-    authentication(secret_field(
-        "antigravity_api_key",
-        "Gemini API Key",
-        "gemini-api-key 模式使用的密钥",
-        &["env", "GEMINI_API_KEY"],
-    )),
-    authentication(secret_field(
-        "antigravity_google_api_key",
-        "Agent Platform API Key",
-        "agent-platform 模式使用的密钥",
-        &["env", "GOOGLE_API_KEY"],
-    )),
     authentication(text_field(
         "antigravity_cloud_project",
         "Google Cloud Project",
@@ -1186,6 +1174,20 @@ pub(super) const ANTIGRAVITY_FIELDS: &[NativeConfigField] = &[
         "Google Cloud Location",
         "例如 global 或 us-central1",
         &["gcp", "location"],
+    )),
+];
+pub(super) const ANTIGRAVITY_ENV_FIELDS: &[NativeConfigField] = &[
+    authentication(secret_field(
+        "antigravity_api_key",
+        "Gemini API Key",
+        "gemini-api-key 模式使用的密钥",
+        &["GEMINI_API_KEY"],
+    )),
+    authentication(secret_field(
+        "antigravity_google_api_key",
+        "Agent Platform API Key",
+        "agent-platform 模式使用的密钥",
+        &["GOOGLE_API_KEY"],
     )),
 ];
 pub(super) const ANTIGRAVITY_CLI_FIELDS: &[NativeConfigField] = &[
@@ -1242,5 +1244,13 @@ pub(super) const ANTIGRAVITY_CONFIG: &[NativeConfigBinding] = &[
         override_relative_path: "antigravity-cli/settings.json",
         format: NativeConfigFormat::Json,
         fields: ANTIGRAVITY_CLI_FIELDS,
+    },
+    NativeConfigBinding {
+        binding_id: "env",
+        home_relative_path: ".gemini/antigravity-acp/.env",
+        directory_override_env: Some("GEMINI_HOME"),
+        override_relative_path: "antigravity-acp/.env",
+        format: NativeConfigFormat::Dotenv,
+        fields: ANTIGRAVITY_ENV_FIELDS,
     },
 ];

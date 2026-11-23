@@ -8393,70 +8393,32 @@ html.dark {
     }
   }
 
-  /* Unified Composer Cockpit: slightly wider outer card that wraps the rounded
-     composer body, hosting the collapsible top tab dock and bottom context bar. */
-  .composer-cockpit-frame {
-    --composer-cockpit-inset: 6px;
-    --composer-cockpit-border: 1px;
-    --composer-cockpit-radius: calc(
-      var(--radius-composer, var(--radius-container, var(--radius))) +
-        var(--composer-cockpit-inset)
-    );
-    position: relative;
-    z-index: 1;
-    overflow: visible;
-  }
-
-  .composer-cockpit-frame:has(
-    .composer-cockpit-dock,
-    .composer-cockpit-footer
-  ) {
-    margin-inline: calc(-1 * var(--composer-cockpit-inset));
-    border: var(--composer-cockpit-border) solid var(--border-strong);
-    border-radius: var(--composer-cockpit-radius);
-    background: color-mix(in srgb, var(--text-strong) 5%, var(--surface-card));
-    box-shadow: var(--shadow-control);
-  }
-
-  .composer-cockpit-core {
-    position: relative;
-  }
-
-  .composer-cockpit-frame:has(.composer-cockpit-dock, .composer-cockpit-footer)
-    .composer-cockpit-core {
-    padding-inline: var(--composer-cockpit-inset);
-  }
-
-  .composer-cockpit-frame:has(.composer-cockpit-footer):not(
-      :has(.composer-cockpit-dock)
-    )
-    .composer-cockpit-core {
-    padding-top: var(--composer-cockpit-inset);
-  }
-
-  .composer-cockpit-frame:has(.composer-cockpit-dock):not(
-      :has(.composer-cockpit-footer)
-    )
-    .composer-cockpit-core {
-    padding-bottom: var(--composer-cockpit-inset);
-  }
-
+  /* Unified Composer Cockpit: Upward-extending tray tucked behind the composer's intact top radius */
   .composer-cockpit-dock {
     position: relative;
     z-index: 1;
     overflow: hidden;
-    border-radius: calc(
-        var(--composer-cockpit-radius) - var(--composer-cockpit-border)
+    margin-bottom: calc(
+      -1 * var(--radius-composer, var(--radius-container, var(--radius)))
+    );
+    padding-bottom: var(
+      --radius-composer,
+      var(--radius-container, var(--radius))
+    );
+    border: 1px solid var(--border-strong);
+    border-bottom: 0;
+    border-radius: var(
+        --radius-composer,
+        var(--radius-container, var(--radius))
       )
-      calc(var(--composer-cockpit-radius) - var(--composer-cockpit-border)) 0 0;
-    background: transparent;
+      var(--radius-composer, var(--radius-container, var(--radius))) 0 0;
+    background: color-mix(in srgb, var(--text-strong) 6%, var(--surface-card));
+    box-shadow: var(--shadow-control);
     animation: composer-fade-in 140ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
 
   .composer-cockpit-dock:has(.composer-cockpit-panel) {
-    margin-bottom: var(--composer-cockpit-inset);
-    border-bottom: 1px solid var(--border-subtle);
-    background: color-mix(in srgb, var(--text-strong) 2%, var(--surface-card));
+    background: color-mix(in srgb, var(--text-strong) 3%, var(--surface-card));
   }
 
   .composer-cockpit-tabbar {
@@ -8464,13 +8426,13 @@ html.dark {
     align-items: center;
     justify-content: space-between;
     gap: 6px;
-    padding: 6px 14px;
+    padding: 6px 12px;
     background: transparent;
   }
 
   .composer-cockpit-dock:has(.composer-cockpit-panel) .composer-cockpit-tabbar {
     border-bottom: 1px solid var(--border-subtle);
-    background: color-mix(in srgb, var(--text-strong) 5%, var(--surface-card));
+    background: color-mix(in srgb, var(--text-strong) 6%, var(--surface-card));
   }
 
   .composer-cockpit-tabs {
@@ -8734,11 +8696,11 @@ html.dark {
 
   .composer-cockpit-footer {
     display: flex;
-    min-height: 32px;
+    min-height: 26px;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    padding: 6px 16px 7px;
+    padding: 7px 12px 1px;
     color: var(--text-muted);
     font-size: 12px;
     line-height: 1.25;
@@ -18288,8 +18250,12 @@ html[data-gpu-mode='software']
   pointer-events: none;
 }
 
-.canvas-surface[data-canvas-panning] .react-flow__viewport {
+.canvas-surface .react-flow__viewport {
   will-change: transform;
+}
+
+.canvas-surface[data-canvas-drag-panning] .react-flow__viewport {
+  pointer-events: none !important;
 }
 
 .canvas-surface[data-canvas-panning]
@@ -18337,6 +18303,7 @@ html[data-gpu-mode='software']
 
 .canvas-surface .react-flow__node {
   overflow: visible;
+  contain: layout style;
 }
 
 .canvas-surface .react-flow__nodesselection {
@@ -18779,7 +18746,7 @@ html[data-gpu-mode='software']
 }
 
 .canvas-surface[data-canvas-panning],
-.canvas-surface[data-canvas-panning] * {
+.canvas-surface[data-canvas-panning] .react-flow__pane {
   cursor: grabbing !important;
 }
 

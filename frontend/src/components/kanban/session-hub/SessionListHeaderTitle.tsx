@@ -29,9 +29,26 @@ export function SessionListHeaderTitle({
       setFits(sessionListTitleFits(slot.clientWidth, text.scrollWidth));
     };
     update();
-    const observer = new ResizeObserver(update);
+    let rafId: number | null = null;
+    const scheduleUpdate = () => {
+      if (typeof requestAnimationFrame !== 'function') {
+        update();
+        return;
+      }
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        update();
+      });
+    };
+    const observer = new ResizeObserver(scheduleUpdate);
     observer.observe(slot);
-    return () => observer.disconnect();
+    return () => {
+      if (rafId !== null && typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(rafId);
+      }
+      observer.disconnect();
+    };
   }, [children]);
 
   const label = (

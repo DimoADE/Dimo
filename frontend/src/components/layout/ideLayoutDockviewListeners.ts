@@ -63,6 +63,7 @@ import {
   assignDockviewGroupIdAndRole,
   setDockviewGroupRole,
 } from '@/utils/dockviewGroupRole';
+import { installDockviewSashResizeGuard } from '@/utils/dockviewSashResizeState';
 import { installDockviewPointerTabDnd } from '@/utils/dockviewPointerTabDnd';
 import { isDockviewApiDisposed } from '@/utils/dockviewSessionPanel';
 import {
@@ -256,6 +257,9 @@ export function attachDockviewWorkspaceListeners(
 
   const pointerTabDndDisposable = dockviewRootEl
     ? installDockviewPointerTabDnd(dockviewRootEl)
+    : null;
+  const disposeSashResizeGuard = dockviewRootEl
+    ? installDockviewSashResizeGuard(dockviewRootEl)
     : null;
   const dndGuardDisposable = registerDndGuard(api);
   let isInternalAnchorSync = false;
@@ -554,6 +558,7 @@ export function attachDockviewWorkspaceListeners(
       cancelAnimationFrame(resizeFrame);
     }
     pointerTabDndDisposable?.dispose();
+    disposeSashResizeGuard?.();
     dndGuardDisposable.dispose();
     removePanelDisposable.dispose();
     normalizeGroupsDisposable.dispose();

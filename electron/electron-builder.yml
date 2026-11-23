@@ -67,7 +67,11 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: Dimo
+  script: build/installer.nsi
   include: build/installer.nsh
+  installerLanguages:
+    - en_US
+    - zh_CN
   installerIcon: build/icons/icon.ico
   uninstallerIcon: build/icons/icon.ico
 

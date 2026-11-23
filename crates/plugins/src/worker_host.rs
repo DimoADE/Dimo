@@ -850,7 +850,7 @@ impl WorkerHost {
             *guard = None;
         }
         if guard.is_none() {
-            let mut fresh = spawn_fresh_shared_node_process(&node_executable, &package_root)?;
+            let mut fresh = spawn_fresh_shared_node_process(&node_executable)?;
             for survivor in crashed_survivors {
                 let _ = remount_survivor_slot(&mut fresh, survivor).await;
             }
@@ -916,9 +916,7 @@ impl WorkerHost {
                     let _ = process.child.kill().await;
                     let _ = process.child.wait().await;
                     *guard = None;
-                    if let Ok(mut fresh) =
-                        spawn_fresh_shared_node_process(&node_executable, &package_root)
-                    {
+                    if let Ok(mut fresh) = spawn_fresh_shared_node_process(&node_executable) {
                         for survivor in survivors {
                             let _ = remount_survivor_slot(&mut fresh, survivor).await;
                         }
@@ -1288,7 +1286,7 @@ impl WorkerHost {
                     *terminal_error.lock().await = Some(reason);
                     process.mounted_slots.remove(&slot_key);
                     process.brokers.remove(&slot_key);
-                    let removed_spec = process.slot_specs.remove(&slot_key);
+                    let _ = process.slot_specs.remove(&slot_key);
 
                     // If this slot timed out asynchronously without killing the shared
                     // Node event loop, unmounting the offending slot succeeds and all
@@ -1312,17 +1310,10 @@ impl WorkerHost {
                         let node_exec = process.node_executable.clone();
                         let survivors: Vec<MountedSlotSpec> =
                             process.slot_specs.values().cloned().collect();
-                        let fallback_cwd = survivors
-                            .first()
-                            .map(|spec| spec.package_root.clone())
-                            .or_else(|| removed_spec.map(|spec| spec.package_root))
-                            .unwrap_or_else(|| PathBuf::from("."));
                         let _ = process.child.kill().await;
                         let _ = process.child.wait().await;
                         *guard = None;
-                        if let Ok(mut fresh) =
-                            spawn_fresh_shared_node_process(&node_exec, &fallback_cwd)
-                        {
+                        if let Ok(mut fresh) = spawn_fresh_shared_node_process(&node_exec) {
                             for survivor in survivors {
                                 let _ = remount_survivor_slot(&mut fresh, survivor).await;
                             }
@@ -2597,10 +2588,8 @@ for await (const rawLine of hostInput) {
 
 fn spawn_fresh_shared_node_process(
     node_executable: &Path,
-    initial_cwd: &Path,
 ) -> Result<SharedNodeProcess, WorkerHostError> {
-    let (child, pid, stdin, stdout, stderr) =
-        spawn_shared_node_runner(node_executable, initial_cwd)?;
+    let (child, pid, stdin, stdout, stderr) = spawn_shared_node_runner(node_executable)?;
     if let Some(stderr) = stderr {
         spawn_stderr_log_reader("shared-node-runner", stderr);
     }
@@ -2719,12 +2708,24 @@ async fn remount_survivor_slot(
     }
 }
 
+fn shared_node_runner_cwd() -> PathBuf {
+    // Keep the long-lived shared Node process's OS working directory off every
+    // plugin snapshot directory so Windows does not hold a directory lock that
+    // blocks plugin uninstall/reinstall; each slot still observes its own
+    // package root via AsyncLocalStorage-backed `process.cwd()`.
+    let temp = std::env::temp_dir();
+    if temp.is_dir() {
+        worker_process_path(&temp)
+    } else {
+        PathBuf::from(".")
+    }
+}
+
 fn spawn_shared_node_runner(
     node_executable: &Path,
-    initial_cwd: &Path,
 ) -> Result<SpawnedSharedNodeIo, WorkerHostError> {
     let program = worker_process_path(node_executable);
-    let cwd = worker_process_path(initial_cwd);
+    let cwd = shared_node_runner_cwd();
     let mut command = Command::new(&program);
     command
         .arg("--max-old-space-size=256")
@@ -3758,5 +3759,15 @@ mod worker_host_tests {
         let err = validate_registrations(&package, &incomplete_handlers)
             .expect_err("missing declared status/command handlers must still fail");
         assert_eq!(err.code(), "handler_required_missing");
+    }
+
+    #[test]
+    fn shared_node_runner_cwd_returns_existing_neutral_directory() {
+        let cwd = shared_node_runner_cwd();
+        assert!(
+            cwd.is_dir(),
+            "shared Node runner cwd must be an existing neutral directory: {}",
+            cwd.display()
+        );
     }
 }

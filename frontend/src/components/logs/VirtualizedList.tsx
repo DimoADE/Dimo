@@ -209,12 +209,21 @@ export function remeasureMountedVirtualRows(
   const nodes = list.querySelectorAll<HTMLElement>(
     ':scope > [data-index], :scope > * > [data-index]'
   );
-  nodes.forEach((node) => {
-    const index = Number(node.getAttribute('data-index'));
+  // Read all layout heights before calling resizeItem: TanStack Virtual may
+  // synchronously adjust container.scrollTop inside resizeItem, so interleaving
+  // reads and writes forces a layout recalc per mounted row during sash drags.
+  const measured: Array<[number, number]> = [];
+  for (const node of nodes) {
+    const rawIndex = node.getAttribute('data-index');
+    if (rawIndex == null || rawIndex === '') continue;
+    const index = Number(rawIndex);
     const height = node.offsetHeight;
-    if (!Number.isFinite(index) || height <= 1) return;
+    if (!Number.isFinite(index) || height <= 1) continue;
+    measured.push([index, height]);
+  }
+  for (const [index, height] of measured) {
     resizeItem(index, height);
-  });
+  }
 }
 
 type OffsetNode = {
@@ -277,12 +286,25 @@ export function unscaledElementRect(element: {
 }
 
 export function observeUnscaledElementRect(
-  instance: { scrollElement: Element | null },
+  instance: {
+    scrollElement: Element | null;
+    options?: { horizontal?: boolean };
+  },
   cb: (rect: { width: number; height: number }) => void
 ): () => void {
   const element = instance.scrollElement;
   if (!(element instanceof HTMLElement)) return () => undefined;
-  const fire = () => cb(unscaledElementRect(element));
+  const horizontal = Boolean(instance.options?.horizontal);
+  let lastPrimarySize: number | null = null;
+  const fire = () => {
+    const rect = unscaledElementRect(element);
+    const primarySize = horizontal ? rect.width : rect.height;
+    if (lastPrimarySize !== null && primarySize === lastPrimarySize) {
+      return;
+    }
+    lastPrimarySize = primarySize;
+    cb(rect);
+  };
   fire();
   const observer = new ResizeObserver(fire);
   observer.observe(element);
@@ -431,6 +453,51 @@ export function scrollTopAfterPrepend(input: {
   const delta = input.nextTotalSize - input.previousTotalSize;
   if (delta <= 0) return input.scrollTop;
   return input.scrollTop + delta;
+}
+
+export interface TimelineReadingAnchor {
+  key: string | number | bigint;
+  offset: number;
+}
+
+/**
+ * Snapshot the first virtual row intersecting the viewport top so prepending
+ * earlier history can restore the reader's exact row offset even after newly
+ * prepended rows remeasure.
+ */
+export function captureTimelineReadingAnchor(input: {
+  items: ReadonlyArray<{
+    key: string | number | bigint;
+    start: number;
+    end: number;
+  }>;
+  scrollTop: number;
+  scrollMarginDelta: number;
+}): TimelineReadingAnchor | null {
+  const top = input.scrollTop - input.scrollMarginDelta;
+  const row = input.items.find((item) => item.end > top);
+  return row ? { key: row.key, offset: top - row.start } : null;
+}
+
+export function resolveAnchoredPrependScrollTop(input: {
+  anchor: TimelineReadingAnchor | null;
+  measurements: ReadonlyArray<{
+    key: string | number | bigint;
+    start: number;
+  }>;
+  scrollMarginDelta: number;
+  scrollHeight?: number;
+  viewportHeight?: number;
+}): number | null {
+  if (!input.anchor) return null;
+  const row = input.measurements.find((item) => item.key === input.anchor?.key);
+  if (!row) return null;
+  const raw = row.start + input.anchor.offset + input.scrollMarginDelta;
+  if (input.scrollHeight != null && input.viewportHeight != null) {
+    const maxScroll = Math.max(0, input.scrollHeight - input.viewportHeight);
+    return Math.max(0, Math.min(raw, maxScroll));
+  }
+  return Math.max(0, raw);
 }
 
 export function isConversationExpansionToggle(

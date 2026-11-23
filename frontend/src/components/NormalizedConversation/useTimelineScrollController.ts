@@ -64,21 +64,25 @@ import {
   ESTIMATED_CONVERSATION_ROW_HEIGHT,
   USER_MESSAGE_SCROLL_INSET_PX,
   cancelVirtualizerFollowScroll,
+  captureTimelineReadingAnchor,
   conversationFollowIntent,
   conversationTailFollowAction,
   conversationTailNeedsRescue,
   findPreviousUserMessageVirtualIndex,
   findViewportAnchorVirtualIndex,
+  getVirtualWindowTranslateY,
   isConversationNearBottom,
   isVirtualizerJumpActive,
   measureScrollMargin,
   measureUnscaledBlockHeight,
   remeasureMountedVirtualRows,
+  resolveAnchoredPrependScrollTop,
   observeUnscaledElementRect,
   scheduleMeasuredScrollToIndex,
   scrollTopAfterPrepend,
   scrollTopToRevealVirtualWindow,
   virtualListHeightPx,
+  type TimelineReadingAnchor,
   type VirtualizedListRef,
 } from '@/components/logs/VirtualizedList';
 import {
@@ -98,6 +102,8 @@ import {
 } from './timelineMemoHelpers';
 
 const OVERSCAN = 10;
+const ANCHOR_RESTORE_MAX_FRAMES = 45;
+const ANCHOR_RESTORE_STABLE_FRAMES = 3;
 
 export function useTimelineScrollController({
   ref,
@@ -148,6 +154,7 @@ export function useTimelineScrollController({
   const tailRescueItemCountRef = useRef(0);
   const tailRescueWindowHeightRef = useRef(0);
   const revealScrollRef = useRef<number | null>(null);
+  const pinToBottomRafRef = useRef<number | null>(null);
   const programmaticScrollDepthRef = useRef(0);
   const smoothFollowRef = useRef(false);
   const seenExpansionRef = useRef<number | null>(null);
@@ -160,7 +167,9 @@ export function useTimelineScrollController({
     index: number | null;
   }>({ sessionId: null, index: null });
   const previousPrependEpochRef = useRef(0);
+  const readingAnchorRef = useRef<TimelineReadingAnchor | null>(null);
   const previousTotalSizeRef = useRef(0);
+  const cancelAnchorRestoreRef = useRef<(() => void) | null>(null);
   const pendingJumpTimelineIndexRef = useRef<{
     index: number;
     align: 'start' | 'center' | 'end' | 'auto';
@@ -303,18 +312,55 @@ export function useTimelineScrollController({
     windowHeight: paintedWindowHeight,
   });
 
+  const cancelAnchorRestore = useCallback(() => {
+    cancelAnchorRestoreRef.current?.();
+    cancelAnchorRestoreRef.current = null;
+  }, []);
+
+  const cancelPinToBottomRaf = useCallback(() => {
+    if (
+      pinToBottomRafRef.current !== null &&
+      typeof cancelAnimationFrame === 'function'
+    ) {
+      cancelAnimationFrame(pinToBottomRafRef.current);
+      pinToBottomRafRef.current = null;
+    }
+  }, []);
+
+  useLayoutEffect(() => {
+    rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = (
+      item,
+      _delta,
+      instance
+    ) => {
+      if (followTailRef.current) return false;
+      return item.start < (instance.scrollOffset ?? 0);
+    };
+  }, [rowVirtualizer]);
+
+  useLayoutEffect(
+    () => () => {
+      cancelAnchorRestore();
+      cancelPinToBottomRaf();
+    },
+    [cancelAnchorRestore, cancelPinToBottomRaf, sessionId]
+  );
+
   const cancelPendingJump = useCallback(() => {
+    cancelAnchorRestore();
     cancelJumpRef.current?.();
     cancelJumpRef.current = null;
     pendingJumpTimelineIndexRef.current = null;
     cancelVirtualizerFollowScroll(rowVirtualizer);
-  }, [rowVirtualizer]);
+  }, [cancelAnchorRestore, rowVirtualizer]);
 
   useEffect(() => () => cancelPendingJump(), [cancelPendingJump]);
 
   const jumpToVirtualIndex = useCallback(
     (index: number, align: 'start' | 'center' | 'end' | 'auto' = 'start') => {
       if (index < 0 || index >= virtualEntries.length) return;
+      cancelAnchorRestore();
+      readingAnchorRef.current = null;
       cancelJumpRef.current?.();
       cancelJumpRef.current = null;
       let pass = 0;
@@ -339,11 +385,26 @@ export function useTimelineScrollController({
       };
       cancelJumpRef.current = scheduleMeasuredScrollToIndex(jump, index);
     },
-    [rowVirtualizer, virtualEntries.length]
+    [cancelAnchorRestore, rowVirtualizer, virtualEntries.length]
   );
 
   const hasEarlierTimeline = hasHiddenEarlierItems || hasEarlier;
+  const captureReadingAnchor = useCallback(() => {
+    const container = containerRef.current;
+    const list = virtualListRef.current;
+    if (!container || !list) return;
+    readingAnchorRef.current = captureTimelineReadingAnchor({
+      items: rowVirtualizer.getVirtualItems(),
+      scrollTop: container.scrollTop,
+      scrollMarginDelta:
+        measureScrollMargin(list, container) -
+        rowVirtualizer.options.scrollMargin,
+    });
+  }, [rowVirtualizer]);
+
   const loadEarlierTimeline = useCallback(() => {
+    cancelAnchorRestore();
+    captureReadingAnchor();
     if (hasHiddenEarlierItems) {
       setVisibleTailSession((current) => {
         const baseCount = current.sessionId === sessionId ? current.count : 24;
@@ -372,6 +433,8 @@ export function useTimelineScrollController({
     });
     void loadOlder();
   }, [
+    cancelAnchorRestore,
+    captureReadingAnchor,
     hasHiddenEarlierItems,
     loadOlder,
     sessionId,
@@ -394,6 +457,7 @@ export function useTimelineScrollController({
 
   const detachFromBottom = useCallback(() => {
     cancelPendingJump();
+    cancelPinToBottomRaf();
     const container = containerRef.current;
     if (container && smoothFollowRef.current) {
       smoothFollowRef.current = false;
@@ -407,7 +471,12 @@ export function useTimelineScrollController({
     if (!isAtBottomRef.current) return;
     isAtBottomRef.current = false;
     onAtBottomChange?.(false);
-  }, [cancelPendingJump, onAtBottomChange, runProgrammaticScroll]);
+  }, [
+    cancelPendingJump,
+    cancelPinToBottomRaf,
+    onAtBottomChange,
+    runProgrammaticScroll,
+  ]);
 
   const handleJumpToVirtualIndex = useCallback(
     (targetIndex: number) => {
@@ -428,6 +497,8 @@ export function useTimelineScrollController({
         detachFromBottom();
       }
       if (index < visibleTimelineStartIndex) {
+        cancelAnchorRestore();
+        readingAnchorRef.current = null;
         pendingJumpTimelineIndexRef.current = { index, align };
         skipNextPrependAdjustRef.current = true;
         setVisibleTailSession((current) => {
@@ -452,6 +523,7 @@ export function useTimelineScrollController({
       jumpToVirtualIndex(virtualIndex, align);
     },
     [
+      cancelAnchorRestore,
       detachFromBottom,
       jumpToVirtualIndex,
       sessionId,
@@ -555,6 +627,7 @@ export function useTimelineScrollController({
       if (!container) return;
       smoothFollowRef.current = behavior === 'smooth';
       cancelVirtualizerFollowScroll(rowVirtualizer);
+      cancelPinToBottomRaf();
       runProgrammaticScroll(() => {
         if (behavior === 'smooth') {
           container.scrollTo({ top: container.scrollHeight, behavior });
@@ -567,7 +640,8 @@ export function useTimelineScrollController({
         behavior !== 'smooth' &&
         typeof requestAnimationFrame === 'function'
       ) {
-        requestAnimationFrame(() => {
+        pinToBottomRafRef.current = requestAnimationFrame(() => {
+          pinToBottomRafRef.current = null;
           const currentContainer = containerRef.current;
           if (!currentContainer || !followTailRef.current) return;
           runProgrammaticScroll(() => {
@@ -577,7 +651,7 @@ export function useTimelineScrollController({
         });
       }
     },
-    [rowVirtualizer, runProgrammaticScroll]
+    [cancelPinToBottomRaf, rowVirtualizer, runProgrammaticScroll]
   );
 
   const scrollToBottom = useCallback(
@@ -605,6 +679,9 @@ export function useTimelineScrollController({
       lastScrollHeightRef.current = scrollHeight;
       const trustedUserScroll =
         event.nativeEvent.isTrusted && programmaticScrollDepthRef.current === 0;
+      if (readingAnchorRef.current && trustedUserScroll) {
+        captureReadingAnchor();
+      }
       const intent = conversationFollowIntent({
         trustedUserScroll,
         previousScrollTop: previous,
@@ -618,6 +695,8 @@ export function useTimelineScrollController({
       if (intent === 'detach') {
         detachFromBottom();
       } else if (intent === 'attach') {
+        cancelAnchorRestore();
+        readingAnchorRef.current = null;
         followTailRef.current = true;
         setIsFollowingTail(true);
         isAtBottomRef.current = true;
@@ -638,6 +717,8 @@ export function useTimelineScrollController({
       updateActiveIndex();
     },
     [
+      cancelAnchorRestore,
+      captureReadingAnchor,
       detachFromBottom,
       hasEarlierTimeline,
       loadEarlierTimeline,
@@ -807,16 +888,112 @@ export function useTimelineScrollController({
     if (!container || !list) return;
     updateScrollMargin();
     let viewportHeight = container.clientHeight;
+    let viewportWidth = container.clientWidth;
+
+    const syncVirtualWindowGeometryBeforePaint = (
+      widthChanged: boolean
+    ): void => {
+      remeasureMountedVirtualRows(list, rowVirtualizer.resizeItem);
+      const liveTotalSize = rowVirtualizer.getTotalSize();
+      const liveScrollMargin = measureScrollMargin(list, container);
+      const liveWindowHeight = win ? win.offsetHeight : 0;
+      if (win) {
+        setPaintedWindowHeight((current) =>
+          Math.abs(current - liveWindowHeight) > 1 ? liveWindowHeight : current
+        );
+      }
+
+      const rawFirstIndex = win?.firstElementChild?.getAttribute('data-index');
+      const firstMountedIndex =
+        rawFirstIndex != null && rawFirstIndex !== ''
+          ? Number(rawFirstIndex)
+          : NaN;
+      const mountedWindowStart = Number.isFinite(firstMountedIndex)
+        ? (rowVirtualizer.measurementsCache[firstMountedIndex]?.start ??
+          rowVirtualizer.getVirtualItems()[0]?.start)
+        : rowVirtualizer.getVirtualItems()[0]?.start;
+
+      const nextListHeight = virtualListHeightPx({
+        totalSize: liveTotalSize,
+        windowStart: mountedWindowStart,
+        scrollMargin: liveScrollMargin,
+        windowHeight: liveWindowHeight,
+      });
+
+      const applyGeometry = () => {
+        list.style.height = `${nextListHeight}px`;
+        if (win && mountedWindowStart !== undefined) {
+          win.style.transform = getVirtualWindowTranslateY(
+            mountedWindowStart,
+            liveScrollMargin
+          );
+        }
+
+        if (!widthChanged) return;
+
+        const currentViewportHeight = container.clientHeight;
+        if (currentViewportHeight <= 0) return;
+
+        const maxScroll = Math.max(
+          0,
+          container.scrollHeight - currentViewportHeight
+        );
+        const visualTop = Math.max(0, mountedWindowStart ?? liveScrollMargin);
+        const visualBottom = visualTop + liveWindowHeight;
+
+        if (followTailRef.current) {
+          const targetTop =
+            win && liveWindowHeight > 1
+              ? Math.min(
+                  Math.max(0, visualBottom - currentViewportHeight),
+                  maxScroll
+                )
+              : maxScroll;
+          if (Math.abs(container.scrollTop - targetTop) > 1) {
+            container.scrollTop = targetTop;
+          }
+          rowVirtualizer.scrollOffset = container.scrollTop;
+          lastScrollTopRef.current = container.scrollTop;
+          lastScrollHeightRef.current = container.scrollHeight;
+          return;
+        }
+
+        let nextScrollTop = Math.min(container.scrollTop, maxScroll);
+        if (win && liveWindowHeight > 1) {
+          const viewBottom = nextScrollTop + currentViewportHeight;
+          if (visualBottom <= nextScrollTop + 1) {
+            nextScrollTop = Math.min(
+              Math.max(0, visualBottom - currentViewportHeight),
+              maxScroll
+            );
+          } else if (visualTop >= viewBottom - 1) {
+            nextScrollTop = Math.min(visualTop, maxScroll);
+          }
+        }
+        if (Math.abs(nextScrollTop - container.scrollTop) > 1) {
+          container.scrollTop = nextScrollTop;
+        }
+        rowVirtualizer.scrollOffset = container.scrollTop;
+        lastScrollTopRef.current = container.scrollTop;
+        lastScrollHeightRef.current = container.scrollHeight;
+      };
+
+      if (widthChanged) {
+        runProgrammaticScroll(applyGeometry);
+      } else {
+        applyGeometry();
+      }
+    };
+
     const observer = new ResizeObserver((entries) => {
       updateScrollMargin();
+      const nextWidth = container.clientWidth;
+      const widthChanged = Math.abs(nextWidth - viewportWidth) > 0.5;
+      viewportWidth = nextWidth;
       const windowResized =
         win != null && entries.some((e) => e.target === win);
-      if (windowResized) {
-        remeasureMountedVirtualRows(list, rowVirtualizer.resizeItem);
-        const winHeight = win.offsetHeight;
-        setPaintedWindowHeight((current) =>
-          Math.abs(current - winHeight) > 1 ? winHeight : current
-        );
+      if (windowResized || widthChanged) {
+        syncVirtualWindowGeometryBeforePaint(widthChanged);
       }
       const nextHeight = container.clientHeight;
       if (nextHeight === viewportHeight) return;
@@ -847,7 +1024,13 @@ export function useTimelineScrollController({
     observer.observe(list);
     if (win) observer.observe(win);
     return () => observer.disconnect();
-  }, [pinToBottom, rowVirtualizer, sideRowsLength, updateScrollMargin]);
+  }, [
+    pinToBottom,
+    rowVirtualizer,
+    runProgrammaticScroll,
+    sideRowsLength,
+    updateScrollMargin,
+  ]);
 
   useLayoutEffect(() => {
     updateActiveIndex();
@@ -886,21 +1069,113 @@ export function useTimelineScrollController({
       combinedPrependEpoch > previousPrependEpochRef.current;
     const container = containerRef.current;
     if (container) {
-      const nextTop = scrollTopAfterPrepend({
-        followTail: followTailRef.current,
-        sessionChanged,
-        prepended,
-        previousTotalSize: previousTotalSizeRef.current,
-        nextTotalSize: totalSize,
-        scrollTop: container.scrollTop,
-      });
+      const anchor =
+        prepended && !sessionChanged && !followTailRef.current
+          ? readingAnchorRef.current
+          : null;
+      const list = virtualListRef.current;
+      const anchoredTop =
+        anchor && list
+          ? resolveAnchoredPrependScrollTop({
+              anchor,
+              measurements: rowVirtualizer.measurementsCache,
+              scrollMarginDelta:
+                measureScrollMargin(list, container) -
+                rowVirtualizer.options.scrollMargin,
+              scrollHeight: container.scrollHeight,
+              viewportHeight: container.clientHeight,
+            })
+          : null;
+      const nextTop =
+        anchoredTop ??
+        scrollTopAfterPrepend({
+          followTail: followTailRef.current,
+          sessionChanged,
+          prepended,
+          previousTotalSize: previousTotalSizeRef.current,
+          nextTotalSize: totalSize,
+          scrollTop: container.scrollTop,
+        });
       if (nextTop !== container.scrollTop) {
         runProgrammaticScroll(() => {
           container.scrollTop = nextTop;
         });
+        lastScrollTopRef.current = container.scrollTop;
+      }
+      if (
+        anchoredTop != null &&
+        anchor &&
+        list &&
+        typeof requestAnimationFrame === 'function'
+      ) {
+        cancelAnchorRestore();
+        let frame = 0;
+        let framesElapsed = 0;
+        let stableFrames = 0;
+        const cancel = () => {
+          cancelAnimationFrame(frame);
+          container.removeEventListener('wheel', cancel, true);
+          container.removeEventListener('pointerdown', cancel, true);
+          container.removeEventListener('touchstart', cancel, true);
+          window.removeEventListener('keydown', cancel, true);
+          cancelAnchorRestoreRef.current = null;
+        };
+        const settle = () => {
+          if (
+            followTailRef.current ||
+            ++framesElapsed > ANCHOR_RESTORE_MAX_FRAMES
+          ) {
+            cancel();
+            return;
+          }
+          const target = resolveAnchoredPrependScrollTop({
+            anchor,
+            measurements: rowVirtualizer.measurementsCache,
+            scrollMarginDelta:
+              measureScrollMargin(list, container) -
+              rowVirtualizer.options.scrollMargin,
+            scrollHeight: container.scrollHeight,
+            viewportHeight: container.clientHeight,
+          });
+          if (target == null) {
+            cancel();
+            return;
+          }
+          if (Math.abs(container.scrollTop - target) > 1) {
+            stableFrames = 0;
+            runProgrammaticScroll(() => {
+              container.scrollTop = target;
+            });
+            lastScrollTopRef.current = container.scrollTop;
+          } else if (++stableFrames >= ANCHOR_RESTORE_STABLE_FRAMES) {
+            cancel();
+            return;
+          }
+          frame = requestAnimationFrame(settle);
+        };
+        container.addEventListener('wheel', cancel, {
+          capture: true,
+          passive: true,
+        });
+        container.addEventListener('pointerdown', cancel, true);
+        container.addEventListener('touchstart', cancel, {
+          capture: true,
+          passive: true,
+        });
+        window.addEventListener('keydown', cancel, true);
+        cancelAnchorRestoreRef.current = cancel;
+        frame = requestAnimationFrame(settle);
       }
     }
     previousPrependEpochRef.current = combinedPrependEpoch;
+    if (
+      prepended ||
+      sessionChanged ||
+      followTailRef.current ||
+      skipPrependAdjust
+    ) {
+      readingAnchorRef.current = null;
+    }
     previousTotalSizeRef.current = totalSize;
     sessionPinRef.current = sessionId;
     const currentExpandableRevision = getExpandableRevision();
@@ -949,6 +1224,7 @@ export function useTimelineScrollController({
     onAtBottomChange?.(true);
     pinToBottom('auto');
   }, [
+    cancelAnchorRestore,
     detachFromBottom,
     effectiveRevealEpoch,
     olderTurnsPrependEpoch,

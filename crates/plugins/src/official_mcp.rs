@@ -12,6 +12,7 @@ use std::{
 };
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{InstalledPlugin, PluginActivation};
 
@@ -473,14 +474,30 @@ pub fn official_product_mcp_name(spec: &Value) -> Option<&'static str> {
     }
 }
 
+/// Maximum projected length for non-product MCP server IDs so combined names
+/// like `mcp_<server_id>_<tool_name>` stay within 64-character provider limits
+/// (e.g. Gemini / Antigravity) even for 30+ character tool names.
+const MAX_PROJECTED_MCP_SERVER_ID_LEN: usize = 28;
+const PROJECTED_MCP_HASH_HEX_LEN: usize = 8;
+
 /// Native-config identity written by the MCP manager. Official product MCPs keep
 /// their ADR names so Grok `server__tool` titles and uninstall match injection.
 ///
 /// Grok session admission requires each MCP name segment to match
 /// `[A-Za-z_][A-Za-z0-9_-]*`. Plugin ids contain `.`, so dotted names
-/// handshake but then have every tool skipped.
+/// handshake but then have every tool skipped. Non-product names also collapse
+/// redundant `dimo-plugin-` prefixes and trailing `{server_id}` overlap and are
+/// capped deterministically so `mcp_<server_id>_<tool_name>` stays `<= 64` chars.
 pub fn projected_mcp_server_id(plugin_id: &str, server_id: &str, spec: &Value) -> String {
-    sanitize_mcp_server_id(&raw_projected_mcp_server_id(plugin_id, server_id, spec))
+    if let Some(official) = official_product_mcp_name(spec) {
+        return sanitize_mcp_server_id(official);
+    }
+    let compact_plugin = compact_plugin_id_for_mcp(plugin_id);
+    let sanitized_plugin = sanitize_mcp_segment(&compact_plugin);
+    let sanitized_server = sanitize_mcp_segment(server_id);
+    let combined = combine_plugin_and_server_id(&sanitized_plugin, &sanitized_server);
+    let sanitized = sanitize_mcp_server_id(&combined);
+    cap_projected_mcp_server_id(&sanitized, plugin_id, server_id)
 }
 
 /// Pre-sanitize identity previously written into Agent native files.
@@ -492,6 +509,74 @@ fn raw_projected_mcp_server_id(plugin_id: &str, server_id: &str, spec: &Value) -
     official_product_mcp_name(spec)
         .map(str::to_string)
         .unwrap_or_else(|| format!("{plugin_id}.{server_id}"))
+}
+
+fn compact_plugin_id_for_mcp(plugin_id: &str) -> String {
+    if let Some(rest) = plugin_id
+        .strip_prefix("dimo-plugin-")
+        .filter(|rest| !rest.is_empty())
+    {
+        return format!("dimo-{rest}");
+    }
+    plugin_id.to_owned()
+}
+
+fn sanitize_mcp_segment(segment: &str) -> String {
+    segment
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' || character == '-' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn combine_plugin_and_server_id(plugin: &str, server: &str) -> String {
+    if server.is_empty() {
+        return plugin.to_owned();
+    }
+    if plugin.is_empty() {
+        return server.to_owned();
+    }
+    let plugin_lower = plugin.to_ascii_lowercase();
+    let server_lower = server.to_ascii_lowercase();
+    if plugin_lower == server_lower
+        || plugin_lower.ends_with(&format!("-{server_lower}"))
+        || plugin_lower.ends_with(&format!("_{server_lower}"))
+    {
+        return plugin.to_owned();
+    }
+    format!("{plugin}-{server}")
+}
+
+fn cap_projected_mcp_server_id(
+    sanitized: &str,
+    raw_plugin_id: &str,
+    raw_server_id: &str,
+) -> String {
+    if sanitized.len() <= MAX_PROJECTED_MCP_SERVER_ID_LEN {
+        return sanitized.to_owned();
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(raw_plugin_id.as_bytes());
+    hasher.update(b".");
+    hasher.update(raw_server_id.as_bytes());
+    let digest = hasher.finalize();
+    let hash_suffix = format!(
+        "{:02x}{:02x}{:02x}{:02x}",
+        digest[0], digest[1], digest[2], digest[3]
+    );
+    debug_assert_eq!(hash_suffix.len(), PROJECTED_MCP_HASH_HEX_LEN);
+    let prefix_budget = MAX_PROJECTED_MCP_SERVER_ID_LEN - 1 - PROJECTED_MCP_HASH_HEX_LEN;
+    let prefix = sanitized[..prefix_budget].trim_end_matches(['-', '_']);
+    if prefix.is_empty() {
+        format!("_{hash_suffix}")
+    } else {
+        format!("{prefix}-{hash_suffix}")
+    }
 }
 
 fn sanitize_mcp_server_id(id: &str) -> String {
@@ -1368,5 +1453,56 @@ mod tests {
         assert!(!binding_has_delegation_mcp(r#"["github"]"#));
         assert!(RETIRED_PRODUCT_MCP_NAMES.contains(&"vibex-delegation-mcp"));
         assert!(!RETIRED_PRODUCT_MCP_NAMES.contains(&SUPERAGENT_MCP_NAME));
+    }
+
+    #[test]
+    fn projected_mcp_server_id_deduplicates_suffix_and_respects_64_char_tool_limit() {
+        let spec = json!({ "command": "node", "args": ["mcp.mjs"] });
+
+        let computer_use_server =
+            projected_mcp_server_id("dimo-plugin-computer-use", "computer-use", &spec);
+        assert_eq!(computer_use_server, "dimo-computer-use");
+        let full_tool_name = format!("mcp_{computer_use_server}_computer_set_window_frame");
+        assert!(
+            full_tool_name.len() <= 64,
+            "expected mcp_<server>_<tool> <= 64 chars, got {} ({})",
+            full_tool_name.len(),
+            full_tool_name
+        );
+
+        assert_eq!(
+            projected_mcp_server_id("dimo.browser", "browser", &spec),
+            "dimo-browser"
+        );
+        assert_eq!(projected_mcp_server_id("mytool", "mytool", &spec), "mytool");
+
+        let long_a = projected_mcp_server_id(
+            "com.example.enterprise.super-long-plugin",
+            "automation-server-alpha",
+            &spec,
+        );
+        let long_b = projected_mcp_server_id(
+            "com.example.enterprise.super-long-plugin",
+            "automation-server-beta",
+            &spec,
+        );
+        assert!(long_a.len() <= MAX_PROJECTED_MCP_SERVER_ID_LEN);
+        assert!(long_b.len() <= MAX_PROJECTED_MCP_SERVER_ID_LEN);
+        assert_ne!(long_a, long_b);
+        assert!(
+            format!("mcp_{long_a}_computer_set_window_frame").len() <= 64,
+            "capped server id must keep combined tool name <= 64 chars: {long_a}"
+        );
+        assert!(
+            long_a
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        );
+        assert!(
+            long_a
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        );
     }
 }

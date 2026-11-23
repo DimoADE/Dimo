@@ -1,14 +1,9 @@
 import { useCallback, useRef, useState } from 'react';
-import {
-  Background,
-  BackgroundVariant,
-  ConnectionMode,
-  ReactFlow,
-  SelectionMode,
-} from '@xyflow/react';
+import { ConnectionMode, ReactFlow, SelectionMode } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import '../workflowStudio.css';
 
+import { CanvasDotBackground } from '@/components/kanban/canvas/CanvasDotBackground';
 import {
   BOARD_DOT_GAP,
   CANVAS_MAX_ZOOM,
@@ -183,8 +178,7 @@ export function WorkflowStudio<
             maxZoom={CANVAS_MAX_ZOOM}
             colorMode="system"
           >
-            <Background
-              variant={BackgroundVariant.Dots}
+            <CanvasDotBackground
               gap={BOARD_DOT_GAP}
               size={1.5}
               className="canvas-dots"

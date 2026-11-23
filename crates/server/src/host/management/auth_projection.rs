@@ -142,13 +142,25 @@ fn credential_present_for_mode(
             snapshot.is_some_and(|snapshot| snapshot.field_present("grok_api_key"))
         }
         ("antigravity" | "gemini", "gemini-api-key") => {
-            snapshot.is_some_and(|snapshot| snapshot.field_present("antigravity_api_key"))
+            env.get(credential_env)
+                .is_some_and(|value| !value.trim().is_empty())
+                || env
+                    .get("GEMINI_API_KEY")
+                    .is_some_and(|value| !value.trim().is_empty())
+                || snapshot.is_some_and(|snapshot| snapshot.field_present("antigravity_api_key"))
         }
-        ("antigravity" | "gemini", "agent-platform") => snapshot.is_some_and(|snapshot| {
-            snapshot.field_present("antigravity_google_api_key")
-                || (snapshot.field_text("antigravity_cloud_project").is_some()
-                    && snapshot.field_text("antigravity_cloud_location").is_some())
-        }),
+        ("antigravity" | "gemini", "agent-platform") => {
+            env.get(credential_env)
+                .is_some_and(|value| !value.trim().is_empty())
+                || env
+                    .get("GOOGLE_API_KEY")
+                    .is_some_and(|value| !value.trim().is_empty())
+                || snapshot.is_some_and(|snapshot| {
+                    snapshot.field_present("antigravity_google_api_key")
+                        || (snapshot.field_text("antigravity_cloud_project").is_some()
+                            && snapshot.field_text("antigravity_cloud_location").is_some())
+                })
+        }
         (_, "official_subscription" | "subscription") => {
             headless_account_env(agent_id)
                 .and_then(|key| env.get(key))
@@ -1164,5 +1176,65 @@ mod tests {
         .unwrap();
         assert_eq!(view.mode, "model_provider");
         assert!(view.credential_present);
+    }
+
+    #[tokio::test]
+    async fn antigravity_gemini_api_key_detected_from_env_and_dotenv() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let gemini_home = home.join(".gemini");
+        let store_path = temp.path().join("data/agent-model-providers.json");
+        tokio::fs::create_dir_all(&gemini_home).await.unwrap();
+
+        let env_only = HashMap::from([
+            (
+                "GEMINI_HOME".to_string(),
+                gemini_home.to_string_lossy().into_owned(),
+            ),
+            ("AGY_AUTH_METHOD".to_string(), "gemini-api-key".to_string()),
+            ("GEMINI_API_KEY".to_string(), "sk-env-key".to_string()),
+        ]);
+        let view_from_env = project_auth_mode_view_at(
+            &home,
+            &store_path,
+            AgentId::parse("antigravity").unwrap(),
+            &env_only,
+        )
+        .await
+        .unwrap();
+        assert_eq!(view_from_env.mode, "gemini-api-key");
+        assert!(
+            view_from_env.credential_present,
+            "GEMINI_API_KEY in agent env should satisfy gemini-api-key mode"
+        );
+
+        let acp_dir = gemini_home.join("antigravity-acp");
+        tokio::fs::create_dir_all(&acp_dir).await.unwrap();
+        tokio::fs::write(
+            acp_dir.join("settings.json"),
+            br#"{"auth":{"type":"gemini-api-key"}}"#,
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(acp_dir.join(".env"), b"GEMINI_API_KEY=sk-dotenv-key\n")
+            .await
+            .unwrap();
+        let env_dotenv = HashMap::from([(
+            "GEMINI_HOME".to_string(),
+            gemini_home.to_string_lossy().into_owned(),
+        )]);
+        let view_from_dotenv = project_auth_mode_view_at(
+            &home,
+            &store_path,
+            AgentId::parse("antigravity").unwrap(),
+            &env_dotenv,
+        )
+        .await
+        .unwrap();
+        assert_eq!(view_from_dotenv.mode, "gemini-api-key");
+        assert!(
+            view_from_dotenv.credential_present,
+            "GEMINI_API_KEY in antigravity-acp/.env should satisfy gemini-api-key mode"
+        );
     }
 }

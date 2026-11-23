@@ -100,28 +100,6 @@ impl AgentConnectionRunner {
                 self.snapshot.working_dir.display()
             )));
         }
-        if self.snapshot.agent_id.as_str() == "pi" {
-            if let Some(message) = crate::pi_trust::launch_preflight(&self.snapshot.env) {
-                return Err(AgentError::NotInstalled(message));
-            }
-            let home = self
-                .snapshot
-                .env
-                .get("HOME")
-                .or_else(|| self.snapshot.env.get("USERPROFILE"))
-                .map(PathBuf::from)
-                .or_else(dirs::home_dir);
-            if let Some(home) = home
-                && let Some(message) = crate::pi_trust::launch_block(
-                    &self.snapshot.working_dir,
-                    &self.snapshot.env,
-                    &home,
-                    &crate::pi_trust::default_ack_path(),
-                )
-            {
-                return Err(AgentError::PiProjectTrustRequired(message));
-            }
-        }
         let mut launch_program = acp_program.clone();
         let mut launch_args = launch_lock.args.clone();
         if let Some(profile) =
@@ -225,6 +203,24 @@ impl AgentConnectionRunner {
                 launch_env.remove(PI_COMMAND_ENV);
             }
             crate::bind_pi_acp_pi_command(&mut launch_env, requested);
+            if let Some(message) = crate::pi_trust::launch_preflight(&launch_env) {
+                return Err(AgentError::NotInstalled(message));
+            }
+            let home = launch_env
+                .get("HOME")
+                .or_else(|| launch_env.get("USERPROFILE"))
+                .map(PathBuf::from)
+                .or_else(dirs::home_dir);
+            if let Some(home) = home
+                && let Some(message) = crate::pi_trust::launch_block(
+                    &self.snapshot.working_dir,
+                    &launch_env,
+                    &home,
+                    &crate::pi_trust::default_ack_path(),
+                )
+            {
+                return Err(AgentError::PiProjectTrustRequired(message));
+            }
         }
         // Resolved ZCode paths win over an inherited or lock-captured value.
         // `ZCODE_ACP_REMOTE` is forced off; a non-blank runtime choice is kept.
@@ -405,7 +401,8 @@ impl AgentConnectionRunner {
         let request_bridge = bridge.clone();
         let notification_bridge = bridge;
         let runner = self.clone();
-        let handshake_timeout_duration = handshake_timeout();
+        let handshake_timeout_duration =
+            handshake_timeout_for_agent(&self.snapshot.agent_id, &self.snapshot.env);
         let handshake_timed_out = Arc::new(AtomicBool::new(false));
         let handshake_timed_out_for_connection = Arc::clone(&handshake_timed_out);
 

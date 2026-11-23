@@ -191,7 +191,7 @@ impl SqlitePluginRegistry {
 
     pub(super) async fn list_plugins(&self) -> Result<Vec<InstalledPlugin>, PluginError> {
         let rows = sqlx::query(
-            "SELECT p.package_json, i.current_package_digest, a.enabled
+            "SELECT p.plugin_id, p.package_json, i.current_package_digest, a.enabled
              FROM plugin_installations_v4 i
              JOIN plugin_packages_v4 p
                ON p.publisher = i.publisher
@@ -203,14 +203,25 @@ impl SqlitePluginRegistry {
         .fetch_all(&self.pool)
         .await
         .map_err(registry_error)?;
-        let plugins: Vec<InstalledPlugin> = rows
-            .into_iter()
-            .map(decode_plugin_row)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(plugins
-            .into_iter()
-            .filter(|plugin| !crate::catalog::is_retired_plugin_id(plugin.id()))
-            .collect())
+        let mut plugins = Vec::with_capacity(rows.len());
+        for row in rows {
+            let plugin_id: String = row.get("plugin_id");
+            match decode_plugin_row(row) {
+                Ok(plugin) => {
+                    if !crate::catalog::is_retired_plugin_id(plugin.id()) {
+                        plugins.push(plugin);
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        plugin_id = %plugin_id,
+                        %error,
+                        "skipping malformed plugin package row in sqlite registry"
+                    );
+                }
+            }
+        }
+        Ok(plugins)
     }
 
     pub(super) async fn rollback_package(
@@ -800,3 +811,204 @@ macro_rules! impl_plugin_registry {
 
 impl_plugin_registry!(InMemoryPluginRegistry);
 impl_plugin_registry!(SqlitePluginRegistry);
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    use super::*;
+    use crate::{PackageFormat, PluginSourceKind};
+
+    async fn test_registry_pool() -> SqlitePool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(":memory:")
+                    .foreign_keys(true),
+            )
+            .await
+            .expect("sqlite pool");
+        sqlx::raw_sql(include_str!(
+            "../../../db/migrations/20260811010000_plugin_control_plane.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("plugin control schema");
+        sqlx::raw_sql(include_str!(
+            "../../../db/migrations/20260811011000_plugin_runtime_evidence.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("plugin runtime evidence schema");
+        sqlx::raw_sql(include_str!(
+            "../../../db/migrations/20260814010000_plugin_platform_v4.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("plugin platform v4 schema");
+        pool
+    }
+
+    async fn insert_raw_installed_plugin(
+        pool: &SqlitePool,
+        publisher: &str,
+        plugin_id: &str,
+        digest: &str,
+        package_json: &str,
+    ) {
+        sqlx::query(
+            "INSERT INTO plugin_packages_v4
+                 (publisher, plugin_id, version, package_digest, source_kind, source_path,
+                  manifest_json, package_json, created_at)
+             VALUES (?, ?, '1.0.0', ?, 'snapshot', '/tmp/plugin', '{}', ?, datetime('now','subsec'))",
+        )
+        .bind(publisher)
+        .bind(plugin_id)
+        .bind(digest)
+        .bind(package_json)
+        .execute(pool)
+        .await
+        .expect("insert plugin package");
+        sqlx::query(
+            "INSERT INTO plugin_installations_v4
+                 (plugin_id, publisher, current_package_digest, rollback_package_digest,
+                  installed_at, updated_at)
+             VALUES (?, ?, ?, NULL, datetime('now','subsec'), datetime('now','subsec'))",
+        )
+        .bind(plugin_id)
+        .bind(publisher)
+        .bind(digest)
+        .execute(pool)
+        .await
+        .expect("insert plugin installation");
+        sqlx::query(
+            "INSERT INTO plugin_activation_intents_v4
+                 (plugin_id, enabled, target_digest, updated_at)
+             VALUES (?, 1, ?, datetime('now','subsec'))",
+        )
+        .bind(plugin_id)
+        .bind(digest)
+        .execute(pool)
+        .await
+        .expect("insert activation intent");
+    }
+
+    #[tokio::test]
+    async fn list_plugins_isolates_malformed_rows_and_decodes_legacy_vibe_x_formats() {
+        let pool = test_registry_pool().await;
+        let registry = SqlitePluginRegistry::new(pool.clone());
+
+        let healthy = PluginPackage::for_test(
+            "acme.healthy",
+            "Healthy",
+            "1.0.0",
+            PluginSourceKind::Snapshot,
+            Path::new("/tmp/healthy"),
+        );
+        let healthy_json = serde_json::to_string(&healthy).expect("serialize healthy");
+
+        let legacy = PluginPackage::for_test(
+            "acme.legacy",
+            "Legacy",
+            "1.0.0",
+            PluginSourceKind::Snapshot,
+            Path::new("/tmp/legacy"),
+        );
+        let mut legacy_value = serde_json::to_value(&legacy).expect("serialize legacy");
+        legacy_value["formats"] = serde_json::json!(["vibe_x"]);
+        let legacy_json = serde_json::to_string(&legacy_value).expect("encode legacy json");
+
+        insert_raw_installed_plugin(
+            &pool,
+            "acme",
+            "acme.healthy",
+            "digest-healthy",
+            &healthy_json,
+        )
+        .await;
+        insert_raw_installed_plugin(&pool, "acme", "acme.legacy", "digest-legacy", &legacy_json)
+            .await;
+        insert_raw_installed_plugin(
+            &pool,
+            "acme",
+            "acme.broken",
+            "digest-broken",
+            r#"{"id":"acme.broken","formats":["unknown_corrupt_format"]}"#,
+        )
+        .await;
+
+        let plugins = registry
+            .list_plugins()
+            .await
+            .expect("list_plugins should isolate malformed rows");
+        let ids: Vec<&str> = plugins.iter().map(InstalledPlugin::id).collect();
+        assert_eq!(ids, vec!["acme.healthy", "acme.legacy"]);
+
+        let loaded_legacy = plugins
+            .iter()
+            .find(|plugin| plugin.id() == "acme.legacy")
+            .expect("legacy plugin loaded");
+        assert_eq!(loaded_legacy.package.formats, vec![PackageFormat::Dimo]);
+    }
+
+    #[tokio::test]
+    async fn normalize_legacy_vibe_x_migration_updates_and_deduplicates_formats() {
+        let pool = test_registry_pool().await;
+
+        let legacy_only = serde_json::json!({
+            "id": "acme.one",
+            "formats": ["vibe_x"]
+        })
+        .to_string();
+        let duplicate_formats = serde_json::json!({
+            "id": "acme.two",
+            "formats": ["vibe_x", "dimo", "codex"]
+        })
+        .to_string();
+        let already_clean = serde_json::json!({
+            "id": "acme.three",
+            "formats": ["dimo", "claude_code"]
+        })
+        .to_string();
+
+        insert_raw_installed_plugin(&pool, "acme", "acme.one", "d1", &legacy_only).await;
+        insert_raw_installed_plugin(&pool, "acme", "acme.two", "d2", &duplicate_formats).await;
+        insert_raw_installed_plugin(&pool, "acme", "acme.three", "d3", &already_clean).await;
+
+        sqlx::raw_sql(include_str!(
+            "../../../db/migrations/20261123010000_normalize_legacy_plugin_format_vibe_x.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("run normalize_legacy_plugin_format_vibe_x migration");
+
+        let one: String = sqlx::query_scalar(
+            "SELECT package_json FROM plugin_packages_v4 WHERE plugin_id = 'acme.one'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let one_val: serde_json::Value = serde_json::from_str(&one).unwrap();
+        assert_eq!(one_val["formats"], serde_json::json!(["dimo"]));
+
+        let two: String = sqlx::query_scalar(
+            "SELECT package_json FROM plugin_packages_v4 WHERE plugin_id = 'acme.two'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let two_val: serde_json::Value = serde_json::from_str(&two).unwrap();
+        assert_eq!(two_val["formats"], serde_json::json!(["dimo", "codex"]));
+
+        let three: String = sqlx::query_scalar(
+            "SELECT package_json FROM plugin_packages_v4 WHERE plugin_id = 'acme.three'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(three, already_clean);
+    }
+}

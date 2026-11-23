@@ -83,18 +83,27 @@ const UserMessage = ({
 
     // Defer the first measurement by one frame so nested content (markdown
     // blocks, images) has finished its own layout before we read heights.
-    const rafId = requestAnimationFrame(() => {
+    let rafId: number | null = requestAnimationFrame(() => {
+      rafId = null;
       measureCollapse();
     });
 
-    const resizeObserver = new ResizeObserver(() => {
-      measureCollapse();
-    });
+    const scheduleMeasure = () => {
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        measureCollapse();
+      });
+    };
+
+    const resizeObserver = new ResizeObserver(scheduleMeasure);
 
     resizeObserver.observe(element);
 
     return () => {
-      cancelAnimationFrame(rafId);
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+      }
       resizeObserver.disconnect();
     };
   }, [displayText, measureCollapse]);

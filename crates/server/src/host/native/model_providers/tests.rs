@@ -592,6 +592,7 @@ async fn antigravity_provider_binding_writes_acp_settings_auth_type() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
     let settings_path = home.join(".gemini/antigravity-acp/settings.json");
+    let env_path = home.join(".gemini/antigravity-acp/.env");
     let store_path = temp.path().join("data/providers.json");
     tokio::fs::create_dir_all(settings_path.parent().unwrap())
         .await
@@ -602,6 +603,9 @@ async fn antigravity_provider_binding_writes_acp_settings_auth_type() {
     )
     .await
     .unwrap();
+    tokio::fs::write(&env_path, "GOOGLE_API_KEY=old\nKEEP=yes\n")
+        .await
+        .unwrap();
     let agent_id = AgentId::parse("antigravity").unwrap();
     let env = HashMap::from([(
         "GEMINI_HOME".to_string(),
@@ -635,13 +639,16 @@ async fn antigravity_provider_binding_writes_acp_settings_auth_type() {
         serde_json::from_slice(&tokio::fs::read(&settings_path).await.unwrap()).unwrap();
     assert_eq!(bound["keep"], true);
     assert_eq!(bound["auth"]["type"], "gemini-api-key");
-    assert_eq!(bound["env"]["GEMINI_API_KEY"], "provider-secret");
-    assert_eq!(
-        bound["env"]["GOOGLE_GEMINI_BASE_URL"],
-        "https://gemini.example/v1"
+    assert!(
+        bound.get("env").is_none(),
+        "agy_acp_server rejects env key in settings.json"
     );
-    assert_eq!(bound["env"]["GEMINI_MODEL"], "gemini-3");
-    assert!(bound["env"].get("GOOGLE_API_KEY").is_none());
+    let env_text = tokio::fs::read_to_string(&env_path).await.unwrap();
+    assert!(env_text.contains("KEEP=yes"));
+    assert!(env_text.contains("GOOGLE_GEMINI_BASE_URL=https://gemini.example/v1"));
+    assert!(env_text.contains("GEMINI_API_KEY=provider-secret"));
+    assert!(env_text.contains("GEMINI_MODEL=gemini-3"));
+    assert!(!env_text.contains("GOOGLE_API_KEY=old"));
 
     bind(&store_path, &home, &env, agent_id, None)
         .await
@@ -649,8 +656,12 @@ async fn antigravity_provider_binding_writes_acp_settings_auth_type() {
     let restored: Value =
         serde_json::from_slice(&tokio::fs::read(&settings_path).await.unwrap()).unwrap();
     assert_eq!(restored["auth"]["type"], "oauth-personal");
-    assert_eq!(restored["env"]["GOOGLE_API_KEY"], "old");
+    assert!(restored.get("env").is_none());
     assert_eq!(restored["keep"], true);
+    let restored_env = tokio::fs::read_to_string(&env_path).await.unwrap();
+    assert!(restored_env.contains("GOOGLE_API_KEY=old"));
+    assert!(restored_env.contains("KEEP=yes"));
+    assert!(!restored_env.contains("provider-secret"));
 }
 
 #[tokio::test]

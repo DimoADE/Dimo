@@ -759,6 +759,20 @@ impl AgentConnectionManager {
         .await
     }
 
+    async fn session_prep_timeout_for_connection(
+        &self,
+        connection_id: AgentConnectionId,
+    ) -> Duration {
+        let connections = self.connections.lock().await;
+        match connections.get(&connection_id) {
+            Some(connection) => session_prep_timeout_for_agent(
+                &connection.snapshot.agent_id,
+                &connection.snapshot.env,
+            ),
+            None => session_prep_timeout(),
+        }
+    }
+
     pub async fn resume_session(
         &self,
         connection_id: AgentConnectionId,
@@ -781,7 +795,9 @@ impl AgentConnectionManager {
             },
         )
         .await?;
-        let timeout = session_prep_timeout();
+        let timeout = self
+            .session_prep_timeout_for_connection(connection_id)
+            .await;
         await_command_result(
             result_rx,
             timeout,
@@ -807,7 +823,9 @@ impl AgentConnectionManager {
             },
         )
         .await?;
-        let timeout = session_prep_timeout();
+        let timeout = self
+            .session_prep_timeout_for_connection(connection_id)
+            .await;
         await_command_result(
             result_rx,
             timeout,

@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   CONVERSATION_OPEN_SETTLE_PASSES,
   cancelVirtualizerFollowScroll,
+  captureTimelineReadingAnchor,
   conversationFollowIntent,
   conversationOpenPinState,
   conversationTailFollowAction,
@@ -14,12 +15,14 @@ import {
   scrollTopToRevealVirtualWindow,
   virtualListHeightPx,
   remeasureMountedVirtualRows,
+  resolveAnchoredPrependScrollTop,
   isConversationExpansionToggle,
   isVirtualizerJumpActive,
   scrollTopAfterPrepend,
   isConversationNearBottom,
   measureScrollMargin,
   measureUnscaledBlockHeight,
+  observeUnscaledElementRect,
   startAlignedVirtualOffset,
   scheduleMeasuredScrollToIndex,
   unscaledElementRect,
@@ -474,6 +477,91 @@ describe('conversation bottom distance', () => {
     expect(sizes).toEqual([[2, 420]]);
   });
 
+  it('batches all mounted row height reads before invoking resizeItem writes', () => {
+    const list = document.createElement('div');
+    const windowEl = document.createElement('div');
+    const events: string[] = [];
+    for (const [index, height] of [
+      [0, 120],
+      [1, 260],
+      [2, 180],
+    ] as const) {
+      const row = document.createElement('div');
+      row.setAttribute('data-index', String(index));
+      Object.defineProperty(row, 'offsetHeight', {
+        get: () => {
+          events.push(`read:${index}`);
+          return height;
+        },
+      });
+      windowEl.append(row);
+    }
+    list.append(windowEl);
+
+    remeasureMountedVirtualRows(list, (index, size) => {
+      events.push(`write:${index}:${size}`);
+    });
+
+    expect(events).toEqual([
+      'read:0',
+      'read:1',
+      'read:2',
+      'write:0:120',
+      'write:1:260',
+      'write:2:180',
+    ]);
+  });
+
+  it('skips redundant observeUnscaledElementRect callbacks on orthogonal width-only resizes', () => {
+    let width = 600;
+    let height = 400;
+    const listeners = new Set<() => void>();
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(private callback: () => void) {}
+        observe() {
+          listeners.add(this.callback);
+        }
+        disconnect() {
+          listeners.delete(this.callback);
+        }
+      }
+    );
+    try {
+      const element = document.createElement('div');
+      Object.defineProperty(element, 'clientWidth', { get: () => width });
+      Object.defineProperty(element, 'clientHeight', { get: () => height });
+
+      const rects: Array<{ width: number; height: number }> = [];
+      const stop = observeUnscaledElementRect(
+        { scrollElement: element, options: { horizontal: false } },
+        (rect) => rects.push(rect)
+      );
+
+      expect(rects).toEqual([{ width: 600, height: 400 }]);
+
+      // Horizontal-only sash drag must not wake the vertical virtualizer.
+      width = 420;
+      listeners.forEach((cb) => cb());
+      width = 880;
+      listeners.forEach((cb) => cb());
+      expect(rects).toEqual([{ width: 600, height: 400 }]);
+
+      // Vertical resize must still emit immediately.
+      height = 520;
+      listeners.forEach((cb) => cb());
+      expect(rects).toEqual([
+        { width: 600, height: 400 },
+        { width: 880, height: 520 },
+      ]);
+
+      stop();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('keeps the viewport on the same rows when older history is prepended', () => {
     expect(
       scrollTopAfterPrepend({
@@ -498,6 +586,52 @@ describe('conversation bottom distance', () => {
         scrollTop: 1960,
       })
     ).toBe(1960);
+  });
+
+  it('captures a row-key reading anchor and restores it after prepend remeasurement', () => {
+    const anchor = captureTimelineReadingAnchor({
+      items: [
+        { key: 'msg-10', start: 0, end: 180 },
+        { key: 'msg-11', start: 180, end: 420 },
+      ],
+      scrollTop: 260,
+      scrollMarginDelta: 20,
+    });
+    expect(anchor).toEqual({ key: 'msg-11', offset: 60 });
+
+    // After older rows prepend and later remeasure taller, msg-11 shifts down.
+    const restored = resolveAnchoredPrependScrollTop({
+      anchor,
+      measurements: [
+        { key: 'msg-1', start: 0 },
+        { key: 'msg-10', start: 1200 },
+        { key: 'msg-11', start: 1410 },
+      ],
+      scrollMarginDelta: 0,
+      scrollHeight: 3000,
+      viewportHeight: 600,
+    });
+    expect(restored).toBe(1470);
+  });
+
+  it('returns null when the anchored row is absent and clamps to max scroll', () => {
+    expect(
+      resolveAnchoredPrependScrollTop({
+        anchor: { key: 'missing', offset: 20 },
+        measurements: [{ key: 'msg-1', start: 0 }],
+        scrollMarginDelta: 0,
+      })
+    ).toBeNull();
+
+    expect(
+      resolveAnchoredPrependScrollTop({
+        anchor: { key: 'msg-tail', offset: 150 },
+        measurements: [{ key: 'msg-tail', start: 900 }],
+        scrollMarginDelta: 0,
+        scrollHeight: 1200,
+        viewportHeight: 400,
+      })
+    ).toBe(800);
   });
 });
 

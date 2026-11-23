@@ -499,7 +499,31 @@ export function ElectronBrowserWebview({
       const flowRoot =
         el.closest('.react-flow') ?? el.closest('[data-canvas-surface]');
       if (flowRoot) {
-        canvasMutationObserver = new MutationObserver(() => {
+        canvasMutationObserver = new MutationObserver((mutations) => {
+          const interacting =
+            useElectronBrowserSurfaceStore.getState().canvasInteracting;
+          const liveTransformOnly =
+            mutations.length > 0 &&
+            mutations.every((mutation) => {
+              if (
+                mutation.type !== 'attributes' ||
+                mutation.attributeName !== 'style' ||
+                !(mutation.target instanceof Element)
+              ) {
+                return false;
+              }
+              if (mutation.target.classList.contains('react-flow__viewport')) {
+                return true;
+              }
+              return (
+                interacting &&
+                mutation.target.classList.contains('react-flow__node')
+              );
+            });
+          if (liveTransformOnly) {
+            scheduleLiveSync();
+            return;
+          }
           scheduleFullSync();
         });
         canvasMutationObserver.observe(flowRoot, {

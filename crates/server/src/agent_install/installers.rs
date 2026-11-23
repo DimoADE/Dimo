@@ -125,6 +125,34 @@ pub(super) async fn ensure_managed_bun(managed_artifacts_dir: &Path) -> anyhow::
     result
 }
 
+const NPM_LOCK_RETRY_BACKOFFS_MS: &[u64] = &[500, 1500];
+
+pub(super) fn build_npm_global_install_command(
+    npm: &Path,
+    component: &PlannedInstallComponent,
+    user_env: &UserEnvironmentLayout,
+    node: Option<&NodeRuntime>,
+    registry: &str,
+) -> tokio::process::Command {
+    let mut command = utils::process::new_hidden_tokio_command(npm, std::iter::empty::<&str>());
+    if std::env::var_os("NODE_USE_ENV_PROXY").is_none() {
+        command.env("NODE_USE_ENV_PROXY", "1");
+    }
+    if std::env::var_os("HERMES_NPM_AUTO_SETUP").is_none() {
+        command.env("HERMES_NPM_AUTO_SETUP", "0");
+    }
+    command.env("npm_config_prefix", &user_env.npm_prefix);
+    if let Some(runtime) = node {
+        prepend_command_path(&mut command, &runtime.bin_dir);
+    }
+    command.args(npm_global_install_args_with_registry(
+        &user_env.npm_prefix,
+        &component.resolved_source,
+        registry,
+    ));
+    command
+}
+
 pub(super) async fn run_npm_global_install<F>(
     npm: &Path,
     component: &PlannedInstallComponent,
@@ -144,19 +172,7 @@ where
     on_progress(55, &cmd_line);
     let mut errors = Vec::new();
     for registry in utils::mirror::npm_registry_candidates() {
-        let mut command = utils::process::new_hidden_tokio_command(npm, std::iter::empty::<&str>());
-        if std::env::var_os("NODE_USE_ENV_PROXY").is_none() {
-            command.env("NODE_USE_ENV_PROXY", "1");
-        }
-        command.env("npm_config_prefix", &user_env.npm_prefix);
-        if let Some(runtime) = node {
-            prepend_command_path(&mut command, &runtime.bin_dir);
-        }
-        command.args(npm_global_install_args_with_registry(
-            &user_env.npm_prefix,
-            &component.resolved_source,
-            registry,
-        ));
+        let command = build_npm_global_install_command(npm, component, user_env, node, registry);
         match run_command_with_progress("npm install -g", command, 68, on_progress).await {
             Ok(()) => return Ok(()),
             Err(error) => {
@@ -174,6 +190,58 @@ where
     anyhow::bail!("{}", errors.join("; "))
 }
 
+pub(super) fn cleanup_stale_npm_staging_dirs(npm_global_root: &Path, package: &str) -> usize {
+    let mut parts = package.split('/');
+    let (parent_dir, unscoped_name) = match (parts.next(), parts.next()) {
+        (Some(scope), Some(name)) if scope.starts_with('@') && !name.is_empty() => {
+            (npm_global_root.join("node_modules").join(scope), name)
+        }
+        (Some(name), None) if !name.is_empty() => (npm_global_root.join("node_modules"), name),
+        _ => return 0,
+    };
+    let staging_prefix = format!(".{unscoped_name}-");
+    let Ok(entries) = std::fs::read_dir(&parent_dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(&staging_prefix) {
+            continue;
+        }
+        let path = entry.path();
+        let ok = if path.is_dir() {
+            std::fs::remove_dir_all(&path).is_ok()
+        } else {
+            std::fs::remove_file(&path).is_ok()
+        };
+        if ok {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+fn dimo_managed_npm_prefix() -> PathBuf {
+    utils::assets::host_data_dir()
+        .join("agent-tools")
+        .join("npm-prefix")
+}
+
+fn npm_install_is_lock_or_permission_error(message: &str) -> bool {
+    npm_install_permission_denied(message) || npm_install_resource_busy(message)
+}
+
+fn format_npm_lock_error(error: &anyhow::Error, prefix: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{error}\n\n目录 `{}` 存在文件锁定或权限拒绝（EPERM/EBUSY），已清理残留临时目录并重试仍失败。请关闭正在运行的相关 Agent、终端，或检查杀毒软件 / Windows Defender 实时扫描占用后重试。",
+        prefix.display()
+    )
+}
+
 pub(super) async fn install_npm<F>(
     component: &PlannedInstallComponent,
     user_env: &mut UserEnvironmentLayout,
@@ -187,20 +255,26 @@ where
         .map(|runtime| runtime.npm.clone())
         .or(utils::shell::resolve_executable_path("npm").await)
         .ok_or_else(|| anyhow::anyhow!("npm was not found; install Node.js and npm first"))?;
-    if let Err(error) = run_npm_global_install(&npm, component, user_env, node, on_progress).await {
-        let message = error.to_string();
-        let is_perm = npm_install_permission_denied(&message);
-        let is_busy = npm_install_resource_busy(&message);
+    let package = npm_spec_name(&component.resolved_source);
+    if let Err(mut last_error) =
+        run_npm_global_install(&npm, component, user_env, node, on_progress).await
+    {
+        let mut message = last_error.to_string();
+        if !npm_install_is_lock_or_permission_error(&message) {
+            return Err(last_error);
+        }
+
+        let mut installed = false;
         let fallback = user_env.user_npm_prefix();
-        if (is_perm || is_busy) && fallback != user_env.npm_prefix {
-            let reason = if is_busy {
+        if fallback != user_env.npm_prefix {
+            let reason = if npm_install_resource_busy(&message) {
                 "target directory is busy/locked (EBUSY)"
             } else {
-                "permission denied"
+                "permission denied (EPERM/EACCES)"
             };
             tracing::info!("{reason}, retrying with user prefix...");
             on_progress(
-                62,
+                60,
                 &format!(
                     "[npm] {reason} on global prefix, retrying with {}",
                     fallback.display()
@@ -208,27 +282,94 @@ where
             );
             *user_env = user_env.clone().with_npm_prefix(fallback);
             prepare_user_environment(user_env).await?;
-            if let Err(fallback_error) =
-                run_npm_global_install(&npm, component, user_env, node, on_progress).await
-            {
-                if npm_install_resource_busy(&fallback_error.to_string()) {
-                    anyhow::bail!(
-                        "{fallback_error}\n\n目录 `{}` 正被其他进程占用（EBUSY），请先关闭正在运行的相关 Agent、终端或杀毒软件扫描后重试。",
-                        user_env.npm_prefix.display()
-                    );
+            match run_npm_global_install(&npm, component, user_env, node, on_progress).await {
+                Ok(()) => installed = true,
+                Err(error) => {
+                    message = error.to_string();
+                    last_error = error;
+                    if !npm_install_is_lock_or_permission_error(&message) {
+                        return Err(last_error);
+                    }
                 }
-                return Err(fallback_error);
             }
-        } else if is_busy {
-            anyhow::bail!(
-                "{error}\n\n目录 `{}` 正被其他进程占用（EBUSY），请先关闭正在运行的相关 Agent、终端或杀毒软件扫描后重试。",
-                user_env.npm_prefix.display()
-            );
-        } else {
-            return Err(error);
+        }
+
+        if !installed {
+            for (index, delay_ms) in NPM_LOCK_RETRY_BACKOFFS_MS.iter().copied().enumerate() {
+                let attempt = index + 1;
+                let removed = cleanup_stale_npm_staging_dirs(&user_env.npm_global_root(), &package);
+                tracing::info!(
+                    attempt,
+                    delay_ms,
+                    removed_staging_dirs = removed,
+                    prefix = %user_env.npm_prefix.display(),
+                    "npm install hit EPERM/EBUSY, retrying after backoff"
+                );
+                on_progress(
+                    61 + attempt as u8,
+                    &format!(
+                        "[npm] file lock or permission error on {}, retrying ({attempt}/{})...",
+                        user_env.npm_prefix.display(),
+                        NPM_LOCK_RETRY_BACKOFFS_MS.len()
+                    ),
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                match run_npm_global_install(&npm, component, user_env, node, on_progress).await {
+                    Ok(()) => {
+                        installed = true;
+                        break;
+                    }
+                    Err(error) => {
+                        message = error.to_string();
+                        last_error = error;
+                        if !npm_install_is_lock_or_permission_error(&message) {
+                            return Err(last_error);
+                        }
+                    }
+                }
+            }
+        }
+
+        if !installed {
+            let managed_prefix = dimo_managed_npm_prefix();
+            if managed_prefix != user_env.npm_prefix {
+                tracing::info!(
+                    managed_prefix = %managed_prefix.display(),
+                    "retrying npm install with Dimo-managed npm prefix after repeated EPERM/EBUSY"
+                );
+                on_progress(
+                    65,
+                    &format!(
+                        "[npm] retrying with Dimo-managed prefix {}",
+                        managed_prefix.display()
+                    ),
+                );
+                let managed_env = user_env.clone().with_npm_prefix(managed_prefix);
+                if prepare_user_environment(&managed_env).await.is_ok() {
+                    cleanup_stale_npm_staging_dirs(&managed_env.npm_global_root(), &package);
+                    match run_npm_global_install(&npm, component, &managed_env, node, on_progress)
+                        .await
+                    {
+                        Ok(()) => {
+                            *user_env = managed_env;
+                            installed = true;
+                        }
+                        Err(error) => {
+                            let managed_msg = error.to_string();
+                            if !npm_install_is_lock_or_permission_error(&managed_msg) {
+                                return Err(error);
+                            }
+                            last_error = error;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !installed {
+            return Err(format_npm_lock_error(&last_error, &user_env.npm_prefix));
         }
     }
-    let package = npm_spec_name(&component.resolved_source);
     let resolved_bin = command_is_placeholder(&component.command)
         .then(|| resolve_npm_package_bin_name(&user_env.npm_prefix, &package));
     let name = if let Some(bin_name) = resolved_bin.as_deref() {
@@ -1407,4 +1548,89 @@ where
     let detail = utils::process::command_output_detail(&output)
         .unwrap_or_else(|| format!("exit status {}", output.status));
     anyhow::bail!("{label} failed: {detail}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn npm_global_install_command_disables_hermes_auto_setup() {
+        let temp = tempfile::tempdir().unwrap();
+        let user_env = UserEnvironmentLayout::for_home(temp.path());
+        let component = PlannedInstallComponent {
+            component_id: "combined_runtime".to_string(),
+            distribution_kind: PlannedDistributionKind::Npx,
+            version: "0.22.2".to_string(),
+            resolved_source: "hermes-agent@0.22.2".to_string(),
+            command: "hermes".to_string(),
+            args: vec!["acp".to_string()],
+            env: BTreeMap::new(),
+            trust: agents::ArtifactTrust::Tofu,
+        };
+
+        let command = build_npm_global_install_command(
+            Path::new("npm"),
+            &component,
+            &user_env,
+            None,
+            "https://registry.npmjs.org",
+        );
+
+        let envs: Vec<(String, Option<String>)> = command
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|val| val.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        if std::env::var_os("HERMES_NPM_AUTO_SETUP").is_none() {
+            assert!(
+                envs.iter()
+                    .any(|(k, v)| k == "HERMES_NPM_AUTO_SETUP" && v.as_deref() == Some("0")),
+                "expected HERMES_NPM_AUTO_SETUP=0 in npm install command env, got: {envs:?}"
+            );
+        }
+        assert!(
+            envs.iter().any(|(k, _)| k == "npm_config_prefix"),
+            "expected npm_config_prefix in npm install command env"
+        );
+    }
+
+    #[test]
+    fn cleanup_stale_npm_staging_dirs_removes_matching_unscoped_and_scoped_temps_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let modules = temp.path().join("node_modules");
+        std::fs::create_dir_all(modules.join(".openclaw-AbCd1234")).unwrap();
+        std::fs::create_dir_all(modules.join("openclaw")).unwrap();
+        std::fs::create_dir_all(modules.join(".otherpkg-1234")).unwrap();
+
+        let removed = cleanup_stale_npm_staging_dirs(temp.path(), "openclaw");
+        assert_eq!(removed, 1);
+        assert!(!modules.join(".openclaw-AbCd1234").exists());
+        assert!(modules.join("openclaw").exists());
+        assert!(modules.join(".otherpkg-1234").exists());
+
+        let scope = modules.join("@xai-official");
+        std::fs::create_dir_all(scope.join(".grok-9999")).unwrap();
+        std::fs::create_dir_all(scope.join("grok")).unwrap();
+        let scoped_removed = cleanup_stale_npm_staging_dirs(temp.path(), "@xai-official/grok");
+        assert_eq!(scoped_removed, 1);
+        assert!(!scope.join(".grok-9999").exists());
+        assert!(scope.join("grok").exists());
+    }
+
+    #[test]
+    fn format_npm_lock_error_mentions_locks_and_antivirus() {
+        let err = format_npm_lock_error(
+            &anyhow::anyhow!("EPERM: operation not permitted, rename"),
+            Path::new(r"C:\Users\dev\AppData\Roaming\npm"),
+        );
+        let text = err.to_string();
+        assert!(text.contains("EPERM/EBUSY"));
+        assert!(text.contains("杀毒软件") || text.contains("Windows Defender"));
+    }
 }

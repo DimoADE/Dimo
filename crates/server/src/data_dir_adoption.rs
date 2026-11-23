@@ -5,7 +5,9 @@
 
 use std::{
     cmp::Reverse,
+    io::Read as _,
     path::{Path, PathBuf},
+    time::SystemTime,
 };
 
 use serde_json::Value;
@@ -14,6 +16,7 @@ use utils::assets::LegacyDataDirAdoption;
 use crate::host::catalog::system::remap_settings_json_paths;
 
 const DB_FILES: [&str; 3] = ["db.sqlite", "db.sqlite-wal", "db.sqlite-shm"];
+const MAX_MIGRATION_BACKUPS: usize = 1;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum DataDirAdoptionOutcome {
@@ -67,6 +70,9 @@ pub async fn adopt_legacy_data_dir() -> Vec<DataDirAdoptionOutcome> {
         for scan_dir in utils::assets::packaged_install_scan_dirs_for(&exe) {
             outcomes.extend(preserve_weaker_install_copies(&scan_dir, &stable, &explicit).await);
         }
+    }
+    if stable.join("db.sqlite").is_file() {
+        prune_migration_backups_beside(&stable, None, MAX_MIGRATION_BACKUPS);
     }
     pin_opened_in_place_when_stable_is_empty(&outcomes, &stable);
     outcomes
@@ -306,7 +312,10 @@ fn sqlite_dirs_directly_under(exe_dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() && path.join("db.sqlite").is_file() {
+        if path.is_dir()
+            && !utils::assets::is_migration_backup_dir(&path)
+            && path.join("db.sqlite").is_file()
+        {
             found.push(path);
         }
     }
@@ -357,7 +366,8 @@ async fn preserve_weaker_install_copies(
     let stable_score = dir_activity_score(stable).await;
     let mut outcomes = Vec::new();
     for dir in sqlite_dirs_directly_under(exe_dir) {
-        if utils::assets::same_data_dir(&dir, stable)
+        if utils::assets::is_migration_backup_dir(&dir)
+            || utils::assets::same_data_dir(&dir, stable)
             || skip
                 .iter()
                 .any(|kept| utils::assets::same_data_dir(&dir, kept))
@@ -374,11 +384,10 @@ async fn preserve_weaker_install_copies(
             });
             continue;
         }
+        let summary = db::inspect_sqlite_content_summary(&dir.join("db.sqlite")).await;
+        let score = dir_activity_score(&dir).await;
         if stable_is_live && !live_is_explicit {
-            let readable = db::inspect_sqlite_content_summary(&dir.join("db.sqlite"))
-                .await
-                .is_some();
-            let score = dir_activity_score(&dir).await;
+            let readable = summary.is_some();
             if !readable || score > stable_score {
                 outcomes.push(DataDirAdoptionOutcome::InstallCopyRemains {
                     dir,
@@ -389,11 +398,27 @@ async fn preserve_weaker_install_copies(
                 continue;
             }
         }
+        let is_empty_copy = summary.is_some_and(|item| !item.has_user_data());
+        let duplicate_backup_exists = is_equivalent_backup_beside(&dir, stable);
+        if (is_empty_copy
+            && (stable_score.has_user_data || has_verified_migration_backup_beside(stable)))
+            || duplicate_backup_exists
+        {
+            if !sqlite_files_have_open_handles(&dir) && std::fs::remove_dir_all(&dir).is_err() {
+                let _ = utils::assets::record_adopted_legacy_source(stable, &dir);
+            }
+            continue;
+        }
         match preserve_sqlite_dir_beside_stable(&dir, stable) {
-            Ok(preserved) => outcomes.push(DataDirAdoptionOutcome::PreservedInstallCopy {
-                from: dir,
-                preserved,
-            }),
+            Ok(preserved) => {
+                let _ = utils::assets::record_adopted_legacy_source(stable, &dir);
+                let _ = utils::assets::record_adopted_legacy_source(stable, &preserved);
+                prune_migration_backups_beside(stable, Some(&preserved), MAX_MIGRATION_BACKUPS);
+                outcomes.push(DataDirAdoptionOutcome::PreservedInstallCopy {
+                    from: dir,
+                    preserved,
+                });
+            }
             Err(error) => outcomes.push(DataDirAdoptionOutcome::InstallCopyRemains {
                 dir,
                 error: error.to_string(),
@@ -403,7 +428,174 @@ async fn preserve_weaker_install_copies(
     outcomes
 }
 
+fn strip_migration_backup_suffixes(name: &str) -> &str {
+    let mut cut = name.len();
+    if let Some(idx) = name.find(".superseded-") {
+        cut = cut.min(idx);
+    }
+    if let Some(idx) = name.find(".preserved-") {
+        cut = cut.min(idx);
+    }
+    let base = &name[..cut];
+    if base.is_empty() { "data" } else { base }
+}
+
+fn is_chained_migration_backup(name: &str) -> bool {
+    name.matches(".superseded-").count() + name.matches(".preserved-").count() > 1
+}
+
+fn latest_backup_stamp(name: &str) -> &str {
+    let last_superseded = name
+        .rfind(".superseded-")
+        .map(|idx| idx + ".superseded-".len());
+    let last_preserved = name
+        .rfind(".preserved-")
+        .map(|idx| idx + ".preserved-".len());
+    let start = match (last_superseded, last_preserved) {
+        (Some(a), Some(b)) => a.max(b),
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+        (None, None) => return "",
+    };
+    let tail = &name[start..];
+    tail.split('.').next().unwrap_or(tail)
+}
+
+fn migration_backup_siblings_of(anchor_dir: &Path) -> Vec<PathBuf> {
+    let Some(parent) = anchor_dir.parent() else {
+        return Vec::new();
+    };
+    if parent.as_os_str().is_empty() {
+        return Vec::new();
+    }
+    let Some(anchor_raw_name) = anchor_dir.file_name().and_then(|name| name.to_str()) else {
+        return Vec::new();
+    };
+    let anchor_base = strip_migration_backup_suffixes(anchor_raw_name);
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return Vec::new();
+    };
+    let mut siblings = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir()
+            || !utils::assets::is_migration_backup_dir(&path)
+            || utils::assets::same_data_dir(&path, anchor_dir)
+        {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let base = strip_migration_backup_suffixes(name);
+        let matches_anchor = base.eq_ignore_ascii_case(anchor_base)
+            || (base.eq_ignore_ascii_case("data") && name.contains(".preserved-"));
+        if matches_anchor {
+            siblings.push(path);
+        }
+    }
+    siblings
+}
+
+fn has_verified_migration_backup_beside(stable: &Path) -> bool {
+    migration_backup_siblings_of(stable)
+        .into_iter()
+        .any(|dir| dir.join("db.sqlite").is_file())
+}
+
+fn files_have_identical_bytes(left: &Path, right: &Path) -> bool {
+    let (Ok(mut left_file), Ok(mut right_file)) =
+        (std::fs::File::open(left), std::fs::File::open(right))
+    else {
+        return false;
+    };
+    let mut left_buf = [0u8; 64 * 1024];
+    let mut right_buf = [0u8; 64 * 1024];
+    loop {
+        let Ok(left_read) = left_file.read(&mut left_buf) else {
+            return false;
+        };
+        let Ok(right_read) = right_file.read(&mut right_buf) else {
+            return false;
+        };
+        if left_read != right_read || left_buf[..left_read] != right_buf[..right_read] {
+            return false;
+        }
+        if left_read == 0 {
+            return true;
+        }
+    }
+}
+
+fn is_equivalent_backup_beside(dir: &Path, stable: &Path) -> bool {
+    let dir_db = dir.join("db.sqlite");
+    let Ok(dir_meta) = std::fs::metadata(&dir_db) else {
+        return false;
+    };
+    let dir_len = dir_meta.len();
+    let dir_wal_len = std::fs::metadata(dir.join("db.sqlite-wal"))
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    for candidate in migration_backup_siblings_of(stable) {
+        let candidate_db = candidate.join("db.sqlite");
+        let Ok(candidate_meta) = std::fs::metadata(&candidate_db) else {
+            continue;
+        };
+        if candidate_meta.len() != dir_len {
+            continue;
+        }
+        let candidate_wal_len = std::fs::metadata(candidate.join("db.sqlite-wal"))
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        if candidate_wal_len != dir_wal_len {
+            continue;
+        }
+        if files_have_identical_bytes(&dir_db, &candidate_db) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Enforces bounded retention on `.superseded-*` and `.preserved-*` sibling
+/// directories beside `anchor_dir`, keeping at most `max_keep` most recent
+/// verified backup copies and pruning older or chained excess copies.
+fn prune_migration_backups_beside(anchor_dir: &Path, always_keep: Option<&Path>, max_keep: usize) {
+    let mut backups = migration_backup_siblings_of(anchor_dir);
+    if backups.len() <= max_keep {
+        return;
+    }
+    backups.sort_by(|left, right| {
+        let rank = |path: &Path| {
+            let name = path
+                .file_name()
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let pinned = always_keep.is_some_and(|keep| utils::assets::same_data_dir(path, keep));
+            let verified = path.join("db.sqlite").is_file();
+            let clean = !is_chained_migration_backup(&name);
+            let stamp = latest_backup_stamp(&name).to_owned();
+            let modified = std::fs::metadata(path)
+                .and_then(|meta| meta.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            (pinned, verified, clean, stamp, modified, name)
+        };
+        rank(right).cmp(&rank(left))
+    });
+    for excess in backups.into_iter().skip(max_keep) {
+        if sqlite_files_have_open_handles(&excess) {
+            continue;
+        }
+        let _ = std::fs::remove_dir_all(&excess);
+    }
+}
+
 fn preserve_sqlite_dir_beside_stable(dir: &Path, stable: &Path) -> std::io::Result<PathBuf> {
+    if utils::assets::is_migration_backup_dir(dir)
+        && !utils::assets::is_inside_macos_app_bundle(dir)
+    {
+        return Ok(dir.to_path_buf());
+    }
     let parent = stable.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -411,10 +603,11 @@ fn preserve_sqlite_dir_beside_stable(dir: &Path, stable: &Path) -> std::io::Resu
         )
     })?;
     std::fs::create_dir_all(parent)?;
-    let name = dir
+    let raw_name = dir
         .file_name()
         .map(|file_name| file_name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "data".to_string());
+    let name = strip_migration_backup_suffixes(&raw_name);
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let mut dest = parent.join(format!("{name}.preserved-{stamp}"));
     let mut suffix = 1u32;
@@ -552,8 +745,23 @@ fn move_into_target_with_decision(
     keep_target: bool,
 ) -> std::io::Result<MoveResult> {
     if keep_target {
+        if utils::assets::is_migration_backup_dir(legacy_dir) {
+            if !sqlite_files_have_open_handles(legacy_dir) {
+                let _ = utils::assets::record_adopted_legacy_source(target_dir, legacy_dir);
+            }
+            prune_migration_backups_beside(target_dir, None, MAX_MIGRATION_BACKUPS);
+            return Ok(MoveResult::KeptTarget {
+                superseded: legacy_dir.to_path_buf(),
+            });
+        }
         let superseded = match evacuate_or_set_aside_legacy_dir(legacy_dir, target_dir) {
-            Ok(aside) => aside,
+            Ok(aside) => {
+                let _ = utils::assets::record_adopted_legacy_source(target_dir, legacy_dir);
+                let _ = utils::assets::record_adopted_legacy_source(target_dir, &aside);
+                prune_migration_backups_beside(legacy_dir, Some(&aside), MAX_MIGRATION_BACKUPS);
+                prune_migration_backups_beside(target_dir, Some(&aside), MAX_MIGRATION_BACKUPS);
+                aside
+            }
             Err(_) => {
                 // Only mark as permanently evaluated when no process holds live
                 // SQLite handles; if still open, re-evaluate on next launch.
@@ -577,7 +785,18 @@ fn move_into_target_with_decision(
         std::fs::create_dir_all(parent)?;
     }
     match rename_dir_with_windows_retry(legacy_dir, target_dir) {
-        Ok(()) => Ok(MoveResult::Moved { superseded }),
+        Ok(()) => {
+            let _ = utils::assets::record_adopted_legacy_source(target_dir, legacy_dir);
+            if let Some(aside) = &superseded {
+                let _ = utils::assets::record_adopted_legacy_source(target_dir, aside);
+            }
+            prune_migration_backups_beside(
+                target_dir,
+                superseded.as_deref(),
+                MAX_MIGRATION_BACKUPS,
+            );
+            Ok(MoveResult::Moved { superseded })
+        }
         Err(rename_err) => {
             if is_windows_sharing_violation(&rename_err)
                 || sqlite_files_have_open_handles(legacy_dir)
@@ -607,9 +826,19 @@ fn move_into_target_with_decision(
                 }
                 return Err(copy_err);
             }
-            if evacuate_or_set_aside_legacy_dir(legacy_dir, target_dir).is_err() {
-                let _ = utils::assets::record_adopted_legacy_source(target_dir, legacy_dir);
+            let _ = utils::assets::record_adopted_legacy_source(target_dir, legacy_dir);
+            if let Some(aside) = &superseded {
+                let _ = utils::assets::record_adopted_legacy_source(target_dir, aside);
             }
+            if let Ok(aside) = evacuate_or_set_aside_legacy_dir(legacy_dir, target_dir) {
+                let _ = utils::assets::record_adopted_legacy_source(target_dir, &aside);
+                prune_migration_backups_beside(legacy_dir, Some(&aside), MAX_MIGRATION_BACKUPS);
+            }
+            prune_migration_backups_beside(
+                target_dir,
+                superseded.as_deref(),
+                MAX_MIGRATION_BACKUPS,
+            );
             Ok(MoveResult::Moved { superseded })
         }
     }
@@ -652,6 +881,9 @@ fn is_empty_dir(dir: &Path) -> bool {
 }
 
 fn set_aside(dir: &Path) -> std::io::Result<PathBuf> {
+    if utils::assets::is_migration_backup_dir(dir) {
+        return Ok(dir.to_path_buf());
+    }
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let name = dir
         .file_name()
@@ -1014,22 +1246,26 @@ mod tests {
         std::fs::create_dir_all(&exe_dir).unwrap();
         let data = exe_dir.join("data");
         let aside = exe_dir.join("data.superseded-20261118-120000");
-        create_test_sqlite(&data, &[], 64).await;
+        create_test_sqlite(&data, &["older-copy"], 64).await;
         create_test_sqlite(&aside, &[], 32).await;
         let stable = root.path().join("AppSupport").join("app.dimo.dimo");
-        create_test_sqlite(&stable, &["kept"], 0).await;
+        create_test_sqlite(&stable, &["kept-1", "kept-2"], 0).await;
 
         let outcomes = preserve_weaker_install_copies(&exe_dir, &stable, &[]).await;
 
-        assert!(outcomes.iter().all(|outcome| {
-            matches!(outcome, DataDirAdoptionOutcome::PreservedInstallCopy { .. })
-        }));
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(
+            outcomes.as_slice(),
+            [DataDirAdoptionOutcome::PreservedInstallCopy { .. }]
+        ));
         assert!(!data.exists());
-        assert!(!aside.exists());
+        // Already-superseded siblings must never be re-preserved into
+        // `.superseded-*.preserved-*`.
+        assert!(aside.exists());
         let summary = db::inspect_sqlite_content_summary(&stable.join("db.sqlite"))
             .await
             .expect("live database");
-        assert_eq!(summary.conversation_count, 1);
+        assert_eq!(summary.conversation_count, 2);
         let preserved: Vec<_> = std::fs::read_dir(stable.parent().unwrap())
             .unwrap()
             .flatten()
@@ -1040,8 +1276,15 @@ mod tests {
                     .is_some_and(|name| name.contains(".preserved-"))
             })
             .collect();
-        assert_eq!(preserved.len(), 2);
-        assert!(preserved.iter().all(|dir| dir.join("db.sqlite").is_file()));
+        assert_eq!(preserved.len(), 1);
+        assert!(preserved.iter().all(|dir| {
+            dir.join("db.sqlite").is_file()
+                && !dir
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .contains(".superseded-")
+        }));
     }
 
     #[tokio::test]
@@ -1445,5 +1688,143 @@ mod tests {
             .collect();
         assert_eq!(linux_dirs, vec![linux_data]);
         assert!(database_update_would_delete(false, &linux_exe).is_none());
+    }
+
+    #[tokio::test]
+    async fn repeated_adoption_and_preserve_cycles_never_chain_backup_suffixes() {
+        let root = tempfile::tempdir().unwrap();
+        let install_dir = root.path().join("Programs").join("Dimo");
+        let legacy_data = install_dir.join("data");
+        let roaming = root.path().join("Roaming");
+        let stable = roaming.join("app.dimo.dimo");
+
+        create_test_sqlite(&legacy_data, &["old-1"], 0).await;
+        create_test_sqlite(&stable, &["live-1", "live-2"], 0).await;
+
+        // Simulate multiple consecutive startup cycles (adopt_ranked + preserve_weaker_install_copies).
+        for _ in 0..4 {
+            let mut candidates = vec![legacy_data.clone()];
+            candidates.extend(utils::assets::superseded_data_dirs_beside(&legacy_data));
+            candidates.extend(utils::assets::superseded_data_dirs_beside(&stable));
+            let pending: Vec<_> = candidates
+                .into_iter()
+                .filter_map(|dir| utils::assets::legacy_data_dir_adoption(dir, stable.clone()))
+                .collect();
+            let _ = adopt_ranked(pending).await;
+            let _ = preserve_weaker_install_copies(&install_dir, &stable, &[]).await;
+            prune_migration_backups_beside(&stable, None, MAX_MIGRATION_BACKUPS);
+        }
+
+        // Active DB stays intact.
+        let summary = db::inspect_sqlite_content_summary(&stable.join("db.sqlite"))
+            .await
+            .expect("active db");
+        assert_eq!(summary.conversation_count, 2);
+
+        // Inspect all directories under both install_dir and roaming: zero chained names.
+        let install_entries: Vec<String> = std::fs::read_dir(&install_dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(install_entries.len(), 1);
+        assert!(install_entries[0].starts_with("data.superseded-"));
+        assert!(!is_chained_migration_backup(&install_entries[0]));
+
+        let roaming_entries: Vec<String> = std::fs::read_dir(&roaming)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(roaming_entries, vec!["app.dimo.dimo"]);
+
+        // Even calling set_aside or move_into_target_with_decision directly on
+        // the already-superseded directory never chains another suffix.
+        let aside_path = install_dir.join(&install_entries[0]);
+        assert_eq!(set_aside(&aside_path).unwrap(), aside_path);
+        let MoveResult::KeptTarget { superseded } =
+            move_into_target_with_decision(&aside_path, &stable, true).unwrap()
+        else {
+            panic!("expected KeptTarget");
+        };
+        assert_eq!(superseded, aside_path);
+        assert!(!is_chained_migration_backup(
+            &superseded.file_name().unwrap().to_string_lossy()
+        ));
+    }
+
+    #[tokio::test]
+    async fn empty_and_duplicate_install_copies_are_skipped_without_creating_backups() {
+        let root = tempfile::tempdir().unwrap();
+        let exe_dir = root.path().join("Dimo");
+        let stable = root.path().join("Roaming").join("app.dimo.dimo");
+        create_test_sqlite(&stable, &["live-1", "live-2"], 0).await;
+
+        // 1. Empty install copy should not create a `.preserved-*` backup beside stable.
+        let empty_copy = exe_dir.join("data");
+        create_test_sqlite(&empty_copy, &[], 64).await;
+        let outcomes = preserve_weaker_install_copies(&exe_dir, &stable, &[]).await;
+        assert!(outcomes.is_empty());
+        assert!(!empty_copy.exists());
+        assert!(migration_backup_siblings_of(&stable).is_empty());
+
+        // 2. First populated weaker copy is preserved once.
+        let populated_copy = exe_dir.join("data");
+        create_test_sqlite(&populated_copy, &["older"], 0).await;
+        let original_bytes = std::fs::read(populated_copy.join("db.sqlite")).unwrap();
+        let outcomes = preserve_weaker_install_copies(&exe_dir, &stable, &[]).await;
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(migration_backup_siblings_of(&stable).len(), 1);
+
+        // 3. An identical copy placed back in exe_dir is deduplicated against the
+        // already-preserved backup instead of creating a second backup.
+        std::fs::create_dir_all(&populated_copy).unwrap();
+        std::fs::write(populated_copy.join("db.sqlite"), &original_bytes).unwrap();
+        let outcomes = preserve_weaker_install_copies(&exe_dir, &stable, &[]).await;
+        assert!(outcomes.is_empty());
+        assert!(!populated_copy.exists());
+        assert_eq!(migration_backup_siblings_of(&stable).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn bounded_retention_prunes_older_and_chained_backups_keeping_active_and_latest() {
+        let root = tempfile::tempdir().unwrap();
+        let roaming = root.path().join("Roaming");
+        let stable = roaming.join("app.dimo.dimo");
+        create_test_sqlite(&stable, &["live-1", "live-2"], 0).await;
+
+        let older = roaming.join("app.dimo.dimo.superseded-20261115-100000");
+        let chained =
+            roaming.join("app.dimo.dimo.superseded-20261116-100000.superseded-20261117-100000");
+        let chained_preserved =
+            roaming.join("data.superseded-20261118-100000.preserved-20261118-100001");
+        let latest = roaming.join("app.dimo.dimo.superseded-20261120-120000");
+        let unrelated = roaming.join("other-app");
+
+        for dir in [&older, &chained, &chained_preserved, &latest] {
+            create_test_sqlite(dir, &["backup"], 0).await;
+        }
+        create_test_sqlite(&unrelated, &["other"], 0).await;
+
+        // Chained backups are ignored by superseded_data_dirs_beside and legacy_data_dir_adoption.
+        let discovered = utils::assets::superseded_data_dirs_beside(&stable);
+        assert!(discovered.contains(&older));
+        assert!(discovered.contains(&latest));
+        assert!(!discovered.contains(&chained));
+        assert!(!discovered.contains(&chained_preserved));
+        assert!(utils::assets::legacy_data_dir_adoption(chained.clone(), stable.clone()).is_none());
+        assert!(
+            utils::assets::legacy_data_dir_adoption(chained_preserved.clone(), stable.clone())
+                .is_none()
+        );
+
+        prune_migration_backups_beside(&stable, None, MAX_MIGRATION_BACKUPS);
+
+        assert!(stable.join("db.sqlite").is_file());
+        assert!(latest.join("db.sqlite").is_file());
+        assert!(unrelated.join("db.sqlite").is_file());
+        assert!(!older.exists());
+        assert!(!chained.exists());
+        assert!(!chained_preserved.exists());
     }
 }

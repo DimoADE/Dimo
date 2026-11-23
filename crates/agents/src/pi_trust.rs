@@ -282,7 +282,7 @@ pub fn launch_preflight(env: &HashMap<String, String>) -> Option<String> {
         .map(|value| value.trim())
         .filter(|value| !value.is_empty());
     let command = custom.unwrap_or("pi");
-    if resolve_pi_command(command).is_some() {
+    if resolve_pi_command_in_env(command, env).is_some() {
         return None;
     }
     Some(match custom {
@@ -297,27 +297,113 @@ pub fn launch_preflight(env: &HashMap<String, String>) -> Option<String> {
 }
 
 pub fn resolve_pi_command(command: &str) -> Option<PathBuf> {
+    resolve_pi_command_in_env(command, &HashMap::new())
+}
+
+pub fn resolve_pi_command_in_env(command: &str, env: &HashMap<String, String>) -> Option<PathBuf> {
     let command = command.trim();
     if command.is_empty() {
         return None;
     }
     let candidate = Path::new(command);
     let resolved = if candidate.is_absolute() || command.contains(['/', '\\']) {
-        candidate.to_path_buf()
+        resolve_explicit_pi_candidate(candidate)?
     } else {
-        which::which(command).ok()?
+        let search_path = env_path_value(env).or_else(|| std::env::var_os("PATH"));
+        resolve_pi_on_search_path(command, search_path.as_deref())?
     };
-    if !resolved.is_file() {
+    if !is_executable_file(&resolved) {
         return None;
+    }
+    Some(canonical_path(&resolved))
+}
+
+fn env_path_value(env: &HashMap<String, String>) -> Option<std::ffi::OsString> {
+    env.get("PATH")
+        .or_else(|| {
+            env.iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case("PATH"))
+                .map(|(_, value)| value)
+        })
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(std::ffi::OsString::from)
+}
+
+fn resolve_explicit_pi_candidate(candidate: &Path) -> Option<PathBuf> {
+    if is_executable_file(candidate) {
+        return Some(candidate.to_path_buf());
+    }
+    #[cfg(windows)]
+    if candidate.extension().is_none() {
+        for ext in ["exe", "com", "cmd", "bat"] {
+            let with_ext = candidate.with_extension(ext);
+            if with_ext.is_file() {
+                return Some(with_ext);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_pi_on_search_path(
+    command: &str,
+    search_path: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    let search_path = search_path?;
+    if let Ok(paths) = which::which_in_all(command, Some(search_path), ".") {
+        let collected = paths.collect::<Vec<_>>();
+        if let Some(spawnable) =
+            workspace_utils::process::first_spawnable_command(collected.iter().cloned())
+            && is_executable_file(&spawnable)
+        {
+            return Some(spawnable);
+        }
+        if let Some(found) = collected.into_iter().find(|path| is_executable_file(path)) {
+            return Some(found);
+        }
+    }
+    #[cfg(windows)]
+    {
+        let names: Vec<String> = if Path::new(command).extension().is_some() {
+            vec![command.to_string()]
+        } else {
+            vec![
+                format!("{command}.exe"),
+                format!("{command}.com"),
+                format!("{command}.cmd"),
+                format!("{command}.bat"),
+                command.to_string(),
+            ]
+        };
+        for dir in std::env::split_paths(search_path) {
+            for name in &names {
+                let candidate = dir.join(name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if fs::metadata(&resolved).ok()?.permissions().mode() & 0o111 == 0 {
-            return None;
-        }
+        fs::metadata(path)
+            .map(|meta| meta.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
     }
-    Some(canonical_path(&resolved))
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 fn is_acknowledged(ack_file: &Path, workspace: &str) -> bool {
@@ -633,5 +719,63 @@ mod tests {
         let message = launch_preflight(&env).expect("missing command");
         assert!(message.contains("is not installed"));
         assert!(message.contains("missing/pi-binary"));
+    }
+
+    #[test]
+    fn preflight_resolves_pi_from_custom_env_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        #[cfg(windows)]
+        let pi_bin = {
+            let bin = tmp.path().join("pi.cmd");
+            fs::write(&bin, "@echo off\r\necho 0.83.0\r\n").unwrap();
+            bin
+        };
+        #[cfg(not(windows))]
+        let pi_bin = {
+            use std::os::unix::fs::PermissionsExt;
+            let bin = tmp.path().join("pi");
+            fs::write(&bin, "#!/bin/sh\necho 0.83.0\n").unwrap();
+            let mut perms = fs::metadata(&bin).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&bin, perms).unwrap();
+            bin
+        };
+
+        let env = HashMap::from([(
+            "PATH".to_string(),
+            tmp.path().to_string_lossy().into_owned(),
+        )]);
+        assert_eq!(launch_preflight(&env), None);
+        assert_eq!(
+            resolve_pi_command_in_env("pi", &env),
+            Some(canonical_path(&pi_bin))
+        );
+    }
+
+    #[test]
+    fn preflight_accepts_existing_custom_pi_acp_pi_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        #[cfg(windows)]
+        let pi_bin = {
+            let bin = tmp.path().join("custom-pi.cmd");
+            fs::write(&bin, "@echo off\r\necho 0.83.0\r\n").unwrap();
+            bin
+        };
+        #[cfg(not(windows))]
+        let pi_bin = {
+            use std::os::unix::fs::PermissionsExt;
+            let bin = tmp.path().join("custom-pi");
+            fs::write(&bin, "#!/bin/sh\necho 0.83.0\n").unwrap();
+            let mut perms = fs::metadata(&bin).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&bin, perms).unwrap();
+            bin
+        };
+
+        let env = HashMap::from([(
+            PI_COMMAND_ENV.to_string(),
+            pi_bin.to_string_lossy().into_owned(),
+        )]);
+        assert_eq!(launch_preflight(&env), None);
     }
 }

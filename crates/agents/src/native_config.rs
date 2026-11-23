@@ -159,6 +159,7 @@ impl NativeConfigProvider {
         let mut exists = false;
         let mut vault_api_key_present = false;
 
+        let mut legacy_antigravity_env: Option<serde_json::Map<String, Value>> = None;
         for binding in profile.native_config {
             let path = self.binding_path(binding);
             let bytes = self
@@ -169,6 +170,12 @@ impl NativeConfigProvider {
             let file_exists = bytes.is_some();
             exists |= file_exists;
             let document = parse_document(binding, bytes.as_deref())?;
+            if crate::AgentKind::Antigravity.matches_id(agent_id.as_str())
+                && binding.binding_id == "settings"
+                && let Some(env_obj) = document.get("env").and_then(Value::as_object)
+            {
+                legacy_antigravity_env = Some(env_obj.clone());
+            }
             let content = match bytes.as_deref() {
                 Some(bytes) => std::str::from_utf8(bytes)
                     .map(str::to_owned)
@@ -195,6 +202,24 @@ impl NativeConfigProvider {
                 revision: file_revision(bytes.as_deref()),
             });
             paths.push(path);
+        }
+
+        if let Some(legacy_env) = legacy_antigravity_env.as_ref() {
+            for (field_id, env_key) in [
+                ("antigravity_api_key", "GEMINI_API_KEY"),
+                ("antigravity_google_api_key", "GOOGLE_API_KEY"),
+            ] {
+                if let Some(field) = fields.iter_mut().find(|field| field.field_id == field_id)
+                    && !field.present
+                    && legacy_env
+                        .get(env_key)
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.trim().is_empty())
+                {
+                    field.present = true;
+                    field.masked_value = Some("••••••••".to_string());
+                }
+            }
         }
 
         let mut api_key_present =

@@ -33,7 +33,13 @@ test("Electron builder config wires icons, DMG background, NSIS hook, Windows EV
   assert.match(builderYml, /icon:\s+build\/icons\/icon\.ico/);
   assert.match(builderYml, /icon:\s+build\/icons\/icon\.icns/);
   assert.match(builderYml, /icon:\s+build\/icons\/128x128@2x\.png/);
+  assert.match(builderYml, /script:\s+build\/installer\.nsi/);
   assert.match(builderYml, /include:\s+build\/installer\.nsh/);
+  assert.match(
+    builderYml,
+    /installerLanguages:[\s\S]*?-\s+en_US[\s\S]*?-\s+zh_CN/,
+    "nsis.installerLanguages must restrict language tables to en_US and zh_CN for custom LangStrings",
+  );
   assert.match(builderYml, /background:\s+build\/dmg-background\.png/);
   assert.match(builderYml, /afterPack:\s+\.\/build\/afterPack\.js/);
   assert.match(builderYml, /afterSign:\s+\.\/build\/afterSign\.js/);
@@ -70,7 +76,13 @@ test("Electron packaging assets and hook scripts exist", () => {
     "icons/128x128@2x.png",
     "icons/icon.png",
     "dmg-background.png",
+    "installer.nsi",
     "installer.nsh",
+    "installer/hooks.nsh",
+    "installer/theme.nsh",
+    "installer/drawing.nsh",
+    "installer/pages.nsh",
+    "installer/strings.nsh",
     "entitlements.mac.plist",
     "afterPack.js",
     "afterSign.js",
@@ -80,7 +92,35 @@ test("Electron packaging assets and hook scripts exist", () => {
     assert.ok(fs.existsSync(filePath), `missing packaging asset ${rel}`);
     assert.ok(fs.statSync(filePath).size > 0, `empty packaging asset ${rel}`);
   }
+  for (const theme of ["light", "dark"]) {
+    for (const size of [48, 60, 64, 72, 80, 96, 128]) {
+      const bmpRel = `installer/assets/icon-${theme}-${size}.bmp`;
+      const bmpPath = path.join(BUILD_DIR, bmpRel);
+      assert.ok(fs.existsSync(bmpPath), `missing installer icon bitmap ${bmpRel}`);
+      assert.ok(fs.statSync(bmpPath).size > 0, `empty installer icon bitmap ${bmpRel}`);
+    }
+  }
   assert.ok(fs.existsSync(path.join(ICONS_DIR, "32x32.png")));
+  assert.ok(
+    fs.existsSync(path.join(ROOT, "scripts", "generate-installer-assets.py")),
+    "missing scripts/generate-installer-assets.py",
+  );
+
+  const installerNsi = fs.readFileSync(
+    path.join(BUILD_DIR, "installer.nsi"),
+    "utf8",
+  );
+  assert.match(installerNsi, /^ManifestDPIAware\s+true\s*$/m);
+  assert.match(installerNsi, /^ManifestDPIAwareness\s+PerMonitorV2\s*$/m);
+  assert.match(installerNsi, /Page\s+custom\s+DimoPageMain\s+DimoPageMainLeave/);
+  assert.match(installerNsi, /Page\s+custom\s+DimoPageFinish\s+DimoPageFinishLeave/);
+  assert.match(
+    installerNsi,
+    /UninstPage\s+custom\s+un\.DimoPageConfirm\s+un\.DimoPageConfirmLeave/,
+  );
+  assert.match(installerNsi, /Nsis7z::ExtractWithCallback/);
+  assert.match(installerNsi, /WriteUninstaller\s+"\$INSTDIR\\\$\{UNINSTALL_FILENAME\}"/);
+  assert.match(installerNsi, /Software\\Classes\\dimo/);
 
   const entitlements = fs.readFileSync(
     path.join(BUILD_DIR, "entitlements.mac.plist"),

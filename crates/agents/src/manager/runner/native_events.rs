@@ -27,8 +27,60 @@ pub(in crate::manager) struct NativeTurnState {
     pub(in crate::manager) accumulated_usage: Option<AgentUsage>,
 }
 
+fn is_insufficient_balance_or_quota(lower: &str) -> bool {
+    lower.contains("insufficient balance")
+        || lower.contains("insufficient_balance")
+        || lower.contains("insufficient_quota")
+        || lower.contains("insufficient quota")
+        || lower.contains("insufficient credit")
+        || lower.contains("insufficient_credit")
+        || lower.contains("insufficient funds")
+        || lower.contains("credit balance is too low")
+        || lower.contains("credit_balance_too_low")
+        || lower.contains("billing_hard_limit")
+        || lower.contains("payment required")
+        || ((lower.contains("403") || lower.contains("402"))
+            && (lower.contains("credit")
+                || lower.contains("balance")
+                || lower.contains("quota")
+                || lower.contains("billing")))
+}
+
+fn is_model_unavailable_signal(lower: &str) -> bool {
+    lower.contains("model_not_found")
+        || lower.contains("no available channel")
+        || lower.contains("no_available_channel")
+        || lower.contains("model is not available")
+        || lower.contains("model unavailable")
+        || lower.contains("model_unavailable")
+}
+
+fn is_service_unavailable_signal(lower: &str) -> bool {
+    lower.contains("503")
+        || lower.contains("service unavailable")
+        || lower.contains("service_unavailable")
+        || lower.contains("temporarily unavailable")
+}
+
 pub(in crate::manager) fn classify_native_turn_error(message: String) -> AgentError {
+    if crate::skills::is_codex_skills_traversal_limit_error(&message) {
+        let enriched =
+            crate::skills::enrich_codex_skills_traversal_error(&message, &[]).unwrap_or(message);
+        return AgentError::Runtime(enriched);
+    }
+
     let lower = message.to_ascii_lowercase();
+    if is_insufficient_balance_or_quota(&lower) {
+        let enriched = if lower.contains("check your account balance") {
+            message
+        } else {
+            format!(
+                "{message} — Provider rejected the request due to insufficient account balance or quota. Check your account balance/billing or switch to another provider."
+            )
+        };
+        return AgentError::Runtime(enriched);
+    }
+
     let is_auth = lower.contains("authentication_failed")
         || lower.contains("authentication_error")
         || lower.contains("invalid_api_key")
@@ -43,10 +95,29 @@ pub(in crate::manager) fn classify_native_turn_error(message: String) -> AgentEr
         || lower.contains("oauth token has expired")
         || lower.contains("token has expired");
     if is_auth {
-        AgentError::AuthenticationRequired(message)
-    } else {
-        AgentError::Runtime(message)
+        return AgentError::AuthenticationRequired(message);
     }
+
+    if is_model_unavailable_signal(&lower) || is_service_unavailable_signal(&lower) {
+        let enriched = if lower.contains("switch to another model")
+            || lower.contains("switching to another model")
+        {
+            message
+        } else if is_model_unavailable_signal(&lower)
+            || (lower.contains("503") && lower.contains("model"))
+        {
+            format!(
+                "{message} — The requested model is currently unavailable on this provider. Try switching to another model or provider and retry."
+            )
+        } else {
+            format!(
+                "{message} — The upstream model service is temporarily unavailable (503). Retry shortly, or switch to another model or provider."
+            )
+        };
+        return AgentError::Runtime(enriched);
+    }
+
+    AgentError::Runtime(message)
 }
 
 pub(in crate::manager) fn parse_cache_tier(tier: Option<&str>) -> CacheTier {
@@ -1175,5 +1246,79 @@ impl AgentConnectionRunner {
                 )
                 .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::classify_native_turn_error;
+    use crate::AgentError;
+
+    #[test]
+    fn classifies_403_insufficient_balance_and_quota_as_runtime_not_auth() {
+        for raw in [
+            "HTTP 403 Forbidden: insufficient balance",
+            "403 authentication_error: insufficient_quota",
+            "403: Your credit balance is too low to access the API",
+        ] {
+            let err = classify_native_turn_error(raw.to_string());
+            match err {
+                AgentError::Runtime(msg) => {
+                    assert!(
+                        msg.contains("account balance"),
+                        "expected balance guidance for `{raw}`, got: {msg}"
+                    );
+                    assert!(
+                        msg.contains("switch to another provider"),
+                        "expected provider guidance for `{raw}`, got: {msg}"
+                    );
+                }
+                other => panic!("expected AgentError::Runtime for `{raw}`, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn classifies_503_and_model_unavailable_with_switch_model_guidance() {
+        for raw in [
+            "HTTP 503 Service Unavailable: model_not_found",
+            "503: no available channel for model gpt-5.4",
+            "503 Service Temporarily Unavailable",
+        ] {
+            let err = classify_native_turn_error(raw.to_string());
+            match err {
+                AgentError::Runtime(msg) => {
+                    assert!(
+                        msg.contains("switch to another model")
+                            || msg.contains("switching to another model"),
+                        "expected switch-model guidance for `{raw}`, got: {msg}"
+                    );
+                }
+                other => panic!("expected AgentError::Runtime for `{raw}`, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn enriches_codex_skills_traversal_limit_errors_with_skills_dir_guidance() {
+        let err = classify_native_turn_error(
+            "failed to load skills: skills scan reached its traversal limit".to_string(),
+        );
+        match err {
+            AgentError::Runtime(msg) => {
+                assert!(msg.contains("skills scan reached its traversal limit"));
+                assert!(
+                    msg.contains("~/.agents/skills"),
+                    "expected ~/.agents/skills guidance, got: {msg}"
+                );
+            }
+            other => panic!("expected AgentError::Runtime, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn genuine_401_auth_errors_remain_authentication_required() {
+        let err = classify_native_turn_error("401 Unauthorized: invalid_api_key".to_string());
+        assert!(matches!(err, AgentError::AuthenticationRequired(_)));
     }
 }

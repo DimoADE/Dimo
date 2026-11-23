@@ -2,6 +2,7 @@ use futures::StreamExt;
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 use super::*;
+use crate::engine::codex_protocol::command_approval_options;
 
 fn test_start_spec() -> EngineStartSpec {
     EngineStartSpec {
@@ -580,4 +581,399 @@ async fn mcp_tool_approval_elicitation_is_answered_with_action() {
             "_meta": { "persist": "session" }
         })
     );
+}
+
+fn approval_params(persist: Value) -> Value {
+    json!({
+        "threadId": "thr",
+        "turnId": "turn",
+        "serverName": "dimo",
+        "mode": "form",
+        "message": "Allow the dimo MCP server to run tool \"list_spaces\"?",
+        "_meta": {
+            "codex_approval_kind": "mcp_tool_call",
+            "tool_name": "list_spaces",
+            "persist": persist
+        },
+        "requestedSchema": { "type": "object", "properties": {} }
+    })
+}
+
+fn permission_decision(
+    option_id: Option<&str>,
+    approved: bool,
+    interrupt: bool,
+) -> EnginePermissionDecision {
+    EnginePermissionDecision {
+        permission_id: "perm".to_string(),
+        approved,
+        option_id: option_id.map(str::to_string),
+        updated_input: None,
+        message: None,
+        interrupt,
+    }
+}
+
+fn pending_codex_request(method: &str) -> PendingCodexServerRequest {
+    PendingCodexServerRequest {
+        raw_rpc_id: json!("rpc-1"),
+        method: method.to_string(),
+        thread_id: "thr".to_string(),
+        prompt_id: Some("turn".to_string()),
+        params: json!({}),
+    }
+}
+
+#[test]
+fn command_rule_round_trip_uses_the_offered_prefix() {
+    let mut request = pending_codex_request("item/commandExecution/requestApproval");
+    let rule =
+        json!({"acceptWithExecpolicyAmendment": {"execpolicy_amendment": ["git", "status"]}});
+    request.params = json!({"availableDecisions": ["accept", rule, "cancel"]});
+
+    let options = command_approval_options(&request.params);
+    let ids: Vec<_> = options.iter().map(|option| option.id.as_str()).collect();
+    assert_eq!(ids, ["accept", "allow-prefix-1", "cancel"]);
+    assert_eq!(options[1].label, "Remember command prefix");
+    assert_eq!(options[1].description.as_deref(), Some("git status"));
+    assert_eq!(options[2].label, "Cancel");
+
+    let result = |id| {
+        build_codex_server_request_result(&request, &permission_decision(Some(id), true, false)).0
+    };
+    assert_eq!(result("allow-prefix-1"), json!({"decision": rule}));
+    assert_eq!(result("allow-prefix-0"), json!({"decision": "cancel"}));
+    assert_eq!(result("allow-prefix-2"), json!({"decision": "cancel"}));
+    assert_eq!(
+        build_codex_server_request_result(
+            &request,
+            &permission_decision(Some("allow-prefix-1"), true, true),
+        )
+        .0,
+        json!({"decision": "cancel"})
+    );
+}
+
+#[test]
+fn command_approval_options_falls_back_when_available_decisions_empty_or_unknown() {
+    let empty = command_approval_options(&json!({"availableDecisions": []}));
+    let unknown = command_approval_options(&json!({
+        "availableDecisions": ["unknownDecision", {"other": {}}]
+    }));
+    let default_ids: Vec<_> = codex_approval_options()
+        .into_iter()
+        .map(|option| option.id)
+        .collect();
+    assert_eq!(
+        empty.into_iter().map(|o| o.id).collect::<Vec<_>>(),
+        default_ids
+    );
+    assert_eq!(
+        unknown.into_iter().map(|o| o.id).collect::<Vec<_>>(),
+        default_ids
+    );
+}
+
+#[test]
+fn mcp_tool_approval_elicitation_becomes_a_permission_card() {
+    let params = approval_params(json!(["session", "always"]));
+    let (permission_id, _record, event) =
+        parse_codex_server_request("mcpServer/elicitation/request", &json!("srv-1"), &params)
+            .expect("approval elicitation");
+    assert_eq!(permission_id, "codex-mcp-elicitation-srv-1");
+    match event {
+        EngineEvent::PermissionRequested {
+            tool_name,
+            decision_reason,
+            options,
+            ..
+        } => {
+            assert_eq!(tool_name, "dimo/list_spaces");
+            assert_eq!(
+                decision_reason.as_deref(),
+                Some("Allow the dimo MCP server to run tool \"list_spaces\"?")
+            );
+            let ids: Vec<_> = options.iter().map(|option| option.id.as_str()).collect();
+            assert_eq!(
+                ids,
+                ["accept", "acceptForSession", "acceptAlways", "decline"]
+            );
+        }
+        other => panic!("expected PermissionRequested, got {other:?}"),
+    }
+}
+
+#[test]
+fn filled_form_and_url_elicitations_stay_unhandled() {
+    let mut form = approval_params(json!("session"));
+    form["requestedSchema"]["properties"] = json!({
+        "confirmed": { "type": "boolean" }
+    });
+    assert!(
+        parse_codex_server_request("mcpServer/elicitation/request", &json!(1), &form).is_none()
+    );
+
+    let url = json!({
+        "threadId": "thr",
+        "serverName": "dimo",
+        "mode": "url",
+        "message": "Sign in",
+        "url": "https://example.test",
+        "elicitationId": "e1",
+        "_meta": { "codex_approval_kind": "mcp_tool_call" }
+    });
+    assert!(parse_codex_server_request("mcpServer/elicitation/request", &json!(2), &url).is_none());
+
+    let mut needs_input = approval_params(json!("session"));
+    needs_input["_meta"]["codex_requires_user_input"] = json!(true);
+    assert!(
+        parse_codex_server_request("mcpServer/elicitation/request", &json!(3), &needs_input)
+            .is_none()
+    );
+}
+
+#[test]
+fn mcp_tool_approval_reply_uses_action_not_decision() {
+    let pending = pending_codex_request("mcpServer/elicitation/request");
+    let (accept, behavior) = build_codex_server_request_result(
+        &pending,
+        &permission_decision(Some("accept"), true, false),
+    );
+    assert_eq!(behavior, "accept");
+    assert_eq!(accept, json!({ "action": "accept", "content": {} }));
+
+    let (session, _) = build_codex_server_request_result(
+        &pending,
+        &permission_decision(Some("acceptForSession"), true, false),
+    );
+    assert_eq!(
+        session,
+        json!({
+            "action": "accept",
+            "content": {},
+            "_meta": { "persist": "session" }
+        })
+    );
+
+    let (always, _) = build_codex_server_request_result(
+        &pending,
+        &permission_decision(Some("acceptAlways"), true, false),
+    );
+    assert_eq!(always["_meta"]["persist"], "always");
+    assert!(always.get("decision").is_none());
+
+    let (decline, behavior) = build_codex_server_request_result(
+        &pending,
+        &permission_decision(Some("decline"), false, false),
+    );
+    assert_eq!(behavior, "decline");
+    assert_eq!(decline, json!({ "action": "decline" }));
+
+    let (cancel, behavior) =
+        build_codex_server_request_result(&pending, &permission_decision(None, false, true));
+    assert_eq!(behavior, "cancel");
+    assert_eq!(cancel, json!({ "action": "cancel" }));
+}
+
+#[test]
+fn command_approval_reply_keeps_decision_field() {
+    let (result, behavior) = build_codex_server_request_result(
+        &pending_codex_request("item/commandExecution/requestApproval"),
+        &permission_decision(Some("accept"), true, false),
+    );
+    assert_eq!(behavior, "accept");
+    assert_eq!(result, json!({ "decision": "accept" }));
+}
+
+async fn reply_error<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    id: &Option<Value>,
+    code: i64,
+    message: &str,
+) {
+    let line = format!(
+        "{}\n",
+        json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+    );
+    w.write_all(line.as_bytes()).await.unwrap();
+}
+
+#[tokio::test]
+async fn codex_empty_rollout_resume_error_falls_back_to_thread_start() {
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let (server_read, mut w) = tokio::io::split(server_io);
+
+    let spec = test_start_spec();
+    let app = CodexAppServer::connect_over_io(spec.workspace_id, client_read, client_write, None);
+
+    let mock_peer = tokio::spawn(async move {
+        let mut lines = BufReader::new(server_read).lines();
+        let mut saw_resume = false;
+        let mut saw_start = false;
+        while let Ok(Some(line)) = lines.next_line().await {
+            let req: Value = serde_json::from_str(&line).expect("valid jsonrpc");
+            let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+            let id = req.get("id").cloned();
+            match method {
+                "initialize" => {
+                    reply(&mut w, &id, json!({ "serverInfo": { "name": "codex" } })).await;
+                }
+                "initialized" => {}
+                "thread/resume" => {
+                    saw_resume = true;
+                    assert_eq!(req["params"]["threadId"], "thr-stale-empty");
+                    reply_error(
+                        &mut w,
+                        &id,
+                        -32603,
+                        "failed to read thread: rollout at /home/user/.codex/sessions/rollout-empty.jsonl is empty",
+                    )
+                    .await;
+                }
+                "thread/start" => {
+                    saw_start = true;
+                    assert!(
+                        saw_resume,
+                        "thread/resume must be attempted before fallback"
+                    );
+                    reply(
+                        &mut w,
+                        &id,
+                        json!({ "thread": { "id": "thr-recovered-42", "model": "gpt-5.4" } }),
+                    )
+                    .await;
+                }
+                "turn/start" => {
+                    assert_eq!(req["params"]["threadId"], "thr-recovered-42");
+                    reply(&mut w, &id, json!({ "turn": { "id": "turn-rec-1" } })).await;
+                    notif(
+                        &mut w,
+                        "item/agentMessage/delta",
+                        json!({
+                            "threadId": "thr-recovered-42",
+                            "itemId": "msg-1",
+                            "delta": "Recovered cleanly"
+                        }),
+                    )
+                    .await;
+                    notif(
+                        &mut w,
+                        "turn/completed",
+                        json!({
+                            "threadId": "thr-recovered-42",
+                            "turn": { "id": "turn-rec-1", "status": "completed", "model": "gpt-5.4" }
+                        }),
+                    )
+                    .await;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_resume && saw_start);
+    });
+
+    app.handshake().await.expect("handshake succeeds");
+    let driver = CodexNativeDriver::new();
+    let handle =
+        driver.bind_existing_server(spec, Arc::clone(&app), Some("thr-stale-empty".into()));
+
+    let events: Vec<EngineEvent> = driver
+        .send_prompt(
+            &handle,
+            EnginePromptRequest {
+                prompt_id: Uuid::new_v4(),
+                blocks: vec![ContentBlock::Text {
+                    text: "Continue our work".into(),
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("fallback to thread/start should succeed")
+        .collect()
+        .await;
+
+    assert_eq!(
+        handle.external_session_id().as_deref(),
+        Some("thr-recovered-42")
+    );
+    assert!(app.is_thread_loaded("thr-recovered-42"));
+    assert!(!app.is_thread_loaded("thr-stale-empty"));
+    assert!(events.iter().any(|ev| matches!(
+        ev,
+        EngineEvent::SessionInitialized { session_id: Some(sid), model: Some(m), .. }
+            if sid == "thr-recovered-42" && m == "gpt-5.4"
+    )));
+    assert!(events.iter().any(|ev| matches!(
+        ev,
+        EngineEvent::AssistantTextDelta { text, .. } if text == "Recovered cleanly"
+    )));
+
+    mock_peer.await.expect("mock peer finished cleanly");
+}
+
+#[tokio::test]
+async fn codex_skills_traversal_limit_rpc_error_is_enriched_without_fallback() {
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let (server_read, mut w) = tokio::io::split(server_io);
+
+    let spec = test_start_spec();
+    let app = CodexAppServer::connect_over_io(spec.workspace_id, client_read, client_write, None);
+
+    let mock_peer = tokio::spawn(async move {
+        let mut lines = BufReader::new(server_read).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let req: Value = serde_json::from_str(&line).expect("valid jsonrpc");
+            let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+            let id = req.get("id").cloned();
+            match method {
+                "initialize" => {
+                    reply(&mut w, &id, json!({ "serverInfo": { "name": "codex" } })).await;
+                }
+                "initialized" => {}
+                "thread/resume" => {
+                    reply_error(
+                        &mut w,
+                        &id,
+                        -32603,
+                        "skills scan reached its traversal limit",
+                    )
+                    .await;
+                    break;
+                }
+                "thread/start" => {
+                    panic!("skills traversal error must not silently fall back to thread/start");
+                }
+                _ => {}
+            }
+        }
+    });
+
+    app.handshake().await.expect("handshake succeeds");
+    let err = app
+        .ensure_thread(
+            Some("thr-existing"),
+            Some("gpt-5.4"),
+            Path::new("."),
+            None,
+            None,
+        )
+        .await
+        .expect_err("skills traversal error must propagate");
+    match err {
+        EngineError::Rpc { code, message } => {
+            assert_eq!(code, -32603);
+            assert!(message.contains("skills scan reached its traversal limit"));
+            assert!(
+                message.contains("~/.agents/skills"),
+                "expected actionable ~/.agents/skills guidance, got: {message}"
+            );
+        }
+        other => panic!("expected EngineError::Rpc, got {other:?}"),
+    }
+
+    mock_peer.await.expect("mock peer finished cleanly");
 }

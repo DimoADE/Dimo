@@ -86,6 +86,7 @@ impl ConversationSessionService {
         let session = Session::find_by_id(pool, input.conversation_id)
             .await?
             .ok_or_else(|| ConversationServiceError::NotFound("Conversation not found".into()))?;
+        let _ = crate::ensure_legacy_jsonl_migrated_on_pool(pool, input.conversation_id).await?;
         let source =
             ConversationAgentBindingRecord::active_for_conversation(pool, input.conversation_id)
                 .await?;

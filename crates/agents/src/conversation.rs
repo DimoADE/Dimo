@@ -881,6 +881,25 @@ impl ConversationError {
     }
 }
 
+const BILLING_ERROR_CODES: &[&str] = &[
+    "insufficient_balance",
+    "insufficient_quota",
+    "insufficient_credit",
+    "insufficient_credits",
+    "credit_balance_too_low",
+    "billing_hard_limit_reached",
+    "payment_required",
+    "quota_exceeded",
+];
+
+const UNAVAILABLE_ERROR_CODES: &[&str] = &[
+    "model_not_found",
+    "model_unavailable",
+    "service_unavailable",
+    "temporarily_unavailable",
+    "no_available_channel",
+];
+
 /// Classify a turn failure from protocol/host evidence only.
 ///
 /// `code` is the ACP/JSON-RPC or host-produced code. `raw` is `acp::Error.data`
@@ -890,19 +909,34 @@ pub fn classify_turn_error(
     raw: Option<&serde_json::Value>,
 ) -> ConversationTurnErrorKind {
     if let Some(raw) = raw {
-        if structured_http_status(raw) == Some(429) || structured_rate_limited(raw) {
+        let status = structured_http_status(raw);
+        let raw_code = structured_error_code(raw);
+        if status == Some(429) || structured_rate_limited(raw) {
             return ConversationTurnErrorKind::RateLimited;
+        }
+        if status == Some(402)
+            || raw_code
+                .as_deref()
+                .is_some_and(|c| BILLING_ERROR_CODES.contains(&c))
+        {
+            return ConversationTurnErrorKind::Rejected;
         }
         if structured_auth_failed(raw) {
             return ConversationTurnErrorKind::AuthRequired;
         }
-        if structured_http_status(raw).is_some_and(|status| (500..600).contains(&status)) {
+        if status.is_some_and(|s| (500..600).contains(&s))
+            || raw_code
+                .as_deref()
+                .is_some_and(|c| UNAVAILABLE_ERROR_CODES.contains(&c))
+        {
             return ConversationTurnErrorKind::ServiceError;
         }
     }
     match code {
         Some("invalid_request" | "invalid_params") => ConversationTurnErrorKind::Rejected,
+        Some(c) if BILLING_ERROR_CODES.contains(&c) => ConversationTurnErrorKind::Rejected,
         Some("internal_error") => ConversationTurnErrorKind::ServiceError,
+        Some(c) if UNAVAILABLE_ERROR_CODES.contains(&c) => ConversationTurnErrorKind::ServiceError,
         Some("request_cancelled" | "cancelled") => ConversationTurnErrorKind::Cancelled,
         Some("auth_required") => ConversationTurnErrorKind::AuthRequired,
         Some("resource_not_found") => ConversationTurnErrorKind::ResourceNotFound,
@@ -927,6 +961,16 @@ fn structured_http_status(raw: &serde_json::Value) -> Option<u16> {
         .and_then(|status| u16::try_from(status).ok())
 }
 
+fn structured_error_code(raw: &serde_json::Value) -> Option<String> {
+    let err = raw.get("error");
+    ["errorKind", "error_kind", "error_code", "code", "type"]
+        .into_iter()
+        .find_map(|key| raw.get(key))
+        .or_else(|| err.and_then(|e| e.get("code").or_else(|| e.get("type"))))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_ascii_lowercase)
+}
+
 fn structured_rate_limited(raw: &serde_json::Value) -> bool {
     raw.get("rate_limited").and_then(serde_json::Value::as_bool) == Some(true)
         || raw
@@ -940,17 +984,15 @@ fn structured_rate_limited(raw: &serde_json::Value) -> bool {
 }
 
 fn structured_auth_failed(raw: &serde_json::Value) -> bool {
-    if structured_http_status(raw) == Some(401) {
-        return true;
-    }
-    matches!(
-        raw.get("errorKind")
-            .or_else(|| raw.get("error_kind"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("authentication_failed" | "auth_required" | "unauthorized")
-    )
+    structured_http_status(raw) == Some(401)
+        || matches!(
+            raw.get("errorKind")
+                .or_else(|| raw.get("error_kind"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
+            Some("authentication_failed" | "auth_required" | "unauthorized")
+        )
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
@@ -1416,3 +1458,42 @@ pub use wire::*;
 #[cfg(test)]
 #[path = "conversation_tests.rs"]
 mod event_sourced_tests;
+
+#[cfg(test)]
+mod error_classification_tests {
+    use serde_json::json;
+
+    use super::{ConversationTurnErrorKind, classify_turn_error};
+
+    #[test]
+    fn classifies_403_billing_and_quota_as_rejected_not_auth_required() {
+        for raw in [
+            json!({ "http_status": 403, "error_code": "insufficient_balance" }),
+            json!({ "http_status": 403, "error": { "code": "insufficient_quota" } }),
+            json!({ "status": 402, "type": "credit_balance_too_low" }),
+        ] {
+            let kind = classify_turn_error(Some("auth_required"), Some(&raw));
+            assert_eq!(kind, ConversationTurnErrorKind::Rejected, "raw={raw}");
+        }
+        assert_eq!(
+            classify_turn_error(Some("insufficient_balance"), None),
+            ConversationTurnErrorKind::Rejected
+        );
+    }
+
+    #[test]
+    fn classifies_503_and_model_unavailable_codes_as_service_error() {
+        for raw in [
+            json!({ "http_status": 503, "error": { "code": "model_not_found" } }),
+            json!({ "http_status": 503, "code": "no_available_channel" }),
+            json!({ "error_code": "model_not_found" }),
+        ] {
+            let kind = classify_turn_error(Some("rpc_-32000"), Some(&raw));
+            assert_eq!(kind, ConversationTurnErrorKind::ServiceError, "raw={raw}");
+        }
+        assert_eq!(
+            classify_turn_error(Some("model_not_found"), None),
+            ConversationTurnErrorKind::ServiceError
+        );
+    }
+}

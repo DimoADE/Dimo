@@ -383,12 +383,12 @@ export function restoreStructuredTokens(
 }
 
 export function syncTriggerMenuWidth(composerRoot: HTMLDivElement): void {
+  const menu = composerRoot.querySelector('.astryx-trigger-menu');
+  const popover = menu?.closest<HTMLElement>('[popover]');
+  if (!popover) return;
+
   const width = composerRoot.getBoundingClientRect().width;
   if (width <= 0) return;
 
-  const menu = composerRoot.querySelector('.astryx-trigger-menu');
-  const popover = menu?.closest<HTMLElement>('[popover]');
-  if (popover) {
-    popover.style.width = `${Math.round(width)}px`;
-  }
+  popover.style.width = `${Math.round(width)}px`;
 }

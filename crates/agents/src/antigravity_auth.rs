@@ -132,6 +132,140 @@ fn gcp_field<'a>(env: &'a HashMap<String, String>, key: &str) -> Option<&'a str>
         .filter(|value| !value.is_empty())
 }
 
+const LAUNCH_INJECTED_ENV_VARS: &[&str] = &[
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_GEMINI_BASE_URL",
+    "GEMINI_MODEL",
+    "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_CLOUD_LOCATION",
+];
+
+fn parse_dotenv_entries(text: &str) -> Vec<(String, String)> {
+    let mut entries = Vec::new();
+    for raw_line in text.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let line = trimmed.strip_prefix("export ").unwrap_or(trimmed);
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let value = value.trim();
+        let unquoted = if (value.starts_with('"') && value.ends_with('"') && value.len() >= 2)
+            || (value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2)
+        {
+            &value[1..value.len() - 1]
+        } else {
+            value
+        };
+        entries.push((key.to_string(), unquoted.to_string()));
+    }
+    entries
+}
+
+fn serialize_dotenv_entries(entries: &[(String, String)]) -> String {
+    let mut out = String::new();
+    for (key, value) in entries {
+        out.push_str(key);
+        out.push('=');
+        out.push_str(value);
+        out.push('\n');
+    }
+    out
+}
+
+fn read_dotenv_entries(path: &Path) -> Vec<(String, String)> {
+    std::fs::read_to_string(path)
+        .map(|text| parse_dotenv_entries(&text))
+        .unwrap_or_default()
+}
+
+fn write_dotenv_entries(
+    acp_dir: &Path,
+    path: &Path,
+    entries: &[(String, String)],
+) -> Result<(), String> {
+    let body = serialize_dotenv_entries(entries);
+    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let parent = target.parent().unwrap_or(acp_dir);
+    std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    let temp = parent.join(format!(".env.dimo-{}.tmp", std::process::id()));
+    std::fs::write(&temp, body).map_err(|err| err.to_string())?;
+    if let Err(err) = std::fs::rename(&temp, &target) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(err.to_string());
+    }
+    Ok(())
+}
+
+fn inject_stored_antigravity_env(env: &mut HashMap<String, String>, acp_dir: &Path) {
+    let dotenv_entries = read_dotenv_entries(&acp_dir.join(".env"));
+    for (key, value) in dotenv_entries {
+        if LAUNCH_INJECTED_ENV_VARS.contains(&key.as_str())
+            && !value.trim().is_empty()
+            && env
+                .get(&key)
+                .is_none_or(|existing| existing.trim().is_empty())
+        {
+            env.insert(key, value);
+        }
+    }
+    if let Ok(Some(settings)) = read_settings(&acp_dir.join("settings.json"))
+        && let Some(legacy_env) = settings.get("env").and_then(serde_json::Value::as_object)
+    {
+        for key in LAUNCH_INJECTED_ENV_VARS {
+            if env
+                .get(*key)
+                .is_none_or(|existing| existing.trim().is_empty())
+                && let Some(value) = legacy_env
+                    .get(*key)
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            {
+                env.insert((*key).to_string(), value.to_string());
+            }
+        }
+    }
+}
+
+fn migrate_legacy_settings_env_to_dotenv(acp_dir: &Path, existing: Option<&serde_json::Value>) {
+    let Some(legacy_env) = existing
+        .and_then(|root| root.get("env"))
+        .and_then(serde_json::Value::as_object)
+    else {
+        return;
+    };
+    let env_path = acp_dir.join(".env");
+    let mut entries = read_dotenv_entries(&env_path);
+    let mut changed = false;
+    for (key, value) in legacy_env {
+        let Some(value) = value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        if !entries.iter().any(|(existing_key, existing_val)| {
+            existing_key == key && !existing_val.trim().is_empty()
+        }) {
+            entries.retain(|(existing_key, _)| existing_key != key);
+            entries.push((key.clone(), value.to_string()));
+            changed = true;
+        }
+    }
+    if changed {
+        let _ = write_dotenv_entries(acp_dir, &env_path, &entries);
+    }
+}
+
 pub fn sync_antigravity_settings(
     env: &HashMap<String, String>,
     process_home: Option<&Path>,
@@ -158,27 +292,36 @@ pub fn sync_antigravity_settings(
             };
         }
     };
+    let has_stale_env = existing
+        .as_ref()
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|obj| obj.contains_key("env"));
+    if has_stale_env {
+        migrate_legacy_settings_env_to_dotenv(&acp_dir, existing.as_ref());
+    }
     let existing_auth_type = existing
         .as_ref()
         .and_then(|root| root.get("auth"))
         .and_then(|auth| auth.get("type"))
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let method = match (recorded, existing_auth_type) {
-        (Some(method), _) => method,
-        (None, Some(_)) => {
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let method: String = match (recorded, existing_auth_type) {
+        (Some(method), _) => method.to_string(),
+        (None, Some(_)) if !has_stale_env => {
             return AntigravitySyncReport {
                 path,
                 status: AntigravitySyncStatus::AlreadyCurrent,
                 reason: None,
             };
         }
-        (None, None) => "oauth-personal",
+        (None, Some(existing_method)) => existing_method,
+        (None, None) => "oauth-personal".to_string(),
     };
     let gcp_project = gcp_field(env, "GOOGLE_CLOUD_PROJECT");
     let gcp_location = gcp_field(env, "GOOGLE_CLOUD_LOCATION");
-    let updated = match merge_settings(existing, method, gcp_project, gcp_location) {
+    let updated = match merge_settings(existing, &method, gcp_project, gcp_location) {
         Ok(Some(updated)) => updated,
         Ok(None) => {
             return AntigravitySyncReport {
@@ -209,16 +352,20 @@ pub fn sync_antigravity_settings(
     }
 }
 
-/// Applies the launch env policy and projects the chosen method into
-/// `settings.json`, exactly as a launch does, so saving a method takes effect
-/// before the next session starts.
+/// Loads stored Antigravity `.env` (with legacy `settings.json["env"]`
+/// fallback), applies the launch env policy, and projects the chosen method
+/// into `settings.json` while stripping any stale `"env"` key that
+/// `agy_acp_server` rejects.
 pub fn apply_antigravity_launch_env(env: &mut HashMap<String, String>) -> AntigravitySyncReport {
-    apply_antigravity_env_policy(env);
     let home = env
         .get("HOME")
         .or_else(|| env.get("USERPROFILE"))
         .map(PathBuf::from)
         .or_else(dirs::home_dir);
+    if let Ok(acp_dir) = antigravity_acp_dir(env, home.as_deref()) {
+        inject_stored_antigravity_env(env, &acp_dir);
+    }
+    apply_antigravity_env_policy(env);
     sync_antigravity_settings(env, home.as_deref())
 }
 fn read_settings(path: &Path) -> Result<Option<serde_json::Value>, String> {
@@ -265,6 +412,9 @@ fn merge_settings(
         let obj = root
             .as_object_mut()
             .ok_or_else(|| "it does not hold a JSON object".to_string())?;
+        // `agy_acp_server` rejects an `"env"` key in `settings.json`; credentials
+        // live in `antigravity-acp/.env` and are injected into the child process.
+        obj.remove("env");
         match obj.get("auth") {
             None | Some(serde_json::Value::Null) => {
                 obj.insert("auth".into(), serde_json::json!({}));
@@ -428,5 +578,56 @@ mod tests {
             resolve_gemini_home_from(None, Some(&home)),
             PathBuf::from("/srv/agy/.gemini")
         );
+    }
+
+    #[test]
+    fn launch_env_injects_dotenv_keys_and_strips_legacy_settings_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let acp_dir = dir.path().join(ACP_SUBDIR);
+        std::fs::create_dir_all(&acp_dir).unwrap();
+        std::fs::write(
+            acp_dir.join("settings.json"),
+            r#"{"keep":true,"auth":{"type":"gemini-api-key"},"env":{"GEMINI_API_KEY":"legacy-key","GOOGLE_GEMINI_BASE_URL":"https://legacy.example/v1"}}"#,
+        )
+        .unwrap();
+
+        let mut runtime = env("gemini-api-key");
+        runtime.insert(
+            "GEMINI_HOME".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+        );
+        let report = apply_antigravity_launch_env(&mut runtime);
+        assert_eq!(report.status, AntigravitySyncStatus::Written);
+        assert_eq!(
+            runtime.get("GEMINI_API_KEY").map(String::as_str),
+            Some("legacy-key")
+        );
+        assert_eq!(
+            runtime.get("GOOGLE_GEMINI_BASE_URL").map(String::as_str),
+            Some("https://legacy.example/v1")
+        );
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&report.path).unwrap()).unwrap();
+        assert_eq!(parsed["keep"], true);
+        assert_eq!(parsed["auth"]["type"], "gemini-api-key");
+        assert!(
+            parsed.get("env").is_none(),
+            "settings.json must not contain an env object for agy_acp_server"
+        );
+
+        let dotenv_text = std::fs::read_to_string(acp_dir.join(".env")).unwrap();
+        assert!(dotenv_text.contains("GEMINI_API_KEY=legacy-key"));
+        assert!(dotenv_text.contains("GOOGLE_GEMINI_BASE_URL=https://legacy.example/v1"));
+
+        // Under oauth-personal, .env keys must still be scrubbed by the env policy.
+        let mut oauth_runtime = env("oauth-personal");
+        oauth_runtime.insert(
+            "GEMINI_HOME".to_string(),
+            dir.path().to_string_lossy().into_owned(),
+        );
+        let oauth_report = apply_antigravity_launch_env(&mut oauth_runtime);
+        assert_eq!(oauth_report.status, AntigravitySyncStatus::Written);
+        assert!(!oauth_runtime.contains_key("GEMINI_API_KEY"));
     }
 }

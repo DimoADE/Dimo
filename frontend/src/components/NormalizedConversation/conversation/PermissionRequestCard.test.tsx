@@ -180,6 +180,38 @@ describe('PermissionRequestCard', () => {
     });
   });
 
+  it('shows engine command-prefix options and submits only the selected rule without host auto-approve', async () => {
+    const user = userEvent.setup();
+    const onRespond = vi.fn();
+    render(
+      <PermissionRequestCard
+        request={fileEditRequest({
+          options: [
+            { id: 'accept', label: 'Allow once', kind: 'allow_once' },
+            {
+              id: 'allow-prefix-1',
+              label: 'Remember command prefix',
+              description: 'git status',
+              kind: 'allow_once',
+            },
+            { id: 'decline', label: 'Decline', kind: 'reject_once' },
+          ],
+        })}
+        onRespond={onRespond}
+      />
+    );
+
+    await user.click(screen.getByRole('button', { name: '展开允许选项' }));
+    await user.click(
+      screen.getByRole('menuitem', { name: /记住命令前缀.*git status/ })
+    );
+
+    expect(onRespond).toHaveBeenCalledWith('perm-1', {
+      kind: 'selected',
+      option_id: 'allow-prefix-1',
+    });
+  });
+
   it('uses the agent-provided reject option for the reject action', () => {
     const onRespond = vi.fn();
     render(

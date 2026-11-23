@@ -32,6 +32,7 @@ import {
   resetElectronBrowserSurfaceStoreForTests,
   setCanvasBrowserInteracting,
   unregisterElectronBrowserTab,
+  useElectronBrowserSurfaceStore,
 } from './electronBrowserSurfaceStore';
 
 interface MockWebviewElement extends HTMLElement {
@@ -731,5 +732,91 @@ describe('ElectronBrowserWebview', () => {
       profileId: 'default',
       url: 'https://github.com/',
     });
+  });
+
+  it('routes canvas viewport transform mutations to coalesced rAF live sync without synchronous store setState', async () => {
+    const rafQueue: FrameRequestCallback[] = [];
+    const rafSpy = vi
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation((cb) => {
+        rafQueue.push(cb);
+        return rafQueue.length;
+      });
+    const cancelSpy = vi
+      .spyOn(window, 'cancelAnimationFrame')
+      .mockImplementation(() => {});
+
+    try {
+      render(
+        <>
+          <ElectronBrowserHost />
+          <div data-testid="workspace-canvas-stage" className="react-flow">
+            <div
+              data-testid="canvas-viewport"
+              className="react-flow__viewport"
+              style={{ transform: 'translate(0px, 0px) scale(1)' }}
+            >
+              <div className="react-flow__node" style={{ zIndex: 5 }}>
+                <ElectronBrowserWebview
+                  tabId="tab-canvas-pan"
+                  url="https://pan.example.com"
+                  profileId="default"
+                  surfaceHost="canvas"
+                  panelVisible={true}
+                  surfaceZIndex={5}
+                />
+              </div>
+            </div>
+          </div>
+        </>
+      );
+
+      const stage = screen.getByTestId('workspace-canvas-stage');
+      const viewport = screen.getByTestId('canvas-viewport');
+      const slot = screen.getByTestId('electron-browser-surface-slot');
+      mockRect(stage, { left: 0, top: 0, width: 1200, height: 800 });
+      mockRect(slot, { left: 100, top: 100, width: 400, height: 300 });
+
+      act(() => {
+        window.dispatchEvent(new Event('resize'));
+      });
+
+      const setStateSpy = vi.spyOn(useElectronBrowserSurfaceStore, 'setState');
+      try {
+        mockRect(slot, { left: 140, top: 120, width: 400, height: 300 });
+        await act(async () => {
+          viewport.style.transform = 'translate(40px, 20px) scale(1)';
+          await Promise.resolve();
+        });
+        expect(setStateSpy).not.toHaveBeenCalled();
+        expect(rafQueue).toHaveLength(1);
+
+        // Second mutation before next vsync coalesces into the same pending frame
+        mockRect(slot, { left: 180, top: 140, width: 400, height: 300 });
+        await act(async () => {
+          viewport.style.transform = 'translate(80px, 40px) scale(1)';
+          await Promise.resolve();
+        });
+        expect(setStateSpy).not.toHaveBeenCalled();
+        expect(rafQueue).toHaveLength(1);
+
+        act(() => {
+          rafQueue.shift()?.(16);
+        });
+        const wrapper = screen.getByTestId('electron-browser-host-wrapper');
+        expect(wrapper.style.left).toBe('180px');
+        expect(wrapper.style.top).toBe('140px');
+        expect(setStateSpy).not.toHaveBeenCalled();
+      } finally {
+        setStateSpy.mockRestore();
+      }
+
+      act(() => {
+        unregisterElectronBrowserTab('tab-canvas-pan');
+      });
+    } finally {
+      rafSpy.mockRestore();
+      cancelSpy.mockRestore();
+    }
   });
 });

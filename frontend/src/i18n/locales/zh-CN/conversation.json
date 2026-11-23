@@ -224,6 +224,7 @@
     "reject": "拒绝",
     "allow": "允许",
     "allowOnce": "允许一次",
+    "allowCommandPrefix": "记住命令前缀",
     "allowSession": "本次会话中允许",
     "allowAlways": "总是允许全部",
     "allowActions": "权限允许选项",

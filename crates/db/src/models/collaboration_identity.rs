@@ -369,11 +369,13 @@ pub async fn resolve_session_in(
 ) -> Result<ResolvedSession, IdentityError> {
     let bound = bound_conversation_in(&mut *conn, thread_id, member_id).await?;
     if let Some(existing) = bound
-        && sqlx::query_scalar::<_, i64>("SELECT 1 FROM sessions WHERE id = ?")
-            .bind(existing)
-            .fetch_optional(&mut *conn)
-            .await?
-            .is_some()
+        && sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM sessions WHERE id = ? AND deleted_at IS NULL AND status != 'archived'",
+        )
+        .bind(existing)
+        .fetch_optional(&mut *conn)
+        .await?
+        .is_some()
     {
         return Ok(ResolvedSession {
             conversation_id: existing,
@@ -390,7 +392,9 @@ pub async fn resolve_session_in(
     let template = sqlx::query_scalar::<_, String>(
         "SELECT tm.conversation_id FROM collaboration_thread_members tm
          JOIN sessions s ON lower(hex(s.id)) = replace(tm.conversation_id, '-', '')
-         WHERE tm.member_id = ? ORDER BY tm.joined_at, tm.thread_id LIMIT 1",
+         WHERE tm.member_id = ?
+         ORDER BY (s.deleted_at IS NULL AND s.status != 'archived') DESC, tm.joined_at, tm.thread_id
+         LIMIT 1",
     )
     .bind(member_id)
     .fetch_optional(&mut *conn)
@@ -418,7 +422,19 @@ pub async fn resolve_session_in(
             .map(|session| session.0)
             .ok_or(IdentityError::NotFound("workspace"))?,
     };
-    let new_id = bound.unwrap_or_else(|| thread_session_id(member_id, thread_id));
+    let candidate_id = bound.unwrap_or_else(|| thread_session_id(member_id, thread_id));
+    let candidate_occupied_dead = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM sessions WHERE id = ? AND (deleted_at IS NOT NULL OR status = 'archived')",
+    )
+    .bind(candidate_id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .is_some();
+    let new_id = if candidate_occupied_dead {
+        Uuid::new_v4()
+    } else {
+        candidate_id
+    };
     let executor = template_session.as_ref().and_then(|s| s.1.clone());
     let agent = member
         .agent
@@ -494,19 +510,53 @@ pub async fn resolve_session_in(
             .await?;
         }
     }
-    let inserted = sqlx::query(
-        "INSERT INTO collaboration_thread_members
-           (thread_id, member_id, conversation_id, last_seen_message_id, status, joined_at)
-         VALUES (?, ?, ?, NULL, 'active', ?)
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(thread_id)
-    .bind(member_id)
-    .bind(new_id.to_string())
-    .bind(now())
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
+    let replaced_dead_bound = bound.is_some_and(|old_id| old_id != new_id);
+    let inserted = if replaced_dead_bound {
+        sqlx::query(
+            "INSERT INTO collaboration_thread_members
+               (thread_id, member_id, conversation_id, last_seen_message_id, status, joined_at)
+             VALUES (?, ?, ?, NULL, 'active', ?)
+             ON CONFLICT(thread_id, member_id) DO UPDATE SET
+               conversation_id = excluded.conversation_id,
+               last_seen_message_id = NULL,
+               status = 'active'",
+        )
+        .bind(thread_id)
+        .bind(member_id)
+        .bind(new_id.to_string())
+        .bind(now())
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+    } else {
+        sqlx::query(
+            "INSERT INTO collaboration_thread_members
+               (thread_id, member_id, conversation_id, last_seen_message_id, status, joined_at)
+             VALUES (?, ?, ?, NULL, 'active', ?)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(thread_id)
+        .bind(member_id)
+        .bind(new_id.to_string())
+        .bind(now())
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+    };
+    if let Some(old_id) = bound
+        && old_id != new_id
+    {
+        sqlx::query(
+            "UPDATE collaboration_space_members
+             SET conversation_id = ?
+             WHERE space_id = ? AND conversation_id = ?",
+        )
+        .bind(new_id.to_string())
+        .bind(thread_id)
+        .bind(old_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
     let conversation_id = bound_conversation_in(&mut *conn, thread_id, member_id)
         .await?
@@ -1248,5 +1298,68 @@ mod tests {
         let report = MemberIdentityMigration::run(&pool).await.unwrap();
         assert_eq!(report.seats_bound, 3);
         assert_eq!(report.conversations_created, 1);
+    }
+
+    #[tokio::test]
+    async fn resolve_session_heals_soft_deleted_and_archived_seat_sessions() {
+        let pool = setup_pool().await;
+        let workspace = Uuid::new_v4();
+        let original = Uuid::new_v4();
+        session(&pool, original, workspace, "审查员").await;
+        space(&pool, "space-heal", workspace).await;
+        seat(&pool, "space-heal", original, "审查员").await;
+        MemberIdentityMigration::run(&pool).await.unwrap();
+        let member = member_id_for_conversation(original);
+
+        // 1. Soft-delete the seat's session row -> resolve_session must heal with a live session.
+        sqlx::query("UPDATE sessions SET deleted_at = datetime('now') WHERE id = ?")
+            .bind(original)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let healed_after_delete = resolve_session(&pool, &member, "space-heal")
+            .await
+            .expect("heal soft-deleted seat");
+        assert!(healed_after_delete.created);
+        assert_ne!(healed_after_delete.conversation_id, original);
+        assert_eq!(
+            seat_conversation(&pool, "space-heal", "审查员").await,
+            healed_after_delete.conversation_id
+        );
+        let live_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sessions WHERE id = ? AND deleted_at IS NULL AND status != 'archived'",
+        )
+        .bind(healed_after_delete.conversation_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(live_count, 1);
+
+        // 2. Archive the newly healed session -> resolve_session must heal again.
+        sqlx::query("UPDATE sessions SET status = 'archived' WHERE id = ?")
+            .bind(healed_after_delete.conversation_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let healed_after_archive = resolve_session(&pool, &member, "space-heal")
+            .await
+            .expect("heal archived seat");
+        assert!(healed_after_archive.created);
+        assert_ne!(
+            healed_after_archive.conversation_id,
+            healed_after_delete.conversation_id
+        );
+        assert_eq!(
+            seat_conversation(&pool, "space-heal", "审查员").await,
+            healed_after_archive.conversation_id
+        );
+        let live_after_archive: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sessions WHERE id = ? AND deleted_at IS NULL AND status != 'archived'",
+        )
+        .bind(healed_after_archive.conversation_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(live_after_archive, 1);
     }
 }

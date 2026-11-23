@@ -2558,17 +2558,22 @@ impl ServerApplicationDomains {
             }
             if entry.archive.starts_with("http://") || entry.archive.starts_with("https://") {
                 let archive = download_surface_marketplace_archive(&entry.archive).await?;
-                verify_optional_archive_digest(&archive, requested_digest)?;
-                return self
-                    .plugin_control_import(json!({
-                        "path": archive.to_string_lossy(),
-                        "developerLink": false,
-                        "conflictDecision": conflict_decision,
-                        "origin": origin_url,
-                        "gitRef": entry.version,
-                        "locked": true,
-                    }))
-                    .await;
+                let result = match verify_optional_archive_digest(&archive, requested_digest) {
+                    Ok(()) => {
+                        self.plugin_control_import(json!({
+                            "path": archive.to_string_lossy(),
+                            "developerLink": false,
+                            "conflictDecision": conflict_decision,
+                            "origin": origin_url,
+                            "gitRef": entry.version,
+                            "locked": true,
+                        }))
+                        .await
+                    }
+                    Err(error) => Err(error),
+                };
+                let _ = std::fs::remove_file(&archive);
+                return result;
             }
         }
 
@@ -2603,23 +2608,33 @@ impl ServerApplicationDomains {
         for url in plugins::official_github_archive_urls(publisher, short_name) {
             match download_surface_marketplace_archive(&url).await {
                 Ok(archive) => {
-                    if let Err(error) = verify_optional_archive_digest(&archive, requested_digest) {
-                        import_error = Some(error);
-                        continue;
-                    }
-                    match self
-                        .plugin_control_import(json!({
-                            "path": archive.to_string_lossy(),
-                            "developerLink": false,
-                            "conflictDecision": conflict_decision,
-                            "origin": github_origin.as_deref().unwrap_or(&origin_url),
-                            "gitRef": requested_version.unwrap_or("main"),
-                            "locked": true,
-                        }))
-                        .await
-                    {
+                    let result = match verify_optional_archive_digest(&archive, requested_digest) {
+                        Ok(()) => {
+                            self.plugin_control_import(json!({
+                                "path": archive.to_string_lossy(),
+                                "developerLink": false,
+                                "conflictDecision": conflict_decision,
+                                "origin": github_origin.as_deref().unwrap_or(&origin_url),
+                                "gitRef": requested_version.unwrap_or("main"),
+                                "locked": true,
+                            }))
+                            .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    let _ = std::fs::remove_file(&archive);
+                    match result {
                         Ok(result) => return Ok(result),
-                        Err(error) => import_error = Some(error),
+                        Err(error) => {
+                            let is_legacy_api_error =
+                                crate::domains::is_legacy_plugin_api_error(&error);
+                            if import_error.is_none() {
+                                import_error = Some(error);
+                            }
+                            if !is_legacy_api_error {
+                                break;
+                            }
+                        }
                     }
                 }
                 Err(error) => {
@@ -2638,21 +2653,29 @@ impl ServerApplicationDomains {
         {
             match download_surface_marketplace_archive(&url).await {
                 Ok(archive) => {
-                    verify_optional_archive_digest(&archive, requested_digest)?;
-                    match self
-                        .plugin_control_import(json!({
-                            "path": archive.to_string_lossy(),
-                            "developerLink": false,
-                            "conflictDecision": conflict_decision,
-                            "origin": origin_url,
-                            "gitRef": listing.tag,
-                            "locked": true,
-                            "showTree": listing.show_tree,
-                        }))
-                        .await
-                    {
+                    let result = match verify_optional_archive_digest(&archive, requested_digest) {
+                        Ok(()) => {
+                            self.plugin_control_import(json!({
+                                "path": archive.to_string_lossy(),
+                                "developerLink": false,
+                                "conflictDecision": conflict_decision,
+                                "origin": origin_url,
+                                "gitRef": listing.tag,
+                                "locked": true,
+                                "showTree": listing.show_tree,
+                            }))
+                            .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    let _ = std::fs::remove_file(&archive);
+                    match result {
                         Ok(result) => return Ok(result),
-                        Err(error) => import_error = Some(error),
+                        Err(error) => {
+                            if import_error.is_none() {
+                                import_error = Some(error);
+                            }
+                        }
                     }
                 }
                 Err(error) => {

@@ -44,7 +44,16 @@ export function useWorkspaceStageInsets({
       getLiveDockviewApi(apiRef.current) ??
       getLiveDockviewApi(readyDockviewApi);
 
-    const measureInsets = () => {
+    let rafId: number | null = null;
+    const cancelScheduledMeasure = () => {
+      if (rafId !== null && typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(rafId);
+      }
+      rafId = null;
+    };
+
+    const measureInsetsNow = () => {
+      cancelScheduledMeasure();
       const next = measureCanvasStageInsets(
         resolveLiveApi(),
         dockviewRootRef.current,
@@ -55,36 +64,63 @@ export function useWorkspaceStageInsets({
       );
     };
 
+    const scheduleMeasureInsets = () => {
+      if (typeof requestAnimationFrame !== 'function') {
+        measureInsetsNow();
+        return;
+      }
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        measureInsetsNow();
+      });
+    };
+
     const api = resolveLiveApi();
     const resizeObserver =
       typeof ResizeObserver !== 'undefined'
-        ? new ResizeObserver(() => measureInsets())
+        ? new ResizeObserver(scheduleMeasureInsets)
         : null;
     const groupDisposables: Array<{ dispose: () => void }> = [];
+    let observedGroups: readonly unknown[] = [];
+    let observedHost: HTMLElement | null = null;
     const clearGroupObservers = () => {
       while (groupDisposables.length > 0) {
         groupDisposables.pop()?.dispose();
       }
       resizeObserver?.disconnect();
+      observedGroups = [];
+      observedHost = null;
     };
 
     const syncGroupObservers = () => {
-      clearGroupObservers();
       const host = dockviewRootRef.current;
+      const currentApi = resolveLiveApi();
+      const nextGroups = currentApi ? currentApi.groups : [];
+      if (
+        host === observedHost &&
+        nextGroups.length === observedGroups.length &&
+        nextGroups.every((group, index) => group === observedGroups[index])
+      ) {
+        return;
+      }
+
+      clearGroupObservers();
+      observedHost = host;
+      observedGroups = [...nextGroups];
       if (resizeObserver && host) {
         resizeObserver.observe(host);
       }
-      const currentApi = resolveLiveApi();
       if (!currentApi) return;
       for (const group of currentApi.groups) {
         if (group.api?.onDidDimensionsChange) {
           groupDisposables.push(
-            group.api.onDidDimensionsChange(() => measureInsets())
+            group.api.onDidDimensionsChange(scheduleMeasureInsets)
           );
         }
         if (group.api?.onDidVisibilityChange) {
           groupDisposables.push(
-            group.api.onDidVisibilityChange(() => measureInsets())
+            group.api.onDidVisibilityChange(scheduleMeasureInsets)
           );
         }
         if (resizeObserver) {
@@ -100,11 +136,11 @@ export function useWorkspaceStageInsets({
     };
 
     syncGroupObservers();
-    measureInsets();
+    measureInsetsNow();
 
     const handleStructureChange = () => {
       syncGroupObservers();
-      measureInsets();
+      scheduleMeasureInsets();
     };
     const apiDisposables = [
       api?.onDidLayoutChange(handleStructureChange),
@@ -122,12 +158,12 @@ export function useWorkspaceStageInsets({
       }
       if (!target.closest('.dv-sash')) return;
       removeSashMoveListeners?.();
-      const onMove = () => measureInsets();
+      const onMove = () => scheduleMeasureInsets();
       const onEnd = () => {
-        measureInsets();
+        measureInsetsNow();
         removeSashMoveListeners?.();
       };
-      document.addEventListener('pointermove', onMove);
+      document.addEventListener('pointermove', onMove, { passive: true });
       document.addEventListener('pointerup', onEnd);
       document.addEventListener('pointercancel', onEnd);
       removeSashMoveListeners = () => {
@@ -140,6 +176,7 @@ export function useWorkspaceStageInsets({
     document.addEventListener('pointerdown', handlePointerDownCapture, true);
 
     return () => {
+      cancelScheduledMeasure();
       document.removeEventListener(
         'pointerdown',
         handlePointerDownCapture,

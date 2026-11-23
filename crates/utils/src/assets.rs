@@ -597,9 +597,29 @@ pub fn dimo_install_data_dir_candidates() -> Vec<PathBuf> {
     )
 }
 
+/// Returns `true` when `path`'s final directory segment already carries a
+/// migration backup suffix (`.superseded-` or `.preserved-`).
+pub fn is_migration_backup_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains(".superseded-") || name.contains(".preserved-"))
+}
+
+fn is_chained_or_preserved_backup_dir(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.contains(".preserved-") || name.matches(".superseded-").count() > 1
+        })
+}
+
 /// Set-aside copies named `{dir}.superseded-*` that still contain `db.sqlite`.
-/// Missing directories are ignored. Nothing is created.
+/// Missing directories, already-superseded/preserved directories, and chained
+/// backup copies are ignored. Nothing is created.
 pub fn superseded_data_dirs_beside(dir: &Path) -> Vec<PathBuf> {
+    if is_migration_backup_dir(dir) {
+        return Vec::new();
+    }
     let Some(parent) = dir.parent() else {
         return Vec::new();
     };
@@ -619,7 +639,7 @@ pub fn superseded_data_dirs_beside(dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_dir() {
+        if !path.is_dir() || is_chained_or_preserved_backup_dir(&path) {
             continue;
         }
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -755,6 +775,7 @@ pub fn legacy_data_dir_adoption(
     target_dir: PathBuf,
 ) -> Option<LegacyDataDirAdoption> {
     (!same_path_for_adoption(&legacy_dir, &target_dir)
+        && !is_chained_or_preserved_backup_dir(&legacy_dir)
         && !is_already_adopted_legacy_source(&target_dir, &legacy_dir)
         && legacy_dir.join("db.sqlite").is_file())
     .then_some(LegacyDataDirAdoption {

@@ -29,6 +29,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
 import {
+  resolveCommandPrefixOptions,
   resolvePermissionAllowOption,
   type PermissionAllowScope,
 } from './permissionRequestPresentation';
@@ -168,6 +169,7 @@ export function PermissionRequestCard({
   const permissionType = permissionTypeFor(detail.kind);
   const PermissionTypeIcon = permissionType.icon;
   const primaryAllow = resolvePermissionAllowOption(options, 'once');
+  const commandPrefixOptions = resolveCommandPrefixOptions(options);
   const rejectOption =
     options.find((option) => option.kind === 'reject_once') ??
     options.find((option) => option.kind === 'reject_always');
@@ -343,12 +345,12 @@ export function PermissionRequestCard({
                       side="top"
                       className="w-[min(280px,calc(100vw-24px))] p-1.5"
                     >
-                      {allowScopes.map(({ scope, label }) => {
+                      {allowScopes.flatMap(({ scope, label }) => {
                         const option = resolvePermissionAllowOption(
                           options,
                           scope
                         );
-                        return (
+                        const scopeItem = (
                           <DropdownMenuItem
                             key={scope}
                             disabled={responding || !option}
@@ -358,6 +360,36 @@ export function PermissionRequestCard({
                             {label}
                           </DropdownMenuItem>
                         );
+                        if (
+                          scope !== 'once' ||
+                          commandPrefixOptions.length === 0
+                        ) {
+                          return [scopeItem];
+                        }
+                        return [
+                          scopeItem,
+                          ...commandPrefixOptions.map((prefixOption) => (
+                            <DropdownMenuItem
+                              key={prefixOption.id}
+                              disabled={responding}
+                              className="px-2.5 py-2"
+                              onSelect={() => respondWithOption(prefixOption)}
+                            >
+                              <span className="flex min-w-0 flex-col gap-0.5">
+                                <span>
+                                  {t(
+                                    'permissionRequestCard.allowCommandPrefix'
+                                  )}
+                                </span>
+                                {prefixOption.description ? (
+                                  <code className="block break-all font-mono text-[11px] text-muted-foreground">
+                                    {prefixOption.description}
+                                  </code>
+                                ) : null}
+                              </span>
+                            </DropdownMenuItem>
+                          )),
+                        ];
                       })}
                     </DropdownMenuContent>
                   </DropdownMenu>

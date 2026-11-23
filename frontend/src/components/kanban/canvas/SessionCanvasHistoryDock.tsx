@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import { Redo2, Undo2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { cn } from '@/lib/utils';
@@ -7,7 +8,7 @@ const DOCK_BUTTON_SHAPE =
 
 const DOCK_BUTTON = `${DOCK_BUTTON_SHAPE} text-muted-foreground hover:bg-[var(--surface-control-hover)] hover:text-foreground disabled:pointer-events-none disabled:opacity-40`;
 
-export function SessionCanvasHistoryDock({
+export const SessionCanvasHistoryDock = memo(function SessionCanvasHistoryDock({
   canUndo,
   canRedo,
   onUndo,
@@ -55,4 +56,4 @@ export function SessionCanvasHistoryDock({
       </button>
     </div>
   );
-}
+});

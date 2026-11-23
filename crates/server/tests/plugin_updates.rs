@@ -375,3 +375,106 @@ async fn standalone_host_updates_plugins_over_http() {
     assert_eq!(detail["data"]["config"], json!({"preview":false}));
     fixture_task.abort();
 }
+
+#[test]
+fn plugin_control_import_rejects_legacy_v1_before_materializing_snapshot() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let data = tempfile::tempdir().unwrap();
+                    let legacy_pkg = tempfile::tempdir().unwrap();
+                    for (name, content) in [
+                        (
+                            ".dimo-plugin/plugin.json",
+                            json!({
+                                "manifestVersion": 4,
+                                "apiVersion": "1.0",
+                                "id": "legacy.browser",
+                                "publisher": "dimo",
+                                "name": "Legacy Browser",
+                                "version": "1.0.0",
+                                "readme": "README.md",
+                                "content": {
+                                    "root": "contents",
+                                    "index": ".dimo-plugin/content.index.json"
+                                },
+                                "config": {
+                                    "schema": {
+                                        "type": "object",
+                                        "additionalProperties": false
+                                    }
+                                },
+                                "engines": {
+                                    "dimo": ">=0.1.3 <1.0.0",
+                                    "pluginSdk": "^1.0.0"
+                                },
+                                "integrations": [
+                                    {
+                                        "id": "legacy-skill",
+                                        "kind": "content.skill",
+                                        "resource": "contents/skills/legacy"
+                                    }
+                                ]
+                            })
+                            .to_string(),
+                        ),
+                        (
+                            "README.md",
+                            "---\nsummary: Legacy v1 package.\n---\n# Legacy\n".into(),
+                        ),
+                        (
+                            ".dimo-plugin/content.index.json",
+                            "{\"schemaVersion\":1,\"items\":[{\"path\":\"contents/skills/legacy/SKILL.md\",\"kind\":\"skill\",\"title\":\"Legacy\"}]}".into(),
+                        ),
+                        (
+                            "contents/skills/legacy/SKILL.md",
+                            "---\nname: legacy\ndescription: Legacy\n---\n".into(),
+                        ),
+                        ("config.json", "{}".into()),
+                    ] {
+                        let file = legacy_pkg.path().join(name);
+                        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                        std::fs::write(file, content).unwrap();
+                    }
+
+                    let server = HeadlessServer::bootstrap(
+                        ServerBootstrapConfig::new(data.path()).with_token(ServerToken::new(TOKEN)),
+                    )
+                    .await
+                    .unwrap();
+                    let app = server.runtime().router();
+                    let (status, body) = call(
+                        app,
+                        "plugin_control_import",
+                        json!({
+                            "path": legacy_pkg.path(),
+                            "origin": "https://github.com/DimoADE/Dimo-plugin-browser",
+                            "gitRef": "master",
+                            "locked": true
+                        }),
+                    )
+                    .await;
+                    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+                    assert!(
+                        body.to_string()
+                            .contains("unsupported plugin apiVersion `1.0`"),
+                        "unexpected response body: {body}"
+                    );
+                    assert!(
+                        !data
+                            .path()
+                            .join("plugins/snapshots/legacy.browser")
+                            .exists(),
+                        "rejected legacy v1 package must not be materialized into plugins/snapshots"
+                    );
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

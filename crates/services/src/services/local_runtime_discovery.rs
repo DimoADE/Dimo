@@ -231,46 +231,68 @@ async fn probe_candidate(
     probe_resolved_candidates(candidates, version_args).await
 }
 
+enum VersionProbeOutcome {
+    Version(Option<String>),
+    SoftFailure(String),
+    BrokenExecutable(String),
+}
+
 async fn probe_resolved_candidates(
     candidates: Vec<std::path::PathBuf>,
     version_args: &[&str],
 ) -> anyhow::Result<LocalRuntimeEvidence> {
-    let mut first_path = None;
+    let mut soft_fallback_path = None;
+    let mut last_broken_error = None;
     for executable in candidates {
         let Ok(executable) = canonicalize_spawnable(executable).await else {
             continue;
         };
-        if first_path.is_none() {
-            first_path = Some(executable.clone());
-        }
         if version_args.is_empty() {
             return Ok(LocalRuntimeEvidence {
                 path: executable.clone(),
                 version: executable_file_revision(&executable),
             });
         }
-        match probe_version(&executable, version_args).await {
-            Ok(version) => {
+        match probe_version_detailed(&executable, version_args).await {
+            VersionProbeOutcome::Version(version) => {
                 return Ok(LocalRuntimeEvidence {
                     path: executable,
                     version,
                 });
             }
-            Err(error) => {
+            VersionProbeOutcome::SoftFailure(error) => {
                 tracing::debug!(
                     path = %executable.display(),
                     %error,
-                    "external Runtime version probe failed; trying the next PATH hit"
+                    "external Runtime version probe failed softly; trying the next PATH hit"
                 );
+                if soft_fallback_path.is_none() {
+                    soft_fallback_path = Some(executable);
+                }
+            }
+            VersionProbeOutcome::BrokenExecutable(detail) => {
+                tracing::debug!(
+                    path = %executable.display(),
+                    %detail,
+                    "rejecting broken external Runtime executable; trying the next PATH hit"
+                );
+                last_broken_error = Some(format!(
+                    "external candidate `{}` failed to run: {detail}",
+                    executable.display()
+                ));
             }
         }
     }
-    let path = first_path
-        .ok_or_else(|| anyhow::anyhow!("external candidate is not an absolute executable file"))?;
-    Ok(LocalRuntimeEvidence {
-        path,
-        version: None,
-    })
+    if let Some(path) = soft_fallback_path {
+        return Ok(LocalRuntimeEvidence {
+            path,
+            version: None,
+        });
+    }
+    if let Some(broken) = last_broken_error {
+        anyhow::bail!("{broken}");
+    }
+    anyhow::bail!("external candidate is not an absolute executable file")
 }
 
 async fn canonicalize_spawnable(
@@ -492,43 +514,70 @@ fn write_cached_probe_version(path: &std::path::Path, revision: &str, version: &
     }
 }
 
-async fn probe_version(
+async fn probe_version_detailed(
     executable: &std::path::Path,
     version_args: &[&str],
-) -> anyhow::Result<Option<String>> {
+) -> VersionProbeOutcome {
     let revision = version_probe_cache_revision(executable);
     if let Some(revision) = revision.as_deref()
         && let Some(cached) = read_cached_probe_version(executable, revision)
     {
-        return Ok(Some(cached));
+        return VersionProbeOutcome::Version(Some(cached));
     }
     let mut command = utils::process::new_hidden_tokio_command(executable, version_args);
     if std::env::var_os("HERMES_NPM_AUTO_SETUP").is_none() {
         command.env("HERMES_NPM_AUTO_SETUP", "0");
     }
-    let output = utils::process::run_command_output_with_timeout(
+    let output = match utils::process::run_command_output_with_timeout(
         &mut command,
         LOCAL_RUNTIME_VERSION_TIMEOUT,
     )
     .await
-    .map_err(|error| {
-        if error.kind() == std::io::ErrorKind::TimedOut {
-            anyhow::anyhow!("external Runtime version probe timed out")
-        } else {
-            error.into()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+            return VersionProbeOutcome::SoftFailure(
+                "external Runtime version probe timed out".to_string(),
+            );
         }
-    })?;
+        Err(error) => {
+            return VersionProbeOutcome::BrokenExecutable(error.to_string());
+        }
+    };
 
+    let stdout = utils::process::decode_process_output(&output.stdout);
+    let stderr = utils::process::decode_process_output(&output.stderr);
     if !output.status.success() {
-        anyhow::bail!("external Runtime version probe failed");
+        if agents::probe_output_indicates_broken_executable(&stdout, &stderr) {
+            let detail = utils::process::command_output_detail(&output)
+                .unwrap_or_else(|| format!("exit status {}", output.status));
+            return VersionProbeOutcome::BrokenExecutable(detail);
+        }
+        return VersionProbeOutcome::SoftFailure(format!(
+            "external Runtime version probe failed ({})",
+            output.status
+        ));
     }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let version = [stdout, stderr].into_iter().find(|value| !value.is_empty());
+    let version = [stdout.trim().to_string(), stderr.trim().to_string()]
+        .into_iter()
+        .find(|value| !value.is_empty());
     if let (Some(revision), Some(version)) = (revision.as_deref(), version.as_deref()) {
         write_cached_probe_version(executable, revision, version);
     }
-    Ok(version)
+    VersionProbeOutcome::Version(version)
+}
+
+#[cfg(test)]
+async fn probe_version(
+    executable: &std::path::Path,
+    version_args: &[&str],
+) -> anyhow::Result<Option<String>> {
+    match probe_version_detailed(executable, version_args).await {
+        VersionProbeOutcome::Version(version) => Ok(version),
+        VersionProbeOutcome::SoftFailure(err) | VersionProbeOutcome::BrokenExecutable(err) => {
+            anyhow::bail!("{err}")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -565,6 +614,45 @@ mod tests {
         let expected = canonicalize_spawnable(script).await.unwrap();
         assert_eq!(evidence.path, expected);
         assert!(evidence.version.is_none());
+    }
+
+    #[tokio::test]
+    async fn rejects_broken_darwin_arm64_enoent_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+
+        #[cfg(windows)]
+        let script = {
+            let script = dir.path().join("grok.cmd");
+            std::fs::write(
+                &script,
+                "@echo off\r\necho Error: spawn C:\\npm\\node_modules\\grok\\vendor\\darwin-arm64\\grok ENOENT 1>&2\r\nexit /b 1\r\n",
+            )
+            .unwrap();
+            script
+        };
+        #[cfg(not(windows))]
+        let script = {
+            use std::os::unix::fs::PermissionsExt;
+            let script = dir.path().join("grok");
+            std::fs::write(
+                &script,
+                "#!/bin/sh\necho 'Error: spawn /npm/node_modules/grok/vendor/darwin-arm64/grok ENOENT' >&2\nexit 1\n",
+            )
+            .unwrap();
+            let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&script, permissions).unwrap();
+            script
+        };
+
+        let error = probe_resolved_candidates(vec![script], &["--version"])
+            .await
+            .expect_err("broken darwin-arm64 ENOENT binary must not be reported as healthy");
+        let text = error.to_string();
+        assert!(
+            text.contains("darwin-arm64") || text.contains("ENOENT"),
+            "{text}"
+        );
     }
 
     #[tokio::test]

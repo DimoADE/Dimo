@@ -37,9 +37,9 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-pub(crate) use self::plugins_marketplace::plugin_control_item;
 #[allow(unused_imports)]
 use self::plugins_marketplace::*;
+pub(crate) use self::plugins_marketplace::{is_legacy_plugin_api_error, plugin_control_item};
 use crate::{
     PreviewProxyRegistry,
     automation_runtime::HeadlessAutomationRuntime,
@@ -1285,5 +1285,19 @@ mod plugin_invoke_contribution_args {
                 .unwrap_or_else(|| panic!("expected DomainCommand for {qualified}"));
             assert_eq!(resolved, expected, "mismatch for {qualified}");
         }
+    }
+
+    #[test]
+    fn legacy_plugin_api_error_classifier_matches_only_unsupported_api_version() {
+        let legacy = ApplicationError::bad_request(
+            "unsupported plugin apiVersion `1.0`; Dimo v2 plugin architecture requires apiVersion \"2.0\"",
+        );
+        assert!(is_legacy_plugin_api_error(&legacy));
+        assert!(!is_legacy_plugin_api_error(&ApplicationError::internal(
+            "remove plugin snapshot directory: Access is denied"
+        )));
+        assert!(!is_legacy_plugin_api_error(&ApplicationError::conflict(
+            "plugin is already installed"
+        )));
     }
 }

@@ -245,8 +245,9 @@ pub use launch_gate::{
     component_dirs_precede_user_path, discover_acp_launch_lock_in_dirs,
     discover_path_acp_launch_lock, launch_program_available, launch_program_is_legacy_acp_shim,
     launch_program_is_vendor_cli, lifecycle_ready_for_path_acp, missing_launch_program_error,
-    prefer_path_launch_program, runtime_executable_env_key, sanitize_runtime_executable_env,
-    sanitize_runtime_executable_lock_env,
+    prefer_path_launch_program, probe_launch_candidate_executable,
+    probe_output_indicates_broken_executable, runtime_executable_env_key,
+    sanitize_runtime_executable_env, sanitize_runtime_executable_lock_env,
 };
 pub use lifecycle::{
     BUSY_LIFECYCLE_MESSAGE, ComponentOwnership, LifecycleAction, LifecycleBlockReason,

@@ -50,10 +50,27 @@ export function ToolCallTarget({
     };
     update();
     if (typeof ResizeObserver !== 'function') return undefined;
-    const observer = new ResizeObserver(update);
+    let rafId: number | null = null;
+    const scheduleUpdate = () => {
+      if (typeof requestAnimationFrame !== 'function') {
+        update();
+        return;
+      }
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        update();
+      });
+    };
+    const observer = new ResizeObserver(scheduleUpdate);
     if (typeof observer.observe !== 'function') return undefined;
     observer.observe(node);
-    return () => observer.disconnect();
+    return () => {
+      if (rafId !== null && typeof cancelAnimationFrame === 'function') {
+        cancelAnimationFrame(rafId);
+      }
+      observer.disconnect();
+    };
   }, [label]);
 
   const labelClass = overflows

@@ -41,9 +41,64 @@ pub(in crate::service) fn session_control_replay_plan(
 
 /// Conversation selection wins per key over the agent's last-used / settings
 /// defaults (CodeG `getSavedPrefsForConnect`).
+#[cfg(test)]
 pub(in crate::service) fn session_control_preferences(
     binding: Option<&ConversationAgentBindingRecord>,
     agent_defaults: &[(String, serde_json::Value)],
+) -> SessionControlPreferences {
+    session_control_preferences_for_member(binding, agent_defaults, None)
+}
+
+/// Returns `true` if a collaboration member explicitly configured a non-empty
+/// string value for `key` in `collaboration_members.config_values`.
+pub(in crate::service) fn seat_has_explicit_config_key(
+    member_config: &crate::collaboration::MemberSessionConfig,
+    key: &str,
+) -> bool {
+    member_config
+        .config_values
+        .as_object()
+        .and_then(|map| map.get(key))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+}
+
+/// Remove the listed keys from a `config_selection_json` object, returning
+/// `Some(updated_json)` only if at least one key was removed.
+pub(in crate::service) fn remove_config_selection_keys(
+    raw_json: &str,
+    keys: &[&str],
+) -> Option<String> {
+    let trimmed = raw_json.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut map =
+        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(trimmed).ok()?;
+    let mut removed = false;
+    for key in keys {
+        if map.remove(*key).is_some() {
+            removed = true;
+        }
+    }
+    if !removed {
+        return None;
+    }
+    serde_json::to_string(&map).ok()
+}
+
+/// Resolve session control preferences for either a standalone conversation
+/// (`member_config == None`) or a collaboration bot/seat (`Some(member_config)`).
+///
+/// For a collaboration seat that has no explicit member `"model"` override in
+/// `collaboration_members.config_values`, a stale observed `"model"` cached on
+/// `conversation_agent_bindings.config_selection_json` must NOT override the
+/// agent's current `agent_session_defaults` or live default provider/model.
+pub(in crate::service) fn session_control_preferences_for_member(
+    binding: Option<&ConversationAgentBindingRecord>,
+    agent_defaults: &[(String, serde_json::Value)],
+    member_config: Option<&crate::collaboration::MemberSessionConfig>,
 ) -> SessionControlPreferences {
     let mut config = Vec::new();
     for (key, value) in agent_defaults {
@@ -62,7 +117,12 @@ pub(in crate::service) fn session_control_preferences(
             value,
         });
     }
+    let ignore_inherited_model =
+        member_config.is_some_and(|cfg| !seat_has_explicit_config_key(cfg, "model"));
     for override_item in binding_config_selection(binding) {
+        if ignore_inherited_model && override_item.key == "model" {
+            continue;
+        }
         if let Some(existing) = config
             .iter_mut()
             .find(|existing| existing.key == override_item.key)
@@ -196,4 +256,136 @@ pub(in crate::service) fn resolve_agent_id_from_executor(
     AgentKind::from_lenient(raw)
         .and_then(|kind| AgentId::parse(kind.as_str()).ok())
         .or_else(|| AgentId::parse(raw).ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::collaboration::MemberSessionConfig;
+
+    fn binding_with_config(config_selection_json: &str) -> ConversationAgentBindingRecord {
+        let now = Utc::now();
+        ConversationAgentBindingRecord {
+            id: Uuid::new_v4(),
+            conversation_id: Uuid::new_v4(),
+            agent_id: AgentId::parse("opencode").expect("opencode"),
+            working_dir: "/workspace".to_string(),
+            acp_session_id: Some("oc-session-1".to_string()),
+            resume_allowed: true,
+            invalidated_reason: None,
+            connection_id: None,
+            continuation_key: None,
+            is_resume_head: true,
+            acp_protocol_version: None,
+            runtime_version: None,
+            acp_version: None,
+            load_supported: false,
+            resume_supported: false,
+            close_supported: false,
+            terminal_supported: false,
+            additional_directories_supported: false,
+            prompt_capabilities_json: "{}".to_string(),
+            session_capabilities_json: "{}".to_string(),
+            client_capabilities_json: "{}".to_string(),
+            mcp_servers_json: "[]".to_string(),
+            modes_json: "[]".to_string(),
+            config_options_json: "[]".to_string(),
+            current_mode: None,
+            config_selection_json: config_selection_json.to_string(),
+            status: "active".to_string(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn seat_without_explicit_model_uses_updated_agent_default_instead_of_stale_binding_model() {
+        let binding = binding_with_config(
+            r#"{"model":"stale-provider/old-model","reasoning_effort":"high"}"#,
+        );
+        let member_cfg = MemberSessionConfig {
+            agent_id: Some("opencode".to_string()),
+            mode_id: None,
+            config_values: json!({}),
+            persona_prompt: None,
+        };
+
+        // Updated agent default must win over the stale binding model.
+        let prefs = session_control_preferences_for_member(
+            Some(&binding),
+            &[("model".to_string(), json!("new-provider/fresh-model"))],
+            Some(&member_cfg),
+        );
+        assert_eq!(
+            prefs
+                .config
+                .iter()
+                .find(|o| o.key == "model")
+                .map(|o| o.value.as_str()),
+            Some("new-provider/fresh-model"),
+            "seat without explicit override must pick up updated agent default"
+        );
+        assert_eq!(
+            prefs
+                .config
+                .iter()
+                .find(|o| o.key == "reasoning_effort")
+                .map(|o| o.value.as_str()),
+            Some("high"),
+            "non-model selection keys should remain intact"
+        );
+
+        // When no agent default is set, stale binding model must NOT be sent so live default wins.
+        let prefs_live =
+            session_control_preferences_for_member(Some(&binding), &[], Some(&member_cfg));
+        assert!(
+            !prefs_live.config.iter().any(|o| o.key == "model"),
+            "stale inherited model must be omitted when neither member nor agent defaults pin it"
+        );
+    }
+
+    #[test]
+    fn seat_with_explicit_member_model_override_is_preserved_over_agent_default() {
+        let binding = binding_with_config(r#"{"model":"custom-provider/pinned-model"}"#);
+        let member_cfg = MemberSessionConfig {
+            agent_id: Some("opencode".to_string()),
+            mode_id: None,
+            config_values: json!({ "model": "custom-provider/pinned-model" }),
+            persona_prompt: None,
+        };
+
+        let prefs = session_control_preferences_for_member(
+            Some(&binding),
+            &[("model".to_string(), json!("new-provider/fresh-model"))],
+            Some(&member_cfg),
+        );
+        assert_eq!(
+            prefs
+                .config
+                .iter()
+                .find(|o| o.key == "model")
+                .map(|o| o.value.as_str()),
+            Some("custom-provider/pinned-model"),
+            "explicit member model override must win over agent default"
+        );
+    }
+
+    #[test]
+    fn remove_config_selection_keys_drops_only_target_keys() {
+        let updated = remove_config_selection_keys(
+            r#"{"model":"stale/x","reasoning_effort":"medium"}"#,
+            &["model"],
+        )
+        .expect("should strip model");
+        let parsed: serde_json::Value = serde_json::from_str(&updated).unwrap();
+        assert_eq!(parsed, json!({ "reasoning_effort": "medium" }));
+        assert_eq!(
+            remove_config_selection_keys(r#"{"reasoning_effort":"medium"}"#, &["model"]),
+            None
+        );
+    }
 }

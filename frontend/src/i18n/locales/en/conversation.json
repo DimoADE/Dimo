@@ -224,6 +224,7 @@
     "reject": "Reject",
     "allow": "Allow",
     "allowOnce": "Allow once",
+    "allowCommandPrefix": "Remember command prefix",
     "allowSession": "Allow for this session",
     "allowAlways": "Always allow all",
     "allowActions": "Permission approval options",

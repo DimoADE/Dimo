@@ -1010,9 +1010,7 @@ pub(super) async fn capture_projection(
             if id == "gemini" {
                 capture_gemini_state(&homes.gemini, &mut backup).await?;
             } else {
-                let settings = antigravity_settings_path(&homes.gemini);
-                capture_json_env(&settings, GEMINI_ENV_KEYS, &mut backup).await?;
-                capture_antigravity_auth_type(&settings, &mut backup).await?;
+                capture_antigravity_state(&homes.gemini, &mut backup).await?;
             }
         }
         "grok" => capture_grok_toml(&homes.grok.join("config.toml"), &mut backup).await?,
@@ -1065,7 +1063,7 @@ pub(super) fn empty_projection_backup(agent_id: &AgentId) -> ProviderProjectionB
     let mut backup = ProviderProjectionBackup::default();
     let json_keys: &[&str] = match agent_id.as_str() {
         "claude_code" => CLAUDE_ENV_KEYS,
-        _ if is_antigravity(agent_id) => GEMINI_ENV_KEYS,
+        "gemini" => GEMINI_ENV_KEYS,
         _ => &[],
     };
     for key in json_keys {
@@ -1079,6 +1077,13 @@ pub(super) fn empty_projection_backup(agent_id: &AgentId) -> ProviderProjectionB
             .json_values
             .insert(GEMINI_MODEL_NAME_KEY.to_string(), None);
         backup.file_values.insert(GEMINI_ENV_FILE.to_string(), None);
+    } else if is_antigravity(agent_id) {
+        backup
+            .json_values
+            .insert(ANTIGRAVITY_AUTH_TYPE_BACKUP_KEY.to_string(), None);
+        backup
+            .file_values
+            .insert(ANTIGRAVITY_ENV_FILE.to_string(), None);
     }
     if agent_id.as_str() == "codex" {
         for key in CODEX_CONFIG_KEYS {
@@ -1138,9 +1143,7 @@ pub(super) async fn restore_projection(
             if id == "gemini" {
                 restore_gemini_state(&homes.gemini, backup).await
             } else {
-                let settings = antigravity_settings_path(&homes.gemini);
-                restore_json_env(&settings, GEMINI_ENV_KEYS, backup, true).await?;
-                restore_antigravity_auth_type(&settings, backup).await
+                restore_antigravity_state(&homes.gemini, backup).await
             }
         }
         "grok" => restore_grok_projection(&homes.grok, backup).await,
