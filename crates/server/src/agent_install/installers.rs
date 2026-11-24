@@ -21,14 +21,18 @@ pub(super) async fn ensure_managed_uv(managed_artifacts_dir: &Path) -> anyhow::R
     let urls = managed_uv_download_urls(&artifact);
     tracing::info!("Downloading managed uv {MANAGED_UV_VERSION} ({platform})");
     let result = async {
-        let (url, bytes) = download_archive_from(&urls, MAX_MANAGED_TOOL_BYTES).await?;
-        let actual = format!("{:x}", Sha256::digest(&bytes));
-        if !actual.eq_ignore_ascii_case(artifact.sha256) {
-            anyhow::bail!(
-                "uv archive SHA-256 mismatch: expected {}, found {actual}",
-                artifact.sha256
-            );
-        }
+        let (url, bytes) =
+            download_archive_from_verified(&urls, MAX_MANAGED_TOOL_BYTES, |_, bytes| {
+                let actual = format!("{:x}", Sha256::digest(bytes));
+                if !actual.eq_ignore_ascii_case(artifact.sha256) {
+                    anyhow::bail!(
+                        "uv archive SHA-256 mismatch: expected {}, found {actual}",
+                        artifact.sha256
+                    );
+                }
+                Ok(())
+            })
+            .await?;
         extract_archive(&bytes, &url, &staging)?;
         let staged = staging
             .join(format!("uv-{}", artifact.target))
@@ -83,14 +87,18 @@ pub(super) async fn ensure_managed_bun(managed_artifacts_dir: &Path) -> anyhow::
     let urls = managed_bun_download_urls(&artifact);
     tracing::info!("Downloading managed Bun {MANAGED_BUN_VERSION} ({platform})");
     let result = async {
-        let (url, bytes) = download_archive_from(&urls, MAX_MANAGED_TOOL_BYTES).await?;
-        let actual = format!("{:x}", Sha256::digest(&bytes));
-        if !actual.eq_ignore_ascii_case(artifact.sha256) {
-            anyhow::bail!(
-                "Bun archive SHA-256 mismatch: expected {}, found {actual}",
-                artifact.sha256
-            );
-        }
+        let (url, bytes) =
+            download_archive_from_verified(&urls, MAX_MANAGED_TOOL_BYTES, |_, bytes| {
+                let actual = format!("{:x}", Sha256::digest(bytes));
+                if !actual.eq_ignore_ascii_case(artifact.sha256) {
+                    anyhow::bail!(
+                        "Bun archive SHA-256 mismatch: expected {}, found {actual}",
+                        artifact.sha256
+                    );
+                }
+                Ok(())
+            })
+            .await?;
         extract_archive(&bytes, &url, &staging)?;
         let exe_name = if cfg!(windows) { "bun.exe" } else { "bun" };
         let staged = staging
@@ -579,11 +587,15 @@ where
                 .unwrap_or(&component.resolved_source)
         ),
     );
-    let (downloaded_url, bytes) = download_archive_from(&urls, MAX_AGENT_BINARY_BYTES).await?;
-    if let agents::ArtifactTrust::ExpectedSha256 { .. } = &component.trust {
-        verify_artifact_bytes(&component.trust, &bytes, None)
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
-    }
+    let (downloaded_url, bytes) =
+        download_archive_from_verified(&urls, MAX_AGENT_BINARY_BYTES, |_, bytes| {
+            if let agents::ArtifactTrust::ExpectedSha256 { .. } = &component.trust {
+                verify_artifact_bytes(&component.trust, bytes, None)
+                    .map_err(|error| anyhow::anyhow!("{error}"))?;
+            }
+            Ok(())
+        })
+        .await?;
     on_progress(
         65,
         &format!(
@@ -1036,7 +1048,11 @@ pub(super) async fn download_kiro_windows_msi(
             "https://prod.download.cli.kiro.dev/stable/latest/manifest.json";
         let manifest_urls = utils::mirror::download_url_candidates(KIRO_MANIFEST_URL);
         let (_, manifest_bytes) =
-            download_archive_from(&manifest_urls, MAX_MANAGED_TOOL_BYTES).await?;
+            download_archive_from_verified(&manifest_urls, MAX_MANAGED_TOOL_BYTES, |_, bytes| {
+                serde_json::from_slice::<serde_json::Value>(bytes)?;
+                Ok(())
+            })
+            .await?;
         let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
         let pkg = manifest
             .get("packages")
@@ -1067,17 +1083,21 @@ pub(super) async fn download_kiro_windows_msi(
     };
     tracing::info!("Downloading Kiro Windows MSI: {msi_url}");
     let msi_urls = utils::mirror::download_url_candidates(&msi_url);
-    let (_, bytes) = download_archive_from(&msi_urls, MAX_AGENT_BINARY_BYTES).await?;
-    if let agents::ArtifactTrust::ExpectedSha256 { .. } = &component.trust {
-        verify_artifact_bytes(&component.trust, &bytes, None)
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
-    }
-    if let Some(expected) = expected_sha256 {
-        let actual = format!("{:x}", Sha256::digest(&bytes));
-        if !actual.eq_ignore_ascii_case(&expected) {
-            anyhow::bail!("Kiro MSI SHA-256 mismatch: expected {expected}, found {actual}");
-        }
-    }
+    let (_, bytes) =
+        download_archive_from_verified(&msi_urls, MAX_AGENT_BINARY_BYTES, |_, bytes| {
+            if let agents::ArtifactTrust::ExpectedSha256 { .. } = &component.trust {
+                verify_artifact_bytes(&component.trust, bytes, None)
+                    .map_err(|error| anyhow::anyhow!("{error}"))?;
+            }
+            if let Some(expected) = expected_sha256.as_deref() {
+                let actual = format!("{:x}", Sha256::digest(bytes));
+                if !actual.eq_ignore_ascii_case(expected) {
+                    anyhow::bail!("Kiro MSI SHA-256 mismatch: expected {expected}, found {actual}");
+                }
+            }
+            Ok(())
+        })
+        .await?;
     let msi_path = staging.join("kiro-cli.msi");
     tokio::fs::write(&msi_path, &bytes).await?;
     Ok(msi_path)

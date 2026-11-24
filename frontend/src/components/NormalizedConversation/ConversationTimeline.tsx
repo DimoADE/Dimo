@@ -355,6 +355,8 @@ const AgentTimelineConversation = forwardRef<
     contextCompactByRowKey,
     scrollBehavior,
     onAtBottomChange,
+    surfaceActive,
+    isLoadingSkeleton: detailLoading && timeline.length === 0,
   });
 
   useEffect(() => {
@@ -375,7 +377,10 @@ const AgentTimelineConversation = forwardRef<
       setSurfaceActive(next.active);
     };
     const observer = new IntersectionObserver(
-      ([entry]) => apply(entry.isIntersecting),
+      (entries) => {
+        const latest = entries[entries.length - 1];
+        if (latest) apply(latest.isIntersecting);
+      },
       { threshold: 0 }
     );
     observer.observe(el);

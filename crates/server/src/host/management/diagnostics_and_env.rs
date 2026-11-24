@@ -174,8 +174,11 @@ pub(super) async fn probe_profile_dependencies(
     items
 }
 
+pub(super) const OPENCLAW_DEFAULT_GATEWAY_PORT: u16 = 18789;
+#[cfg(test)]
 pub(super) const OPENCLAW_DEFAULT_GATEWAY_ENDPOINT: &str = "127.0.0.1:18789";
-pub(super) const OPENCLAW_GATEWAY_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
+pub(super) const OPENCLAW_LOCAL_GATEWAY_PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+pub(super) const OPENCLAW_REMOTE_GATEWAY_PROBE_TIMEOUT: Duration = Duration::from_millis(2500);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct CandidateProbeFailure {
@@ -217,7 +220,7 @@ pub(super) fn parse_openclaw_gateway_endpoint(raw: &str) -> Option<OpenClawGatew
     } else if let Some(rest) = trimmed.strip_prefix("http://") {
         (80u16, rest)
     } else {
-        (18789u16, trimmed)
+        (OPENCLAW_DEFAULT_GATEWAY_PORT, trimmed)
     };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("").trim();
     let authority = authority
@@ -252,9 +255,9 @@ pub(super) fn parse_openclaw_gateway_endpoint(raw: &str) -> Option<OpenClawGatew
     let host_lower = host.to_ascii_lowercase();
     let is_local = matches!(
         host_lower.as_str(),
-        "127.0.0.1" | "localhost" | "::1" | "0.0.0.0"
+        "127.0.0.1" | "localhost" | "::1" | "0.0.0.0" | "::"
     );
-    let connect_host = if host_lower == "0.0.0.0" {
+    let connect_host = if matches!(host_lower.as_str(), "0.0.0.0" | "::") {
         "127.0.0.1"
     } else {
         host
@@ -271,29 +274,164 @@ pub(super) fn parse_openclaw_gateway_endpoint(raw: &str) -> Option<OpenClawGatew
     })
 }
 
+fn openclaw_env_value(environment: &HashMap<String, String>, key: &str) -> Option<String> {
+    environment
+        .get(key)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var(key)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+}
+
+fn parse_port_str(raw: &str) -> Option<u16> {
+    raw.trim().parse::<u16>().ok().filter(|&port| port > 0)
+}
+
+fn parse_json_port(value: &serde_json::Value) -> Option<u16> {
+    value
+        .as_u64()
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|&port| port > 0)
+        .or_else(|| value.as_str().and_then(parse_port_str))
+}
+
+fn strip_json5_comments_and_trailing_commas(source: &str) -> String {
+    let mut no_comments = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    while let Some(ch) = chars.next() {
+        if in_string {
+            no_comments.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => {
+                in_string = true;
+                no_comments.push(ch);
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                chars.next();
+                for next in chars.by_ref() {
+                    if next == '\n' {
+                        no_comments.push(next);
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut previous = '\0';
+                for next in chars.by_ref() {
+                    if previous == '*' && next == '/' {
+                        break;
+                    }
+                    previous = next;
+                }
+            }
+            _ => no_comments.push(ch),
+        }
+    }
+
+    let bytes = no_comments.as_bytes();
+    let mut output = String::with_capacity(no_comments.len());
+    let mut index = 0usize;
+    in_string = false;
+    escaped = false;
+    while index < bytes.len() {
+        let ch = no_comments[index..].chars().next().unwrap();
+        let ch_len = ch.len_utf8();
+        if in_string {
+            output.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            index += ch_len;
+            continue;
+        }
+        if ch == '"' {
+            in_string = true;
+            output.push(ch);
+            index += ch_len;
+            continue;
+        }
+        if ch == ',' {
+            let rest = no_comments[index + ch_len..].trim_start();
+            if rest.starts_with('}') || rest.starts_with(']') {
+                index += ch_len;
+                continue;
+            }
+        }
+        output.push(ch);
+        index += ch_len;
+    }
+    output
+}
+
+fn parse_openclaw_config_json(bytes: &[u8]) -> Option<serde_json::Value> {
+    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(bytes) {
+        return Some(json);
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    let stripped = strip_json5_comments_and_trailing_commas(text);
+    serde_json::from_str::<serde_json::Value>(&stripped).ok()
+}
+
+fn resolve_openclaw_config_path(
+    home: Option<&Path>,
+    environment: &HashMap<String, String>,
+) -> Option<PathBuf> {
+    if let Some(config_path) = openclaw_env_value(environment, "OPENCLAW_CONFIG_PATH") {
+        return Some(PathBuf::from(config_path));
+    }
+    let openclaw_home = openclaw_env_value(environment, "OPENCLAW_STATE_DIR")
+        .or_else(|| openclaw_env_value(environment, "OPENCLAW_HOME"))
+        .map(PathBuf::from)
+        .or_else(|| home.map(|home| home.join(".openclaw")));
+    openclaw_home.map(|dir| dir.join("openclaw.json"))
+}
+
 pub(super) async fn resolve_openclaw_gateway_endpoint(
     home: Option<&Path>,
     environment: &HashMap<String, String>,
 ) -> OpenClawGatewayEndpoint {
-    if let Some(raw) = environment.get("OPENCLAW_GATEWAY_URL")
-        && let Some(parsed) = parse_openclaw_gateway_endpoint(raw)
+    if let Some(raw) = openclaw_env_value(environment, "OPENCLAW_GATEWAY_URL")
+        && let Some(parsed) = parse_openclaw_gateway_endpoint(&raw)
     {
         return parsed;
     }
-    let openclaw_home = environment
-        .get("OPENCLAW_HOME")
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("OPENCLAW_HOME")
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-        })
-        .or_else(|| home.map(|home| home.join(".openclaw")));
-    if let Some(openclaw_home) = openclaw_home {
-        let config_path = openclaw_home.join("openclaw.json");
-        if let Ok(bytes) = tokio::fs::read(&config_path).await
-            && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes)
+    let env_port =
+        openclaw_env_value(environment, "OPENCLAW_GATEWAY_PORT").and_then(|v| parse_port_str(&v));
+    let mut config_port: Option<u16> = None;
+    let mut custom_bind_host: Option<String> = None;
+
+    if let Some(config_path) = resolve_openclaw_config_path(home, environment)
+        && let Ok(bytes) = tokio::fs::read(&config_path).await
+        && let Some(json) = parse_openclaw_config_json(&bytes)
+    {
+        let gateway_mode = json
+            .pointer("/gateway/mode")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .map(str::to_ascii_lowercase);
+        if gateway_mode.as_deref() != Some("local")
             && let Some(raw) = json
                 .pointer("/gateway/remote/url")
                 .and_then(serde_json::Value::as_str)
@@ -301,41 +439,121 @@ pub(super) async fn resolve_openclaw_gateway_endpoint(
         {
             return parsed;
         }
+        config_port = json.pointer("/gateway/port").and_then(parse_json_port);
+        if json
+            .pointer("/gateway/bind")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|bind| bind.trim().eq_ignore_ascii_case("custom"))
+        {
+            custom_bind_host = json
+                .pointer("/gateway/customBindHost")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|host| !host.is_empty())
+                .map(str::to_string);
+        }
     }
+
+    let port = env_port
+        .or(config_port)
+        .unwrap_or(OPENCLAW_DEFAULT_GATEWAY_PORT);
+    if let Some(host) = custom_bind_host {
+        let candidate = if host.contains(':') && !host.starts_with('[') {
+            format!("[{host}]:{port}")
+        } else {
+            format!("{host}:{port}")
+        };
+        if let Some(parsed) = parse_openclaw_gateway_endpoint(&candidate) {
+            return parsed;
+        }
+    }
+    let endpoint = format!("127.0.0.1:{port}");
     OpenClawGatewayEndpoint {
-        display: OPENCLAW_DEFAULT_GATEWAY_ENDPOINT.to_string(),
-        connect_addr: OPENCLAW_DEFAULT_GATEWAY_ENDPOINT.to_string(),
+        display: endpoint.clone(),
+        connect_addr: endpoint,
         is_local: true,
     }
+}
+
+fn openclaw_probe_targets(endpoint: &OpenClawGatewayEndpoint) -> Vec<String> {
+    let mut targets = vec![endpoint.connect_addr.clone()];
+    if !endpoint.is_local {
+        return targets;
+    }
+    let port = if let Some(after) = endpoint.connect_addr.strip_prefix('[') {
+        after
+            .split_once("]:")
+            .and_then(|(_, port)| port.parse::<u16>().ok())
+    } else {
+        endpoint
+            .connect_addr
+            .rsplit_once(':')
+            .and_then(|(_, port)| port.parse::<u16>().ok())
+    };
+    if let Some(port) = port {
+        for fallback in [format!("127.0.0.1:{port}"), format!("[::1]:{port}")] {
+            if !targets.iter().any(|existing| existing == &fallback) {
+                targets.push(fallback);
+            }
+        }
+    }
+    targets
 }
 
 pub(super) async fn probe_openclaw_gateway_endpoint(
     endpoint: OpenClawGatewayEndpoint,
 ) -> OpenClawGatewayProbe {
-    match tokio::time::timeout(
-        OPENCLAW_GATEWAY_PROBE_TIMEOUT,
-        tokio::net::TcpStream::connect(&endpoint.connect_addr),
-    )
-    .await
-    {
-        Ok(Ok(_stream)) => OpenClawGatewayProbe {
-            endpoint,
-            reachable: true,
-            error: None,
-        },
-        Ok(Err(error)) => OpenClawGatewayProbe {
-            endpoint,
-            reachable: false,
-            error: Some(error.to_string()),
-        },
-        Err(_) => OpenClawGatewayProbe {
-            endpoint,
-            reachable: false,
-            error: Some(format!(
-                "connection timed out after {}ms",
-                OPENCLAW_GATEWAY_PROBE_TIMEOUT.as_millis()
-            )),
-        },
+    let timeout = if endpoint.is_local {
+        OPENCLAW_LOCAL_GATEWAY_PROBE_TIMEOUT
+    } else {
+        OPENCLAW_REMOTE_GATEWAY_PROBE_TIMEOUT
+    };
+    let mut set = tokio::task::JoinSet::new();
+    for target in openclaw_probe_targets(&endpoint) {
+        set.spawn(async move {
+            match tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&target)).await {
+                Ok(Ok(_stream)) => Ok(()),
+                Ok(Err(error)) => Err((false, error.to_string())),
+                Err(_) => Err((
+                    true,
+                    format!("connection timed out after {}ms", timeout.as_millis()),
+                )),
+            }
+        });
+    }
+
+    let mut first_error: Option<String> = None;
+    let mut first_non_timeout_error: Option<String> = None;
+    while let Some(result) = set.join_next().await {
+        match result {
+            Ok(Ok(())) => {
+                set.abort_all();
+                return OpenClawGatewayProbe {
+                    endpoint,
+                    reachable: true,
+                    error: None,
+                };
+            }
+            Ok(Err((is_timeout, message))) => {
+                if !is_timeout && first_non_timeout_error.is_none() {
+                    first_non_timeout_error = Some(message.clone());
+                }
+                if first_error.is_none() {
+                    first_error = Some(message);
+                }
+            }
+            Err(join_error) => {
+                if first_error.is_none() {
+                    first_error = Some(join_error.to_string());
+                }
+            }
+        }
+    }
+
+    OpenClawGatewayProbe {
+        endpoint,
+        reachable: false,
+        error: first_non_timeout_error.or(first_error),
     }
 }
 
@@ -1748,6 +1966,76 @@ mod tests {
         let closed_probe = probe_openclaw_gateway_endpoint(closed_ep).await;
         assert!(!closed_probe.reachable);
         assert!(closed_probe.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn openclaw_gateway_endpoint_supports_json5_local_port_and_overrides() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let openclaw_dir = home.join(".openclaw");
+        tokio::fs::create_dir_all(&openclaw_dir).await.unwrap();
+
+        // JSON5 comments, trailing commas, and local mode overriding stale remote.url
+        tokio::fs::write(
+            openclaw_dir.join("openclaw.json"),
+            br#"{
+                // local gateway on custom port
+                "gateway": {
+                    "mode": "local",
+                    "port": 19001,
+                    /* stale remote entry must not override local mode */
+                    "remote": {
+                        "url": "wss://stale.example.com:18789",
+                    },
+                },
+            }"#,
+        )
+        .await
+        .unwrap();
+        let local_port = resolve_openclaw_gateway_endpoint(Some(home), &HashMap::new()).await;
+        assert_eq!(local_port.connect_addr, "127.0.0.1:19001");
+        assert!(local_port.is_local);
+
+        // OPENCLAW_GATEWAY_PORT takes precedence over config gateway.port
+        let env_port = HashMap::from([("OPENCLAW_GATEWAY_PORT".to_string(), "19002".to_string())]);
+        let from_env_port = resolve_openclaw_gateway_endpoint(Some(home), &env_port).await;
+        assert_eq!(from_env_port.connect_addr, "127.0.0.1:19002");
+        assert!(from_env_port.is_local);
+
+        // OPENCLAW_CONFIG_PATH points directly to an alternate config with custom bind host
+        let custom_cfg = temp.path().join("custom-openclaw.json");
+        tokio::fs::write(
+            &custom_cfg,
+            br#"{"gateway":{"bind":"custom","customBindHost":"192.168.10.5","port":"19444"}}"#,
+        )
+        .await
+        .unwrap();
+        let env_cfg = HashMap::from([(
+            "OPENCLAW_CONFIG_PATH".to_string(),
+            custom_cfg.display().to_string(),
+        )]);
+        let from_custom = resolve_openclaw_gateway_endpoint(Some(home), &env_cfg).await;
+        assert_eq!(from_custom.connect_addr, "192.168.10.5:19444");
+        assert!(!from_custom.is_local);
+    }
+
+    #[tokio::test]
+    async fn openclaw_gateway_local_probe_detects_ipv6_loopback_listener() {
+        let Ok(listener) = tokio::net::TcpListener::bind("[::1]:0").await else {
+            return;
+        };
+        let port = listener.local_addr().unwrap().port();
+        let endpoint = OpenClawGatewayEndpoint {
+            display: format!("127.0.0.1:{port}"),
+            connect_addr: format!("127.0.0.1:{port}"),
+            is_local: true,
+        };
+        let probe = probe_openclaw_gateway_endpoint(endpoint).await;
+        assert!(
+            probe.reachable,
+            "local probe must detect IPv6 loopback [::1]:{port}, got error: {:?}",
+            probe.error
+        );
     }
 
     #[tokio::test]

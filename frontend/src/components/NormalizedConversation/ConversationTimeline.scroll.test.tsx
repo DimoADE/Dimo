@@ -60,6 +60,7 @@ let viewportWidth = 600;
 let rowHeight = 128;
 let dynamicLayoutMode = false;
 const resizeObservers = new Set<() => void>();
+const intersectionObservers = new Set<(isIntersecting: boolean) => void>();
 const layoutMocks: { mockRestore: () => void }[] = [];
 const scrollToDescriptor = Object.getOwnPropertyDescriptor(
   HTMLElement.prototype,
@@ -123,20 +124,51 @@ beforeEach(() => {
       }
     }
   );
+  vi.stubGlobal(
+    'IntersectionObserver',
+    class {
+      private targets = new Set<Element>();
+      constructor(
+        private callback: (
+          entries: { target: Element; isIntersecting: boolean }[]
+        ) => void
+      ) {}
+      private notify = (isIntersecting: boolean) => {
+        this.callback(
+          Array.from(this.targets, (target) => ({ target, isIntersecting }))
+        );
+      };
+      observe(target: Element) {
+        this.targets.add(target);
+        intersectionObservers.add(this.notify);
+      }
+      unobserve(target: Element) {
+        this.targets.delete(target);
+      }
+      disconnect() {
+        this.targets.clear();
+        intersectionObservers.delete(this.notify);
+      }
+    }
+  );
   layoutMocks.push(
     vi
       .spyOn(HTMLElement.prototype, 'clientHeight', 'get')
       .mockImplementation(function (this: HTMLElement) {
+        if (!this.isConnected) return 0;
         return this.dataset.panel === 'conversation-logs'
           ? viewportHeight
           : 120;
       }),
     vi
       .spyOn(HTMLElement.prototype, 'clientWidth', 'get')
-      .mockImplementation(() => viewportWidth),
+      .mockImplementation(function (this: HTMLElement) {
+        return this.isConnected ? viewportWidth : 0;
+      }),
     vi
       .spyOn(HTMLElement.prototype, 'offsetHeight', 'get')
       .mockImplementation(function (this: HTMLElement) {
+        if (!this.isConnected) return 0;
         if (!dynamicLayoutMode) return 128;
         if (this.hasAttribute('data-index')) return rowHeight;
         const rows = this.querySelectorAll(':scope > [data-index]');
@@ -146,7 +178,11 @@ beforeEach(() => {
     vi
       .spyOn(HTMLElement.prototype, 'scrollHeight', 'get')
       .mockImplementation(function (this: HTMLElement) {
-        if (this.dataset.panel !== 'conversation-logs' || viewportHeight <= 0) {
+        if (
+          !this.isConnected ||
+          this.dataset.panel !== 'conversation-logs' ||
+          viewportHeight <= 0
+        ) {
           return 0;
         }
         if (!dynamicLayoutMode) return 2560;
@@ -169,6 +205,7 @@ afterEach(() => {
   layoutMocks.splice(0).forEach((mock) => mock.mockRestore());
   vi.unstubAllGlobals();
   resizeObservers.clear();
+  intersectionObservers.clear();
   if (scrollToDescriptor) {
     Object.defineProperty(
       HTMLElement.prototype,
@@ -196,6 +233,14 @@ function resizeViewport(height: number) {
   act(() => {
     viewportHeight = height;
     Array.from(resizeObservers).forEach((notify) => notify());
+  });
+}
+
+function setSurfaceIntersecting(isIntersecting: boolean) {
+  act(() => {
+    Array.from(intersectionObservers).forEach((notify) =>
+      notify(isIntersecting)
+    );
   });
 }
 
@@ -397,5 +442,102 @@ describe('opening a conversation', () => {
     const reboundBottom = reboundTop + virtualWindow.offsetHeight;
     expect(reboundBottom).toBeGreaterThan(viewport.scrollTop + 1);
     expect(reboundTop).toBeLessThan(viewport.scrollTop + viewportHeight - 1);
+  });
+
+  it('restores the bottom of a long session after Dockview detaches and re-attaches the tab DOM', async () => {
+    viewportHeight = 400;
+    history.view = historyView(40);
+    const { container } = render(timelineElement());
+    const viewport = container.querySelector<HTMLElement>(
+      '[data-panel="conversation-logs"]'
+    );
+    if (!viewport) throw new Error('Conversation viewport was not rendered');
+    await waitFor(() =>
+      expect(viewport.scrollTop).toBeGreaterThanOrEqual(2000)
+    );
+    setSurfaceIntersecting(true);
+
+    // Simulate Dockview `onlyWhenVisible` switching away from Tab A to Tab B:
+    // the DOM subtree is removed from document, Chromium resets scrollTop to 0,
+    // and ResizeObserver does not fire a 0px entry for disconnected elements.
+    const parent = container.parentElement;
+    if (!parent) throw new Error('Expected test container parent');
+    parent.removeChild(container);
+    viewport.scrollTop = 0;
+    setSurfaceIntersecting(false);
+    fireEvent.scroll(viewport);
+    await nextFrame();
+
+    // Simulate switching back from Tab B to Tab A at the same viewport height.
+    parent.appendChild(container);
+    expect(viewport.scrollTop).toBe(0);
+    setSurfaceIntersecting(true);
+    await nextFrame();
+
+    expect(viewport.scrollTop).toBeGreaterThanOrEqual(2000);
+  });
+
+  it('restores a mid-conversation reading offset after Dockview detaches and re-attaches the tab DOM', async () => {
+    viewportHeight = 400;
+    history.view = historyView(40);
+    const { container } = render(timelineElement());
+    const viewport = container.querySelector<HTMLElement>(
+      '[data-panel="conversation-logs"]'
+    );
+    if (!viewport) throw new Error('Conversation viewport was not rendered');
+    await waitFor(() =>
+      expect(viewport.scrollTop).toBeGreaterThanOrEqual(2000)
+    );
+    setSurfaceIntersecting(true);
+
+    // User scrolls up into the middle of the long session.
+    fireEvent.wheel(viewport, { deltaY: -120 });
+    viewport.scrollTop = 1200;
+    fireEvent.scroll(viewport);
+    await nextFrame();
+    expect(viewport.scrollTop).toBe(1200);
+
+    // Switch away to another tab: Dockview detaches DOM and Chromium zeroes scrollTop.
+    const parent = container.parentElement;
+    if (!parent) throw new Error('Expected test container parent');
+    parent.removeChild(container);
+    viewport.scrollTop = 0;
+    setSurfaceIntersecting(false);
+    await nextFrame();
+
+    // Switch back to the long session: scrollTop must return to 1200, not 0.
+    parent.appendChild(container);
+    setSurfaceIntersecting(true);
+    await nextFrame();
+
+    expect(viewport.scrollTop).toBe(1200);
+  });
+
+  it('restores a mid-conversation reading offset when display:none zeroes scrollTop across a 0 -> >0 resize reveal', async () => {
+    viewportHeight = 400;
+    history.view = historyView(40);
+    const { container } = render(timelineElement());
+    const viewport = container.querySelector<HTMLElement>(
+      '[data-panel="conversation-logs"]'
+    );
+    if (!viewport) throw new Error('Conversation viewport was not rendered');
+    await waitFor(() =>
+      expect(viewport.scrollTop).toBeGreaterThanOrEqual(2000)
+    );
+
+    fireEvent.wheel(viewport, { deltaY: -120 });
+    viewport.scrollTop = 1100;
+    fireEvent.scroll(viewport);
+    await nextFrame();
+    expect(viewport.scrollTop).toBe(1100);
+
+    // Simulate KeepAliveSurface `display: none` resetting scrollTop to 0 and
+    // collapsing viewport height to 0 before revealing again.
+    viewport.scrollTop = 0;
+    resizeViewport(0);
+    resizeViewport(500);
+    await nextFrame();
+
+    expect(viewport.scrollTop).toBe(1100);
   });
 });

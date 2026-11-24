@@ -935,3 +935,117 @@ fn write_fake_npm_script(
         path
     }
 }
+
+async fn spawn_test_download_server(
+    routes: Vec<(&'static str, &'static str, Vec<u8>)>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut req_buf = [0u8; 2048];
+            let Ok(read) = socket.read(&mut req_buf).await else {
+                continue;
+            };
+            if read == 0 {
+                continue;
+            }
+            let req = String::from_utf8_lossy(&req_buf[..read]);
+            let path = req
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or("/");
+            let response = if let Some((_, content_type, body)) =
+                routes.iter().find(|(route, _, _)| *route == path)
+            {
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let mut bytes = header.into_bytes();
+                bytes.extend_from_slice(body);
+                bytes
+            } else {
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
+            };
+            let _ = socket.write_all(&response).await;
+            let _ = socket.shutdown().await;
+        }
+    });
+    (format!("http://{addr}"), handle)
+}
+
+#[tokio::test]
+async fn download_archive_from_verified_falls_back_past_html_mirror_response() {
+    let valid_payload = b"MZ\x90\x00muse-valid-windows-binary".to_vec();
+    let expected_sha = format!("{:x}", Sha256::digest(&valid_payload));
+    let (base, server) = spawn_test_download_server(vec![
+        (
+            "/mirror",
+            "text/html; charset=\"utf-8\"",
+            b"<!DOCTYPE html><html><body>Facebook error page</body></html>".to_vec(),
+        ),
+        (
+            "/official",
+            "application/octet-stream",
+            valid_payload.clone(),
+        ),
+    ])
+    .await;
+
+    let urls = vec![format!("{base}/mirror"), format!("{base}/official")];
+    let trust = agents::ArtifactTrust::ExpectedSha256 {
+        sha256: expected_sha,
+    };
+    let (chosen_url, bytes) =
+        download_archive_from_verified(&urls, MAX_MANAGED_TOOL_BYTES, |_, bytes| {
+            verify_artifact_bytes(&trust, bytes, None)
+                .map(|_| ())
+                .map_err(|error| anyhow::anyhow!("{error}"))
+        })
+        .await
+        .expect("must reject HTML mirror response and fall back to official candidate");
+
+    server.abort();
+    assert_eq!(chosen_url, format!("{base}/official"));
+    assert_eq!(bytes, valid_payload);
+}
+
+#[tokio::test]
+async fn download_archive_from_verified_falls_back_past_sha256_mismatch() {
+    let valid_payload = b"MZ\x90\x00muse-valid-windows-binary".to_vec();
+    let expected_sha = format!("{:x}", Sha256::digest(&valid_payload));
+    let (base, server) = spawn_test_download_server(vec![
+        (
+            "/corrupt",
+            "application/octet-stream",
+            b"corrupt-mirror-bytes".to_vec(),
+        ),
+        (
+            "/official",
+            "application/octet-stream",
+            valid_payload.clone(),
+        ),
+    ])
+    .await;
+
+    let urls = vec![format!("{base}/corrupt"), format!("{base}/official")];
+    let trust = agents::ArtifactTrust::ExpectedSha256 {
+        sha256: expected_sha,
+    };
+    let (chosen_url, bytes) =
+        download_archive_from_verified(&urls, MAX_MANAGED_TOOL_BYTES, |_, bytes| {
+            verify_artifact_bytes(&trust, bytes, None)
+                .map(|_| ())
+                .map_err(|error| anyhow::anyhow!("{error}"))
+        })
+        .await
+        .expect("must fall back past SHA-256 mismatch to next candidate");
+
+    server.abort();
+    assert_eq!(chosen_url, format!("{base}/official"));
+    assert_eq!(bytes, valid_payload);
+}

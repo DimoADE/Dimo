@@ -605,7 +605,10 @@ pub async fn install_managed_node_from_archive_bytes(
     Ok(runtime)
 }
 
-async fn download_node_archive(urls: &[String]) -> Result<Vec<u8>, ManagedToolchainError> {
+async fn download_node_archive(
+    urls: &[String],
+    expected_sha256: &str,
+) -> Result<Vec<u8>, ManagedToolchainError> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(NODE_DOWNLOAD_TIMEOUT_SECS))
         .build()
@@ -622,6 +625,23 @@ async fn download_node_archive(urls: &[String]) -> Result<Vec<u8>, ManagedToolch
                     last_error = format!("HTTP {} from {url}", resp.status());
                     continue;
                 }
+                if let Some(content_type) = resp
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                {
+                    let media_type = content_type
+                        .split(';')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_ascii_lowercase();
+                    if matches!(media_type.as_str(), "text/html" | "application/xhtml+xml") {
+                        last_error =
+                            format!("unexpected HTML response ({content_type}) from {url}");
+                        continue;
+                    }
+                }
                 if let Some(len) = resp.content_length()
                     && len as usize > MAX_MANAGED_NODE_ARCHIVE_BYTES
                 {
@@ -635,6 +655,13 @@ async fn download_node_archive(urls: &[String]) -> Result<Vec<u8>, ManagedToolch
                             return Err(ManagedToolchainError::ArchiveTooLarge {
                                 max_bytes: MAX_MANAGED_NODE_ARCHIVE_BYTES,
                             });
+                        }
+                        let actual = format!("{:x}", Sha256::digest(&bytes));
+                        if !actual.eq_ignore_ascii_case(expected_sha256) {
+                            last_error = format!(
+                                "SHA-256 mismatch from {url}: expected {expected_sha256}, found {actual}"
+                            );
+                            continue;
                         }
                         return Ok(bytes.to_vec());
                     }
@@ -747,7 +774,7 @@ pub async fn ensure_managed_node_runtime(
     }
 
     let urls = managed_node_download_urls(&artifact);
-    match download_node_archive(&urls).await {
+    match download_node_archive(&urls, artifact.sha256).await {
         Ok(bytes) => {
             install_managed_node_from_archive_bytes(base_dir, platform, &artifact, &bytes).await
         }

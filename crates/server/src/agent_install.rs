@@ -1546,8 +1546,22 @@ async fn install_bun_via_npm_fallback(
     ))
 }
 
+fn html_response_content_type(response: &reqwest::Response) -> Option<String> {
+    let raw = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)?
+        .to_str()
+        .ok()?;
+    let media_type = raw.split(';').next()?.trim().to_ascii_lowercase();
+    matches!(media_type.as_str(), "text/html" | "application/xhtml+xml")
+        .then(|| raw.trim().to_string())
+}
+
 async fn download_archive(url: &str, limit: usize) -> anyhow::Result<Vec<u8>> {
     let response = reqwest::get(url).await?.error_for_status()?;
+    if let Some(content_type) = html_response_content_type(&response) {
+        anyhow::bail!("unexpected HTML response (Content-Type: {content_type})");
+    }
     if response
         .content_length()
         .is_some_and(|length| length > limit as u64)
@@ -1561,12 +1575,25 @@ async fn download_archive(url: &str, limit: usize) -> anyhow::Result<Vec<u8>> {
     Ok(bytes.to_vec())
 }
 
-async fn download_archive_from(urls: &[String], limit: usize) -> anyhow::Result<(String, Vec<u8>)> {
+async fn download_archive_from_verified<F>(
+    urls: &[String],
+    limit: usize,
+    mut validate: F,
+) -> anyhow::Result<(String, Vec<u8>)>
+where
+    F: FnMut(&str, &[u8]) -> anyhow::Result<()>,
+{
     let mut errors = Vec::new();
     for url in urls {
         tracing::info!("GET {url}");
         match download_archive(url, limit).await {
-            Ok(bytes) => return Ok((url.clone(), bytes)),
+            Ok(bytes) => match validate(url, &bytes) {
+                Ok(()) => return Ok((url.clone(), bytes)),
+                Err(error) => {
+                    tracing::warn!("download verification failed: {url}: {error}");
+                    errors.push(format!("{url}: {error}"));
+                }
+            },
             Err(error) => {
                 tracing::warn!("download failed: {url}: {error}");
                 errors.push(format!("{url}: {error}"));
@@ -1574,6 +1601,10 @@ async fn download_archive_from(urls: &[String], limit: usize) -> anyhow::Result<
         }
     }
     anyhow::bail!("{}", errors.join("; "))
+}
+
+async fn download_archive_from(urls: &[String], limit: usize) -> anyhow::Result<(String, Vec<u8>)> {
+    download_archive_from_verified(urls, limit, |_, _| Ok(())).await
 }
 
 async fn ensure_managed_node(managed_artifacts_dir: &Path) -> anyhow::Result<NodeRuntime> {
@@ -1602,14 +1633,18 @@ async fn ensure_managed_node(managed_artifacts_dir: &Path) -> anyhow::Result<Nod
     let urls = managed_node_download_urls(&artifact);
     tracing::info!("Downloading managed Node.js {MANAGED_NODE_VERSION} ({platform})");
     let result = async {
-        let (url, bytes) = download_archive_from(&urls, MAX_MANAGED_TOOL_BYTES).await?;
-        let actual = format!("{:x}", Sha256::digest(&bytes));
-        if !actual.eq_ignore_ascii_case(artifact.sha256) {
-            anyhow::bail!(
-                "Node.js archive SHA-256 mismatch: expected {}, found {actual}",
-                artifact.sha256
-            );
-        }
+        let (url, bytes) =
+            download_archive_from_verified(&urls, MAX_MANAGED_TOOL_BYTES, |_, bytes| {
+                let actual = format!("{:x}", Sha256::digest(bytes));
+                if !actual.eq_ignore_ascii_case(artifact.sha256) {
+                    anyhow::bail!(
+                        "Node.js archive SHA-256 mismatch: expected {}, found {actual}",
+                        artifact.sha256
+                    );
+                }
+                Ok(())
+            })
+            .await?;
         extract_archive(&bytes, &url, &staging)?;
         let staged_root = staging.join(format!("node-v{MANAGED_NODE_VERSION}-{}", artifact.target));
         let staged_bin = if cfg!(windows) {

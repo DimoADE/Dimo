@@ -637,9 +637,15 @@ pub async fn preflight(
             status: if gateway.reachable { "pass" } else { "warning" }.to_string(),
             detail: if gateway.reachable {
                 format!("Gateway 已就绪 ({})", gateway.endpoint.display)
+            } else if gateway.endpoint.is_local {
+                format!(
+                    "OpenClaw CLI 已安装，但本地 Gateway ({}) 未在监听；请先运行 `openclaw gateway start`（或 `openclaw gateway run`）启动 Gateway，或在配置中设置 gateway.remote.url ({})",
+                    gateway.endpoint.display,
+                    gateway.error.as_deref().unwrap_or("connection refused")
+                )
             } else {
                 format!(
-                    "OpenClaw CLI 已安装，但本地 Gateway ({}) 未在监听；请先启动 OpenClaw Gateway 或配置 gateway.remote.url ({})",
+                    "OpenClaw CLI 已安装，但无法连接远程 Gateway ({})；请检查网络或 gateway.remote.url 配置 ({})",
                     gateway.endpoint.display,
                     gateway.error.as_deref().unwrap_or("connection refused")
                 )

@@ -121,6 +121,8 @@ export function useTimelineScrollController({
   contextCompactByRowKey,
   scrollBehavior,
   onAtBottomChange,
+  surfaceActive = true,
+  isLoadingSkeleton = false,
 }: {
   ref: ForwardedRef<VirtualizedListRef>;
   panelRef: RefObject<HTMLDivElement | null>;
@@ -137,6 +139,8 @@ export function useTimelineScrollController({
   contextCompactByRowKey: Map<string, ContextCompactPresentation | null>;
   scrollBehavior: ScrollBehavior;
   onAtBottomChange?: (isAtBottom: boolean) => void;
+  surfaceActive?: boolean;
+  isLoadingSkeleton?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const virtualListRef = useRef<HTMLDivElement | null>(null);
@@ -149,11 +153,20 @@ export function useTimelineScrollController({
   const followTailRef = useRef(true);
   const lastScrollTopRef = useRef(0);
   const lastScrollHeightRef = useRef(0);
+  const surfaceActiveRef = useRef(surfaceActive);
+  const previousSurfaceActiveRef = useRef(surfaceActive);
+  const observedViewportHeightRef = useRef(0);
+  const hiddenScrollSnapshotRef = useRef<{
+    sessionId: string | null;
+    followTail: boolean;
+    scrollTop: number;
+  } | null>(null);
   const tailRescuePassesRef = useRef(0);
   const tailRescueBudgetRef = useRef(0);
   const tailRescueItemCountRef = useRef(0);
   const tailRescueWindowHeightRef = useRef(0);
   const revealScrollRef = useRef<number | null>(null);
+  const revealRestoreRafRef = useRef<number | null>(null);
   const pinToBottomRafRef = useRef<number | null>(null);
   const programmaticScrollDepthRef = useRef(0);
   const smoothFollowRef = useRef(false);
@@ -301,6 +314,11 @@ export function useTimelineScrollController({
       runProgrammaticScroll(() => {
         elementScroll(offset, options, instance);
       });
+      const container = containerRef.current;
+      if (container) {
+        lastScrollTopRef.current = container.scrollTop;
+        lastScrollHeightRef.current = container.scrollHeight;
+      }
     },
   });
   const virtualRows = rowVirtualizer.getVirtualItems();
@@ -327,6 +345,16 @@ export function useTimelineScrollController({
     }
   }, []);
 
+  const cancelRevealRestoreRaf = useCallback(() => {
+    if (
+      revealRestoreRafRef.current !== null &&
+      typeof cancelAnimationFrame === 'function'
+    ) {
+      cancelAnimationFrame(revealRestoreRafRef.current);
+      revealRestoreRafRef.current = null;
+    }
+  }, []);
+
   useLayoutEffect(() => {
     rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = (
       item,
@@ -342,17 +370,19 @@ export function useTimelineScrollController({
     () => () => {
       cancelAnchorRestore();
       cancelPinToBottomRaf();
+      cancelRevealRestoreRaf();
     },
-    [cancelAnchorRestore, cancelPinToBottomRaf, sessionId]
+    [cancelAnchorRestore, cancelPinToBottomRaf, cancelRevealRestoreRaf, sessionId]
   );
 
   const cancelPendingJump = useCallback(() => {
     cancelAnchorRestore();
+    cancelRevealRestoreRaf();
     cancelJumpRef.current?.();
     cancelJumpRef.current = null;
     pendingJumpTimelineIndexRef.current = null;
     cancelVirtualizerFollowScroll(rowVirtualizer);
-  }, [cancelAnchorRestore, rowVirtualizer]);
+  }, [cancelAnchorRestore, cancelRevealRestoreRaf, rowVirtualizer]);
 
   useEffect(() => () => cancelPendingJump(), [cancelPendingJump]);
 
@@ -568,6 +598,7 @@ export function useTimelineScrollController({
 
   useEffect(() => {
     cancelPendingJump();
+    hiddenScrollSnapshotRef.current = null;
     setFindOpen(false);
     setFindQuery('');
     setFindMatchIndex(0);
@@ -636,6 +667,7 @@ export function useTimelineScrollController({
         }
       });
       lastScrollTopRef.current = container.scrollTop;
+      lastScrollHeightRef.current = container.scrollHeight;
       if (
         behavior !== 'smooth' &&
         typeof requestAnimationFrame === 'function'
@@ -648,6 +680,7 @@ export function useTimelineScrollController({
             currentContainer.scrollTop = currentContainer.scrollHeight;
           });
           lastScrollTopRef.current = currentContainer.scrollTop;
+          lastScrollHeightRef.current = currentContainer.scrollHeight;
         });
       }
     },
@@ -671,6 +704,7 @@ export function useTimelineScrollController({
     (event: UIEvent<HTMLDivElement>) => {
       const container = containerRef.current;
       if (!container) return;
+      if (!surfaceActiveRef.current || !container.isConnected) return;
       const previous = lastScrollTopRef.current;
       const scrollTop = container.scrollTop;
       const previousHeight = lastScrollHeightRef.current;
@@ -679,6 +713,9 @@ export function useTimelineScrollController({
       lastScrollHeightRef.current = scrollHeight;
       const trustedUserScroll =
         event.nativeEvent.isTrusted && programmaticScrollDepthRef.current === 0;
+      if (trustedUserScroll) {
+        cancelRevealRestoreRaf();
+      }
       if (readingAnchorRef.current && trustedUserScroll) {
         captureReadingAnchor();
       }
@@ -718,6 +755,7 @@ export function useTimelineScrollController({
     },
     [
       cancelAnchorRestore,
+      cancelRevealRestoreRaf,
       captureReadingAnchor,
       detachFromBottom,
       hasEarlierTimeline,
@@ -881,13 +919,165 @@ export function useTimelineScrollController({
     );
   }, []);
 
+  const virtualEntriesLengthRef = useRef(virtualEntries.length);
+  virtualEntriesLengthRef.current = virtualEntries.length;
+
+  const captureHiddenScrollSnapshot = useCallback(() => {
+    if (hiddenScrollSnapshotRef.current?.sessionId === sessionId) return;
+    const container = containerRef.current;
+    const liveScrollTop =
+      container && container.isConnected && container.clientHeight > 0
+        ? container.scrollTop
+        : 0;
+    const scrollTop =
+      liveScrollTop > 1 ? liveScrollTop : lastScrollTopRef.current;
+    hiddenScrollSnapshotRef.current = {
+      sessionId,
+      followTail: followTailRef.current,
+      scrollTop,
+    };
+  }, [sessionId]);
+
+  const restoreScrollPositionAfterReveal = useCallback((): boolean => {
+    const container = containerRef.current;
+    const list = virtualListRef.current;
+    if (!container || container.clientHeight <= 0) return false;
+
+    const snapshot =
+      hiddenScrollSnapshotRef.current?.sessionId === sessionId
+        ? hiddenScrollSnapshotRef.current
+        : null;
+    const shouldFollowTail = snapshot
+      ? snapshot.followTail
+      : followTailRef.current;
+    const savedScrollTop = snapshot
+      ? snapshot.scrollTop
+      : lastScrollTopRef.current;
+    hiddenScrollSnapshotRef.current = null;
+    revealScrollRef.current = null;
+    updateScrollMargin();
+
+    if (shouldFollowTail) {
+      followTailRef.current = true;
+      setIsFollowingTail(true);
+      isAtBottomRef.current = true;
+      onAtBottomChange?.(true);
+      if (virtualEntriesLengthRef.current > 0) {
+        pinnedSessionReadyRef.current = sessionId;
+      }
+      tailRescuePassesRef.current = 0;
+      tailRescueBudgetRef.current = 0;
+      if (list) {
+        remeasureMountedVirtualRows(list, rowVirtualizer.resizeItem);
+      }
+      pinToBottom('auto');
+      if (typeof requestAnimationFrame === 'function') {
+        cancelRevealRestoreRaf();
+        revealRestoreRafRef.current = requestAnimationFrame(() => {
+          revealRestoreRafRef.current = null;
+          const current = containerRef.current;
+          const currentList = virtualListRef.current;
+          if (
+            !current ||
+            !currentList ||
+            !surfaceActiveRef.current ||
+            current.clientHeight <= 0 ||
+            !followTailRef.current
+          ) {
+            return;
+          }
+          remeasureMountedVirtualRows(currentList, rowVirtualizer.resizeItem);
+          pinToBottom('auto');
+        });
+      }
+      return true;
+    }
+
+    // Chromium resets scrollTop to 0 when a kept-alive panel is detached from
+    // the document (`removeChild` in Dockview `onlyWhenVisible`) or hidden via
+    // `display: none`. Restore the reader's saved offset when revealed again.
+    if (
+      savedScrollTop > 1 &&
+      Math.abs(container.scrollTop - savedScrollTop) > 1
+    ) {
+      const applySavedTop = (targetContainer: HTMLDivElement) => {
+        const maxScroll = Math.max(
+          0,
+          targetContainer.scrollHeight - targetContainer.clientHeight
+        );
+        const targetTop = Math.min(savedScrollTop, maxScroll);
+        if (Math.abs(targetContainer.scrollTop - targetTop) > 1) {
+          runProgrammaticScroll(() => {
+            targetContainer.scrollTop = targetTop;
+          });
+        }
+        lastScrollTopRef.current = targetContainer.scrollTop;
+        lastScrollHeightRef.current = targetContainer.scrollHeight;
+      };
+      if (list) {
+        remeasureMountedVirtualRows(list, rowVirtualizer.resizeItem);
+      }
+      applySavedTop(container);
+      if (typeof requestAnimationFrame === 'function') {
+        cancelRevealRestoreRaf();
+        revealRestoreRafRef.current = requestAnimationFrame(() => {
+          revealRestoreRafRef.current = null;
+          const current = containerRef.current;
+          if (
+            !current ||
+            !surfaceActiveRef.current ||
+            current.clientHeight <= 0 ||
+            followTailRef.current
+          ) {
+            return;
+          }
+          applySavedTop(current);
+        });
+      }
+    }
+    return true;
+  }, [
+    cancelRevealRestoreRaf,
+    onAtBottomChange,
+    pinToBottom,
+    rowVirtualizer,
+    runProgrammaticScroll,
+    sessionId,
+    updateScrollMargin,
+  ]);
+
+  useLayoutEffect(() => {
+    surfaceActiveRef.current = surfaceActive;
+    const wasActive = previousSurfaceActiveRef.current;
+    previousSurfaceActiveRef.current = surfaceActive;
+    if (wasActive && !surfaceActive) {
+      captureHiddenScrollSnapshot();
+      cancelPinToBottomRaf();
+      cancelRevealRestoreRaf();
+      observedViewportHeightRef.current = 0;
+      return;
+    }
+    if (!wasActive && surfaceActive) {
+      const restored = restoreScrollPositionAfterReveal();
+      if (restored && containerRef.current) {
+        observedViewportHeightRef.current = containerRef.current.clientHeight;
+      }
+    }
+  }, [
+    cancelPinToBottomRaf,
+    cancelRevealRestoreRaf,
+    captureHiddenScrollSnapshot,
+    restoreScrollPositionAfterReveal,
+    surfaceActive,
+  ]);
+
   useLayoutEffect(() => {
     const container = containerRef.current;
     const list = virtualListRef.current;
     const win = virtualWindowRef.current;
     if (!container || !list) return;
     updateScrollMargin();
-    let viewportHeight = container.clientHeight;
+    observedViewportHeightRef.current = container.clientHeight;
     let viewportWidth = container.clientWidth;
 
     const syncVirtualWindowGeometryBeforePaint = (
@@ -987,6 +1177,26 @@ export function useTimelineScrollController({
 
     const observer = new ResizeObserver((entries) => {
       updateScrollMargin();
+      const nextHeight = container.clientHeight;
+      const prevHeight = observedViewportHeightRef.current;
+      if (nextHeight === 0) {
+        if (prevHeight > 0) {
+          captureHiddenScrollSnapshot();
+        }
+        observedViewportHeightRef.current = 0;
+        viewportWidth = container.clientWidth;
+        return;
+      }
+      const revealed = prevHeight === 0 && nextHeight > 0;
+      observedViewportHeightRef.current = nextHeight;
+      if (revealed) {
+        viewportWidth = container.clientWidth;
+        // Streaming growth changes the list, not the viewport. Restoring only
+        // on 0 -> >0 reveal avoids jitter while recovering from hidden/detached
+        // panels whose scrollTop Chromium reset to 0.
+        restoreScrollPositionAfterReveal();
+        return;
+      }
       const nextWidth = container.clientWidth;
       const widthChanged = Math.abs(nextWidth - viewportWidth) > 0.5;
       viewportWidth = nextWidth;
@@ -995,39 +1205,18 @@ export function useTimelineScrollController({
       if (windowResized || widthChanged) {
         syncVirtualWindowGeometryBeforePaint(widthChanged);
       }
-      const nextHeight = container.clientHeight;
-      if (nextHeight === viewportHeight) return;
-      const revealed = viewportHeight === 0 && nextHeight > 0;
-      viewportHeight = nextHeight;
-      // Streaming growth changes the list, not the viewport. Pinning on every
-      // resize is what makes a hidden-then-shown tail jitter without painting.
-      if (!revealed || !followTailRef.current) return;
-      remeasureMountedVirtualRows(list, rowVirtualizer.resizeItem);
-      pinToBottom('auto');
-      if (typeof requestAnimationFrame !== 'function') return;
-      requestAnimationFrame(() => {
-        const current = containerRef.current;
-        const currentList = virtualListRef.current;
-        if (
-          !current ||
-          !currentList ||
-          current.clientHeight <= 0 ||
-          !followTailRef.current
-        ) {
-          return;
-        }
-        remeasureMountedVirtualRows(currentList, rowVirtualizer.resizeItem);
-        pinToBottom('auto');
-      });
     });
     observer.observe(container);
     observer.observe(list);
     if (win) observer.observe(win);
     return () => observer.disconnect();
   }, [
-    pinToBottom,
+    captureHiddenScrollSnapshot,
+    isLoadingSkeleton,
+    restoreScrollPositionAfterReveal,
     rowVirtualizer,
     runProgrammaticScroll,
+    sessionId,
     sideRowsLength,
     updateScrollMargin,
   ]);
@@ -1049,13 +1238,15 @@ export function useTimelineScrollController({
   }, [jumpToVirtualIndex, virtualEntries, visibleTimelineStartIndex]);
 
   useLayoutEffect(() => {
+    const container = containerRef.current;
+    const viewportHeight = container?.clientHeight ?? 0;
     const rawSessionChanged = sessionPinRef.current !== sessionId;
     if (rawSessionChanged) {
       pinnedSessionReadyRef.current = null;
     }
     const firstNonEmptyForSession =
       virtualEntries.length > 0 && pinnedSessionReadyRef.current !== sessionId;
-    if (firstNonEmptyForSession) {
+    if (firstNonEmptyForSession && viewportHeight > 0) {
       pinnedSessionReadyRef.current = sessionId;
     }
     const sessionChanged = rawSessionChanged || firstNonEmptyForSession;
@@ -1067,7 +1258,6 @@ export function useTimelineScrollController({
     const prepended =
       !skipPrependAdjust &&
       combinedPrependEpoch > previousPrependEpochRef.current;
-    const container = containerRef.current;
     if (container) {
       const anchor =
         prepended && !sessionChanged && !followTailRef.current
@@ -1101,6 +1291,7 @@ export function useTimelineScrollController({
           container.scrollTop = nextTop;
         });
         lastScrollTopRef.current = container.scrollTop;
+        lastScrollHeightRef.current = container.scrollHeight;
       }
       if (
         anchoredTop != null &&
@@ -1147,6 +1338,7 @@ export function useTimelineScrollController({
               container.scrollTop = target;
             });
             lastScrollTopRef.current = container.scrollTop;
+            lastScrollHeightRef.current = container.scrollHeight;
           } else if (++stableFrames >= ANCHOR_RESTORE_STABLE_FRAMES) {
             cancel();
             return;
@@ -1185,7 +1377,6 @@ export function useTimelineScrollController({
       seenExpansionRef.current !== currentExpandableRevision;
     expansionInViewRef.current = false;
     seenExpansionRef.current = currentExpandableRevision;
-    const viewportHeight = container?.clientHeight ?? 0;
     const decision = conversationTailFollowAction({
       attached: followTailRef.current,
       sessionChanged,
@@ -1263,7 +1454,14 @@ export function useTimelineScrollController({
 
   useLayoutEffect(() => {
     const container = containerRef.current;
-    if (!container || virtualRows.length === 0) return;
+    if (
+      !container ||
+      !surfaceActiveRef.current ||
+      !container.isConnected ||
+      virtualRows.length === 0
+    ) {
+      return;
+    }
     const virtualizerScrollOffset = rowVirtualizer.scrollOffset ?? 0;
     if (
       !followTailRef.current &&
@@ -1321,9 +1519,12 @@ export function useTimelineScrollController({
       tailRescuePassesRef.current = 0;
     }
     const container = containerRef.current;
+    if (!container || !surfaceActiveRef.current || !container.isConnected) {
+      return;
+    }
     const needsRescue = conversationTailNeedsRescue({
       attached: followTailRef.current,
-      viewportHeight: container?.clientHeight ?? 0,
+      viewportHeight: container.clientHeight,
       itemCount: virtualEntries.length,
       visibleIndexes: virtualRows.map((row) => row.index),
     });
