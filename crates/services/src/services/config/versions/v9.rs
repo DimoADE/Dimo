@@ -54,6 +54,10 @@ fn default_auto_update_enabled() -> bool {
     true
 }
 
+fn default_continue_conversations_after_restart() -> bool {
+    true
+}
+
 fn default_multi_agent_enabled() -> bool {
     true
 }
@@ -168,6 +172,10 @@ pub struct Config {
     /// existing Agent-managed ACP session in the selected workspace.
     #[serde(default)]
     pub previous_session_continuation_enabled: bool,
+    /// Automatically reconnect and continue conversations whose active turn was
+    /// interrupted by an app exit or crash when the host restarts.
+    #[serde(default = "default_continue_conversations_after_restart")]
+    pub continue_conversations_after_restart: bool,
     /// Automatically check for app releases on startup.
     #[serde(default = "default_auto_update_enabled")]
     pub auto_update_enabled: bool,
@@ -234,6 +242,7 @@ impl Config {
             ai_message_default_collapsed: default_ai_message_default_collapsed(),
             hide_model_thinking: default_hide_model_thinking(),
             previous_session_continuation_enabled: false,
+            continue_conversations_after_restart: default_continue_conversations_after_restart(),
             auto_update_enabled: default_auto_update_enabled(),
             crash_reports_enabled: false,
             link_open_behavior: LinkOpenBehavior::default(),
@@ -328,6 +337,7 @@ impl Default for Config {
             ai_message_default_collapsed: default_ai_message_default_collapsed(),
             hide_model_thinking: default_hide_model_thinking(),
             previous_session_continuation_enabled: false,
+            continue_conversations_after_restart: default_continue_conversations_after_restart(),
             auto_update_enabled: default_auto_update_enabled(),
             crash_reports_enabled: false,
             link_open_behavior: LinkOpenBehavior::default(),
@@ -444,6 +454,21 @@ mod tests {
         let loaded: Config = serde_json::from_value(saved).expect("load older v9 config");
 
         assert!(!loaded.previous_session_continuation_enabled);
+    }
+
+    #[test]
+    fn continue_conversations_after_restart_defaults_on_for_new_and_older_v9_configs() {
+        assert!(Config::default().continue_conversations_after_restart);
+
+        let mut saved = serde_json::to_value(Config::default()).expect("serialize config");
+        saved
+            .as_object_mut()
+            .expect("config object")
+            .remove("continue_conversations_after_restart");
+
+        let loaded: Config = serde_json::from_value(saved).expect("load older v9 config");
+
+        assert!(loaded.continue_conversations_after_restart);
     }
 
     #[test]

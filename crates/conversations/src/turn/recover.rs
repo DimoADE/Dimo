@@ -895,12 +895,10 @@ impl ConversationSessionService {
     }
 
     /// Reconcile turns orphaned by the previous process lifecycle (startup recovery,
-    /// ADR-0001). A turn left in-flight (pending/queued/running/blocked) when the host
-    /// died can never resume its generation, so drive it to the **Interrupted** terminal
-    /// state *through the event log* (never a bare status UPDATE) and void its orphaned
-    /// pending permission requests. Session *context* is reloaded lazily on the next
-    /// open/send via ACP `session/load` — we deliberately do **not** eagerly reconnect
-    /// agents here. Returns the number of turns recovered.
+    /// ADR-0001). Drives orphaned in-flight turns to **Interrupted**, voids pending
+    /// interactions, and enqueues automatic restart continuations for eligible
+    /// conversations (dispatched immediately afterward by `dispatch_queued_inputs`).
+    /// Returns the number of turns recovered.
     pub async fn recover_interrupted_turns(&self) -> Result<usize, ConversationServiceError> {
         note_host_lifetime();
         let pool = &self.ctx.deployment.db().pool;
@@ -935,12 +933,23 @@ impl ConversationSessionService {
 
         let mut recovered = 0usize;
         let mut failed = 0usize;
-        for turn in &in_flight {
+        let mut settled_turns = Vec::with_capacity(in_flight.len());
+        for turn in in_flight {
+            let had_pending_user_interaction = self
+                .turn_had_pending_user_interaction(&turn)
+                .await
+                .unwrap_or(true);
             match self
                 .interrupt_in_flight_turn(turn.conversation_id, turn.id)
                 .await
             {
-                Ok(()) => recovered += 1,
+                Ok(()) => {
+                    recovered += 1;
+                    settled_turns.push(super::restart_continuation::SettledInterruptedTurn {
+                        turn,
+                        had_pending_user_interaction,
+                    });
+                }
                 Err(error) => {
                     failed += 1;
                     tracing::error!(
@@ -958,6 +967,9 @@ impl ConversationSessionService {
                 failed,
                 "startup crash-recovery left orphaned in-flight turns; they will be interrupted when next opened"
             );
+        }
+        if let Err(error) = self.enqueue_restart_continuations(&settled_turns).await {
+            tracing::warn!(%error, "startup recovery: failed to schedule automatic restart continuations");
         }
 
         Ok(recovered)

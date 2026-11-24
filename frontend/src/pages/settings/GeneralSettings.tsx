@@ -624,6 +624,30 @@ export function GeneralSettings() {
 
             <div className="settings-row">
               <div>
+                <Label
+                  htmlFor="continue-conversations-after-restart"
+                  className="cursor-pointer"
+                >
+                  {t('general.enableRestartContinuation')}
+                </Label>
+                <p className="settings-row__description">
+                  {t('general.enableRestartContinuationHint')}
+                </p>
+              </div>
+              <Switch
+                id="continue-conversations-after-restart"
+                className="settings-switch"
+                checked={draft.continue_conversations_after_restart ?? true}
+                onCheckedChange={(checked: boolean) =>
+                  updateDraft({
+                    continue_conversations_after_restart: checked,
+                  })
+                }
+              />
+            </div>
+
+            <div className="settings-row">
+              <div>
                 <Label>{t('general.importLocalSessions')}</Label>
                 <p className="settings-row__description">
                   {t('general.importLocalSessionsDescription')}

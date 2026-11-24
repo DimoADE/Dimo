@@ -186,6 +186,14 @@ impl ConversationSessionService {
                 return Err(error);
             }
         };
+        let origin = claim
+            .input
+            .principal
+            .get("origin")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(crate::commit_reminder::LOCAL_USER_ORIGIN)
+            .to_string();
         let committed = match self
             .commit_new_turn(
                 ConversationStartTurnInput {
@@ -211,7 +219,7 @@ impl ConversationSessionService {
                     collaboration_origin: payload.collaboration_origin,
                     provider_instance_id: payload.provider_instance_id,
                 },
-                crate::commit_reminder::LOCAL_USER_ORIGIN,
+                origin.as_str(),
             )
             .await
         {
@@ -243,7 +251,13 @@ impl ConversationSessionService {
 
     /// Resume durable queues after host event persistence is online. Each
     /// conversation dispatches at most one Turn; terminal events pump the rest.
+    /// Bounded concurrency avoids one slow handshake stalling all other
+    /// conversations while preventing a startup thundering herd.
     pub async fn dispatch_queued_inputs(&self) -> Result<usize, ConversationServiceError> {
+        use futures::stream::{self, StreamExt};
+
+        const MAX_CONCURRENT_STARTUP_DISPATCH: usize = 3;
+
         let inputs = ConversationInputControl::with_publisher(
             self.ctx.deployment.db().pool.clone(),
             self.ctx.event_publisher.clone(),
@@ -256,28 +270,32 @@ impl ConversationSessionService {
                 &self.ctx.deployment.db().pool,
             )
             .await?;
-        let mut started = 0;
-        for conversation_id in conversation_ids {
-            match self.dispatch_next_queued_input(conversation_id).await {
-                Ok(Some(_)) => started += 1,
-                Ok(None) => {}
-                Err(error) => {
-                    if error.should_retry_queued_dispatch() {
-                        tracing::warn!(
-                            %conversation_id,
-                            %error,
-                            "failed to resume a durable conversation input"
-                        );
-                    } else {
-                        tracing::info!(
-                            %conversation_id,
-                            %error,
-                            "durable conversation input is waiting for session rebind"
-                        );
+        let started = stream::iter(conversation_ids)
+            .map(|conversation_id| async move {
+                match self.dispatch_next_queued_input(conversation_id).await {
+                    Ok(Some(_)) => 1usize,
+                    Ok(None) => 0usize,
+                    Err(error) => {
+                        if error.should_retry_queued_dispatch() {
+                            tracing::warn!(
+                                %conversation_id,
+                                %error,
+                                "failed to resume a durable conversation input"
+                            );
+                        } else {
+                            tracing::info!(
+                                %conversation_id,
+                                %error,
+                                "durable conversation input is waiting for session rebind"
+                            );
+                        }
+                        0usize
                     }
                 }
-            }
-        }
+            })
+            .buffer_unordered(MAX_CONCURRENT_STARTUP_DISPATCH)
+            .fold(0usize, |acc, count| async move { acc + count })
+            .await;
         Ok(started)
     }
 }

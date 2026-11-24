@@ -31,6 +31,8 @@ mod continuation;
 mod queue;
 #[path = "turn/recover.rs"]
 mod recover;
+#[path = "turn/restart_continuation.rs"]
+pub(crate) mod restart_continuation;
 #[path = "turn/start.rs"]
 mod start;
 #[path = "turn/steer.rs"]
@@ -48,6 +50,7 @@ pub use queue::{
     ForkVisibleConversation, create_delegated_conversation, create_fork_conversation,
     create_workflow_conversation, fork_visible_conversation,
 };
+pub use restart_continuation::{RESTART_CONTINUATION_ORIGIN, RESTART_CONTINUATION_PROMPT};
 pub use start::{
     AfterTurnEvent, BeforeTurnContext, RuntimeEventNotification, clear_turn_hooks,
     register_after_turn_hook, register_before_turn_hook, subscribe_after_turn_events,

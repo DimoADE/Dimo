@@ -569,6 +569,24 @@ describe('GeneralSettings Agent model catalogs', () => {
     });
   });
 
+  it('keeps restart continuation enabled by default and persists when disabled', async () => {
+    const user = userEvent.setup();
+    const { updateAndSaveConfig } = renderSettings();
+
+    const toggle = await screen.findByRole('switch', {
+      name: '重启后自动继续中断的会话',
+    });
+    expect(toggle).toBeChecked();
+
+    await user.click(toggle);
+
+    await waitFor(() => {
+      expect(updateAndSaveConfig).toHaveBeenCalledWith(
+        expect.objectContaining({ continue_conversations_after_restart: false })
+      );
+    });
+  });
+
   it('opens local session import from general settings', async () => {
     const user = userEvent.setup();
     renderSettings();

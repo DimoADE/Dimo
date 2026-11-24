@@ -2144,6 +2144,8 @@
     "sessionContinuationDescription": "Control whether a new conversation can connect to a previous Agent session in the same workspace.",
     "enablePreviousSessionContinuation": "Fork an existing session on create",
     "enablePreviousSessionContinuationHint": "Off by default. When enabled, the entry appears only for an existing workspace and an Agent that supports listing sessions.",
+    "enableRestartContinuation": "Auto-continue interrupted sessions after restart",
+    "enableRestartContinuationHint": "Reconnect and continue active sessions that were cut short when the app exits or restarts.",
     "importLocalSessionsTitle": "Import local sessions",
     "importLocalSessions": "Import local sessions",
     "importLocalSessionsDescription": "Click Import to import local Agent session data. Import the corresponding project into Dimo first.",

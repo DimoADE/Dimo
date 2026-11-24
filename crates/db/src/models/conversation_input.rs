@@ -263,6 +263,24 @@ impl ConversationInputRecord {
         .await
     }
 
+    pub async fn find_by_turn_id(
+        pool: &SqlitePool,
+        conversation_id: Uuid,
+        turn_id: Uuid,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Self>(&format!(
+            r#"SELECT {INPUT_COLUMNS}
+               FROM conversation_inputs
+               WHERE conversation_id = ? AND turn_id = ?
+               ORDER BY created_at DESC, id DESC
+               LIMIT 1"#
+        ))
+        .bind(conversation_id)
+        .bind(turn_id)
+        .fetch_optional(pool)
+        .await
+    }
+
     pub async fn list_for_conversation(
         pool: &SqlitePool,
         conversation_id: Uuid,

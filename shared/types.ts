@@ -792,6 +792,11 @@ hide_model_thinking: boolean,
  */
 previous_session_continuation_enabled: boolean,
 /**
+ * Automatically reconnect and continue conversations whose active turn was
+ * interrupted by an app exit or crash when the host restarts.
+ */
+continue_conversations_after_restart: boolean,
+/**
  * Automatically check for app releases on startup.
  */
 auto_update_enabled: boolean,

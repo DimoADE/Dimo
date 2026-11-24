@@ -98,6 +98,7 @@ function stubConfig(): Config {
     ai_message_default_collapsed: false,
     hide_model_thinking: false,
     previous_session_continuation_enabled: false,
+    continue_conversations_after_restart: true,
     auto_update_enabled: true,
     crash_reports_enabled: false,
     link_open_behavior: 'ExternalBrowser',

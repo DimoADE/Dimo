@@ -2144,6 +2144,8 @@
     "sessionContinuationDescription": "控制创建会话时是否可以连接 Agent 中同一工作区的先前会话。",
     "enablePreviousSessionContinuation": "Fork会话以创建",
     "enablePreviousSessionContinuationHint": "默认关闭。开启后，仅在 Agent 支持列出会话且选择现有工作区时显示该入口。",
+    "enableRestartContinuation": "重启后自动继续中断的会话",
+    "enableRestartContinuationHint": "应用异常退出或重启后，自动重连并继续被中断的会话。",
     "importLocalSessionsTitle": "本地会话导入",
     "importLocalSessions": "本地会话导入",
     "importLocalSessionsDescription": "点击导入按钮以进行本地Agent会话数据导入，需先将对应项目导入Dimo，否则无法选择数据",
