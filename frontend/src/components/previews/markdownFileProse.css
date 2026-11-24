@@ -1,22 +1,23 @@
 @import '../../styles/conversation/conv-variables.css';
 @import '../../styles/conversation/conv-markdown.css';
 
-/* File Preview and RichText share conv-markdown metrics. StyleX on
-   Astryx Markdown / Lexical uses :not(#\#)×3; these rules outrank it. */
+/* File Preview and RichText (Lexical WYSIWYG) share upgraded conv-markdown
+   metrics. StyleX on Lexical RichText uses :not(#\#)×3; these rules outrank it
+   while keeping both surfaces visually consistent. */
 
 .markdown-file-prose:not(#\#):not(#\#):not(#\#):not(#\#),
 .markdown-file-prose [contenteditable]:not(#\#):not(#\#):not(#\#):not(#\#) {
   color: var(--conv-text-primary, var(--text-strong));
-  font-size: 13px;
-  line-height: 1.7;
+  font-size: 14px;
+  line-height: 1.625;
   overflow-wrap: break-word;
   word-break: break-word;
 }
 
 .markdown-file-prose
   :is(p, li, [role='paragraph']):not(#\#):not(#\#):not(#\#):not(#\#) {
-  font-size: 13px;
-  line-height: 1.7;
+  font-size: 14px;
+  line-height: 1.625;
 }
 
 .markdown-file-prose
@@ -35,66 +36,15 @@
     table,
     hr,
     [role='paragraph'],
-    .astryx-markdown-list,
-    .astryx-markdown-table,
-    .astryx-markdown-codeblock,
     .conv-md-codeblock,
     .conv-md-codeblock-single,
     .conv-md-mermaid,
-    .conv-md-html-preview
+    .conv-md-html-preview,
+    .conv-md-alert,
+    .conv-md-details,
+    .conv-md-table-container
   ):not(dialog *):not(#\#):not(#\#):not(#\#):not(#\#) {
-  margin-block: 0;
   max-width: none;
-}
-
-.markdown-file-prose
-  :is(
-    p,
-    h1,
-    h2,
-    h3,
-    h4,
-    h5,
-    h6,
-    ul,
-    ol,
-    blockquote,
-    pre,
-    table,
-    hr,
-    [role='paragraph'],
-    .astryx-markdown-list,
-    .astryx-markdown-table,
-    .astryx-markdown-codeblock,
-    .conv-md-codeblock,
-    .conv-md-codeblock-single,
-    .conv-md-mermaid,
-    .conv-md-html-preview
-  )
-  + :is(
-    p,
-    h1,
-    h2,
-    h3,
-    h4,
-    h5,
-    h6,
-    ul,
-    ol,
-    blockquote,
-    pre,
-    table,
-    hr,
-    [role='paragraph'],
-    .astryx-markdown-list,
-    .astryx-markdown-table,
-    .astryx-markdown-codeblock,
-    .conv-md-codeblock,
-    .conv-md-codeblock-single,
-    .conv-md-mermaid,
-    .conv-md-html-preview
-  ):not(#\#):not(#\#):not(#\#):not(#\#) {
-  margin-top: 8px;
 }
 
 .markdown-file-prose
@@ -102,10 +52,45 @@
     #\#
   ) {
   color: var(--conv-text-primary, var(--text-strong));
-  font-size: 1em;
-  font-weight: 700;
-  letter-spacing: 0.01em;
-  line-height: 1.7;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.markdown-file-prose h1:not(dialog *):not(#\#):not(#\#):not(#\#):not(#\#) {
+  font-size: 1.25rem;
+  line-height: 1.3;
+  margin-block: 1.35rem 0.55rem;
+}
+
+.markdown-file-prose h2:not(dialog *):not(#\#):not(#\#):not(#\#):not(#\#) {
+  font-size: 1.125rem;
+  line-height: 1.32;
+  margin-block: 1.25rem 0.5rem;
+}
+
+.markdown-file-prose h3:not(dialog *):not(#\#):not(#\#):not(#\#):not(#\#) {
+  font-size: 1rem;
+  line-height: 1.35;
+  margin-block: 1.1rem 0.4rem;
+}
+
+.markdown-file-prose h4:not(dialog *):not(#\#):not(#\#):not(#\#):not(#\#) {
+  font-size: 0.9375rem;
+  line-height: 1.4;
+  margin-block: 0.95rem 0.35rem;
+}
+
+.markdown-file-prose h5:not(dialog *):not(#\#):not(#\#):not(#\#):not(#\#) {
+  font-size: 0.875rem;
+  line-height: 1.45;
+  margin-block: 0.85rem 0.3rem;
+}
+
+.markdown-file-prose h6:not(dialog *):not(#\#):not(#\#):not(#\#):not(#\#) {
+  color: var(--conv-text-secondary, var(--text-muted));
+  font-size: 0.875rem;
+  line-height: 1.45;
+  margin-block: 0.85rem 0.3rem;
 }
 
 .markdown-file-prose strong:not(#\#):not(#\#):not(#\#):not(#\#),
@@ -119,9 +104,9 @@
 }
 
 .markdown-file-prose :not(pre) > code:not(#\#):not(#\#):not(#\#):not(#\#) {
-  background: var(--conv-surface-control, var(--surface-control));
-  border: 1px solid var(--conv-border-subtle, var(--border-content));
-  border-radius: var(--radius);
+  background: var(--conv-inline-code-bg, var(--surface-control));
+  border: 1px solid transparent;
+  border-radius: var(--radius-inline-code);
   color: var(--conv-text-primary, var(--text-strong));
   font-family: var(
     --font-mono,
@@ -130,33 +115,61 @@
     'Fira Code',
     monospace
   );
-  font-size: 0.88em;
-  padding: 0.05em 5px;
+  font-size: 0.85em;
+  font-weight: 450;
+  padding: 0.1em 0.35em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
 .markdown-file-prose a:not(#\#):not(#\#):not(#\#):not(#\#) {
-  color: var(--conv-tool-icon);
-  text-decoration: underline;
-  text-underline-offset: 2px;
+  color: var(--conv-link-color);
+  text-decoration: none;
+  text-underline-offset: 0.2em;
 }
 
 .markdown-file-prose a:hover:not(#\#):not(#\#):not(#\#):not(#\#) {
-  color: var(--conv-text-primary, var(--text-strong));
+  color: var(--conv-link-hover-color);
+  text-decoration: underline;
+}
+
+.markdown-file-prose
+  .conv-resource-link[data-resource-kind='file']:not(#\#):not(#\#):not(#\#):not(
+    #\#
+  ),
+.markdown-file-prose
+  .conv-resource-link[data-resource-kind='folder']:not(#\#):not(#\#):not(
+    #\#
+  ):not(#\#) {
+  color: var(--conv-file-link-color);
+}
+
+.markdown-file-prose
+  .conv-resource-link[data-resource-kind='file']:hover:not(#\#):not(#\#):not(
+    #\#
+  ):not(#\#),
+.markdown-file-prose
+  .conv-resource-link[data-resource-kind='folder']:hover:not(#\#):not(#\#):not(
+    #\#
+  ):not(#\#) {
+  color: var(--conv-file-link-hover-color);
 }
 
 .markdown-file-prose blockquote:not(#\#):not(#\#):not(#\#):not(#\#) {
-  background: var(--conv-surface-control, var(--surface-control));
-  border: 1px solid var(--conv-border-subtle, var(--border-content));
-  border-radius: var(--radius);
+  background: transparent;
+  border: none;
+  border-inline-start: 2px solid var(--conv-border-strong, var(--border-strong));
+  border-radius: 0;
   color: var(--conv-text-secondary, var(--text-muted));
+  margin-block: 0.75rem;
   margin-inline: 0;
-  padding: 6px 10px;
+  padding: 0.15rem 0 0.15rem 0.9rem;
 }
 
 .markdown-file-prose ul:not(#\#):not(#\#):not(#\#):not(#\#),
 .markdown-file-prose ol:not(#\#):not(#\#):not(#\#):not(#\#) {
-  line-height: 1.7;
-  margin: 10px 0;
+  line-height: 1.625;
+  margin: 0.55rem 0;
 }
 
 .markdown-file-prose [contenteditable] ul:not(#\#):not(#\#):not(#\#):not(#\#),
@@ -167,8 +180,32 @@
   padding-inline-start: var(--spacing-6, 24px);
 }
 
-.markdown-file-prose li:not(#\#):not(#\#):not(#\#):not(#\#) {
-  margin-bottom: 4px;
+.markdown-file-prose [contenteditable] ul ul:not(#\#):not(#\#):not(#\#):not(#\#) {
+  list-style-type: circle;
+}
+
+.markdown-file-prose
+  [contenteditable]
+  ul
+  ul
+  ul:not(#\#):not(#\#):not(#\#):not(#\#) {
+  list-style-type: square;
+}
+
+.markdown-file-prose [contenteditable] ol ol:not(#\#):not(#\#):not(#\#):not(#\#) {
+  list-style-type: lower-alpha;
+}
+
+.markdown-file-prose
+  [contenteditable]
+  ol
+  ol
+  ol:not(#\#):not(#\#):not(#\#):not(#\#) {
+  list-style-type: lower-roman;
+}
+
+.markdown-file-prose li + li:not(#\#):not(#\#):not(#\#):not(#\#) {
+  margin-top: 0.3rem;
 }
 
 .markdown-file-prose li p:not(#\#):not(#\#):not(#\#):not(#\#) {
@@ -177,24 +214,17 @@
 
 .markdown-file-prose hr:not(#\#):not(#\#):not(#\#):not(#\#) {
   border: none;
-  border-top: 1px solid var(--border-strong, hsl(var(--border)));
+  border-top: 1px solid var(--conv-border-subtle, var(--border-strong));
   height: 0;
-  margin-bottom: 20px;
-  margin-top: 12px;
+  margin-block: 1rem;
   max-width: none;
   width: 100%;
 }
 
-.markdown-file-prose hr + *:not(#\#):not(#\#):not(#\#):not(#\#) {
-  margin-top: 16px;
-}
-
 .markdown-file-prose table:not(#\#):not(#\#):not(#\#):not(#\#) {
-  background: var(--conv-surface-card, var(--surface-content));
-  border: 1px solid var(--conv-border-subtle, var(--border-content));
-  border-collapse: separate;
-  border-radius: var(--radius);
-  border-spacing: 0;
+  background: transparent;
+  border: none;
+  border-collapse: collapse;
   display: table;
   margin: 0;
   max-width: none;
@@ -204,17 +234,21 @@
 
 .markdown-file-prose th:not(#\#):not(#\#):not(#\#):not(#\#),
 .markdown-file-prose td:not(#\#):not(#\#):not(#\#):not(#\#) {
+  border: none;
   border-bottom: 1px solid var(--conv-border-subtle, var(--border-content));
-  border-right: 1px solid var(--conv-border-subtle, var(--border-content));
-  padding: 8px 12px;
+  padding: 0.5rem 0.75rem;
   text-align: left;
+  vertical-align: top;
   overflow-wrap: break-word;
   word-wrap: break-word;
 }
 
-.markdown-file-prose th:last-child:not(#\#):not(#\#):not(#\#):not(#\#),
-.markdown-file-prose td:last-child:not(#\#):not(#\#):not(#\#):not(#\#) {
-  border-right: none;
+.markdown-file-prose thead th:not(#\#):not(#\#):not(#\#):not(#\#) {
+  background: transparent;
+  border-bottom: 1px solid var(--conv-border-strong, var(--border-strong));
+  color: var(--conv-text-secondary, var(--text-muted));
+  font-size: 0.8125rem;
+  font-weight: 600;
 }
 
 .markdown-file-prose
@@ -222,9 +256,4 @@
   tr:last-child
   td:not(#\#):not(#\#):not(#\#):not(#\#) {
   border-bottom: none;
-}
-
-.markdown-file-prose th:not(#\#):not(#\#):not(#\#):not(#\#) {
-  background: var(--conv-surface-control, var(--surface-control));
-  font-weight: 600;
 }

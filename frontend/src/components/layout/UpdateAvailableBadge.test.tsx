@@ -168,7 +168,7 @@ describe('UpdateAvailableBadge', () => {
     expect(await screen.findByText('发现新版本')).toBeVisible();
     expect(screen.getByText('v0.37.0 → v0.39.0')).toBeVisible();
     expect(screen.getByText('更新内容')).toBeVisible();
-    expect(screen.getByText(/修复状态栏更新提示/)).toBeVisible();
+    expect(await screen.findByText(/修复状态栏更新提示/)).toBeVisible();
 
     const upgradeBtn = screen.getByRole('button', { name: '升级到 v0.39.0' });
     await user.click(upgradeBtn);

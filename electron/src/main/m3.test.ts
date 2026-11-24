@@ -276,15 +276,25 @@ describe('dimo:// deep links and launch args', () => {
       parseModelRouterImport(
         'dimo://modelrouter/import?ticket=tkt_123&agent=claude_code'
       )
-    ).toEqual({ ticket: 'tkt_123', agentId: 'claude_code' });
+    ).toEqual({ ticket: 'tkt_123', agentId: 'claude_code', hostId: null });
 
     expect(
-      parseModelRouterImport('dimo-dev://modelrouter?ticket=tkt_456')
-    ).toEqual({ ticket: 'tkt_456', agentId: null });
+      parseModelRouterImport(
+        'dimo://modelrouter/import?ticket=tkt_124&agent=claude_code&hostId=7f2c9a10-1234-5678-9abc-def012345678'
+      )
+    ).toEqual({
+      ticket: 'tkt_124',
+      agentId: 'claude_code',
+      hostId: '7f2c9a10-1234-5678-9abc-def012345678',
+    });
+
+    expect(
+      parseModelRouterImport('dimo-dev://modelrouter?ticket=tkt_456&host_id=host:abc-1')
+    ).toEqual({ ticket: 'tkt_456', agentId: null, hostId: 'host:abc-1' });
 
     expect(
       parseModelRouterImport('dimo://import-modelrouter?ticket=tkt_789&agentId=codex')
-    ).toEqual({ ticket: 'tkt_789', agentId: 'codex' });
+    ).toEqual({ ticket: 'tkt_789', agentId: 'codex', hostId: null });
 
     expect(
       parseModelRouterImport('dimo://modelrouter/import?agent=claude_code')
@@ -326,7 +336,7 @@ describe('dimo:// deep links and launch args', () => {
 
     // Arrives before handlers are attached (macOS cold-start open-url).
     manager.handleUrl(
-      'dimo://modelrouter/import?ticket=tkt_cold&agent=claude_code'
+      'dimo://modelrouter/import?ticket=tkt_cold&agent=claude_code&hostId=host-target-1'
     );
     expect(manager.takePendingModelRouterImport()).toBeNull();
 
@@ -343,6 +353,7 @@ describe('dimo:// deep links and launch args', () => {
       id: 1,
       ticket: 'tkt_cold',
       agentId: 'claude_code',
+      hostId: 'host-target-1',
     });
 
     const taken = manager.takePendingModelRouterImport();
@@ -350,6 +361,7 @@ describe('dimo:// deep links and launch args', () => {
       id: 1,
       ticket: 'tkt_cold',
       agentId: 'claude_code',
+      hostId: 'host-target-1',
     });
     expect(manager.takePendingModelRouterImport()).toBeNull();
 

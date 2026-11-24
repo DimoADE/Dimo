@@ -12,6 +12,7 @@ export type LaunchAction = 'new-window' | 'open-settings';
 export interface ParsedModelRouterImport {
   ticket: string;
   agentId: string | null;
+  hostId: string | null;
 }
 
 export interface ParsedSessionActivation {
@@ -71,7 +72,13 @@ export function parseModelRouterImport(
     parsed.searchParams.get('agent_id');
   const agentId = agentRaw?.trim() ? agentRaw.trim() : null;
 
-  return { ticket, agentId };
+  const hostRaw =
+    parsed.searchParams.get('hostId') ??
+    parsed.searchParams.get('host_id') ??
+    parsed.searchParams.get('targetHostId');
+  const hostId = hostRaw?.trim() ? hostRaw.trim() : null;
+
+  return { ticket, agentId, hostId };
 }
 
 export function parseSessionActivation(
@@ -284,6 +291,7 @@ export class DeepLinkManager {
         id: this.nextImportId++,
         ticket: modelRouterImport.ticket,
         agentId: modelRouterImport.agentId,
+        hostId: modelRouterImport.hostId,
       };
       this.pendingImport = payload;
       handlers.openSettingsWindow('/settings/agents');

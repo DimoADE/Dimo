@@ -1073,45 +1073,54 @@ pub fn host_identity_path(data_root: &Path) -> PathBuf {
     data_root.join("host-identity.json")
 }
 
-/// Stable Host identity for the given data directory.
+/// Machine-wide stable Host identity file (`host-identity.json`).
 ///
-/// Desktop and `dimo-server` must persist this next to the database so pairing
-/// and capabilities keep the same identity across restarts and Host family
-/// processes.
-pub fn load_or_create_host_id(data_root: &Path) -> std::io::Result<String> {
-    let path = host_identity_path(data_root);
-    if let Ok(text) = std::fs::read_to_string(&path)
-        && let Ok(value) = serde_json::from_str::<serde_json::Value>(&text)
-        && let Some(host_id) = value
-            .get("host_id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+/// Stored in the OS application config directory alongside `bootstrap.json`
+/// (`%APPDATA%\dimo\dimo\config\host-identity.json` on Windows) so switching
+/// ports, dev/release builds, or custom data directories on the same machine
+/// reuses a single persistent `host_id` instead of minting duplicate UUIDs.
+pub fn stable_host_identity_path() -> PathBuf {
+    if let Some(explicit) =
+        std::env::var_os("DIMO_HOST_IDENTITY_PATH").filter(|value| !value.is_empty())
     {
-        return Ok(host_id.to_string());
+        return PathBuf::from(explicit);
     }
+    ProjectDirs::from("app", "dimo", "dimo")
+        .map(|dirs| dirs.config_dir().join("host-identity.json"))
+        .or_else(|| dirs::home_dir().map(|home| home.join(".dimo").join("host-identity.json")))
+        .unwrap_or_else(|| PathBuf::from(".dimo-host-identity.json"))
+}
+
+fn read_host_id_file(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+    value
+        .get("host_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn write_host_id_file_atomic(path: &Path, host_id: &str) -> std::io::Result<String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let host_id = uuid::Uuid::new_v4().to_string();
     let encoded = serde_json::to_vec_pretty(&serde_json::json!({ "host_id": host_id }))
         .map_err(std::io::Error::other)?;
-    let staging = path.with_extension("json.tmp");
+    let staging = path.with_extension(format!(
+        "json.{}.{}.tmp",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
     std::fs::write(&staging, encoded)?;
     restrict_owner_read_write(&staging);
-    match std::fs::rename(&staging, &path) {
+    match std::fs::rename(&staging, path) {
         Ok(()) => {}
         Err(_) if path.exists() => {
             let _ = std::fs::remove_file(&staging);
-            if let Ok(text) = std::fs::read_to_string(&path)
-                && let Ok(value) = serde_json::from_str::<serde_json::Value>(&text)
-                && let Some(existing) = value
-                    .get("host_id")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-            {
-                return Ok(existing.to_string());
+            if let Some(existing) = read_host_id_file(path) {
+                return Ok(existing);
             }
         }
         Err(error) => {
@@ -1119,8 +1128,192 @@ pub fn load_or_create_host_id(data_root: &Path) -> std::io::Result<String> {
             return Err(error);
         }
     }
-    restrict_owner_read_write(&path);
-    Ok(host_id)
+    restrict_owner_read_write(path);
+    Ok(host_id.to_string())
+}
+
+fn mirror_host_id_to_data_root(data_root: &Path, host_id: &str) {
+    let local_path = host_identity_path(data_root);
+    if read_host_id_file(&local_path).as_deref() == Some(host_id) {
+        return;
+    }
+    let _ = write_host_id_file_atomic(&local_path, host_id);
+}
+
+/// Stable Host identity for the given data directory.
+///
+/// Desktop and `dimo-server` must persist this next to the database so pairing
+/// and capabilities keep the same identity across restarts and Host family
+/// processes.
+pub fn load_or_create_host_id(data_root: &Path) -> std::io::Result<String> {
+    let path = host_identity_path(data_root);
+    if let Some(existing) = read_host_id_file(&path) {
+        return Ok(existing);
+    }
+    let host_id = uuid::Uuid::new_v4().to_string();
+    write_host_id_file_atomic(&path, &host_id)
+}
+
+/// Load or create the single machine-stable `host_id`, adopting any historical
+/// persisted ID from `data_root` or `legacy_dirs` before minting a new UUID.
+pub fn load_or_create_host_id_with_stable_store(
+    data_root: &Path,
+    stable_path: &Path,
+    legacy_dirs: &[PathBuf],
+) -> std::io::Result<String> {
+    if let Some(existing) = read_host_id_file(stable_path) {
+        mirror_host_id_to_data_root(data_root, &existing);
+        return Ok(existing);
+    }
+
+    let local_path = host_identity_path(data_root);
+    if let Some(existing) = read_host_id_file(&local_path) {
+        let persisted = write_host_id_file_atomic(stable_path, &existing)?;
+        if persisted != existing {
+            mirror_host_id_to_data_root(data_root, &persisted);
+        }
+        return Ok(persisted);
+    }
+
+    for legacy_dir in legacy_dirs {
+        if legacy_dir == data_root {
+            continue;
+        }
+        if let Some(existing) = read_host_id_file(&host_identity_path(legacy_dir)) {
+            let persisted = write_host_id_file_atomic(stable_path, &existing)?;
+            mirror_host_id_to_data_root(data_root, &persisted);
+            return Ok(persisted);
+        }
+    }
+
+    let minted = uuid::Uuid::new_v4().to_string();
+    let persisted = write_host_id_file_atomic(stable_path, &minted)?;
+    mirror_host_id_to_data_root(data_root, &persisted);
+    Ok(persisted)
+}
+
+/// Machine-stable local Host identity used by `dimo-server` and desktop services.
+///
+/// Reuses the OS config directory store (`stable_host_identity_path`) and adopts
+/// any pre-existing `host-identity.json` from `data_root` or standard install
+/// directories so switching ports, dev/release modes, or re-logging in never
+/// creates duplicate Local Hosts.
+pub fn load_or_create_local_host_id(data_root: &Path) -> std::io::Result<String> {
+    let stable_path = stable_host_identity_path();
+    let legacy_dirs = [
+        release_default_data_dir(),
+        legacy_roaming_data_dir(),
+        pre_rename_data_dir(),
+    ];
+    load_or_create_host_id_with_stable_store(data_root, &stable_path, &legacy_dirs)
+}
+
+/// Deterministic SHA-256 hex digest for machine-level fingerprint seeds.
+pub fn hash_machine_fingerprint(seed: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"dimo-machine-v1:");
+    hasher.update(seed.trim().as_bytes());
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    hex
+}
+
+fn read_os_machine_id() -> Option<String> {
+    static CACHED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            #[cfg(windows)]
+            {
+                use winreg::{
+                    RegKey,
+                    enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY},
+                };
+
+                let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+                let key = hklm
+                    .open_subkey_with_flags(
+                        "SOFTWARE\\Microsoft\\Cryptography",
+                        KEY_READ | KEY_WOW64_64KEY,
+                    )
+                    .or_else(|_| hklm.open_subkey("SOFTWARE\\Microsoft\\Cryptography"))
+                    .ok()?;
+                let guid: String = key.get_value("MachineGuid").ok()?;
+                let trimmed = guid.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_ascii_lowercase())
+            }
+            #[cfg(target_os = "linux")]
+            {
+                for candidate in [
+                    "/etc/machine-id",
+                    "/var/lib/dbus/machine-id",
+                    "/sys/class/dmi/id/product_uuid",
+                ] {
+                    if let Ok(raw) = std::fs::read_to_string(candidate) {
+                        let trimmed = raw.trim();
+                        if !trimmed.is_empty() {
+                            return Some(trimmed.to_ascii_lowercase());
+                        }
+                    }
+                }
+                None
+            }
+            #[cfg(target_os = "macos")]
+            {
+                let output = std::process::Command::new("ioreg")
+                    .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+                    .output()
+                    .ok()?;
+                if !output.status.success() {
+                    return None;
+                }
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    if let Some((_, rest)) = line.split_once("IOPlatformUUID") {
+                        let uuid = rest
+                            .trim()
+                            .trim_start_matches('=')
+                            .trim()
+                            .trim_matches('"')
+                            .trim();
+                        if !uuid.is_empty() {
+                            return Some(uuid.to_ascii_lowercase());
+                        }
+                    }
+                }
+                None
+            }
+            #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+            {
+                None
+            }
+        })
+        .clone()
+}
+
+/// Stable machine-level SHA-256 fingerprint (independent of listening port).
+///
+/// Prefers the OS machine/hardware UUID and falls back to the persistent
+/// `host_id` when the OS identifier is unavailable.
+pub fn machine_fingerprint(fallback_host_id: Option<&str>) -> String {
+    if let Some(machine_id) = read_os_machine_id() {
+        return hash_machine_fingerprint(&format!("os:{machine_id}"));
+    }
+    if let Some(host_id) = fallback_host_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return hash_machine_fingerprint(&format!("host:{host_id}"));
+    }
+    if let Ok(host_id) = load_or_create_local_host_id(&host_data_dir()) {
+        return hash_machine_fingerprint(&format!("host:{host_id}"));
+    }
+    hash_machine_fingerprint("host:unknown")
 }
 
 fn restrict_owner_read_write(path: &Path) {

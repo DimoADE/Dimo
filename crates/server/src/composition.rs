@@ -157,8 +157,10 @@ impl HeadlessServer {
                 "could not apply pending backup restore before opening database"
             );
         }
-        config.server.host_id = utils::assets::load_or_create_host_id(&config.data_dir)
-            .map_err(|error| ServerBootstrapError::HostIdentity(error.to_string()))?;
+        if config.server.host_id.trim().is_empty() {
+            config.server.host_id = utils::assets::load_or_create_host_id(&config.data_dir)
+                .map_err(|error| ServerBootstrapError::HostIdentity(error.to_string()))?;
+        }
         if config.server.reachability.is_empty() {
             let allow_lan = utils::net::listen_allows_lan(config.server.listen_addr);
             config.server.reachability =

@@ -156,4 +156,80 @@ describe('accountApi & Model Marketplace helpers', () => {
     expect(localStorage.getItem(ACCOUNT_TOKEN_STORAGE_KEY)).toBe('stale_tok');
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it('sends hostId on web-handoff and uses desktop bridge hostname for startLogin fallback', async () => {
+    localStorage.setItem(ACCOUNT_TOKEN_STORAGE_KEY, 'tok_abc');
+    const prevBridge = window.dimoDesktop;
+    Object.defineProperty(window, 'dimoDesktop', {
+      configurable: true,
+      value: { hostname: 'STUDIO-WORKSTATION' },
+    });
+    try {
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              handoffUrl:
+                'https://dimo.test/api/auth/desktop/web-handoff?ticket=h_2',
+              expiresIn: 60,
+            }),
+            { status: 200 }
+          )
+        )
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              requestId: 'req-2',
+              verifier: 'ver-2',
+              userCode: 'EFGH-5678',
+              verifyUrl: 'https://dimo.test/desktop/authorize?request=req-2',
+              expiresIn: 600,
+              interval: 2,
+            }),
+            { status: 200 }
+          )
+        )
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({
+              apiKey: 'sk-vxr-2',
+              agentId: 'codex',
+              protocol: 'openai',
+              baseUrl: 'https://dimo.test/api/router',
+              model: { id: 'gpt-5', name: 'GPT-5' },
+              models: [{ id: 'gpt-5', name: 'GPT-5' }],
+              targetHostId: 'host-target-123',
+              targetHostName: 'GPU-Box',
+            }),
+            { status: 200 }
+          )
+        );
+
+      await accountApi.webHandoff('/account/market', 'host:uuid-local-1');
+      expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+        targetPath: '/account/market',
+        hostId: 'host:uuid-local-1',
+      });
+
+      await accountApi.startLogin({
+        hostId: 'host:uuid-local-1',
+        nextPath: '/account/models',
+      });
+      expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({
+        deviceName: 'STUDIO-WORKSTATION',
+        hostId: 'host:uuid-local-1',
+        nextPath: '/account/models',
+      });
+
+      const provision = await accountApi.redeemImportTicket('tkt_target');
+      expect(provision.targetHostId).toBe('host-target-123');
+      expect(provision.targetHostName).toBe('GPU-Box');
+    } finally {
+      Object.defineProperty(window, 'dimoDesktop', {
+        configurable: true,
+        value: prevBridge,
+      });
+    }
+  });
 });

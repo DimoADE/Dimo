@@ -404,6 +404,7 @@ function detachDragDropListeners(): void {
 
 const dimoDesktopBridge = {
   platform: bootstrap.platform,
+  hostname: bootstrap.hostname,
   isDev: Boolean(bootstrap.isDev),
   isDeveloperMode: (): boolean => currentDeveloperMode,
   get backend(): ElectronBackendConnectionInfo | undefined {

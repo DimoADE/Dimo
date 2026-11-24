@@ -11,6 +11,7 @@ import {
   writeDesktopSharedPreferenceSection,
 } from '@/lib/frontendPreferences';
 
+import { resolveCurrentHostIdForHandoff } from './hostIdentity';
 import { openExternal } from './openExternal';
 
 export type SavedHostDeleteSelector = {
@@ -144,6 +145,8 @@ export type RouterProvision = {
   group?: string;
   groups?: string[];
   keyName?: string;
+  targetHostId?: string;
+  targetHostName?: string;
 };
 
 export type DeviceLogin = {
@@ -444,6 +447,15 @@ function normalizeNextPath(nextPath?: string): string {
   return trimmed;
 }
 
+function defaultDesktopDeviceName(): string {
+  const bridgeHost =
+    typeof window !== 'undefined' &&
+    typeof window.dimoDesktop?.hostname === 'string'
+      ? window.dimoDesktop.hostname.trim()
+      : '';
+  return bridgeHost || 'Dimo Desktop';
+}
+
 export const accountApi = {
   startLogin: (options?: StartLoginOptions): Promise<DeviceLogin> => {
     const resolved =
@@ -451,7 +463,7 @@ export const accountApi = {
     return call('/api/auth/desktop/start', {
       method: 'POST',
       body: {
-        deviceName: resolved.deviceName?.trim() || 'Dimo Desktop',
+        deviceName: resolved.deviceName?.trim() || defaultDesktopDeviceName(),
         hostId: resolved.hostId?.trim() || '',
         nextPath: normalizeNextPath(resolved.nextPath),
       },
@@ -519,11 +531,15 @@ export const accountApi = {
     }),
 
   webHandoff: (
-    targetPath: string
-  ): Promise<{ handoffUrl: string; expiresIn?: number }> =>
-    authed('/api/auth/desktop/web-handoff', 'POST', {
+    targetPath: string,
+    hostId?: string | null
+  ): Promise<{ handoffUrl: string; expiresIn?: number }> => {
+    const trimmedHostId = hostId?.trim();
+    return authed('/api/auth/desktop/web-handoff', 'POST', {
       targetPath: normalizeNextPath(targetPath),
-    }),
+      ...(trimmedHostId ? { hostId: trimmedHostId } : {}),
+    });
+  },
 
   async redeemImportTicket(ticket: string): Promise<RouterProvision> {
     const trimmed = ticket.trim();
@@ -620,13 +636,17 @@ export function modelRouterUrl(agentId: string, modelId: string | null) {
 }
 
 export async function openAccountWebPath(
-  targetPath = '/account'
+  targetPath = '/account',
+  options?: { hostId?: string | null }
 ): Promise<string> {
   const normalized = normalizeNextPath(targetPath);
   const fallbackUrl = getSiteUrl(normalized);
   if (accountToken()) {
     try {
-      const handoff = await accountApi.webHandoff(normalized);
+      const hostId =
+        options?.hostId?.trim() ||
+        (await resolveCurrentHostIdForHandoff().catch(() => null));
+      const handoff = await accountApi.webHandoff(normalized, hostId);
       if (handoff?.handoffUrl) {
         await openExternal(handoff.handoffUrl);
         return handoff.handoffUrl;

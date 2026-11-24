@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
 
+import * as apiModule from '@/lib/api';
 import {
   hostClientApi,
   type HostClientProfile,
@@ -25,6 +26,7 @@ import {
   resolveAccountStorageKey,
   resolveLegacyAccountStorageKeys,
 } from './accountHostConfigs';
+import { isSameHostId } from './hostIdentity';
 import { useDimoAccount } from './useDimoAccount';
 
 const PUSH_DEBOUNCE_MS = 350;
@@ -169,6 +171,95 @@ export function summarizeSyncableHostProfile(
     needsToken: !hasCredential && !isSsh,
     connected: false,
     lastConnectedAt: profile.lastConnectedAt ?? null,
+  };
+}
+
+function extractNormalizedHostname(originOrAddress: string): string | null {
+  const trimmed = originOrAddress.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(
+      /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`
+    );
+    return parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase() || null;
+  } catch {
+    return null;
+  }
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const lower = hostname.toLowerCase();
+  return lower === 'localhost' || lower === '127.0.0.1' || lower === '::1';
+}
+
+export function filterSelfHostProfiles(
+  profiles: SyncableHostProfile[],
+  context: {
+    localHostId?: string | null;
+    localAddresses?: string[];
+  }
+): SyncableHostProfile[] {
+  const localHostId = context.localHostId?.trim() || null;
+  const ownNonLoopbackHosts = new Set<string>();
+  for (const addr of context.localAddresses ?? []) {
+    const hostname = extractNormalizedHostname(addr);
+    if (
+      hostname &&
+      hostname !== '0.0.0.0' &&
+      hostname !== '::' &&
+      !isLoopbackHost(hostname)
+    ) {
+      ownNonLoopbackHosts.add(hostname);
+    }
+  }
+
+  return profiles.filter((profile) => {
+    if (localHostId && isSameHostId(profile.hostId, localHostId)) {
+      return false;
+    }
+    const isSsh = savedHostSource(profile.provisionKind) === 'ssh';
+    if (!isSsh && profile.origin) {
+      const originHost = extractNormalizedHostname(profile.origin);
+      if (
+        originHost &&
+        (isLoopbackHost(originHost) || ownNonLoopbackHosts.has(originHost))
+      ) {
+        return false;
+      }
+    }
+    return true;
+  });
+}
+
+async function resolveLocalSelfHostFilter(): Promise<{
+  localHostId: string | null;
+  localAddresses: string[];
+}> {
+  let getStatus: (() => Promise<apiModule.WebServerStatus>) | undefined;
+  try {
+    getStatus = apiModule.webServiceApi?.getStatus;
+  } catch {
+    return { localHostId: null, localAddresses: [] };
+  }
+  if (typeof getStatus !== 'function') {
+    return { localHostId: null, localAddresses: [] };
+  }
+  const status = await getStatus().catch(() => null);
+  if (!status) {
+    return { localHostId: null, localAddresses: [] };
+  }
+  const localAddresses: string[] = [
+    ...(Array.isArray(status.addresses) ? status.addresses : []),
+    ...(Array.isArray(status.listen_addresses)
+      ? status.listen_addresses.flatMap((item) =>
+          [item.origin, item.ip].filter(Boolean)
+        )
+      : []),
+    ...(status.address ? [status.address] : []),
+  ];
+  return {
+    localHostId: status.host_id?.trim() || null,
+    localAddresses,
   };
 }
 
@@ -401,9 +492,12 @@ export async function syncAccountSavedHosts(
 
       const postMergeBundle =
         await hostClientApi.exportSyncProfiles(accountKey);
-      const preparedProfiles = prepareProfilesForCloudUpload(
-        postMergeBundle.profiles
+      const selfHostFilter = await resolveLocalSelfHostFilter();
+      const filteredPostMerge = filterSelfHostProfiles(
+        postMergeBundle.profiles,
+        selfHostFilter
       );
+      const preparedProfiles = prepareProfilesForCloudUpload(filteredPostMerge);
       if (
         needsCloudPush(
           preparedProfiles,
@@ -415,7 +509,7 @@ export async function syncAccountSavedHosts(
         await accountApi.putSavedHosts(preparedProfiles);
         await hostClientApi.markSyncPushed(
           accountKey,
-          postMergeBundle.profiles.map((item) => item.profileId)
+          filteredPostMerge.map((item) => item.profileId)
         );
       }
       lastPushedSignatureByAccount.set(
@@ -458,7 +552,12 @@ export async function pushLocalSavedHostChanges(
       const bundle = await hostClientApi.exportSyncProfiles(accountKey);
       await flushPendingCloudDeletes(bundle.pendingDeletes);
 
-      const preparedProfiles = prepareProfilesForCloudUpload(bundle.profiles);
+      const selfHostFilter = await resolveLocalSelfHostFilter();
+      const filteredProfiles = filterSelfHostProfiles(
+        bundle.profiles,
+        selfHostFilter
+      );
+      const preparedProfiles = prepareProfilesForCloudUpload(filteredProfiles);
       const signature = stableProfileSignature(preparedProfiles);
       if (
         preparedProfiles.length > 0 &&
@@ -467,7 +566,7 @@ export async function pushLocalSavedHostChanges(
         await accountApi.putSavedHosts(preparedProfiles);
         await hostClientApi.markSyncPushed(
           accountKey,
-          bundle.profiles.map((item) => item.profileId)
+          filteredProfiles.map((item) => item.profileId)
         );
       }
       lastPushedSignatureByAccount.set(accountKey, signature);

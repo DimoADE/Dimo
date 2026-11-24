@@ -18,11 +18,13 @@ function shouldSkip(el: HTMLElement): boolean {
   if (el.getAttribute('aria-hidden') === 'true') return true;
   if (el.classList.contains('conv-md-codeblock-header')) return true;
   if (el.classList.contains('conv-md-codeblock-copy')) return true;
+  if (el.classList.contains('conv-md-codeblock-actions')) return true;
+  if (el.classList.contains('conv-md-table-actions')) return true;
   return false;
 }
 
 function languageFromClass(className: string | null | undefined): string {
-  const match = className?.match(/language-([\w-]+)/i);
+  const match = className?.match(/language-([\w.+-]+)/i);
   return match?.[1] ?? '';
 }
 
@@ -103,10 +105,10 @@ function listItemChildren(el: HTMLElement): Node[] {
   return marker ? children.slice(1) : children;
 }
 
-function serializeChildren(nodes: Iterable<Node>): string {
+function serializeChildren(nodes: Iterable<Node>, listDepth = 0): string {
   let result = '';
   for (const child of nodes) {
-    result += serializeNode(child);
+    result += serializeNode(child, listDepth);
   }
   return result;
 }
@@ -137,9 +139,9 @@ function serializeTable(el: HTMLElement): string {
   return `\n${lines.join('\n')}\n`;
 }
 
-function serializeNode(node: Node): string {
+function serializeNode(node: Node, listDepth = 0): string {
   if (node.nodeType === Node.DOCUMENT_FRAGMENT_NODE) {
-    return serializeChildren(node.childNodes);
+    return serializeChildren(node.childNodes, listDepth);
   }
   if (node.nodeType === Node.TEXT_NODE) {
     return (node.textContent ?? '').replace(/\u00a0/g, ' ');
@@ -171,25 +173,25 @@ function serializeNode(node: Node): string {
   }
   if (tag === 'a') {
     const href = el.getAttribute('href') ?? '';
-    const inner = serializeChildren(el.childNodes).trim();
+    const inner = serializeChildren(el.childNodes, listDepth).trim();
     if (!inner) return '';
     if (!href || href === '#') return inner;
     return `[${inner}](${href})`;
   }
   if (tag === 'strong' || tag === 'b') {
-    return wrapInline(serializeChildren(el.childNodes), '**');
+    return wrapInline(serializeChildren(el.childNodes, listDepth), '**');
   }
   if (tag === 'em' || tag === 'i') {
-    return wrapInline(serializeChildren(el.childNodes), '*');
+    return wrapInline(serializeChildren(el.childNodes, listDepth), '*');
   }
   if (tag === 'del' || tag === 's') {
-    return wrapInline(serializeChildren(el.childNodes), '~~');
+    return wrapInline(serializeChildren(el.childNodes, listDepth), '~~');
   }
   if (tag === 'u') {
-    return wrapInline(serializeChildren(el.childNodes), '__');
+    return wrapInline(serializeChildren(el.childNodes, listDepth), '__');
   }
   if (tag === 'blockquote') {
-    const inner = serializeChildren(el.childNodes).trim();
+    const inner = serializeChildren(el.childNodes, listDepth).trim();
     if (!inner) return '';
     return `\n${inner
       .split('\n')
@@ -198,7 +200,7 @@ function serializeNode(node: Node): string {
   }
   if (/^h[1-6]$/.test(tag)) {
     const level = Number(tag.slice(1));
-    const inner = serializeChildren(el.childNodes).trim();
+    const inner = serializeChildren(el.childNodes, listDepth).trim();
     if (!inner) return '';
     return `\n${'#'.repeat(level)} ${inner}\n`;
   }
@@ -206,8 +208,12 @@ function serializeNode(node: Node): string {
     return serializeTable(el);
   }
   if (tag === 'ul' || tag === 'ol' || el.getAttribute('role') === 'list') {
-    const inner = serializeChildren(el.childNodes).trim();
-    return inner ? `\n${inner}\n\n` : '';
+    const inner = serializeChildren(el.childNodes, listDepth).replace(
+      /^\n+|\n+$/g,
+      ''
+    );
+    if (!inner) return '';
+    return listDepth > 0 ? `\n${inner}\n` : `\n${inner}\n\n`;
   }
   if (isListItem(el)) {
     const parent = el.parentElement;
@@ -217,12 +223,24 @@ function serializeNode(node: Node): string {
           .filter((child) => child instanceof HTMLElement && isListItem(child))
           .indexOf(el) + 1
       : 1;
-    const marker = ordered ? `${Math.max(index, 1)}. ` : '- ';
-    const inner = serializeChildren(listItemChildren(el)).trim();
-    return `${marker}${inner}\n`;
+    const startAttr = ordered ? Number(parent?.getAttribute('start') ?? 1) : 1;
+    const itemNum =
+      (Number.isFinite(startAttr) ? startAttr : 1) + Math.max(index, 1) - 1;
+    const indent = '  '.repeat(listDepth);
+    const taskCheckbox = el.querySelector<HTMLInputElement>(
+      ':scope > input[type="checkbox"], :scope > p > input[type="checkbox"]'
+    );
+    const taskPrefix = taskCheckbox
+      ? taskCheckbox.checked
+        ? '[x] '
+        : '[ ] '
+      : '';
+    const marker = ordered ? `${itemNum}. ` : '- ';
+    const inner = serializeChildren(listItemChildren(el), listDepth + 1).trim();
+    return `${indent}${marker}${taskPrefix}${inner}\n`;
   }
 
-  const inner = serializeChildren(el.childNodes);
+  const inner = serializeChildren(el.childNodes, listDepth);
   if (tag === 'p' || tag === 'div' || tag === 'section' || tag === 'li') {
     const trimmed = inner.replace(/\n+$/u, '');
     return trimmed ? `${trimmed}\n\n` : '';

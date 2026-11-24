@@ -91,6 +91,8 @@ pub struct HostClientProfileView {
     pub has_credential: bool,
     pub connected: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connected_window_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provision_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provision: Option<serde_json::Value>,
@@ -223,8 +225,9 @@ impl HostClientRuntime {
         self.refresh_active(registry).await?;
         let state = self.load().await?;
         let lookup = host_app_window_label(window_label).unwrap_or(window_label);
-        let active_id = self.active.lock().await.get(lookup).cloned();
-        let profiles = views(&state, active_id.as_deref());
+        let active_snapshot = self.active.lock().await.clone();
+        let active_id = active_snapshot.get(lookup).cloned();
+        let profiles = views_with_active_windows(&state, active_id.as_deref(), &active_snapshot);
         let profile = active_id
             .as_deref()
             .and_then(|id| profiles.iter().find(|item| item.id == id).cloned());
@@ -865,24 +868,41 @@ fn parse_health(origin: &str, body: HealthBody) -> Option<DiscoveredProbe> {
 }
 
 fn views(state: &StoredState, active_id: Option<&str>) -> Vec<HostClientProfileView> {
+    let empty = HashMap::new();
+    views_with_active_windows(state, active_id, &empty)
+}
+
+fn views_with_active_windows(
+    state: &StoredState,
+    active_id: Option<&str>,
+    active_windows: &HashMap<String, String>,
+) -> Vec<HostClientProfileView> {
     let mut profiles: Vec<_> = state
         .profiles
         .iter()
-        .map(|profile| HostClientProfileView {
-            id: profile.id.clone(),
-            origin: profile.origin.clone(),
-            host_id: profile.host_id.clone(),
-            name: if profile.name.is_empty() {
-                profile.origin.clone()
-            } else {
-                profile.name.clone()
-            },
-            last_connected_at: profile.last_connected_at.clone(),
-            needs_token: profile.needs_token || profile.access_token.is_none(),
-            has_credential: profile.access_token.is_some() && !profile.needs_token,
-            connected: active_id == Some(profile.id.as_str()),
-            provision_kind: profile.provision_kind.clone(),
-            provision: profile.provision.clone(),
+        .map(|profile| {
+            let connected_window_label = active_windows
+                .iter()
+                .find_map(|(window, bound_id)| {
+                    (bound_id == &profile.id).then(|| window.clone())
+                });
+            HostClientProfileView {
+                id: profile.id.clone(),
+                origin: profile.origin.clone(),
+                host_id: profile.host_id.clone(),
+                name: if profile.name.is_empty() {
+                    profile.origin.clone()
+                } else {
+                    profile.name.clone()
+                },
+                last_connected_at: profile.last_connected_at.clone(),
+                needs_token: profile.needs_token || profile.access_token.is_none(),
+                has_credential: profile.access_token.is_some() && !profile.needs_token,
+                connected: active_id == Some(profile.id.as_str()),
+                connected_window_label,
+                provision_kind: profile.provision_kind.clone(),
+                provision: profile.provision.clone(),
+            }
         })
         .collect();
     profiles.sort_by(|left, right| {

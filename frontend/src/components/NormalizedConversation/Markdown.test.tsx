@@ -251,29 +251,43 @@ describe('Markdown', () => {
     expect(getComputedStyle(icon as Element).alignSelf).toBe('center');
   });
 
-  it('keeps ordered-list numbers and periods on one line', () => {
-    renderMarkdown('1. first\n2. second\n10. tenth');
+  it('renders native multi-level ordered and unordered lists with semantic markers and dynamic multi-digit gutter', () => {
+    renderMarkdown(
+      [
+        '1. first',
+        '   - nested bullet',
+        '     - deep bullet',
+        '       - third level bullet',
+        '2. second',
+        '3. third',
+        '4. fourth',
+        '5. fifth',
+        '6. sixth',
+        '7. seventh',
+        '8. eighth',
+        '9. ninth',
+        '10. tenth',
+      ].join('\n')
+    );
 
-    const ordered = screen
-      .getAllByRole('list')
-      .find((list) => list.tagName === 'OL');
-    const markers = ordered?.querySelectorAll(':scope > li > span:first-child');
+    const lists = screen.getAllByRole('list');
+    const ordered = lists.find((list) => list.tagName === 'OL');
+    const unordered = lists.filter((list) => list.tagName === 'UL');
 
     expect(ordered).toBeTruthy();
-    expect(markers?.length).toBeGreaterThanOrEqual(2);
-    for (const marker of markers ?? []) {
-      const style = getComputedStyle(marker);
-      expect(style.whiteSpace).toBe('nowrap');
-      expect(style.width).not.toBe('12px');
-      expect(style.minWidth).not.toBe('1.5em');
-    }
-    expect(getComputedStyle(ordered as Element).paddingLeft).toBe('2.2px');
-    expect(getComputedStyle(ordered as Element).paddingInlineStart).toBe(
-      '2.2px'
+    expect(ordered).toHaveAttribute('data-ol-digits', '2');
+    expect(getComputedStyle(ordered as Element).listStyleType).toBe('decimal');
+    expect(getComputedStyle(ordered as Element).listStylePosition).toBe(
+      'outside'
     );
+
+    expect(unordered).toHaveLength(3);
+    expect(getComputedStyle(unordered[0]!).listStyleType).toBe('disc');
+    expect(getComputedStyle(unordered[1]!).listStyleType).toBe('circle');
+    expect(getComputedStyle(unordered[2]!).listStyleType).toBe('square');
   });
 
-  it('uses the same indent and marker gap for ordered and unordered lists', () => {
+  it('uses consistent outside list markers and indentation for ordered and unordered lists', () => {
     renderMarkdown('- bullet\n\n1. first');
 
     const unordered = screen
@@ -282,58 +296,40 @@ describe('Markdown', () => {
     const ordered = screen
       .getAllByRole('list')
       .find((list) => list.tagName === 'OL');
-    const unorderedItem = unordered?.querySelector(':scope > li');
-    const orderedItem = ordered?.querySelector(':scope > li');
-    const unorderedMarker = unorderedItem?.querySelector(
-      ':scope > span:first-child'
-    );
-    const orderedMarker = orderedItem?.querySelector(
-      ':scope > span:first-child'
-    );
 
+    expect(getComputedStyle(unordered as Element).listStylePosition).toBe(
+      'outside'
+    );
+    expect(getComputedStyle(ordered as Element).listStylePosition).toBe(
+      'outside'
+    );
     expect(getComputedStyle(unordered as Element).paddingInlineStart).toBe(
-      '2.2px'
+      getComputedStyle(ordered as Element).paddingInlineStart
     );
-    expect(getComputedStyle(ordered as Element).paddingInlineStart).toBe(
-      '2.2px'
-    );
-    expect(getComputedStyle(unorderedItem as Element).paddingLeft).toBe(
-      getComputedStyle(orderedItem as Element).paddingLeft
-    );
-    expect(getComputedStyle(unorderedItem as Element).gap).toBe(
-      getComputedStyle(orderedItem as Element).gap
-    );
-    expect(getComputedStyle(unorderedMarker as Element).width).toBe('8px');
-    expect(getComputedStyle(orderedMarker as Element).width).not.toBe('8px');
   });
 
-  it('keeps unordered list markers compact', () => {
-    renderMarkdown('- item');
-
-    const unordered = screen.getByRole('list');
-    const marker = unordered.querySelector(':scope > li > span:first-child');
-
-    expect(getComputedStyle(unordered).paddingLeft).toBe('2.2px');
-    expect(getComputedStyle(unordered).paddingInlineStart).toBe('2.2px');
-    expect(getComputedStyle(marker as Element).width).toBe('8px');
-  });
-
-  it('leaves extra space below a horizontal rule', () => {
+  it('keeps horizontal rules spaced cleanly from surrounding prose', () => {
     const { container } = renderMarkdown('Above\n\n---\n\nBelow');
     const rule = container.querySelector('hr');
 
     expect(rule).not.toBeNull();
-    expect(getComputedStyle(rule as Element).marginBottom).toBe('20px');
+    expect(getComputedStyle(rule as Element).marginTop).toBe('1rem');
+    expect(getComputedStyle(rule as Element).marginBottom).toBe('1rem');
   });
 
-  it('uses a looser line-height so adjacent inline code stays separated', () => {
+  it('uses a comfortable 1.625 line-height and 4px inline code chips', () => {
     const { container } = renderMarkdown(
       'line with `one` token\n\nline with `two` token'
     );
     const root = container.querySelector('.conv-markdown');
+    const inlineCode = container.querySelector('code');
 
     const lineHeight = getComputedStyle(root as Element).lineHeight;
-    expect(['1.7', '22.1px']).toContain(lineHeight);
+    expect(['1.625', '22.75px']).toContain(lineHeight);
+    expect(inlineCode).not.toBeNull();
+    expect(getComputedStyle(inlineCode as Element).borderRadius).toBe(
+      'var(--radius-inline-code)'
+    );
   });
 
   it('renders a GFM table when projected message rows contain blank gaps', () => {
@@ -424,7 +420,9 @@ describe('Markdown', () => {
       '[frontend/src/App.tsx](http://127.0.0.1:3002/local-projects/project-1/sessions)'
     );
 
-    fireEvent.click(screen.getByRole('link', { name: 'frontend/src/App.tsx' }));
+    const link = screen.getByRole('link', { name: 'App.tsx' });
+    expect(link).toHaveAttribute('title', 'frontend/src/App.tsx');
+    fireEvent.click(link);
 
     expect(panelActionsMock.openFilePreview).toHaveBeenCalledWith(
       'C:/workspace/project/frontend/src/App.tsx',
@@ -435,7 +433,7 @@ describe('Markdown', () => {
     );
   });
 
-  it('opens relative file hrefs in the workspace editor instead of navigating the page', () => {
+  it('opens relative file hrefs in the workspace editor while preserving colorful file icons', () => {
     renderMarkdown('[manager.rs](crates/agents/src/manager.rs)');
 
     const link = screen.getByRole('link', { name: 'manager.rs' });
@@ -446,7 +444,8 @@ describe('Markdown', () => {
     const paintedIconPart = fileIcon?.querySelector(
       '[fill]:not([fill="none"])'
     );
-    expect(getComputedStyle(paintedIconPart as Element).fill).toBe(
+    expect(paintedIconPart).toBeInTheDocument();
+    expect(getComputedStyle(paintedIconPart as Element).fill).not.toBe(
       'currentcolor'
     );
     fireEvent.click(link);
@@ -526,11 +525,14 @@ describe('Markdown', () => {
   it('opens file-looking links with empty hrefs in the workspace editor', () => {
     renderMarkdown('[PRD/english-video-review-extension-prd.md]()');
 
-    fireEvent.click(
-      screen.getByRole('link', {
-        name: 'PRD/english-video-review-extension-prd.md',
-      })
+    const link = screen.getByRole('link', {
+      name: 'english-video-review-extension-prd.md',
+    });
+    expect(link).toHaveAttribute(
+      'title',
+      'PRD/english-video-review-extension-prd.md'
     );
+    fireEvent.click(link);
 
     expect(panelActionsMock.openFilePreview).toHaveBeenCalledWith(
       'C:/workspace/project/PRD/english-video-review-extension-prd.md',
@@ -589,7 +591,9 @@ describe('Markdown', () => {
   it('opens inline code file paths in the workspace editor', () => {
     renderMarkdown('Open `frontend/src/App.tsx`');
 
-    fireEvent.click(screen.getByRole('link', { name: 'frontend/src/App.tsx' }));
+    const link = screen.getByRole('link', { name: 'App.tsx' });
+    expect(link).toHaveAttribute('title', 'frontend/src/App.tsx');
+    fireEvent.click(link);
 
     expect(panelActionsMock.openFilePreview).toHaveBeenCalledWith(
       'C:/workspace/project/frontend/src/App.tsx',
@@ -604,8 +608,9 @@ describe('Markdown', () => {
     renderMarkdown('Open `frontend/src/App.tsx`');
 
     const code = screen.getByRole('link', {
-      name: 'frontend/src/App.tsx',
+      name: 'App.tsx',
     });
+    expect(code).toHaveAttribute('title', 'frontend/src/App.tsx');
     fireEvent.keyDown(code, { key: 'Enter' });
 
     expect(panelActionsMock.openFilePreview).toHaveBeenCalledWith(
@@ -843,38 +848,33 @@ T_1 &= 3s
 });
 
 describe('Markdown raw HTML', () => {
-  it('renders an allowlisted block element', async () => {
+  it('renders an allowlisted block element natively', () => {
     const { container } = renderMarkdown(
       'before <div class="box">inner text</div> after'
     );
 
-    await waitFor(() => {
-      const host = container.querySelector('.conv-md-raw-html');
-      expect(host).not.toBeNull();
-      expect(host).toHaveTextContent('inner text');
-    });
+    const innerDiv = container.querySelector('.conv-markdown div');
+    expect(innerDiv).not.toBeNull();
+    expect(innerDiv).toHaveTextContent('inner text');
   });
 
-  it('renders an inline element like <sub>', async () => {
+  it('renders an inline element like <sub>', () => {
     const { container } = renderMarkdown('H<sub>2</sub>O');
 
-    await waitFor(() => {
-      expect(container.querySelector('sub')).toHaveTextContent('2');
-    });
+    expect(container.querySelector('sub')).toHaveTextContent('2');
   });
 
-  it('strips event handlers, styles, and disallowed attributes', async () => {
+  it('strips event handlers, styles, and disallowed attributes', () => {
     const { container } = renderMarkdown(
       '<div onclick="alert(1)" style="color:red" title="kept">hi</div>'
     );
 
-    await waitFor(() => {
-      const inner = container.querySelector('.conv-md-raw-html > div');
-      expect(inner).not.toBeNull();
-      expect(inner).not.toHaveAttribute('onclick');
-      expect(inner).not.toHaveAttribute('style');
-      expect(inner).toHaveAttribute('title', 'kept');
-    });
+    const inner = container.querySelector('.conv-markdown div[title="kept"]');
+    expect(inner).not.toBeNull();
+    expect(inner).not.toHaveAttribute('onclick');
+    expect(inner).not.toHaveAttribute('style');
+    expect(inner).toHaveAttribute('title', 'kept');
+    expect(inner).toHaveTextContent('hi');
   });
 
   it('resolves a raw <img> src against the workspace base path', async () => {
@@ -893,21 +893,16 @@ describe('Markdown raw HTML', () => {
     );
 
     expect(container.querySelector('script')).not.toBeInTheDocument();
-    expect(
-      container.querySelector('.conv-md-raw-html')
-    ).not.toBeInTheDocument();
     expect(container.textContent).toContain('<system-reminder>');
     expect(container.textContent).toContain('<script>');
   });
 
-  it('keeps HTML-looking text inside code spans as code', async () => {
+  it('keeps HTML-looking text inside code spans as code', () => {
     const { container } = renderMarkdown('`<div>x</div>`');
 
-    await waitFor(() => {
-      const code = container.querySelector('code');
-      expect(code).not.toBeNull();
-      expect(code).toHaveTextContent('<div>x</div>');
-    });
+    const code = container.querySelector('code');
+    expect(code).not.toBeNull();
+    expect(code).toHaveTextContent('<div>x</div>');
   });
 
   it('falls back to literal text when rawHtml is disabled', () => {
@@ -915,21 +910,162 @@ describe('Markdown raw HTML', () => {
       rawHtml: false,
     });
 
-    expect(
-      container.querySelector('.conv-md-raw-html')
-    ).not.toBeInTheDocument();
+    expect(container.querySelector('.conv-markdown div')).toBeNull();
     expect(container.textContent).toContain('<div class="box">hi</div>');
   });
 
-  it('sets prose blocks to 100% max-width instead of capping at 680px', () => {
+  it('renders native paragraphs at 100% max-width instead of capping at 680px', () => {
     const { container } = renderMarkdown(
       'A long collaboration message paragraph.'
     );
     const paragraph = container.querySelector(
-      '[role="paragraph"]'
+      '.conv-markdown p'
     ) as HTMLElement | null;
     expect(paragraph).not.toBeNull();
-    expect(paragraph?.style.getPropertyValue('--x-maxWidth')).toBe('100%');
+    expect(getComputedStyle(paragraph!).maxWidth).toBe('100%');
+  });
+
+  it('renders <details><summary> with inner Markdown parsed natively', () => {
+    const { container } = renderMarkdown(
+      '<details open>\n<summary>More details</summary>\n\n**Bold** and `inline` inside.\n\n</details>'
+    );
+
+    const details = container.querySelector('details.conv-md-details');
+    expect(details).toBeInTheDocument();
+    expect(details?.querySelector('summary.conv-md-summary')).toHaveTextContent(
+      'More details'
+    );
+    expect(details?.querySelector('strong')).toHaveTextContent('Bold');
+    expect(details?.querySelector('code')).toHaveTextContent('inline');
+  });
+});
+
+describe('Phase 1 & Phase 2 Markdown upgrades', () => {
+  it('renders GitHub Alert callouts for all five severities and custom titles', () => {
+    const { container } = renderMarkdown(
+      [
+        '> [!NOTE]',
+        '> Note body.',
+        '',
+        '> [!WARNING] Watch out',
+        '> Dangerous **action**.',
+        '',
+        '> [!CAUTION]',
+        '> Irreversible.',
+      ].join('\n')
+    );
+
+    const note = container.querySelector('.conv-md-alert[data-alert-kind="note"]');
+    const warning = container.querySelector(
+      '.conv-md-alert[data-alert-kind="warning"]'
+    );
+    const caution = container.querySelector(
+      '.conv-md-alert[data-alert-kind="caution"]'
+    );
+
+    expect(note).toBeInTheDocument();
+    expect(note).toHaveTextContent('Note body.');
+    expect(warning).toBeInTheDocument();
+    expect(warning?.querySelector('.conv-md-alert-title')).toHaveTextContent(
+      'Watch out'
+    );
+    expect(warning?.querySelector('strong')).toHaveTextContent('action');
+    expect(caution).toBeInTheDocument();
+  });
+
+  it('renders GFM footnotes with backref links', () => {
+    const { container } = renderMarkdown(
+      'Here is a claim[^1].\n\n[^1]: Supporting source.'
+    );
+
+    expect(container.querySelector('a[data-footnote-ref]')).toBeInTheDocument();
+    const footnotes = container.querySelector('section[data-footnotes]');
+    expect(footnotes).toBeInTheDocument();
+    expect(footnotes).toHaveTextContent('Supporting source.');
+  });
+
+  it('disambiguates duplicate basenames and forwards line ranges on click', () => {
+    renderMarkdown(
+      'Compare [crates/a/src/turn/mod.rs:22](crates/a/src/turn/mod.rs#L22-L40) and [crates/b/src/chat/mod.rs](crates/b/src/chat/mod.rs).'
+    );
+
+    const first = screen.getByRole('link', {
+      name: 'mod.rs · turn · L22–40',
+    });
+    const second = screen.getByRole('link', {
+      name: 'mod.rs · chat',
+    });
+
+    expect(first).toBeInTheDocument();
+    expect(second).toBeInTheDocument();
+
+    fireEvent.click(first);
+    expect(panelActionsMock.openFilePreview).toHaveBeenCalledWith(
+      'C:/workspace/project/crates/a/src/turn/mod.rs',
+      {
+        displayPath: 'crates/a/src/turn/mod.rs',
+        title: 'crates/a/src/turn/mod.rs',
+        location: { line: 22, column: 1, endLine: 40 },
+      }
+    );
+  });
+
+  it('normalizes LLM under- and over-indented nested lists without turning them into code blocks', () => {
+    const { container } = renderMarkdown(
+      ['1. Top item', '  - two-space nested bullet', '        - over-indented sub-bullet', '2. Next top item'].join('\n')
+    );
+
+    expect(container.querySelector('pre')).toBeNull();
+    const ol = container.querySelector('ol');
+    expect(ol?.querySelectorAll(':scope > li')).toHaveLength(2);
+    expect(ol?.querySelectorAll('ul')).toHaveLength(2);
+  });
+
+  it('displays code fence title and toggles word wrap on multi-line code blocks', () => {
+    const { container } = renderMarkdown(
+      '```ts title="src/engine.ts"\nconst engine = createEngine();\nexport default engine;\n```'
+    );
+
+    const codeblock = container.querySelector('.conv-md-codeblock');
+    expect(codeblock).toBeInTheDocument();
+    expect(codeblock?.querySelector('.conv-md-codeblock-title')).toHaveTextContent(
+      'src/engine.ts'
+    );
+    expect(codeblock).not.toHaveClass('is-wrapped');
+
+    const wrapBtn = screen.getByRole('button', { name: /自动换行|Word wrap/i });
+    fireEvent.click(wrapBtn);
+    expect(codeblock).toHaveClass('is-wrapped');
+  });
+
+  it('strips YAML frontmatter and supports interactive task checkboxes when enabled for file preview', () => {
+    const onToggle = vi.fn();
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    const { container } = render(
+      <QueryClientProvider client={queryClient}>
+        <Markdown
+          value={'---\ntitle: Spec\n---\n\n# Heading\n\n- [ ] First task\n- [x] Done task'}
+          workspacePath="C:/workspace/project"
+          stripFrontmatter
+          onToggleTaskCheckbox={onToggle}
+        />
+      </QueryClientProvider>
+    );
+
+    expect(container.textContent).not.toContain('title: Spec');
+    expect(container.querySelector('h1')).toHaveTextContent('Heading');
+    const checkboxes = container.querySelectorAll<HTMLInputElement>(
+      'input[type="checkbox"]'
+    );
+    expect(checkboxes).toHaveLength(2);
+    expect(checkboxes[0]!.checked).toBe(false);
+    expect(checkboxes[1]!.checked).toBe(true);
+
+    fireEvent.click(checkboxes[0]!);
+    expect(onToggle).toHaveBeenCalledWith(0, true);
   });
 });
 

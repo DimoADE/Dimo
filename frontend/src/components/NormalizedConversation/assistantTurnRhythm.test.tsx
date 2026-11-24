@@ -217,24 +217,18 @@ describe('assistant turn vertical rhythm', () => {
     expect(getComputedStyle(expandedInner as Element).overflow).toBe('visible');
   });
 
-  it('maintains an 8px vertical rhythm across headings, blockquotes, and paragraphs inside Astryx document wrapper', () => {
+  it('maintains semantic heading, blockquote, and paragraph vertical rhythm inside .conv-markdown', () => {
     const { container } = render(
       <div className="legacy-design">
         <style>{conversationStyles}</style>
         <div className="conv-markdown">
-          <div role="document" className="astryx-markdown">
-            <h2 className="astryx-markdown-heading">Section</h2>
-            <h3 className="astryx-markdown-heading">Question 1</h3>
-            <blockquote className="astryx-blockquote astryx-markdown-blockquote">
-              <div role="paragraph" className="astryx-markdown-paragraph">
-                Quote paragraph 1
-              </div>
-              <div role="paragraph" className="astryx-markdown-paragraph">
-                Quote paragraph 2
-              </div>
-            </blockquote>
-            <h3 className="astryx-markdown-heading">Question 2</h3>
-          </div>
+          <h2>Section</h2>
+          <h3>Question 1</h3>
+          <blockquote>
+            <p>Quote paragraph 1</p>
+            <p>Quote paragraph 2</p>
+          </blockquote>
+          <h3>Question 2</h3>
         </div>
       </div>
     );
@@ -242,18 +236,17 @@ describe('assistant turn vertical rhythm', () => {
     const h2 = container.querySelector('h2') as Element;
     const [q1, q2] = container.querySelectorAll('h3');
     const blockquote = container.querySelector('blockquote') as Element;
-    const [quoteP1, quoteP2] =
-      blockquote.querySelectorAll('[role="paragraph"]');
+    const [quoteP1, quoteP2] = blockquote.querySelectorAll('p');
 
     expect(getComputedStyle(h2).marginTop).toBe('0px');
-    expect(getComputedStyle(h2).marginBottom).toBe('0px');
-    expect(getComputedStyle(q1).marginTop).toBe('8px');
-    expect(getComputedStyle(q1).marginBottom).toBe('0px');
-    expect(getComputedStyle(blockquote).marginTop).toBe('8px');
-    expect(getComputedStyle(blockquote).marginBottom).toBe('0px');
+    expect(getComputedStyle(h2).marginBottom).toBe('0.5rem');
+    expect(getComputedStyle(q1).marginTop).toBe('1.1rem');
+    expect(getComputedStyle(q1).marginBottom).toBe('0.4rem');
+    expect(getComputedStyle(blockquote).marginTop).toBe('0.75rem');
+    expect(getComputedStyle(blockquote).marginBottom).toBe('0.75rem');
     expect(getComputedStyle(quoteP1).marginTop).toBe('0px');
-    expect(getComputedStyle(quoteP2).marginTop).toBe('8px');
-    expect(getComputedStyle(q2).marginTop).toBe('8px');
+    expect(getComputedStyle(quoteP2).marginBottom).toBe('0px');
+    expect(getComputedStyle(q2).marginTop).toBe('1.1rem');
   });
 });
 

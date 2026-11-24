@@ -7,9 +7,13 @@ import {
 } from 'react';
 import { useTranslation } from 'react-i18next';
 import type {
+  AgentAuthModeView,
   AgentAuthenticationStatus,
   AgentId,
   AgentManagementView,
+  AgentModelProvidersView,
+  DshProvidersView,
+  OpenCodeProviderConnectionsView,
 } from 'shared/types';
 
 import { ConfirmDialog } from '@/components/dialogs/shared/ConfirmDialog';
@@ -21,14 +25,18 @@ import {
 import {
   accountApi,
   dshProviderSaveRequest,
+  isSameHostId,
   nextUniqueDshProviderId,
   nextUniqueOpenCodeProviderId,
+  normalizeBareHostId,
   openCodeConnectRequest,
   providerSaveRequest,
+  resolveCurrentHostIdentity,
   resolveRouterProviderName,
   type RouterProvision,
 } from '@/features/model-router';
-import { getDesktopShell } from '@/lib/desktopShell';
+import { hostClientApi } from '@/lib/api';
+import { getDesktopShell, getDesktopWindowLabel } from '@/lib/desktopShell';
 
 import { rememberAgentAuthKindTab } from './agentAuthKindTab';
 import {
@@ -42,7 +50,36 @@ export type PendingModelRouterImport = {
   id?: number;
   ticket: string;
   agentId?: string | null;
+  hostId?: string | null;
 };
+
+type RemoteImportTarget = {
+  hostName: string;
+  windowLabel?: string | null;
+  profileId?: string | null;
+};
+
+async function invokeTargetAgentCommand<T>(
+  remoteTarget: RemoteImportTarget | null,
+  command: string,
+  args: Record<string, unknown>,
+  localCall: () => Promise<T>
+): Promise<T> {
+  if (!remoteTarget) {
+    return localCall();
+  }
+  const shell = getDesktopShell();
+  return shell.invoke<T>('remote_desktop_call', {
+    profileId: remoteTarget.windowLabel
+      ? 'active-host-client'
+      : (remoteTarget.profileId ?? 'active-host-client'),
+    ...(remoteTarget.windowLabel
+      ? { windowLabel: remoteTarget.windowLabel }
+      : {}),
+    command,
+    args,
+  });
+}
 
 export function useAgentModelRouterImport({
   agents,
@@ -73,52 +110,73 @@ export function useAgentModelRouterImport({
       targetAgentId: AgentId,
       provision: RouterProvision,
       savedProviderId: string | null,
-      providerName: string
+      providerName: string,
+      remoteTarget: RemoteImportTarget | null = null
     ) => {
       try {
         if (targetAgentId === 'opencode' || targetAgentId === 'mimo_code') {
-          await agentManagementApi.connectOpenCodeProvider(
-            openCodeConnectRequest(provision, true, {
-              providerId: savedProviderId ?? undefined,
-              name: providerName,
-            }),
-            targetAgentId
+          const request = openCodeConnectRequest(provision, true, {
+            providerId: savedProviderId ?? undefined,
+            name: providerName,
+          });
+          await invokeTargetAgentCommand<OpenCodeProviderConnectionsView>(
+            remoteTarget,
+            'opencode_provider_connect',
+            { agentId: targetAgentId, request },
+            () =>
+              agentManagementApi.connectOpenCodeProvider(request, targetAgentId)
           );
         } else if (targetAgentId === 'deepseek_harness') {
-          await agentManagementApi.saveDshProvider(
-            dshProviderSaveRequest(provision, true, {
-              id: savedProviderId ?? undefined,
-              displayName: providerName,
-            })
+          const request = dshProviderSaveRequest(provision, true, {
+            id: savedProviderId ?? undefined,
+            displayName: providerName,
+          });
+          await invokeTargetAgentCommand<DshProvidersView>(
+            remoteTarget,
+            'dsh_provider_save',
+            { request },
+            () => agentManagementApi.saveDshProvider(request)
           );
-          await agentManagementApi.setAuthMode(
-            'deepseek_harness',
-            'custom',
-            null
+          await invokeTargetAgentCommand<AgentAuthModeView>(
+            remoteTarget,
+            'agent_auth_mode_set',
+            { agentId: 'deepseek_harness', mode: 'custom', apiKey: null },
+            () =>
+              agentManagementApi.setAuthMode('deepseek_harness', 'custom', null)
           );
-          clearAgentSettingsDraft('dsh-auth');
+          if (!remoteTarget) {
+            clearAgentSettingsDraft('dsh-auth');
+          }
         } else {
-          const agent = agentsListRef.current.find(
-            (item) => item.agent_id === targetAgentId
-          );
-          const signedIn =
-            agent?.authentication === 'account' ||
-            agent?.authentication === 'multiple_unknown';
-          if (signedIn) {
-            const confirmed = await ConfirmDialog.show({
-              title: t('settings:agents.authSwitchToProviderTitle'),
-              message: t('settings:agents.authSwitchToProviderMessage'),
-              confirmText: t('settings:agents.authSwitchToProviderConfirm'),
-              cancelText: t('common:cancel'),
-              variant: 'destructive',
-            });
-            if (confirmed !== 'confirmed') {
-              return;
+          if (!remoteTarget) {
+            const agent = agentsListRef.current.find(
+              (item) => item.agent_id === targetAgentId
+            );
+            const signedIn =
+              agent?.authentication === 'account' ||
+              agent?.authentication === 'multiple_unknown';
+            if (signedIn) {
+              const confirmed = await ConfirmDialog.show({
+                title: t('settings:agents.authSwitchToProviderTitle'),
+                message: t('settings:agents.authSwitchToProviderMessage'),
+                confirmText: t('settings:agents.authSwitchToProviderConfirm'),
+                cancelText: t('common:cancel'),
+                variant: 'destructive',
+              });
+              if (confirmed !== 'confirmed') {
+                return;
+              }
             }
           }
           let providerId = savedProviderId;
           if (!providerId) {
-            const list = await agentManagementApi.modelProviders(targetAgentId);
+            const list =
+              await invokeTargetAgentCommand<AgentModelProvidersView>(
+                remoteTarget,
+                'agent_model_providers',
+                { agentId: targetAgentId },
+                () => agentManagementApi.modelProviders(targetAgentId)
+              );
             providerId =
               list.providers.find((item) => item.name === providerName)?.id ??
               null;
@@ -126,15 +184,24 @@ export function useAgentModelRouterImport({
           if (!providerId) {
             throw new Error(t('settings:agents.modelRouterImportFailed'));
           }
-          await agentManagementApi.bindModelProvider(targetAgentId, providerId);
+          await invokeTargetAgentCommand<AgentModelProvidersView>(
+            remoteTarget,
+            'agent_model_provider_bind',
+            { agentId: targetAgentId, providerId },
+            () => agentManagementApi.bindModelProvider(targetAgentId, providerId)
+          );
         }
-        clearAgentSettingsDraft(`auth-mode:${targetAgentId}`);
-        rememberAgentAuthKindTab(targetAgentId, 'provider');
-        setProviderRefreshKey((current) => current + 1);
-        await refreshAuthentication();
+        if (!remoteTarget) {
+          clearAgentSettingsDraft(`auth-mode:${targetAgentId}`);
+          rememberAgentAuthKindTab(targetAgentId, 'provider');
+          setProviderRefreshKey((current) => current + 1);
+          await refreshAuthentication();
+        }
         toast.success(
           t('settings:agents.modelRouterApplied', {
-            model: provision.model.name,
+            model: remoteTarget
+              ? `${provision.model.name} (${remoteTarget.hostName})`
+              : provision.model.name,
           })
         );
       } catch (error) {
@@ -155,29 +222,108 @@ export function useAgentModelRouterImport({
       processedImportTicketsRef.current.add(ticket);
       try {
         const provision = await accountApi.redeemImportTicket(ticket);
+        const targetHostId = normalizeBareHostId(
+          provision.targetHostId ?? payload?.hostId
+        );
+        const currentHost = await resolveCurrentHostIdentity().catch(
+          () => null
+        );
+
+        let remoteTarget: RemoteImportTarget | null = null;
+        if (
+          targetHostId &&
+          currentHost?.hostId &&
+          !isSameHostId(targetHostId, currentHost.hostId)
+        ) {
+          const hostClientStatus = await hostClientApi
+            .status()
+            .catch(() => null);
+          const allProfiles = hostClientStatus?.profiles ?? [];
+          const connectedProfile =
+            allProfiles.find(
+              (profile) =>
+                isSameHostId(profile.host_id, targetHostId) &&
+                (profile.connected || Boolean(profile.connected_window_label))
+            ) ??
+            (hostClientStatus?.connected &&
+            hostClientStatus.profile &&
+            isSameHostId(hostClientStatus.profile.host_id, targetHostId)
+              ? hostClientStatus.profile
+              : null);
+
+          if (connectedProfile) {
+            remoteTarget = {
+              hostName:
+                provision.targetHostName?.trim() ||
+                connectedProfile.name?.trim() ||
+                targetHostId,
+              windowLabel: connectedProfile.connected_window_label ?? null,
+              profileId: connectedProfile.id,
+            };
+          } else {
+            const savedMatch = allProfiles.find((profile) =>
+              isSameHostId(profile.host_id, targetHostId)
+            );
+            const targetHostLabel =
+              provision.targetHostName?.trim() ||
+              savedMatch?.name?.trim() ||
+              targetHostId;
+            const confirmed = await ConfirmDialog.show({
+              title: t(
+                'settings:agents.modelRouterTargetHostMismatchTitle',
+                'Target Host Not Connected'
+              ),
+              message: t(
+                'settings:agents.modelRouterTargetHostMismatchMessage',
+                {
+                  targetHost: targetHostLabel,
+                  currentHost: currentHost.hostName,
+                  defaultValue:
+                    'This import targets "{{targetHost}}", which is not connected in this Dimo app. Import to the current local Host ({{currentHost}}) instead?',
+                }
+              ),
+              confirmText: t(
+                'settings:agents.modelRouterTargetHostMismatchConfirm',
+                'Import to Current Host'
+              ),
+              cancelText: t('common:cancel', 'Cancel'),
+            });
+            if (confirmed !== 'confirmed') {
+              return;
+            }
+          }
+        }
+
         const targetAgentId = (provision.agentId?.trim() ||
           payload?.agentId?.trim() ||
           selectedAgentIdRef.current ||
           'claude_code') as AgentId;
 
-        selectAgent(targetAgentId);
-        setFocusDiagnostics(false);
-        setRegistryOpen(false);
-        rememberAgentAuthKindTab(targetAgentId, 'provider');
-        if (targetAgentId === 'deepseek_harness') {
-          clearAgentSettingsDraft('dsh-auth');
-        } else {
-          retainAgentSettingsDraft(`auth-mode:${targetAgentId}`, {
-            mode: 'model_provider',
-            apiKey: '',
-          });
+        if (!remoteTarget) {
+          selectAgent(targetAgentId);
+          setFocusDiagnostics(false);
+          setRegistryOpen(false);
+          rememberAgentAuthKindTab(targetAgentId, 'provider');
+          if (targetAgentId === 'deepseek_harness') {
+            clearAgentSettingsDraft('dsh-auth');
+          } else {
+            retainAgentSettingsDraft(`auth-mode:${targetAgentId}`, {
+              mode: 'model_provider',
+              apiKey: '',
+            });
+          }
         }
 
         let savedProviderId: string | null = null;
         let providerName = resolveRouterProviderName(provision);
         if (targetAgentId === 'opencode' || targetAgentId === 'mimo_code') {
           const existing =
-            await agentManagementApi.openCodeProviders(targetAgentId);
+            await invokeTargetAgentCommand<OpenCodeProviderConnectionsView>(
+              remoteTarget,
+              'opencode_provider_connections',
+              { agentId: targetAgentId },
+              () => agentManagementApi.openCodeProviders(targetAgentId)
+            );
           providerName = resolveRouterProviderName(
             provision,
             existing.providers.map((provider) => provider.name)
@@ -186,15 +332,24 @@ export function useAgentModelRouterImport({
             providerName,
             existing.providers.map((provider) => provider.provider_id)
           );
-          await agentManagementApi.connectOpenCodeProvider(
-            openCodeConnectRequest(provision, false, {
-              providerId: savedProviderId,
-              name: providerName,
-            }),
-            targetAgentId
+          const request = openCodeConnectRequest(provision, false, {
+            providerId: savedProviderId,
+            name: providerName,
+          });
+          await invokeTargetAgentCommand<OpenCodeProviderConnectionsView>(
+            remoteTarget,
+            'opencode_provider_connect',
+            { agentId: targetAgentId, request },
+            () =>
+              agentManagementApi.connectOpenCodeProvider(request, targetAgentId)
           );
         } else if (targetAgentId === 'deepseek_harness') {
-          const existing = await agentManagementApi.dshProviders();
+          const existing = await invokeTargetAgentCommand<DshProvidersView>(
+            remoteTarget,
+            'dsh_providers',
+            {},
+            () => agentManagementApi.dshProviders()
+          );
           providerName = resolveRouterProviderName(
             provision,
             existing.providers.map((provider) => provider.display_name)
@@ -204,15 +359,24 @@ export function useAgentModelRouterImport({
             ...existing.catalog.map((provider) => provider.id),
             'deepseek',
           ]);
-          await agentManagementApi.saveDshProvider(
-            dshProviderSaveRequest(provision, false, {
-              id: savedProviderId,
-              displayName: providerName,
-            })
+          const request = dshProviderSaveRequest(provision, false, {
+            id: savedProviderId,
+            displayName: providerName,
+          });
+          await invokeTargetAgentCommand<DshProvidersView>(
+            remoteTarget,
+            'dsh_provider_save',
+            { request },
+            () => agentManagementApi.saveDshProvider(request)
           );
         } else {
           const existing =
-            await agentManagementApi.modelProviders(targetAgentId);
+            await invokeTargetAgentCommand<AgentModelProvidersView>(
+              remoteTarget,
+              'agent_model_providers',
+              { agentId: targetAgentId },
+              () => agentManagementApi.modelProviders(targetAgentId)
+            );
           providerName = resolveRouterProviderName(
             provision,
             existing.providers.map((provider) => provider.name)
@@ -220,9 +384,14 @@ export function useAgentModelRouterImport({
           const existingIds = new Set(
             existing.providers.map((provider) => provider.id)
           );
-          const saved = await agentManagementApi.saveModelProvider(
-            providerSaveRequest(provision, null, providerName)
-          );
+          const request = providerSaveRequest(provision, null, providerName);
+          const saved =
+            await invokeTargetAgentCommand<AgentModelProvidersView>(
+              remoteTarget,
+              'agent_model_provider_save',
+              { request },
+              () => agentManagementApi.saveModelProvider(request)
+            );
           savedProviderId =
             saved.providers.find(
               (provider) =>
@@ -233,14 +402,19 @@ export function useAgentModelRouterImport({
             null;
         }
 
-        setProviderRefreshKey((current) => current + 1);
+        if (!remoteTarget) {
+          setProviderRefreshKey((current) => current + 1);
+        }
+        const description = remoteTarget
+          ? `${remoteTarget.hostName} · ${providerName} · ${provision.model.name}`
+          : `${providerName} · ${provision.model.name}`;
         toast.success(
           t(
             'settings:agents.modelRouterImportConfirmEnable',
             '模型导入成功，是否立即启用？'
           ),
           {
-            description: `${providerName} · ${provision.model.name}`,
+            description,
             duration: 15000,
             cancel: {
               label: t('common:cancel', '取消'),
@@ -253,7 +427,8 @@ export function useAgentModelRouterImport({
                   targetAgentId,
                   provision,
                   savedProviderId,
-                  providerName
+                  providerName,
+                  remoteTarget
                 );
               },
             },
@@ -277,6 +452,11 @@ export function useAgentModelRouterImport({
   );
 
   useEffect(() => {
+    const windowLabel = getDesktopWindowLabel();
+    if (windowLabel && windowLabel.startsWith('settings-host-')) {
+      return;
+    }
+
     let active = true;
     let unlisten: (() => void) | undefined;
 

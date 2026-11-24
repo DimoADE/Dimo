@@ -81,7 +81,15 @@ export {
   type PortableUserConfig,
 } from './accountHostConfigs';
 export {
+  isSameHostId,
+  normalizeBareHostId,
+  resolveCurrentHostIdForHandoff,
+  resolveDesktopLocalHostname,
+  type CurrentHostIdentity,
+} from './hostIdentity';
+export {
   AccountSavedHostsSyncBridge,
+  filterSelfHostProfiles,
   isolateSavedHostsOnSignOut,
   pushLocalSavedHostChanges,
   resetAccountSavedHostsForTests,

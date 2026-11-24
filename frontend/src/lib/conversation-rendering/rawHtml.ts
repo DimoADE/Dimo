@@ -1,16 +1,9 @@
 /**
- * Raw-HTML support for the Astryx markdown renderer.
- *
- * Astryx's markdown parser has no HTML tokens, so inline/block HTML would be
- * rendered as literal text. We instead protect well-formed, allowlisted HTML
- * into private-use placeholders before parsing; the renderer later expands
- * each placeholder through DOMPurify into real elements (see
- * `RawHtmlElement`). Anything not in the allowlist — including conversation
- * pseudo-tags such as `<system-reminder>` and `<script>` — is left as literal
- * text, exactly as before.
- *
- * Code (fenced blocks and inline spans) is masked before scanning so HTML
- * shown as code examples is never captured.
+ * Shared raw-HTML allowlist (`RAW_HTML_ALLOWED_TAGS`) and legacy placeholder
+ * helper used by Dimo's Markdown pipeline (`remarkFilterRawHtml` + `rehype-raw`
+ * + `rehype-sanitize`). Anything not in the allowlist — including conversation
+ * pseudo-tags such as `<system-reminder>` and `<script>` — is preserved as
+ * visible literal text rather than executed or silently deleted.
  */
 
 /** Placeholder matched by inline plugins after parsing. */

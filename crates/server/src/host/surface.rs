@@ -1824,6 +1824,8 @@ impl ServerApplicationDomains {
             .reorder(&args.agent_ids)
             .await
             .map_err(internal_error)?;
+        self.events
+            .emit("agent-management-snapshot-invalidated", json!({}));
         serialize(self.management().list().await.map_err(internal_error)?)
     }
 
@@ -2202,6 +2204,10 @@ impl ServerApplicationDomains {
             .execute(&self.pool)
             .await
             .map_err(internal_error)?;
+        self.events.emit(
+            "agent-management-snapshot-invalidated",
+            json!({ "agentId": args.agent_id }),
+        );
         serialize(self.management().list().await.map_err(internal_error)?)
     }
 

@@ -78,6 +78,10 @@ pub struct WebServerStatus {
     #[serde(default)]
     pub host_id: Option<String>,
     #[serde(default)]
+    pub host_name: Option<String>,
+    #[serde(default)]
+    pub machine_fingerprint: Option<String>,
+    #[serde(default)]
     pub reachability: Vec<remote_protocol::ReachabilityOrigin>,
     #[serde(default)]
     pub serves_web_ui: bool,
@@ -194,7 +198,7 @@ async fn composed_reachability(addresses: &[String]) -> Vec<remote_protocol::Rea
 
 async fn load_or_create_host_id() -> Result<String, DesktopError> {
     tokio::task::spawn_blocking(|| {
-        utils::assets::load_or_create_host_id(&utils::assets::asset_dir())
+        utils::assets::load_or_create_local_host_id(&utils::assets::host_data_dir())
     })
     .await
     .map_err(|error| DesktopError::Internal(format!("Failed to persist host identity: {error}")))?
@@ -281,6 +285,8 @@ pub async fn live_lan_origins() -> Vec<remote_protocol::ReachabilityOrigin> {
 
 async fn status_from_runtime(config: WebServiceConfig) -> WebServerStatus {
     let host_id = load_or_create_host_id().await.ok();
+    let host_name = utils::net::local_hostname();
+    let machine_fingerprint = Some(utils::assets::machine_fingerprint(host_id.as_deref()));
     let snapshot = {
         let mut runtime = WEB_SERVICE_RUNTIME.lock().await;
         runtime.as_mut().map(|runtime| {
@@ -308,6 +314,8 @@ async fn status_from_runtime(config: WebServiceConfig) -> WebServerStatus {
             started_at: Some(started_at),
             message: None,
             host_id,
+            host_name,
+            machine_fingerprint,
             reachability,
             serves_web_ui,
         };
@@ -323,6 +331,8 @@ async fn status_from_runtime(config: WebServiceConfig) -> WebServerStatus {
         started_at: None,
         message: None,
         host_id,
+        host_name,
+        machine_fingerprint,
         reachability: Vec::new(),
         serves_web_ui: true,
     }

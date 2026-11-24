@@ -6,14 +6,13 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentPropsWithoutRef,
   type MouseEvent,
   type ReactElement,
   type ReactNode,
+  type RefObject,
 } from 'react';
-import {
-  Markdown as AstryxMarkdownBase,
-  type MarkdownProps,
-} from '@astryxdesign/core/Markdown';
+import type { Components } from 'hast-util-to-jsx-runtime';
 import { loadKatex } from '@/lib/katexRuntime';
 import {
   hostFileSrc,
@@ -41,6 +40,12 @@ import { PluginBoundary } from '@/components/plugins/PluginBoundary';
 import { CodeBlock, CompactCodeBlock } from './CodeBlock';
 import { HtmlPreviewBlock, isHtmlPreviewLanguage } from './HtmlPreviewBlock';
 import { MermaidDiagram, resetMermaidSvgCache } from './MermaidDiagram';
+import {
+  MarkdownAlert,
+  isMarkdownAlertKind,
+} from './MarkdownAlert';
+import { MarkdownDetails, MarkdownSummary } from './MarkdownDetails';
+import { MarkdownTable } from './MarkdownTable';
 import { parseTagReferenceHref } from '@/lib/tagReferenceMarkers';
 import {
   MarkdownBlockCache,
@@ -49,7 +54,6 @@ import {
 } from '@/lib/conversation-rendering/markdownBlockCache';
 import {
   decodeFenceInfoLanguage,
-  encodeFenceInfoLanguages,
   fenceInfoLanguage,
   isMathFenceLanguage,
   splitFencedCodeSegments,
@@ -63,12 +67,17 @@ import {
   MATH_PLACEHOLDER_PATTERN,
   protectConversationMath,
 } from '@/lib/conversation-rendering/conversationMath';
+
+type ProtectedMath = ReturnType<typeof protectConversationMath>['math'][number];
+import { extractYamlFrontmatter } from '@/lib/conversation-rendering/markdownFrontmatterAndTasks';
+import { buildMessageFileDisambiguationMap } from '@/lib/conversation-rendering/markdownEngine/collectFileDisplayPaths';
+import type { InlineTokenMatcher } from '@/lib/conversation-rendering/markdownEngine/hastInlineTokens';
 import {
-  HTML_PLACEHOLDER_PATTERN,
-  protectRawHtml,
-} from '@/lib/conversation-rendering/rawHtml';
-import { RawHtmlElement } from './RawHtmlElement';
+  extractFenceTitle,
+  renderMarkdownToReactElement,
+} from '@/lib/conversation-rendering/markdownEngine/markdownProcessor';
 import {
+  MarkdownFileLinkContext,
   MarkdownResourceLink,
   resolveMarkdownInlineResource,
 } from './MarkdownResourceLink';
@@ -86,14 +95,41 @@ export type AstryxMarkdownProps = {
   taskId?: string;
   workspacePath?: string | null;
   softBreaks?: boolean;
-  /** Opt-in streaming fade-in (Astryx incremental parse + animation). */
+  /** Opt-in streaming fade-in and incremental deferred highlighting. */
   isStreaming?: boolean;
   /**
-   * Render allowlisted raw HTML (sanitized through DOMPurify). Defaults to
-   * `true`; pass `false` on surfaces that must keep `<` literal.
+   * Render allowlisted raw HTML (sanitized through rehype-sanitize). Defaults
+   * to `true`; pass `false` on surfaces that must keep `<` literal.
    */
   rawHtml?: boolean;
+  /** Strip leading YAML frontmatter (`--- ... ---`) for Markdown file previews. */
+  stripFrontmatter?: boolean;
+  /**
+   * Interactive GFM task-list checkbox callback (used by Markdown file previews
+   * to write checkbox toggles back to the document).
+   */
+  onToggleTaskCheckbox?: (taskIndex: number, checked: boolean) => void;
 };
+
+type TaskToggleCallback = (taskIndex: number, checked: boolean) => void;
+
+const LARGE_DOC_BLOCK_THRESHOLD = 60;
+const TASK_LIST_LINE_COUNT_REGEX =
+  /^(?:[ \t]*>[ \t]*)*[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+\[[ xX]\](?:[ \t]+|$)/;
+
+function countTaskCheckboxesInBlock(blockText: string): number {
+  if (!blockText.includes('[')) return 0;
+  let count = 0;
+  for (const segment of splitFencedCodeSegments(blockText)) {
+    if (segment.kind !== 'text') continue;
+    for (const line of segment.text.split('\n')) {
+      if (TASK_LIST_LINE_COUNT_REGEX.test(line)) {
+        count += 1;
+      }
+    }
+  }
+  return count;
+}
 
 function flattenNodeText(node: ReactNode): string {
   if (node == null || typeof node === 'boolean') return '';
@@ -120,7 +156,6 @@ function MarkdownImage({
   taskId?: string;
   workspacePath?: string | null;
 }) {
-  // Astryx keeps angle brackets around `<url>` image destinations.
   const normalizedSrc = (src ?? '').replace(/^<([\s\S]*)>$/, '$1');
   const isVibeImage = normalizedSrc.startsWith('.vibe-images/');
   const { data: metadata, isLoading } = useImageMetadata(
@@ -252,6 +287,8 @@ type MarkdownComponentContext = {
   workspacePath?: string | null;
   isStreaming?: boolean;
   deferCodeHighlight?: boolean;
+  taskToggleRef?: RefObject<TaskToggleCallback | undefined>;
+  hasTaskToggle?: boolean;
 };
 
 function analyzeStreamingFenceState(value: string): {
@@ -299,12 +336,17 @@ function neutralizeUnclosedMathFence(value: string): string {
 function MarkdownCodeSwitch({
   code,
   language: rawLanguage,
+  title,
   taskAttemptId,
   taskId,
   workspacePath,
   isStreaming,
   deferCodeHighlight,
-}: MarkdownComponentContext & { code: string; language?: string }) {
+}: MarkdownComponentContext & {
+  code: string;
+  language?: string;
+  title?: string;
+}) {
   const renderers = useMarkdownRenderers();
   const language = decodeFenceInfoLanguage(rawLanguage);
   const customRenderer =
@@ -345,7 +387,7 @@ function MarkdownCodeSwitch({
   }
   const className =
     language && language !== 'plaintext' ? `language-${language}` : undefined;
-  const isSingleLine = !deferHighlight && !code.includes('\n');
+  const isSingleLine = !deferHighlight && !title && !code.includes('\n');
   if (isSingleLine) {
     return (
       <CompactCodeBlock
@@ -359,32 +401,130 @@ function MarkdownCodeSwitch({
     <CodeBlock
       className={className}
       value={code}
+      title={title}
       isStreaming={Boolean(isStreaming && deferHighlight)}
       deferHighlight={deferHighlight}
     />
   );
 }
 
-function createMarkdownComponents({
-  taskAttemptId,
-  taskId,
-  workspacePath,
-  isStreaming,
-  deferCodeHighlight,
-}: MarkdownComponentContext): MarkdownProps['components'] {
-  return {
-    code: ({ code, language }) => (
-      <MarkdownCodeSwitch
-        code={code}
-        language={language}
-        taskAttemptId={taskAttemptId}
-        taskId={taskId}
-        workspacePath={workspacePath}
-        isStreaming={isStreaming}
-        deferCodeHighlight={deferCodeHighlight}
+function KatexMath({ tex, display }: { tex: string; display: boolean }) {
+  const [html, setHtml] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadKatex()
+      .then((katex) => {
+        if (cancelled) return;
+        setHtml(
+          katex.renderToString(tex, {
+            displayMode: display,
+            throwOnError: false,
+            strict: false,
+          })
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setHtml(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [display, tex]);
+
+  if (html) {
+    return (
+      <span
+        className={display ? 'katex-display' : undefined}
+        dangerouslySetInnerHTML={{ __html: html }}
       />
-    ),
-    inlineCode: ({ children }) => {
+    );
+  }
+
+  return <span>{display ? `$$${tex}$$` : `$${tex}$`}</span>;
+}
+
+type BlockInlineRegistries = {
+  math: readonly ProtectedMath[];
+  mentions: readonly string[];
+  taskIndexOffset: number;
+};
+
+type PrePropsWithMeta = ComponentPropsWithoutRef<'pre'> & {
+  'data-code-block'?: string;
+  'data-language'?: string;
+  'data-meta'?: string;
+};
+
+type CodePropsWithMeta = ComponentPropsWithoutRef<'code'> & {
+  'data-block-code'?: string;
+};
+
+type DivPropsWithAlert = ComponentPropsWithoutRef<'div'> & {
+  'data-markdown-alert'?: string;
+  'data-markdown-alert-title'?: string;
+};
+
+type SpanPropsWithToken = ComponentPropsWithoutRef<'span'> & {
+  'data-md-token'?: string;
+  'data-md-token-index'?: string;
+};
+
+type AnchorPropsWithFootnote = ComponentPropsWithoutRef<'a'> & {
+  'data-footnote-ref'?: string | boolean;
+  'data-footnote-backref'?: string | boolean;
+};
+
+type InputPropsWithTask = ComponentPropsWithoutRef<'input'> & {
+  'data-task-index'?: string;
+};
+
+function createBaseMarkdownComponents(
+  ctx: MarkdownComponentContext
+): Partial<Components> {
+  const {
+    taskAttemptId,
+    taskId,
+    workspacePath,
+    isStreaming,
+    deferCodeHighlight,
+  } = ctx;
+
+  return {
+    pre: ({
+      children,
+      'data-code-block': isCodeBlock,
+      'data-language': dataLanguage,
+      'data-meta': dataMeta,
+      ...rest
+    }: PrePropsWithMeta) => {
+      if (isCodeBlock === 'true') {
+        const rawCode = flattenNodeText(children).replace(/\r?\n$/, '');
+        const title = extractFenceTitle(dataMeta);
+        return (
+          <MarkdownCodeSwitch
+            code={rawCode}
+            language={dataLanguage}
+            title={title}
+            taskAttemptId={taskAttemptId}
+            taskId={taskId}
+            workspacePath={workspacePath}
+            isStreaming={isStreaming}
+            deferCodeHighlight={deferCodeHighlight}
+          />
+        );
+      }
+      return <pre {...rest}>{children}</pre>;
+    },
+    code: ({
+      children,
+      'data-block-code': isBlockCode,
+      ...rest
+    }: CodePropsWithMeta) => {
+      if (isBlockCode === 'true') {
+        return <code {...rest}>{children}</code>;
+      }
+
       const text = flattenNodeText(children).trim();
       const resource = resolveMarkdownInlineResource(text, workspacePath);
 
@@ -400,9 +540,28 @@ function createMarkdownComponents({
         );
       }
 
-      return <code>{text || children}</code>;
+      return <code {...rest}>{text || children}</code>;
     },
-    link: ({ href, children }) => {
+    a: ({
+      href,
+      children,
+      'data-footnote-ref': footnoteRef,
+      'data-footnote-backref': footnoteBackref,
+      ...rest
+    }: AnchorPropsWithFootnote) => {
+      if (footnoteRef != null || footnoteBackref != null) {
+        return (
+          <a
+            href={href}
+            data-footnote-ref={footnoteRef}
+            data-footnote-backref={footnoteBackref}
+            {...rest}
+          >
+            {children}
+          </a>
+        );
+      }
+
       const tagReferencePayload = href ? parseTagReferenceHref(href) : null;
       if (tagReferencePayload) {
         return (
@@ -468,7 +627,7 @@ function createMarkdownComponents({
         </MarkdownResourceLink>
       );
     },
-    image: ({ src, alt }) => (
+    img: ({ src, alt }) => (
       <MarkdownImage
         src={src}
         alt={alt}
@@ -477,43 +636,110 @@ function createMarkdownComponents({
         workspacePath={workspacePath}
       />
     ),
+    table: ({ children, ...rest }) => (
+      <MarkdownTable {...rest}>{children}</MarkdownTable>
+    ),
+    details: ({ children, open, ...rest }) => (
+      <MarkdownDetails open={Boolean(open)} {...rest}>
+        {children}
+      </MarkdownDetails>
+    ),
+    summary: ({ children, ...rest }) => (
+      <MarkdownSummary {...rest}>{children}</MarkdownSummary>
+    ),
+    div: ({
+      children,
+      'data-markdown-alert': alertKind,
+      'data-markdown-alert-title': alertTitle,
+      ...rest
+    }: DivPropsWithAlert) => {
+      if (isMarkdownAlertKind(alertKind)) {
+        return (
+          <MarkdownAlert kind={alertKind} title={alertTitle}>
+            {children}
+          </MarkdownAlert>
+        );
+      }
+      return <div {...rest}>{children}</div>;
+    },
   };
 }
 
-function KatexMath({ tex, display }: { tex: string; display: boolean }) {
-  const [html, setHtml] = useState<string | null>(null);
+function withBlockDynamicComponents(
+  baseComponents: Partial<Components>,
+  registries: BlockInlineRegistries,
+  taskToggleRef?: RefObject<TaskToggleCallback | undefined>,
+  hasTaskToggle?: boolean
+): Partial<Components> {
+  const needsSpan =
+    registries.math.length > 0 || registries.mentions.length > 0;
+  const needsCheckbox = Boolean(hasTaskToggle);
 
-  useEffect(() => {
-    let cancelled = false;
-    void loadKatex()
-      .then((katex) => {
-        if (cancelled) return;
-        setHtml(
-          katex.renderToString(tex, {
-            displayMode: display,
-            throwOnError: false,
-            strict: false,
-          })
-        );
-      })
-      .catch(() => {
-        if (!cancelled) setHtml(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [display, tex]);
-
-  if (html) {
-    return (
-      <span
-        className={display ? 'katex-display' : undefined}
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
-    );
+  if (!needsSpan && !needsCheckbox) {
+    return baseComponents;
   }
 
-  return <span>{display ? `$$${tex}$$` : `$${tex}$`}</span>;
+  return {
+    ...baseComponents,
+    ...(needsSpan
+      ? {
+          span: ({
+            children,
+            'data-md-token': tokenKind,
+            'data-md-token-index': tokenIndexRaw,
+            ...rest
+          }: SpanPropsWithToken) => {
+            if (tokenKind === 'math' && tokenIndexRaw != null) {
+              const math = registries.math[Number(tokenIndexRaw)];
+              if (!math) return null;
+              return <KatexMath tex={math.tex} display={math.display} />;
+            }
+            if (tokenKind === 'member' && tokenIndexRaw != null) {
+              const nickname = registries.mentions[Number(tokenIndexRaw)];
+              if (!nickname) return null;
+              return <MemberMentionChip nickname={nickname} />;
+            }
+            return <span {...rest}>{children}</span>;
+          },
+        }
+      : {}),
+    ...(needsCheckbox
+      ? {
+          input: ({
+            type,
+            checked,
+            disabled: _disabled,
+            'data-task-index': localIndexRaw,
+            ...rest
+          }: InputPropsWithTask) => {
+            if (type === 'checkbox' && localIndexRaw != null) {
+              const globalIndex =
+                registries.taskIndexOffset + Number(localIndexRaw);
+              return (
+                <input
+                  {...rest}
+                  type="checkbox"
+                  checked={Boolean(checked)}
+                  disabled={false}
+                  className="conv-md-task-checkbox is-interactive"
+                  onChange={(event) => {
+                    taskToggleRef?.current?.(globalIndex, event.target.checked);
+                  }}
+                />
+              );
+            }
+            return (
+              <input
+                {...rest}
+                type={type}
+                checked={checked}
+                disabled={_disabled}
+              />
+            );
+          },
+        }
+      : {}),
+  };
 }
 
 function arePropsEqual(prev: AstryxMarkdownProps, next: AstryxMarkdownProps) {
@@ -525,7 +751,9 @@ function arePropsEqual(prev: AstryxMarkdownProps, next: AstryxMarkdownProps) {
     prev.workspacePath === next.workspacePath &&
     prev.softBreaks === next.softBreaks &&
     prev.isStreaming === next.isStreaming &&
-    prev.rawHtml === next.rawHtml
+    prev.rawHtml === next.rawHtml &&
+    prev.stripFrontmatter === next.stripFrontmatter &&
+    prev.onToggleTaskCheckbox === next.onToggleTaskCheckbox
   );
 }
 
@@ -546,11 +774,12 @@ export function resetMarkdownBlockElementCache(): void {
 type CompileMarkdownBlockOptions = {
   softBreaks?: boolean;
   rawHtml?: boolean;
-  workspacePath?: string | null;
   enableMemberMentions: boolean;
   knownNicknames: readonly string[];
-  isStreaming?: boolean;
-  components: MarkdownProps['components'];
+  baseComponents: Partial<Components>;
+  taskToggleRef?: RefObject<TaskToggleCallback | undefined>;
+  hasTaskToggle?: boolean;
+  taskIndexOffset?: number;
 };
 
 function buildBlockElementCacheKey(
@@ -580,71 +809,41 @@ function compileMarkdownBlockElement(
   const prepared = prepareSingleMarkdownBlock(blockText, {
     softBreaks: options.softBreaks,
   });
-  // Astryx drops link nodes with empty destinations (`[text]()`), so rewrite
-  // empty targets to `#` — the link component resolves workspace paths from label.
+  // Rewrite empty link destinations (`[text]()`) to `#` so workspace path
+  // resolution can still read the link label.
   const withLinks = prepared.replace(/\[([^\]\n]+)\]\(\)/g, '[$1](#)');
-  // Raw HTML is protected before math so `$…$` inside an HTML region stays literal.
-  const protectedHtml =
-    options.rawHtml !== false
-      ? protectRawHtml(withLinks)
-      : { text: withLinks, html: [] };
-  const withMath = protectConversationMath(protectedHtml.text);
+  const withMath = protectConversationMath(withLinks);
   const withMentions = options.enableMemberMentions
     ? protectMemberMentions(withMath.text, options.knownNicknames)
     : { text: withMath.text, mentions: [] };
-  const finalText = encodeFenceInfoLanguages(withMentions.text);
 
-  const inlinePlugins: NonNullable<MarkdownProps['inlinePlugins']> = [];
+  const inlineTokens: InlineTokenMatcher[] = [];
   if (withMath.math.length > 0) {
-    inlinePlugins.push({
-      pattern: MATH_PLACEHOLDER_PATTERN,
-      render: (match: RegExpMatchArray, key: string) => {
-        const math = withMath.math[Number(match[1])];
-        if (!math) return null;
-        return <KatexMath key={key} tex={math.tex} display={math.display} />;
-      },
-    });
-  }
-  if (protectedHtml.html.length > 0) {
-    inlinePlugins.push({
-      pattern: HTML_PLACEHOLDER_PATTERN,
-      render: (match: RegExpMatchArray, key: string) => {
-        const entry = protectedHtml.html[Number(match[1])];
-        if (!entry) return null;
-        return (
-          <RawHtmlElement
-            key={key}
-            html={entry.html}
-            block={entry.block}
-            workspacePath={options.workspacePath}
-          />
-        );
-      },
-    });
+    inlineTokens.push({ kind: 'math', pattern: MATH_PLACEHOLDER_PATTERN });
   }
   if (withMentions.mentions.length > 0) {
-    inlinePlugins.push({
+    inlineTokens.push({
+      kind: 'member',
       pattern: MEMBER_PLACEHOLDER_PATTERN,
-      render: (match: RegExpMatchArray, key: string) => {
-        const nickname = withMentions.mentions[Number(match[1])];
-        if (!nickname) return null;
-        return <MemberMentionChip key={key} nickname={nickname} />;
-      },
     });
   }
 
-  return (
-    <AstryxMarkdownBase
-      display="block"
-      autolink="gfm"
-      contentWidth="100%"
-      components={options.components}
-      inlinePlugins={inlinePlugins.length > 0 ? inlinePlugins : undefined}
-      isStreaming={options.isStreaming}
-    >
-      {finalText}
-    </AstryxMarkdownBase>
+  const components = withBlockDynamicComponents(
+    options.baseComponents,
+    {
+      math: withMath.math,
+      mentions: withMentions.mentions,
+      taskIndexOffset: options.taskIndexOffset ?? 0,
+    },
+    options.taskToggleRef,
+    options.hasTaskToggle
   );
+
+  return renderMarkdownToReactElement(withMentions.text, {
+    rawHtml: options.rawHtml,
+    inlineTokens,
+    components,
+  });
 }
 
 export const AstryxMarkdown = memo(function AstryxMarkdown({
@@ -656,56 +855,104 @@ export const AstryxMarkdown = memo(function AstryxMarkdown({
   softBreaks,
   isStreaming,
   rawHtml,
+  stripFrontmatter,
+  onToggleTaskCheckbox,
 }: AstryxMarkdownProps) {
   const memberMentionCtx = useCollaborationMemberMention();
+  const taskToggleRef = useRef<TaskToggleCallback | undefined>(
+    onToggleTaskCheckbox
+  );
+  taskToggleRef.current = onToggleTaskCheckbox;
+  const hasTaskToggle = Boolean(onToggleTaskCheckbox);
 
-  const settledComponents = useMemo<MarkdownProps['components']>(
+  const effectiveValue = useMemo(() => {
+    if (!stripFrontmatter) return value;
+    return extractYamlFrontmatter(value).body;
+  }, [stripFrontmatter, value]);
+
+  const fileDisambiguationMap = useMemo(
+    () => buildMessageFileDisambiguationMap(effectiveValue, workspacePath),
+    [effectiveValue, workspacePath]
+  );
+
+  const settledComponents = useMemo(
     () =>
-      createMarkdownComponents({
+      createBaseMarkdownComponents({
         taskAttemptId,
         taskId,
         workspacePath,
         isStreaming: false,
         deferCodeHighlight: false,
+        taskToggleRef,
+        hasTaskToggle,
       }),
-    [taskAttemptId, taskId, workspacePath]
+    [hasTaskToggle, taskAttemptId, taskId, workspacePath]
   );
 
-  const activeComponents = useMemo<MarkdownProps['components']>(
+  const activeComponents = useMemo(
     () =>
       isStreaming
-        ? createMarkdownComponents({
+        ? createBaseMarkdownComponents({
             taskAttemptId,
             taskId,
             workspacePath,
             isStreaming: true,
             deferCodeHighlight: false,
+            taskToggleRef,
+            hasTaskToggle,
           })
         : settledComponents,
-    [isStreaming, settledComponents, taskAttemptId, taskId, workspacePath]
+    [
+      hasTaskToggle,
+      isStreaming,
+      settledComponents,
+      taskAttemptId,
+      taskId,
+      workspacePath,
+    ]
   );
 
-  const deferredStreamingComponents = useMemo<MarkdownProps['components']>(
+  const deferredStreamingComponents = useMemo(
     () =>
       isStreaming
-        ? createMarkdownComponents({
+        ? createBaseMarkdownComponents({
             taskAttemptId,
             taskId,
             workspacePath,
             isStreaming: true,
             deferCodeHighlight: true,
+            taskToggleRef,
+            hasTaskToggle,
           })
         : settledComponents,
-    [isStreaming, settledComponents, taskAttemptId, taskId, workspacePath]
+    [
+      hasTaskToggle,
+      isStreaming,
+      settledComponents,
+      taskAttemptId,
+      taskId,
+      workspacePath,
+    ]
   );
 
   const renderedBlocks = useMemo(() => {
-    const { body, tagAppendix, mathSpans } = preprocessForBlockSplit(value);
+    const { body, tagAppendix, mathSpans } =
+      preprocessForBlockSplit(effectiveValue);
     const blocks = splitIntoBlocks(body, mathSpans, Boolean(isStreaming));
     const elements: ReactElement[] = [];
+    let runningTaskOffset = 0;
 
     for (const block of blocks) {
-      if (block.closed) {
+      const blockTaskCount = hasTaskToggle
+        ? countTaskCheckboxesInBlock(block.text)
+        : 0;
+      const blockTaskOffset = runningTaskOffset;
+      runningTaskOffset += blockTaskCount;
+
+      const canUseElementCache =
+        block.closed && !(hasTaskToggle && blockTaskCount > 0);
+
+      if (canUseElementCache) {
         const cacheKey = buildBlockElementCacheKey(block.hash, block.text, {
           softBreaks,
           rawHtml,
@@ -723,11 +970,11 @@ export const AstryxMarkdown = memo(function AstryxMarkdown({
         const compiled = compileMarkdownBlockElement(block.text, {
           softBreaks,
           rawHtml,
-          workspacePath,
           enableMemberMentions: memberMentionCtx.enableMemberMentions,
           knownNicknames: memberMentionCtx.knownNicknames,
-          isStreaming: false,
-          components: settledComponents,
+          baseComponents: settledComponents,
+          taskToggleRef,
+          hasTaskToggle: false,
         });
         markdownBlockElementCache.set(cacheKey, block.text, compiled);
         elements.push(compiled);
@@ -745,18 +992,23 @@ export const AstryxMarkdown = memo(function AstryxMarkdown({
         compileMarkdownBlockElement(activeBlockText, {
           softBreaks,
           rawHtml,
-          workspacePath,
           enableMemberMentions: memberMentionCtx.enableMemberMentions,
           knownNicknames: memberMentionCtx.knownNicknames,
-          isStreaming: Boolean(isStreaming) && !fenceState.hasCodeFence,
-          components: fenceState.hasUnclosedFence
+          baseComponents: fenceState.hasUnclosedFence
             ? deferredStreamingComponents
             : activeComponents,
+          taskToggleRef,
+          hasTaskToggle: hasTaskToggle && blockTaskCount > 0,
+          taskIndexOffset: blockTaskOffset,
         })
       );
     }
 
     if (tagAppendix) {
+      const appendixTaskCount = hasTaskToggle
+        ? countTaskCheckboxesInBlock(tagAppendix)
+        : 0;
+      const appendixTaskOffset = runningTaskOffset;
       const appendixFenceState = isStreaming
         ? analyzeStreamingFenceState(tagAppendix)
         : { hasCodeFence: false, hasUnclosedFence: false };
@@ -767,13 +1019,14 @@ export const AstryxMarkdown = memo(function AstryxMarkdown({
         compileMarkdownBlockElement(appendixText, {
           softBreaks,
           rawHtml,
-          workspacePath,
           enableMemberMentions: memberMentionCtx.enableMemberMentions,
           knownNicknames: memberMentionCtx.knownNicknames,
-          isStreaming: Boolean(isStreaming) && !appendixFenceState.hasCodeFence,
-          components: appendixFenceState.hasUnclosedFence
+          baseComponents: appendixFenceState.hasUnclosedFence
             ? deferredStreamingComponents
             : activeComponents,
+          taskToggleRef,
+          hasTaskToggle: hasTaskToggle && appendixTaskCount > 0,
+          taskIndexOffset: appendixTaskOffset,
         })
       );
     }
@@ -782,6 +1035,8 @@ export const AstryxMarkdown = memo(function AstryxMarkdown({
   }, [
     activeComponents,
     deferredStreamingComponents,
+    effectiveValue,
+    hasTaskToggle,
     isStreaming,
     memberMentionCtx.enableMemberMentions,
     memberMentionCtx.knownNicknames,
@@ -790,13 +1045,14 @@ export const AstryxMarkdown = memo(function AstryxMarkdown({
     softBreaks,
     taskAttemptId,
     taskId,
-    value,
     workspacePath,
   ]);
 
   const prevKeyedBlocksRef = useRef<
     Array<{ raw: ReactElement; keyed: ReactElement }>
   >([]);
+
+  const isLargeDocument = renderedBlocks.length > LARGE_DOC_BLOCK_THRESHOLD;
 
   const keyedBlocks = useMemo(() => {
     const previous = prevKeyedBlocksRef.current;
@@ -812,18 +1068,29 @@ export const AstryxMarkdown = memo(function AstryxMarkdown({
       } else {
         next[index] = {
           raw,
-          keyed: <Fragment key={`block-${index}`}>{raw}</Fragment>,
+          keyed: isLargeDocument ? (
+            <div key={`block-${index}`} className="conv-md-chunk">
+              {raw}
+            </div>
+          ) : (
+            <Fragment key={`block-${index}`}>{raw}</Fragment>
+          ),
         };
       }
     }
 
     prevKeyedBlocksRef.current = next;
     return next.map((entry) => entry.keyed);
-  }, [renderedBlocks]);
+  }, [isLargeDocument, renderedBlocks]);
 
   return (
-    <div className={`conv-markdown${className ? ` ${className}` : ''}`}>
-      {keyedBlocks}
-    </div>
+    <MarkdownFileLinkContext.Provider value={fileDisambiguationMap}>
+      <div
+        className={`conv-markdown${className ? ` ${className}` : ''}`}
+        data-streaming={isStreaming ? 'true' : undefined}
+      >
+        {keyedBlocks}
+      </div>
+    </MarkdownFileLinkContext.Provider>
   );
 }, arePropsEqual);

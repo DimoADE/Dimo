@@ -70,6 +70,7 @@ export interface SidecarRestartedPayload {
 export interface BootstrapPayload {
   windowLabel: string;
   platform: NodeJS.Platform;
+  hostname?: string;
   appVersion: string;
   backend: ElectronBackendConnectionInfo | null;
   capabilities?: CachedServerCapabilities | null;
@@ -226,6 +227,7 @@ export interface PendingModelRouterImport {
   id: number;
   ticket: string;
   agentId: string | null;
+  hostId: string | null;
 }
 
 export interface HostClientProfileView {

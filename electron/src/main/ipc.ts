@@ -1,3 +1,5 @@
+import os from 'node:os';
+
 import { ipcMain, type IpcMainEvent, type IpcMainInvokeEvent } from 'electron';
 
 import { HOST_COMMANDS } from '../../../shared/hostCommands';
@@ -209,9 +211,17 @@ export function registerIpcHandlers(context: IpcContext): void {
     );
     const includeLocalCapabilities =
       registeredLabel !== null && isLocalDesktopWindowLabel(registeredLabel);
+    const rawHostname = (() => {
+      try {
+        return os.hostname().trim();
+      } catch {
+        return '';
+      }
+    })();
     const payload: BootstrapPayload = {
       windowLabel,
       platform: process.platform,
+      ...(rawHostname ? { hostname: rawHostname } : {}),
       appVersion,
       backend: sidecar.getConnectionOrNull(),
       capabilities: includeLocalCapabilities

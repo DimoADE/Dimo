@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   pollLogin: vi.fn(),
   openModelMarketplace: vi.fn(),
   openExternal: vi.fn(),
+  resolveCurrentHostIdentity: vi.fn(),
 }));
 
 vi.mock('./account', async (original) => ({
@@ -20,6 +21,11 @@ vi.mock('./account', async (original) => ({
     startLogin: mocks.startLogin,
     pollLogin: mocks.pollLogin,
   },
+}));
+
+vi.mock('./hostIdentity', async (original) => ({
+  ...(await original<typeof import('./hostIdentity')>()),
+  resolveCurrentHostIdentity: mocks.resolveCurrentHostIdentity,
 }));
 
 vi.mock('./openExternal', () => ({
@@ -33,6 +39,13 @@ describe('ModelRouterEntry', () => {
     mocks.pollLogin.mockReset();
     mocks.openModelMarketplace.mockReset();
     mocks.openExternal.mockReset();
+    mocks.resolveCurrentHostIdentity.mockReset();
+    mocks.resolveCurrentHostIdentity.mockResolvedValue({
+      hostId: 'host:win-desktop-01',
+      hostName: 'ALICE-WORKSTATION',
+      kind: 'local',
+      fingerprint: 'a'.repeat(64),
+    });
   });
 
   it('opens the web model marketplace directly when signed in without opening a local model dialog', async () => {
@@ -51,7 +64,7 @@ describe('ModelRouterEntry', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
-  it('starts device login with the agent model marketplace nextPath when signed out', async () => {
+  it('starts device login with hostId, real hostname, and agent marketplace nextPath when signed out', async () => {
     mocks.startLogin.mockResolvedValue({
       requestId: 'req-1',
       verifier: 'ver-1',
@@ -65,9 +78,11 @@ describe('ModelRouterEntry', () => {
     await userEvent.click(screen.getByRole('button', { name: 'ModelRouter' }));
 
     await waitFor(() =>
-      expect(mocks.startLogin).toHaveBeenCalledWith(
-        '/account/models?agent=codex'
-      )
+      expect(mocks.startLogin).toHaveBeenCalledWith({
+        deviceName: 'ALICE-WORKSTATION',
+        hostId: 'host:win-desktop-01',
+        nextPath: '/account/models?agent=codex',
+      })
     );
     expect(mocks.openExternal).toHaveBeenCalledWith(
       'https://site.test/desktop/authorize?request=req-1'

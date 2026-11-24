@@ -568,3 +568,93 @@ fn debug_dev_assets_dir_prefers_runtime_workspace_over_stale_compile_time_worktr
         stale_worktree.join("dev_assets")
     );
 }
+
+#[test]
+fn stable_host_id_reuses_single_uuid_across_data_dirs_and_adopts_historical_id() {
+    let temp = tempfile::tempdir().unwrap();
+    let stable_path = temp.path().join("config").join("host-identity.json");
+    let dev_data = temp.path().join("dev_assets");
+    let release_data = temp.path().join("release_data");
+    let legacy_data = temp.path().join("legacy_data");
+
+    // 1. Adopting an existing historical host_id from data_root preserves it in stable_path.
+    std::fs::create_dir_all(&release_data).unwrap();
+    std::fs::write(
+        super::host_identity_path(&release_data),
+        r#"{ "host_id": "legacy-host-uuid-1234" }"#,
+    )
+    .unwrap();
+
+    let adopted = super::load_or_create_host_id_with_stable_store(
+        &release_data,
+        &stable_path,
+        std::slice::from_ref(&legacy_data),
+    )
+    .unwrap();
+    assert_eq!(adopted, "legacy-host-uuid-1234");
+    assert_eq!(
+        super::read_host_id_file(&stable_path).as_deref(),
+        Some("legacy-host-uuid-1234")
+    );
+
+    // 2. Switching to another data_root (e.g. dev_assets or custom dir) reuses the exact same ID.
+    let reused = super::load_or_create_host_id_with_stable_store(
+        &dev_data,
+        &stable_path,
+        std::slice::from_ref(&legacy_data),
+    )
+    .unwrap();
+    assert_eq!(reused, "legacy-host-uuid-1234");
+    assert_eq!(
+        super::read_host_id_file(&super::host_identity_path(&dev_data)).as_deref(),
+        Some("legacy-host-uuid-1234")
+    );
+
+    // 3. Fresh stable store adopts from legacy_dirs if present, otherwise mints once and reuses.
+    let fresh_stable = temp.path().join("fresh-config").join("host-identity.json");
+    std::fs::create_dir_all(&legacy_data).unwrap();
+    std::fs::write(
+        super::host_identity_path(&legacy_data),
+        r#"{ "host_id": "pre-rename-host-5678" }"#,
+    )
+    .unwrap();
+    let from_legacy = super::load_or_create_host_id_with_stable_store(
+        &temp.path().join("brand-new-data"),
+        &fresh_stable,
+        std::slice::from_ref(&legacy_data),
+    )
+    .unwrap();
+    assert_eq!(from_legacy, "pre-rename-host-5678");
+
+    let clean_stable = temp.path().join("clean-config").join("host-identity.json");
+    let first = super::load_or_create_host_id_with_stable_store(
+        &temp.path().join("dir-a"),
+        &clean_stable,
+        &[],
+    )
+    .unwrap();
+    let second = super::load_or_create_host_id_with_stable_store(
+        &temp.path().join("dir-b"),
+        &clean_stable,
+        &[],
+    )
+    .unwrap();
+    assert!(!first.is_empty());
+    assert_eq!(first, second);
+}
+
+#[test]
+fn machine_fingerprint_is_stable_sha256_hex() {
+    let a = super::hash_machine_fingerprint("os:machine-abc");
+    let b = super::hash_machine_fingerprint("os:machine-abc");
+    let c = super::hash_machine_fingerprint("os:machine-xyz");
+    assert_eq!(a, b);
+    assert_ne!(a, c);
+    assert_eq!(a.len(), 64);
+    assert!(a.chars().all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()));
+
+    let fp1 = super::machine_fingerprint(Some("host-a"));
+    let fp2 = super::machine_fingerprint(Some("host-a"));
+    assert_eq!(fp1, fp2);
+    assert_eq!(fp1.len(), 64);
+}

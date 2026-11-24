@@ -436,9 +436,23 @@ export function classifyMarkdownBlock(text: string): MarkdownBlockKind {
   return 'paragraph';
 }
 
+const DETAILS_OPEN_TAG_REGEX = /<details(?:\s[^>]*)?>/gi;
+const DETAILS_CLOSE_TAG_REGEX = /<\/details\s*>/gi;
+const FOOTNOTE_DEFINITION_REGEX = /(?:^|\n) {0,3}\[\^[^\]\s]+\]:/;
+
+function countRegexMatches(value: string, regex: RegExp): number {
+  regex.lastIndex = 0;
+  let count = 0;
+  while (regex.exec(value) !== null) {
+    count += 1;
+  }
+  return count;
+}
+
 /**
- * Single-pass O(N) blank-line splitter that respects fenced code blocks and
- * restores pre-extracted display-math placeholders per block.
+ * Single-pass O(N) blank-line splitter that respects fenced code blocks,
+ * `<details>...</details>` containers, and GFM footnote definitions, while
+ * restoring pre-extracted display-math placeholders per block.
  */
 export function splitIntoBlocks(
   body: string,
@@ -446,6 +460,21 @@ export function splitIntoBlocks(
   isStreaming = true
 ): MarkdownBlock[] {
   if (!body) return [];
+
+  if (FOOTNOTE_DEFINITION_REGEX.test(body)) {
+    const text = restoreMathSpans(body.trim(), mathSpans);
+    if (!text) return [];
+    const hash = hashMarkdownBlock(text);
+    return [
+      {
+        id: hash,
+        hash,
+        text,
+        kind: classifyMarkdownBlock(text),
+        closed: !isStreaming,
+      },
+    ];
+  }
 
   const rawSlices: string[] = [];
   const len = body.length;
@@ -457,6 +486,7 @@ export function splitIntoBlocks(
   let fenceChar: '`' | '~' = '`';
   let fenceLen = 0;
   let currentBlockIsList = false;
+  let detailsDepth = 0;
 
   while (pos < len) {
     const newlineIdx = body.indexOf('\n', pos);
@@ -486,8 +516,9 @@ export function splitIntoBlocks(
 
     if (sawBlankSinceBlockContent && blockStart !== -1) {
       if (
-        currentBlockIsList &&
-        isIndentedListContinuation(body, lineStart, lineEnd)
+        detailsDepth > 0 ||
+        (currentBlockIsList &&
+          isIndentedListContinuation(body, lineStart, lineEnd))
       ) {
         sawBlankSinceBlockContent = false;
       } else {
@@ -512,6 +543,13 @@ export function splitIntoBlocks(
       fenceChar = openFence.char;
       fenceLen = openFence.length;
       blockEnd = newlineIdx === -1 ? lineEnd : nextPos;
+    } else if (body.indexOf('<', lineStart) !== -1) {
+      const lineText = body.slice(lineStart, lineEnd);
+      if (lineText.includes('<details') || lineText.includes('</details')) {
+        const opens = countRegexMatches(lineText, DETAILS_OPEN_TAG_REGEX);
+        const closes = countRegexMatches(lineText, DETAILS_CLOSE_TAG_REGEX);
+        detailsDepth = Math.max(0, detailsDepth + opens - closes);
+      }
     }
 
     pos = nextPos;

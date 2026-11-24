@@ -59,6 +59,7 @@ import { ZoomableImagePreview } from '@/components/previews/ZoomableImagePreview
 import { toast } from '@/components/ui/toast';
 import { useAppContextMenu } from '@/components/context-menu';
 import { copyImageFromSrc, saveImageFromSrc } from '@/lib/previewMediaActions';
+import { toggleMarkdownTaskCheckbox } from '@/lib/conversation-rendering/markdownFrontmatterAndTasks';
 import { writeClipboardViaBridge } from '@/vscode/bridge';
 import { fileTreeApi } from '@/lib/api';
 import { desktopApi, fileToBase64 } from '@/lib/api/misc';
@@ -1422,6 +1423,24 @@ function DockviewPreviewPanel(props: IDockviewPanelProps) {
                 className="markdown-file-prose"
                 value={editorContent}
                 workspacePath={markdownBasePath}
+                stripFrontmatter
+                onToggleTaskCheckbox={
+                  resolvedFilePath
+                    ? (taskIndex, checked) => {
+                        const nextValue = toggleMarkdownTaskCheckbox(
+                          editorContent,
+                          taskIndex,
+                          checked
+                        );
+                        if (nextValue === editorContent) return;
+                        setDraft(
+                          nextValue === content
+                            ? null
+                            : { path: resolvedFilePath, content: nextValue }
+                        );
+                      }
+                    : undefined
+                }
               />
             </div>
           </Suspense>

@@ -1,9 +1,10 @@
-import { memo, useMemo, type ReactNode } from 'react';
 import {
-  Markdown,
-  type MarkdownInlinePlugin,
-  type MarkdownProps,
-} from '@astryxdesign/core/Markdown';
+  memo,
+  useMemo,
+  type ComponentPropsWithoutRef,
+  type ReactNode,
+} from 'react';
+import type { Components } from 'hast-util-to-jsx-runtime';
 import {
   getSessionComposerStructuredTokenSegments,
   type SessionComposerStructuredToken,
@@ -17,6 +18,8 @@ import {
   useCollaborationMemberMention,
 } from '@/features/collaboration/MemberMentionChip';
 import { applySoftBreaks } from '@/lib/conversation-rendering/streamdownPlugins';
+import type { InlineTokenMatcher } from '@/lib/conversation-rendering/markdownEngine/hastInlineTokens';
+import { renderMarkdownToReactElement } from '@/lib/conversation-rendering/markdownEngine/markdownProcessor';
 import {
   deriveRelativeFilePath,
   resolveFilePathFromRoot,
@@ -443,91 +446,72 @@ export const UserMessageMarkdown = memo(function UserMessageMarkdown({
       value,
     ]
   );
-  const inlinePlugins = useMemo<MarkdownInlinePlugin[]>(
-    () => [
-      {
-        pattern: TOKEN_PLACEHOLDER_PATTERN,
-        render: (match, key): ReactNode => {
-          const token = restricted.tokens[Number(match[1])];
-          if (!token) return null;
-          if (token.kind === 'file' && panelActions) {
-            return (
-              <SessionComposerTokenChip
-                key={key}
-                token={token}
-                className="cursor-pointer"
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  const fullPath = resolveFilePathFromRoot(
-                    token.value,
-                    workspacePath
-                  );
-                  const displayPath =
-                    deriveRelativeFilePath(fullPath, workspacePath) ??
-                    token.value;
-                  panelActions.openFilePreview(fullPath, {
-                    displayPath,
-                    title: displayPath,
-                  });
-                }}
-              />
-            );
-          }
-          return <SessionComposerTokenChip key={key} token={token} />;
-        },
-      },
-      {
+  const inlineTokens = useMemo<InlineTokenMatcher[]>(() => {
+    const matchers: InlineTokenMatcher[] = [];
+    if (restricted.tokens.length > 0) {
+      matchers.push({ kind: 'token', pattern: TOKEN_PLACEHOLDER_PATTERN });
+    }
+    if (restricted.underlines.length > 0) {
+      matchers.push({
+        kind: 'underline',
         pattern: UNDERLINE_PLACEHOLDER_PATTERN,
-        render: (match, key): ReactNode => (
-          <u key={key}>{restricted.underlines[Number(match[1])] ?? ''}</u>
-        ),
-      },
-      {
-        pattern: LINK_PLACEHOLDER_PATTERN,
-        render: (match, key): ReactNode => {
-          const link = restricted.links[Number(match[1])];
-          return link ? (
-            <MarkdownResourceLink
-              key={key}
-              href={link.href}
-              workspacePath={workspacePath}
-            >
-              {link.label}
-            </MarkdownResourceLink>
-          ) : null;
-        },
-      },
-      {
-        pattern: MEMBER_PLACEHOLDER_PATTERN,
-        render: (match, key): ReactNode => {
-          const nickname = restricted.memberMentions[Number(match[1])];
-          if (!nickname) return null;
-          return (
-            <MemberMentionChip
-              key={key}
-              nickname={nickname}
-              avatar={memberMentionCtx.resolveMemberAvatar(nickname)}
-            />
-          );
-        },
-      },
-    ],
-    [
-      memberMentionCtx,
-      panelActions,
-      restricted.links,
-      restricted.memberMentions,
-      restricted.tokens,
-      restricted.underlines,
-      workspacePath,
-    ]
-  );
-  const components = useMemo<MarkdownProps['components']>(
+      });
+    }
+    if (restricted.links.length > 0) {
+      matchers.push({ kind: 'link', pattern: LINK_PLACEHOLDER_PATTERN });
+    }
+    if (restricted.memberMentions.length > 0) {
+      matchers.push({ kind: 'member', pattern: MEMBER_PLACEHOLDER_PATTERN });
+    }
+    return matchers;
+  }, [
+    restricted.links.length,
+    restricted.memberMentions.length,
+    restricted.tokens.length,
+    restricted.underlines.length,
+  ]);
+
+  const components = useMemo<Partial<Components>>(
     () => ({
-      code: UserCodeBlock,
-      inlineCode: ({ children }) => {
-        const text = String(children).trim();
+      pre: ({
+        children,
+        'data-code-block': isCodeBlock,
+        'data-language': dataLanguage,
+        ...rest
+      }: ComponentPropsWithoutRef<'pre'> & {
+        'data-code-block'?: string;
+        'data-language'?: string;
+      }) => {
+        if (isCodeBlock === 'true') {
+          const flatten = (node: ReactNode): string => {
+            if (node == null || typeof node === 'boolean') return '';
+            if (typeof node === 'string' || typeof node === 'number') {
+              return String(node);
+            }
+            if (Array.isArray(node)) return node.map(flatten).join('');
+            if (typeof node === 'object' && 'props' in node) {
+              return flatten(
+                (node as { props?: { children?: ReactNode } }).props?.children
+              );
+            }
+            return '';
+          };
+          const code = flatten(children).replace(/\r?\n$/, '');
+          return <UserCodeBlock code={code} language={dataLanguage} />;
+        }
+        return <pre {...rest}>{children}</pre>;
+      },
+      code: ({
+        children,
+        'data-block-code': isBlockCode,
+        ...rest
+      }: ComponentPropsWithoutRef<'code'> & {
+        'data-block-code'?: string;
+      }) => {
+        if (isBlockCode === 'true') {
+          return <code {...rest}>{children}</code>;
+        }
+        const text = String(children ?? '').trim();
         const resource = resolveMarkdownInlineResource(text, workspacePath);
 
         if (resource) {
@@ -542,30 +526,107 @@ export const UserMessageMarkdown = memo(function UserMessageMarkdown({
           );
         }
 
-        return <code>{text || children}</code>;
+        return <code {...rest}>{text || children}</code>;
       },
-      link: ({ href, children }) => (
+      a: ({ href, children }) => (
         <MarkdownResourceLink href={href} workspacePath={workspacePath}>
           {children}
         </MarkdownResourceLink>
       ),
+      span: ({
+        children,
+        'data-md-token': tokenKind,
+        'data-md-token-index': tokenIndexRaw,
+        ...rest
+      }: ComponentPropsWithoutRef<'span'> & {
+        'data-md-token'?: string;
+        'data-md-token-index'?: string;
+      }) => {
+        if (tokenKind && tokenIndexRaw != null) {
+          const idx = Number(tokenIndexRaw);
+          if (tokenKind === 'token') {
+            const token = restricted.tokens[idx];
+            if (!token) return null;
+            if (token.kind === 'file' && panelActions) {
+              return (
+                <SessionComposerTokenChip
+                  token={token}
+                  className="cursor-pointer"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const fullPath = resolveFilePathFromRoot(
+                      token.value,
+                      workspacePath
+                    );
+                    const displayPath =
+                      deriveRelativeFilePath(fullPath, workspacePath) ??
+                      token.value;
+                    panelActions.openFilePreview(fullPath, {
+                      displayPath,
+                      title: displayPath,
+                    });
+                  }}
+                />
+              );
+            }
+            return <SessionComposerTokenChip token={token} />;
+          }
+          if (tokenKind === 'underline') {
+            return <u>{restricted.underlines[idx] ?? ''}</u>;
+          }
+          if (tokenKind === 'link') {
+            const link = restricted.links[idx];
+            return link ? (
+              <MarkdownResourceLink
+                href={link.href}
+                workspacePath={workspacePath}
+              >
+                {link.label}
+              </MarkdownResourceLink>
+            ) : null;
+          }
+          if (tokenKind === 'member') {
+            const nickname = restricted.memberMentions[idx];
+            if (!nickname) return null;
+            return (
+              <MemberMentionChip
+                nickname={nickname}
+                avatar={memberMentionCtx.resolveMemberAvatar(nickname)}
+              />
+            );
+          }
+        }
+        return <span {...rest}>{children}</span>;
+      },
     }),
-    [workspacePath]
+    [
+      memberMentionCtx,
+      panelActions,
+      restricted.links,
+      restricted.memberMentions,
+      restricted.tokens,
+      restricted.underlines,
+      workspacePath,
+    ]
+  );
+
+  const rendered = useMemo(
+    () =>
+      renderMarkdownToReactElement(restricted.value, {
+        rawHtml: false,
+        inlineTokens,
+        components,
+      }),
+    [components, inlineTokens, restricted.value]
   );
 
   return (
     <div
+      role="document"
       className={`conv-markdown conv-user-markdown${className ? ` ${className}` : ''}`}
     >
-      <Markdown
-        autolink="gfm"
-        display="block"
-        contentWidth="100%"
-        components={components}
-        inlinePlugins={inlinePlugins}
-      >
-        {restricted.value}
-      </Markdown>
+      {rendered}
     </div>
   );
 });

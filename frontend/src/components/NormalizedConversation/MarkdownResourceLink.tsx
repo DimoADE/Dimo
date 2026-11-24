@@ -1,19 +1,41 @@
-import { useEffect, useState, type MouseEvent, type ReactNode } from 'react';
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  type MouseEvent,
+  type ReactNode,
+} from 'react';
 import { Globe2, Link2 } from 'lucide-react';
 
 import FileIcon from '@/components/FileIcon';
+import type { FileOpenLocation } from '@/components/file-tree/file-tree-types';
 import { useOptionalPanelActionsContext } from '@/contexts/PanelActionsContext';
 import { useOpenLink } from '@/hooks/useOpenLink';
 import {
   deriveRelativeFilePath,
   resolveFilePathFromRoot,
 } from '@/utils/filePaths';
+import {
+  extractFileLocation,
+  formatCompactFileLinkLabel,
+  formatLineLocationSuffix,
+} from './fileLinkLabel';
 
 export type WorkspacePathTarget = {
   path: string;
   displayPath: string;
   nodeType: 'file' | 'folder';
+  location?: FileOpenLocation;
 };
+
+/**
+ * Provides per-message basename disambiguation suffixes (e.g. `src/turn` when
+ * two files share the same basename) to nested `MarkdownResourceLink` nodes.
+ */
+export const MarkdownFileLinkContext = createContext<
+  ReadonlyMap<string, string> | undefined
+>(undefined);
 
 export function trimFilePathCandidate(value: string): string {
   return value
@@ -21,8 +43,8 @@ export function trimFilePathCandidate(value: string): string {
     .replace(/^['"`]+/, '')
     .replace(/['"`.,;]+$/, '')
     .replace(/[)\]}]+$/, '')
-    .replace(/#L\d+(?:-L?\d+)?$/i, '')
-    .replace(/:(\d+)(?::\d+)?$/, '');
+    .replace(/#L\d+(?:C\d+)?(?:-L?\d+(?:C\d+)?)?$/i, '')
+    .replace(/:(\d+)(?:-\d+|:\d+)?$/, '');
 }
 
 export function isAbsoluteLocalPath(src: string): boolean {
@@ -271,6 +293,10 @@ export function resolveMarkdownWorkspacePathTarget(
 ): WorkspacePathTarget | null {
   if (isExternalWebHref(href)) return null;
 
+  const location =
+    (href ? extractFileLocation(href) : null) ??
+    extractFileLocation(childrenText);
+
   const candidates = [
     childrenText,
     hrefToWorkspacePathCandidate(href, workspacePath) ?? '',
@@ -295,7 +321,9 @@ export function resolveMarkdownWorkspacePathTarget(
     );
     const displayPath =
       deriveRelativeFilePath(filePath, workspacePath) ?? normalizedCandidate;
-    return { path: filePath, displayPath, nodeType };
+    return location && nodeType === 'file'
+      ? { path: filePath, displayPath, nodeType, location }
+      : { path: filePath, displayPath, nodeType };
   }
 
   return null;
@@ -376,6 +404,38 @@ function flattenNodeText(node: ReactNode): string {
   return '';
 }
 
+function shouldFormatAsCompactFileLabel(
+  label: string,
+  pathTarget: WorkspacePathTarget
+): boolean {
+  const trimmed = label.trim();
+  if (!trimmed) return true;
+  if (pathTarget.nodeType !== 'file') return false;
+
+  const targetBase = pathTarget.displayPath
+    .replace(/\\/g, '/')
+    .split('/')
+    .pop()
+    ?.toLowerCase();
+  const labelWithoutLocation = trimFilePathCandidate(trimmed);
+  const labelBase = labelWithoutLocation
+    .replace(/\\/g, '/')
+    .split('/')
+    .pop()
+    ?.toLowerCase();
+
+  if (!targetBase || !labelBase || labelBase !== targetBase) {
+    return false;
+  }
+
+  return (
+    /[\\/]/.test(trimmed) ||
+    extractFileLocation(trimmed) != null ||
+    labelWithoutLocation.replace(/\\/g, '/') ===
+      pathTarget.displayPath.replace(/\\/g, '/')
+  );
+}
+
 export function MarkdownResourceLink({
   href,
   children,
@@ -389,6 +449,7 @@ export function MarkdownResourceLink({
 }) {
   const panelActions = useOptionalPanelActionsContext();
   const openLink = useOpenLink();
+  const disambiguationMap = useContext(MarkdownFileLinkContext);
   const label = flattenNodeText(children);
   const pathTarget =
     suppliedPathTarget ??
@@ -399,6 +460,45 @@ export function MarkdownResourceLink({
     webUrl && !internalProjectRoute ? webUrl.href : undefined;
   const kind = pathTarget?.nodeType ?? (webUrl ? 'web' : 'link');
 
+  const normalizedDisplayPath = pathTarget?.displayPath
+    .replace(/\\/g, '/')
+    .replace(/\/+$/, '');
+  const disambiguationSuffix = normalizedDisplayPath
+    ? disambiguationMap?.get(normalizedDisplayPath)
+    : undefined;
+
+  let renderedLabel: ReactNode = children;
+  if (pathTarget) {
+    if (shouldFormatAsCompactFileLabel(label, pathTarget)) {
+      renderedLabel = formatCompactFileLinkLabel({
+        displayPath: pathTarget.displayPath,
+        nodeType: pathTarget.nodeType,
+        location: pathTarget.location,
+        disambiguationSuffix,
+      });
+    } else if (pathTarget.nodeType === 'file') {
+      const suffixParts: string[] = [];
+      if (disambiguationSuffix && !label.includes(disambiguationSuffix)) {
+        suffixParts.push(disambiguationSuffix);
+      }
+      const lineSuffix = formatLineLocationSuffix(pathTarget.location);
+      if (lineSuffix && !label.includes(lineSuffix)) {
+        suffixParts.push(lineSuffix);
+      }
+      if (suffixParts.length > 0) {
+        renderedLabel = `${label.trim()} \u00b7 ${suffixParts.join(' \u00b7 ')}`;
+      }
+    }
+  }
+
+  const tooltip = pathTarget
+    ? pathTarget.location
+      ? `${pathTarget.displayPath}:${pathTarget.location.line}${
+          pathTarget.location.endLine ? `-${pathTarget.location.endLine}` : ''
+        }`
+      : pathTarget.displayPath
+    : href;
+
   const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
     if (pathTarget) {
       event.preventDefault();
@@ -407,6 +507,7 @@ export function MarkdownResourceLink({
         panelActions?.openFilePreview(pathTarget.path, {
           displayPath: pathTarget.displayPath,
           title: pathTarget.displayPath,
+          ...(pathTarget.location ? { location: pathTarget.location } : {}),
         });
       } else {
         panelActions?.revealInFileTree(pathTarget.path, {
@@ -442,7 +543,7 @@ export function MarkdownResourceLink({
       rel={renderedHref ? 'noopener noreferrer' : undefined}
       role={renderedHref ? undefined : 'link'}
       tabIndex={renderedHref ? undefined : 0}
-      title={pathTarget?.displayPath ?? href}
+      title={tooltip}
     >
       {pathTarget ? (
         <span
@@ -463,7 +564,7 @@ export function MarkdownResourceLink({
           data-resource-icon="link"
         />
       )}
-      <span className="conv-resource-link-label">{children}</span>
+      <span className="conv-resource-link-label">{renderedLabel}</span>
     </a>
   );
 }

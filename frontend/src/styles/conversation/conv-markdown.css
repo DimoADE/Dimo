@@ -1,12 +1,13 @@
 /* ============================================
  * AI Conversation — Markdown Renderer
- * Base markdown styles, code blocks (fenced &
- * single-line), Shiki token rendering,
- * lists, headings, tables, links, blockquotes
+ * Unified remark/rehype typography, inline code,
+ * code blocks, multi-level native lists, headings,
+ * minimalist tables, GitHub alerts, details/summary,
+ * footnotes, links, blockquotes, math & diagrams
  * ============================================ */
 
 /* =========================================
- * Markdown Renderer
+ * Markdown Renderer Root & Rhythm
  * ========================================= */
 
 .conv-markdown {
@@ -15,7 +16,7 @@
   word-break: break-word;
   min-width: 0;
   font-size: 14px;
-  line-height: 1.7;
+  line-height: 1.625;
   color: var(--conv-text-primary);
 }
 
@@ -25,50 +26,55 @@
   overflow-wrap: anywhere;
   word-break: break-word;
   font-size: 14px;
-  line-height: 1.7;
+  line-height: 1.625;
   color: var(--conv-text-primary);
 }
 
-.conv-markdown > *,
-.conv-markdown p,
-.conv-markdown li,
-.conv-markdown [role='paragraph'] {
-  line-height: 1.7;
+.conv-markdown p {
+  margin: 0.65rem 0;
+  line-height: 1.625;
 }
 
-.conv-markdown
-  :is(
-    p,
-    h1,
-    h2,
-    h3,
-    h4,
-    h5,
-    h6,
-    ul,
-    ol,
-    blockquote,
-    pre,
-    hr,
-    [role='paragraph'],
-    .astryx-markdown-paragraph,
-    .astryx-markdown-heading,
-    .astryx-markdown-list,
-    .astryx-markdown-blockquote
-  ):not(#\#):not(#\#):not(#\#):not(#\#) {
+.conv-markdown :is(p, h1, h2, h3, h4, h5, h6, ul, ol, blockquote, pre, hr) {
   max-width: 100%;
 }
 
-.conv-markdown > *,
-.conv-markdown > [role='document'] > *,
-.conv-markdown blockquote > * {
-  margin: 0;
+/* Large Markdown document chunk virtualization hint */
+.conv-md-chunk {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
 }
 
-.conv-markdown > * + *,
-.conv-markdown > [role='document'] > * + *,
-.conv-markdown blockquote > * + * {
-  margin-top: 8px;
+.conv-md-chunk > :first-child {
+  margin-top: 0;
+}
+
+.conv-md-chunk > :last-child {
+  margin-bottom: 0;
+}
+
+.conv-md-chunk + .conv-md-chunk {
+  margin-top: 0.65rem;
+}
+
+/* Subtle streaming arrival transition on the active trailing block */
+@keyframes conv-md-stream-fade {
+  from {
+    opacity: 0.72;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.conv-markdown[data-streaming='true'] > :last-child {
+  animation: conv-md-stream-fade 140ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conv-markdown[data-streaming='true'] > :last-child {
+    animation: none;
+  }
 }
 
 .conv-markdown pre {
@@ -84,12 +90,15 @@
     'Fira Code',
     monospace
   );
-  font-size: 13px;
+  font-size: 0.85em;
 }
+
+/* ── Images ── */
 
 .conv-md-image-frame {
   display: block;
   max-width: min(100%, 520px);
+  margin: 0.65rem 0;
   padding: 0;
   border: 1px solid var(--conv-border-subtle);
   border-radius: var(--radius);
@@ -115,21 +124,25 @@
   align-items: center;
   min-height: 24px;
   border: 1px solid var(--conv-border-subtle);
-  border-radius: 999px;
+  border-radius: var(--radius-inline-code);
   padding: 2px 8px;
   background: var(--conv-surface-control);
   color: var(--conv-text-tertiary);
   font-size: 12px;
 }
 
-/* Inline code */
+/* ── Inline Code (4px crisp chip, non-capsule) ── */
+
 .conv-markdown :not(pre) > code {
-  background: var(--conv-surface-control);
-  border: 1px solid var(--conv-border-subtle);
+  background: var(--conv-inline-code-bg);
+  border: 1px solid transparent;
   color: var(--conv-text-primary);
-  padding: 0.05em 5px;
-  border-radius: var(--radius);
-  font-size: 13px;
+  padding: 0.1em 0.35em;
+  border-radius: var(--radius-inline-code);
+  font-size: 0.85em;
+  font-weight: 450;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
 /* ── Code Block (fenced, multi-line) ── */
@@ -137,9 +150,9 @@
 .conv-md-codeblock {
   border: 1px solid var(--conv-border-subtle);
   border-radius: var(--radius);
-  background: var(--conv-surface-card);
+  background: var(--conv-code-bg);
   overflow: hidden;
-  margin: 6px 0;
+  margin: 0.75rem 0;
 }
 
 .conv-md-codeblock-header {
@@ -147,21 +160,61 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  min-height: 28px;
+  min-height: 30px;
   padding: 3px 6px 3px 10px;
   background: var(--conv-surface-control);
   border-bottom: 1px solid var(--conv-border-subtle);
   font-size: 11px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   color: var(--conv-text-tertiary);
+}
+
+.conv-md-codeblock-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.conv-md-codeblock-file-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.conv-md-codeblock-title {
+  font-family: var(
+    --font-mono,
+    'IBM Plex Mono',
+    'Cascadia Code',
+    'Fira Code',
+    monospace
+  );
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--conv-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .conv-md-codeblock-language {
   font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   color: var(--conv-text-secondary);
+  flex-shrink: 0;
 }
 
+.conv-md-codeblock-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.conv-md-codeblock-action,
 .conv-md-codeblock-copy {
   display: inline-flex;
   align-items: center;
@@ -169,19 +222,28 @@
   width: 24px;
   height: 24px;
   border: 1px solid transparent;
-  border-radius: var(--radius);
+  border-radius: var(--radius-inline-code);
   padding: 0;
   color: var(--conv-text-secondary);
   background: transparent;
   cursor: pointer;
   transition:
     background 0.15s,
-    border-color 0.15s;
+    border-color 0.15s,
+    color 0.15s;
 }
 
+.conv-md-codeblock-action:hover,
 .conv-md-codeblock-copy:hover {
   border-color: var(--conv-border-subtle);
   background: var(--conv-surface-control-hover);
+  color: var(--conv-text-primary);
+}
+
+.conv-md-codeblock-action.is-active {
+  border-color: var(--conv-border-strong);
+  background: var(--conv-surface-control-hover);
+  color: var(--conv-text-primary);
 }
 
 .conv-md-codeblock-copy.is-copied {
@@ -205,9 +267,16 @@
   line-height: 1.55;
 }
 
+.conv-md-codeblock.is-wrapped pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .conv-md-codeblock code {
   color: var(--conv-code-text);
   display: block;
+  font-size: inherit;
 }
 
 .conv-md-codeblock-line {
@@ -226,14 +295,14 @@
   );
 }
 
-/* ── Single-line code block ── */
+/* ── Single-line Code Block ── */
 
 .conv-md-codeblock-single {
-  margin: 6px 0;
+  margin: 0.65rem 0;
   padding: 8px 12px;
   border: 1px solid var(--conv-border-subtle);
   border-radius: var(--radius);
-  background: var(--conv-surface-card);
+  background: var(--conv-code-bg);
   white-space: pre;
   overflow-x: auto;
   font-family: var(
@@ -251,28 +320,30 @@
   color: var(--conv-code-text);
   display: block;
   font-family: inherit;
+  font-size: inherit;
 }
 
-/* Math */
+/* ── Math ── */
 
 .conv-markdown .katex {
   font-size: 1em;
 }
 
 .conv-markdown .katex-display {
-  margin: 8px 0;
+  display: block;
+  margin: 0.75rem 0;
   padding: 2px 0;
   overflow-x: auto;
   overflow-y: hidden;
 }
 
-/* Fenced & standalone HTML live preview */
+/* ── Fenced & Standalone HTML Live Preview ── */
 
 .conv-md-html-preview {
   position: relative;
   width: 100%;
   max-width: 100%;
-  margin: 6px 0;
+  margin: 0.75rem 0;
   border: 1px solid var(--conv-border-subtle);
   border-radius: var(--radius);
   background: var(--conv-surface-card);
@@ -342,10 +413,10 @@
   color: var(--conv-text-secondary);
 }
 
-/* Mermaid diagrams */
+/* ── Mermaid Diagrams ── */
 
 .conv-md-mermaid {
-  margin: 6px 0;
+  margin: 0.75rem 0;
   max-width: 100%;
   border: 1px solid var(--conv-border-subtle);
   border-radius: var(--radius);
@@ -414,161 +485,485 @@
   line-height: 1.5;
 }
 
-/* ── Lists ── */
+/* ── Native Multi-Level Lists ── */
 
 .conv-markdown ul,
 .conv-markdown ol {
-  margin: 10px 0;
+  --list-gutter: 1.45rem;
+  margin: 0.55rem 0;
   max-width: 100%;
-  padding-left: 2.2px;
-  padding-inline-start: 2.2px;
+  padding-inline-start: var(--list-gutter);
   list-style-position: outside;
-  line-height: 1.7;
+  line-height: 1.625;
 }
 
 .conv-markdown ul {
   list-style-type: disc;
 }
 
+.conv-markdown ul ul {
+  list-style-type: circle;
+}
+
+.conv-markdown ul ul ul {
+  list-style-type: square;
+}
+
 .conv-markdown ol {
   list-style-type: decimal;
 }
 
-.conv-markdown .astryx-list-item {
-  padding-left: 4px !important;
-  padding-right: 4px !important;
-  padding-inline-start: 4px !important;
-  padding-inline-end: 4px !important;
+.conv-markdown ol[data-ol-digits='2'] {
+  --list-gutter: 2.05rem;
 }
 
-.conv-markdown .astryx-list-item > span:first-child {
-  width: 8px !important;
+.conv-markdown ol[data-ol-digits='3'] {
+  --list-gutter: 2.6rem;
 }
 
-.conv-markdown
-  [data-list-style='decimal']
-  > .astryx-list-item
-  > span:first-child {
-  width: auto !important;
-  min-width: 0 !important;
-  white-space: nowrap;
+.conv-markdown ol ol {
+  list-style-type: lower-alpha;
+}
+
+.conv-markdown ol ol ol {
+  list-style-type: lower-roman;
+}
+
+.conv-markdown ul > li::marker {
+  color: var(--conv-text-tertiary);
+}
+
+.conv-markdown ol > li::marker {
+  color: var(--conv-text-secondary);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
 .conv-markdown li {
-  margin-bottom: 4px;
+  margin: 0;
   word-wrap: break-word;
   overflow-wrap: break-word;
 }
 
-.conv-markdown hr,
-.conv-markdown > [role='document'] > hr {
-  margin-top: 12px;
-  margin-bottom: 20px;
+.conv-markdown li + li {
+  margin-top: 0.3rem;
 }
 
-.conv-markdown hr + *,
-.conv-markdown > [role='document'] > hr + * {
-  margin-top: 16px;
+.conv-markdown li > ul,
+.conv-markdown li > ol {
+  margin: 0.25rem 0 0;
 }
 
-.conv-markdown li :where(p, [role='paragraph']) {
-  margin: 0;
+.conv-markdown li > p {
+  margin: 0.25rem 0;
 }
 
-/* ── Headings ── */
+.conv-markdown li > p:first-child {
+  margin-top: 0;
+}
+
+.conv-markdown li > p:last-child {
+  margin-bottom: 0;
+}
+
+/* GFM Task Lists */
+.conv-markdown ul.contains-task-list {
+  list-style: none;
+  padding-inline-start: 0.25rem;
+}
+
+.conv-markdown li.task-list-item {
+  list-style: none;
+}
+
+.conv-markdown .conv-md-task-checkbox,
+.conv-markdown li.task-list-item > input[type='checkbox'] {
+  margin-inline-end: 0.45rem;
+  vertical-align: -0.1em;
+  accent-color: var(--conv-link-color);
+}
+
+.conv-markdown .conv-md-task-checkbox.is-interactive {
+  cursor: pointer;
+}
+
+/* ── Horizontal Rules ── */
+
+.conv-markdown hr {
+  border: none;
+  border-top: 1px solid var(--conv-border-subtle);
+  margin: 1rem 0;
+}
+
+/* ── Headings (Semantic Hierarchy) ── */
 
 .conv-markdown :where(h1, h2, h3, h4, h5, h6) {
-  font-size: 1em;
-  /* Size is flat, so weight carries the role: one full step above <strong>. */
-  font-weight: 700;
-  letter-spacing: 0.01em;
+  font-weight: 600;
   color: var(--conv-text-primary);
+  letter-spacing: -0.01em;
 }
 
-/* ── Bold / Italic ── */
+.conv-markdown h1 {
+  font-size: 1.25rem;
+  line-height: 1.3;
+  margin: 1.35rem 0 0.55rem;
+}
 
-.conv-markdown :where(strong) {
+.conv-markdown h2 {
+  font-size: 1.125rem;
+  line-height: 1.32;
+  margin: 1.25rem 0 0.5rem;
+}
+
+.conv-markdown h3 {
+  font-size: 1rem;
+  line-height: 1.35;
+  margin: 1.1rem 0 0.4rem;
+}
+
+.conv-markdown h4 {
+  font-size: 0.9375rem;
+  line-height: 1.4;
+  margin: 0.95rem 0 0.35rem;
+}
+
+.conv-markdown h5 {
+  font-size: 0.875rem;
+  line-height: 1.45;
+  margin: 0.85rem 0 0.3rem;
+}
+
+.conv-markdown h6 {
+  font-size: 0.875rem;
+  line-height: 1.45;
+  color: var(--conv-text-secondary);
+  margin: 0.85rem 0 0.3rem;
+}
+
+/* ── Bold / Italic / Strikethrough / Kbd / Mark ── */
+
+.conv-markdown :where(strong, b) {
   font-weight: 600;
 }
 
-.conv-markdown :where(em) {
+.conv-markdown :where(em, i) {
   color: var(--conv-text-secondary);
 }
 
-/* ── Blockquote ── */
+.conv-markdown :where(del, s) {
+  color: var(--conv-text-tertiary);
+}
+
+.conv-markdown kbd {
+  display: inline-block;
+  padding: 0.08em 0.35em;
+  border: 1px solid var(--conv-border-strong);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-inline-code);
+  background: var(--conv-surface-control);
+  font-family: var(
+    --font-mono,
+    'IBM Plex Mono',
+    'Cascadia Code',
+    'Fira Code',
+    monospace
+  );
+  font-size: 0.82em;
+  line-height: 1.25;
+}
+
+.conv-markdown mark {
+  background: color-mix(in srgb, var(--md-alert-warning) 22%, transparent);
+  color: inherit;
+  border-radius: var(--radius-inline-code);
+  padding: 0 0.15em;
+}
+
+/* ── Blockquote (Clean Left Bar) ── */
 
 .conv-markdown :where(blockquote) {
-  margin-inline: 0;
-  padding: 6px 10px;
-  border: 1px solid var(--conv-border-subtle);
-  background: var(--conv-surface-control);
-  border-radius: var(--radius);
+  margin: 0.75rem 0;
+  padding: 0.15rem 0 0.15rem 0.9rem;
+  border: none;
+  border-inline-start: 2px solid var(--conv-border-strong);
+  background: transparent;
+  border-radius: 0;
   color: var(--conv-text-secondary);
 }
 
-/* ── Tables ── */
+.conv-markdown blockquote > :first-child {
+  margin-top: 0;
+}
 
-.conv-markdown table {
-  border-collapse: separate;
-  border-spacing: 0;
-  display: table;
-  width: max-content;
-  min-width: 100%;
-  max-width: none;
-  margin: 0;
+.conv-markdown blockquote > :last-child {
+  margin-bottom: 0;
+}
+
+/* ── GitHub Alerts ── */
+
+.conv-md-alert {
+  --_alert-color: var(--md-alert-note);
+  margin: 0.75rem 0;
+  padding: 0.65rem 0.85rem;
+  border-inline-start: 3px solid var(--_alert-color);
+  border-radius: 0 var(--radius-inline-code)
+    var(--radius-inline-code) 0;
+  background: color-mix(in srgb, var(--_alert-color) 8%, transparent);
+}
+
+.conv-md-alert[data-alert-kind='note'] {
+  --_alert-color: var(--md-alert-note);
+}
+
+.conv-md-alert[data-alert-kind='tip'] {
+  --_alert-color: var(--md-alert-tip);
+}
+
+.conv-md-alert[data-alert-kind='important'] {
+  --_alert-color: var(--md-alert-important);
+}
+
+.conv-md-alert[data-alert-kind='warning'] {
+  --_alert-color: var(--md-alert-warning);
+}
+
+.conv-md-alert[data-alert-kind='caution'] {
+  --_alert-color: var(--md-alert-caution);
+}
+
+.conv-md-alert-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.3rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--_alert-color);
+}
+
+.conv-md-alert-icon {
+  width: 0.95rem;
+  height: 0.95rem;
+  flex-shrink: 0;
+}
+
+.conv-md-alert-body > :first-child {
+  margin-top: 0;
+}
+
+.conv-md-alert-body > :last-child {
+  margin-bottom: 0;
+}
+
+/* ── Details / Summary ── */
+
+.conv-md-details {
+  margin: 0.75rem 0;
   border: 1px solid var(--conv-border-subtle);
   border-radius: var(--radius);
   background: var(--conv-surface-card);
+  overflow: hidden;
 }
 
-.conv-markdown .astryx-markdown-table {
+.conv-md-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.75rem;
+  font-weight: 500;
+  color: var(--conv-text-primary);
+  background: var(--conv-surface-control);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.conv-md-summary::-webkit-details-marker {
+  display: none;
+}
+
+.conv-md-details-chevron {
+  width: 0.9rem;
+  height: 0.9rem;
+  flex-shrink: 0;
+  color: var(--conv-text-tertiary);
+  transition: transform 140ms ease;
+}
+
+.conv-md-details[open] > .conv-md-summary {
+  border-bottom: 1px solid var(--conv-border-subtle);
+}
+
+.conv-md-details[open] > .conv-md-summary .conv-md-details-chevron {
+  transform: rotate(90deg);
+}
+
+.conv-md-details > :not(.conv-md-summary) {
+  padding-inline: 0.75rem;
+}
+
+.conv-md-details > :nth-child(2) {
+  padding-top: 0.6rem;
+}
+
+.conv-md-details > :last-child:not(.conv-md-summary) {
+  padding-bottom: 0.6rem;
+}
+
+/* ── Minimalist Tables + Copy Menu ── */
+
+.conv-md-table-container {
+  position: relative;
+  margin: 0.75rem 0;
+  max-width: 100%;
+}
+
+.conv-md-table-actions {
+  position: absolute;
+  top: 0.2rem;
+  right: 0.25rem;
+  z-index: 2;
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+
+.conv-md-table-container:hover .conv-md-table-actions,
+.conv-md-table-container:focus-within .conv-md-table-actions {
+  opacity: 1;
+}
+
+.conv-md-table-copy-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 7px;
+  border: 1px solid var(--conv-border-subtle);
+  border-radius: var(--radius-inline-code);
+  background: var(--conv-surface-card);
+  color: var(--conv-text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  transition:
+    background 0.15s,
+    border-color 0.15s,
+    color 0.15s;
+}
+
+.conv-md-table-copy-trigger:hover {
+  border-color: var(--conv-border-strong);
+  background: var(--conv-surface-control-hover);
+  color: var(--conv-text-primary);
+}
+
+.conv-md-table-copy-trigger.is-copied {
+  border-color: var(--conv-tool-success);
+  color: var(--conv-tool-success);
+}
+
+.conv-md-table-scroll {
   max-width: 100%;
   overflow-x: auto;
   overscroll-behavior-inline: contain;
 }
 
+.conv-md-table-scroll:focus-visible {
+  outline: 2px solid var(--conv-link-color);
+  outline-offset: 2px;
+  border-radius: var(--radius-inline-code);
+}
+
+.conv-markdown table {
+  border-collapse: collapse;
+  display: table;
+  width: max-content;
+  min-width: 100%;
+  max-width: none;
+  margin: 0;
+  border: none;
+  background: transparent;
+}
+
 .conv-markdown th,
 .conv-markdown td {
+  border: none;
   border-bottom: 1px solid var(--conv-border-subtle);
-  border-right: 1px solid var(--conv-border-subtle);
-  padding: 8px 12px;
+  padding: 0.5rem 0.75rem;
   text-align: left;
+  vertical-align: top;
   word-wrap: break-word;
   overflow-wrap: break-word;
 }
 
+.conv-markdown th:first-child,
+.conv-markdown td:first-child {
+  padding-inline-start: 0.25rem;
+}
+
 .conv-markdown th:last-child,
 .conv-markdown td:last-child {
-  border-right: none;
+  padding-inline-end: 0.25rem;
+}
+
+.conv-markdown thead th {
+  font-weight: 600;
+  font-size: 0.8125rem;
+  color: var(--conv-text-secondary);
+  border-bottom: 1px solid var(--conv-border-strong);
+  background: transparent;
 }
 
 .conv-markdown tbody tr:last-child td {
   border-bottom: none;
 }
 
-.conv-markdown th {
+/* ── Footnotes (GFM) ── */
+
+.conv-markdown section[data-footnotes] {
+  margin-top: 1.25rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--conv-border-subtle);
+  font-size: 0.8125rem;
+  color: var(--conv-text-secondary);
+}
+
+.conv-markdown section[data-footnotes] .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.conv-markdown a[data-footnote-ref] {
+  font-size: 0.75em;
   font-weight: 600;
-  background: var(--conv-surface-control);
+  text-decoration: none;
+  padding-inline: 1px;
 }
 
-.conv-markdown thead tr:first-child th:first-child {
-  border-start-start-radius: calc(var(--radius) - 1px);
+.conv-markdown a[data-footnote-backref] {
+  margin-inline-start: 0.35rem;
+  text-decoration: none;
+  font-size: 0.85em;
 }
 
-.conv-markdown thead tr:first-child th:last-child {
-  border-start-end-radius: calc(var(--radius) - 1px);
-}
-
-/* ── Links ── */
+/* ── Links & File Chips ── */
 
 .conv-markdown a {
-  color: var(--conv-tool-icon);
-  text-underline-offset: 2px;
-  text-decoration: underline;
+  color: var(--conv-link-color);
+  text-underline-offset: 0.2em;
+  text-decoration: none;
 }
 
 .conv-markdown a:hover {
-  color: var(--conv-text-primary);
+  color: var(--conv-link-hover-color);
+  text-decoration: underline;
 }
 
 .conv-markdown .conv-resource-link {
@@ -576,7 +971,7 @@
   align-items: baseline;
   gap: 0.25em;
   max-width: 100%;
-  color: var(--conv-tool-icon);
+  color: var(--conv-link-color);
   font-weight: 500;
   line-height: inherit;
   text-decoration: none;
@@ -584,8 +979,19 @@
 }
 
 .conv-markdown .conv-resource-link:hover {
-  color: var(--conv-tool-icon);
+  color: var(--conv-link-hover-color);
   text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.conv-markdown .conv-resource-link[data-resource-kind='file'],
+.conv-markdown .conv-resource-link[data-resource-kind='folder'] {
+  color: var(--conv-file-link-color);
+}
+
+.conv-markdown .conv-resource-link[data-resource-kind='file']:hover,
+.conv-markdown .conv-resource-link[data-resource-kind='folder']:hover {
+  color: var(--conv-file-link-hover-color);
 }
 
 .conv-resource-link-icon {
@@ -597,10 +1003,11 @@
 }
 
 .conv-resource-link-favicon {
-  border-radius: var(--radius);
+  border-radius: var(--radius-inline-code);
   object-fit: contain;
 }
 
+/* Preserve FileIcon's native brand colors for files and folders */
 .conv-resource-link-file-icon,
 .conv-resource-link-file-icon > .file-icon {
   width: 1em !important;
@@ -611,15 +1018,6 @@
 .conv-resource-link-file-icon svg {
   width: 100%;
   height: 100%;
-  color: currentColor;
-}
-
-.conv-resource-link-file-icon svg [fill]:not([fill='none']) {
-  fill: currentColor !important;
-}
-
-.conv-resource-link-file-icon svg [stroke]:not([stroke='none']) {
-  stroke: currentColor !important;
 }
 
 .conv-resource-link-label {
@@ -627,19 +1025,12 @@
   overflow-wrap: anywhere;
 }
 
-/* ── Paragraph spacing ── */
+/* ── Root Boundary Margin Trimming ── */
 
-.conv-markdown p {
+.conv-markdown > :first-child {
+  margin-top: 0;
+}
+
+.conv-markdown > :last-child {
   margin-bottom: 0;
-}
-
-/* Code block background — uses CSS variables for theme adaptation */
-.conv-md-codeblock,
-.conv-md-codeblock-single {
-  background: var(--conv-code-bg);
-}
-
-.conv-md-codeblock-header {
-  background: var(--conv-surface-control);
-  border-bottom-color: var(--conv-border-subtle);
 }

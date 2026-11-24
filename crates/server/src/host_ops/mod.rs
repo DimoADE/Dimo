@@ -618,6 +618,10 @@ impl ServerApplicationDomains {
                     .ok_or_else(|| {
                         ApplicationError::not_found(format!("agent {}", args.agent_id))
                     })?;
+                self.events.emit(
+                    "agent-management-snapshot-invalidated",
+                    json!({ "agentId": args.agent_id, "enabled": args.enabled }),
+                );
                 serialize(view)
             }
             DomainCommand::AgentManagementRefresh => {

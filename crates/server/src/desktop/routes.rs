@@ -228,7 +228,7 @@ fn to_json<T: serde::Serialize>(value: T) -> Result<Value, DesktopError> {
 
 async fn local_host_id() -> Option<String> {
     tokio::task::spawn_blocking(|| {
-        utils::assets::load_or_create_host_id(&utils::assets::asset_dir()).ok()
+        utils::assets::load_or_create_local_host_id(&utils::assets::host_data_dir()).ok()
     })
     .await
     .ok()
@@ -335,6 +335,8 @@ struct RemoteCallArg {
     args: Value,
     #[serde(default)]
     operation_id: Option<String>,
+    #[serde(default)]
+    window_label: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -618,10 +620,24 @@ async fn invoke_desktop_command(
                 .map_err(|error| {
                     DesktopError::BadRequest(format!("invalid operation id: {error}"))
                 })?;
+            let target_window = match parsed
+                .window_label
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                Some(explicit)
+                    if (caller == "main" || caller == "settings")
+                        && explicit.starts_with("host-") =>
+                {
+                    explicit
+                }
+                _ => caller.as_str(),
+            };
             state
                 .remote_desktop
                 .call(
-                    &caller,
+                    target_window,
                     &parsed.profile_id,
                     &parsed.command,
                     parsed.args,

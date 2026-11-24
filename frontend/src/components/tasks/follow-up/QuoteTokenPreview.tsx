@@ -15,7 +15,7 @@ import {
   X,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { Markdown } from '@astryxdesign/core/Markdown';
+import { renderMarkdownToReactElement } from '@/lib/conversation-rendering/markdownEngine/markdownProcessor';
 import { usePortalContainer } from '@/contexts/PortalContainerContext';
 import {
   hasQuoteSourceAnchor,
@@ -138,9 +138,7 @@ export function QuoteTokenPreview({
       }}
     >
       <div className="conv-markdown quote-token-preview-markdown break-words text-xs leading-5 text-foreground">
-        <Markdown display="block" density="compact" autolink="gfm">
-          {text}
-        </Markdown>
+        {renderMarkdownToReactElement(text, { rawHtml: false })}
       </div>
       {quoteMeta?.annotation && !editingNote ? (
         <div

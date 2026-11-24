@@ -272,7 +272,7 @@ fn valid_account_lease(store: &HostTunnelStore) -> Option<&AccountRelayLease> {
 }
 
 fn load_or_create_host_id_sync() -> Option<String> {
-    utils::assets::load_or_create_host_id(&utils::assets::asset_dir()).ok()
+    utils::assets::load_or_create_local_host_id(&utils::assets::host_data_dir()).ok()
 }
 
 fn default_official_quick_origin(store: &HostTunnelStore) -> Option<String> {

@@ -244,16 +244,8 @@
   color: inherit !important;
 }
 
-.dimo-user-message .conv-user-markdown .astryx-list-item > span:first-child {
-  color: var(--conv-user-text) !important;
-}
-
-.dimo-user-message
-  .conv-user-markdown
-  .astryx-list-item
-  > span:first-child
-  > span {
-  background-color: var(--conv-user-text) !important;
+.dimo-user-message .conv-user-markdown li::marker {
+  color: var(--conv-user-text);
 }
 
 .conv-user-bubble > div.absolute button {
@@ -289,15 +281,16 @@
   color: var(--conv-user-text) !important;
 }
 
-/* Keep every Astryx prose node on the adaptive user-message foreground. */
+/* Keep prose nodes inside user bubbles on the adaptive user-message foreground. */
 .conv-user-bubble .conv-markdown,
-.conv-user-bubble .conv-markdown [role='paragraph'],
 .conv-user-bubble
   .conv-markdown
   :where(p, li, span, strong, u):not(.session-composer-token-chip):not(
     .session-composer-token-chip *
   ):not(.collaboration-member-mention-chip):not(
     .collaboration-member-mention-chip *
+  ):not(.conv-resource-link-label):not(.conv-resource-link-file-icon):not(
+    .conv-resource-link-file-icon *
   ) {
   color: var(--conv-user-text) !important;
 }
@@ -332,19 +325,36 @@
 }
 
 .conv-user-bubble .conv-markdown .conv-resource-link,
-.conv-user-bubble .conv-markdown .conv-resource-link :where(span, svg) {
-  color: var(--conv-tool-icon) !important;
+.conv-user-bubble .conv-markdown .conv-resource-link .conv-resource-link-label {
+  color: var(--conv-link-color) !important;
 }
 
-/* Inline code inside user bubbles stays readable on the charcoal surface. */
+.conv-user-bubble
+  .conv-markdown
+  .conv-resource-link[data-resource-kind='file'],
+.conv-user-bubble
+  .conv-markdown
+  .conv-resource-link[data-resource-kind='file']
+  .conv-resource-link-label,
+.conv-user-bubble
+  .conv-markdown
+  .conv-resource-link[data-resource-kind='folder'],
+.conv-user-bubble
+  .conv-markdown
+  .conv-resource-link[data-resource-kind='folder']
+  .conv-resource-link-label {
+  color: var(--conv-file-link-color) !important;
+}
+
+/* Inline code inside user bubbles stays crisp and readable on the charcoal surface. */
 .conv-user-bubble code {
   background: var(--conv-user-code-bg) !important;
   background-color: var(--conv-user-code-bg) !important;
   color: var(--conv-user-text) !important;
   border: 1px solid var(--conv-user-code-border) !important;
-  border-radius: var(--radius);
-  padding: 1px 5px;
-  font-weight: 500;
+  border-radius: var(--radius-inline-code);
+  padding: 0.1em 0.35em;
+  font-weight: 450;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }

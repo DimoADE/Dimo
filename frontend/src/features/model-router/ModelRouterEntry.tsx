@@ -22,6 +22,7 @@ import {
   type DeviceLogin,
   type RouterProvision,
 } from './account';
+import { resolveCurrentHostIdentity } from './hostIdentity';
 import { openExternal } from './openExternal';
 import { supportsModelRouter } from './preset';
 
@@ -89,7 +90,12 @@ export function ModelRouterEntry({
         await openModelMarketplace(agentId);
         return;
       }
-      const next = await accountApi.startLogin(modelMarketplacePath(agentId));
+      const identity = await resolveCurrentHostIdentity().catch(() => null);
+      const next = await accountApi.startLogin({
+        deviceName: identity?.hostName,
+        hostId: identity?.hostId,
+        nextPath: modelMarketplacePath(agentId),
+      });
       setLogin(next);
       await openExternal(next.verifyUrl);
     } catch (err) {

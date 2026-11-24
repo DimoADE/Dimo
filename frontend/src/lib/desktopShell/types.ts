@@ -203,6 +203,7 @@ export type ElectronSidecarStatus =
  */
 export interface ElectronDesktopBridge {
   readonly platform?: string;
+  readonly hostname?: string;
   readonly isDev?: boolean;
   isDeveloperMode?: () => boolean;
   readonly backend?: ElectronBackendConnectionInfo;

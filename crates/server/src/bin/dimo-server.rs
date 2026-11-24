@@ -162,6 +162,14 @@ async fn run(launch: ServerLaunch, startup_tokens: CapturedStartupTokens) -> Exi
     if launch.desktop {
         server = server.with_desktop_mode(true);
     }
+    match utils::assets::load_or_create_local_host_id(&data_dir) {
+        Ok(host_id) => {
+            server.host_id = host_id;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "could not load machine-stable host identity; falling back to data_dir");
+        }
+    }
 
     let mut bootstrap = ServerBootstrapConfig::new(data_dir.clone());
     bootstrap.server = server;

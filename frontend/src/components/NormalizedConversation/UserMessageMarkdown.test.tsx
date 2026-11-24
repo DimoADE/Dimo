@@ -243,7 +243,7 @@ describe('UserMessageMarkdown', () => {
     expect(getComputedStyle(paragraph).color).toBe('var(--conv-user-text)');
   });
 
-  it('uses the same list indentation and item spacing as assistant markdown', () => {
+  it('uses native semantic list indentation and multi-level markers matching assistant markdown', () => {
     render(
       <StyledUserMessage value={'- Parent\n  - Child\n\n1. first\n2. second'} />
     );
@@ -251,39 +251,21 @@ describe('UserMessageMarkdown', () => {
     const lists = screen.getAllByRole('list');
     const unordered = lists.filter((list) => list.tagName === 'UL');
     const ordered = lists.find((list) => list.tagName === 'OL');
-    const parentItem = unordered[0]?.querySelector(':scope > li');
-    const parentMarker = parentItem?.querySelector(':scope > span:first-child');
-    const nestedItem = unordered[1]?.querySelector(':scope > li');
+    expect(unordered).toHaveLength(2);
+    expect(ordered).toBeTruthy();
+
     const parentListStyle = getComputedStyle(unordered[0] as Element);
-    const parentItemStyle = getComputedStyle(parentItem as Element);
     const nestedListStyle = getComputedStyle(unordered[1] as Element);
-    const nestedItemStyle = getComputedStyle(nestedItem as Element);
     const orderedStyle = getComputedStyle(ordered as Element);
 
-    expect(parentListStyle.paddingLeft).toBe('2.2px');
-    expect(parentListStyle.paddingInlineStart).toBe('2.2px');
-    expect(parentListStyle.marginTop).toBe('10px');
-    expect(parentListStyle.marginBottom).toBe('10px');
-    expect(parentItemStyle.paddingLeft).toBe('4px');
-    expect(parentItemStyle.paddingInlineStart).toBe('4px');
-    expect(parentItemStyle.paddingRight).toBe('4px');
-    expect(parentItemStyle.marginBottom).toBe('4px');
-    expect(parentItemStyle.gap).not.toBe('0.125rem');
-    expect(['1.7', '23.8px']).toContain(parentItemStyle.lineHeight);
-    expect(getComputedStyle(parentMarker as Element).width).toBe('8px');
-    expect(nestedListStyle.paddingLeft).toBe('2.2px');
-    expect(nestedListStyle.paddingInlineStart).toBe('2.2px');
-    expect(nestedItemStyle.paddingLeft).toBe('4px');
-    expect(nestedItemStyle.paddingInlineStart).toBe('4px');
-    expect(orderedStyle.paddingLeft).toBe('2.2px');
-    expect(orderedStyle.paddingInlineStart).toBe('2.2px');
-    expect(orderedStyle.marginTop).toBe('10px');
+    expect(parentListStyle.listStyleType).toBe('disc');
+    expect(nestedListStyle.listStyleType).toBe('circle');
+    expect(orderedStyle.listStyleType).toBe('decimal');
+    expect(parentListStyle.listStylePosition).toBe('outside');
+    expect(orderedStyle.listStylePosition).toBe('outside');
     expect(orderedStyle.paddingInlineStart).toBe(
       parentListStyle.paddingInlineStart
     );
-    expect(
-      getComputedStyle(ordered?.querySelector(':scope > li') as Element).gap
-    ).toBe(parentItemStyle.gap);
   });
 
   it('keeps single line breaks as visible hard breaks', () => {
@@ -296,17 +278,17 @@ describe('UserMessageMarkdown', () => {
     expect(container).toHaveTextContent('second line');
   });
 
-  it('keeps user-message ordered-list numbers on one line', () => {
-    render(<StyledUserMessage value={'1. first\n2. second'} />);
+  it('renders native ordered-list items with multi-digit gutter metadata when >= 10 items', () => {
+    const items = Array.from({ length: 10 }, (_, idx) => `${idx + 1}. item ${idx + 1}`).join('\n');
+    render(<StyledUserMessage value={items} />);
 
     const ordered = screen
       .getAllByRole('list')
       .find((list) => list.tagName === 'OL');
-    const marker = ordered?.querySelector(':scope > li > span:first-child');
-    const style = getComputedStyle(marker as Element);
 
-    expect(style.whiteSpace).toBe('nowrap');
-    expect(style.minWidth).not.toBe('1.5em');
+    expect(ordered).toBeTruthy();
+    expect(ordered).toHaveAttribute('data-ol-digits', '2');
+    expect(getComputedStyle(ordered as Element).listStyleType).toBe('decimal');
   });
 
   it('renders file and website links with the shared inline resource style', () => {

@@ -35,6 +35,17 @@
 
   --conv-code-bg: var(--surface-control);
   --conv-code-text: var(--text-strong);
+  --conv-inline-code-bg: var(
+    --md-inline-code-bg,
+    color-mix(in srgb, var(--conv-text-primary) 8%, transparent)
+  );
+  --conv-link-color: var(--md-link, var(--conv-tool-icon));
+  --conv-link-hover-color: var(--md-link-hover, var(--conv-link-color));
+  --conv-file-link-color: var(--md-file-link, var(--conv-link-color));
+  --conv-file-link-hover-color: var(
+    --md-file-link-hover,
+    var(--conv-file-link-color)
+  );
   --conv-terminal-bg: hsl(var(--console-background));
   --conv-terminal-text: hsl(var(--console-foreground));
 }

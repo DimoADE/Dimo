@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, Suspense, lazy, useEffect, useState } from 'react';
 import {
   AlertCircle,
   ArrowUpCircle,
@@ -10,8 +10,13 @@ import {
 import { useTranslation } from 'react-i18next';
 
 import { useUserSystem } from '@/components/ConfigProvider';
-import { ReleaseNotes } from '@/components/settings/ReleaseNotes';
 import { Button } from '@/components/ui/button';
+
+const LazyReleaseNotes = lazy(() =>
+  import('@/components/settings/ReleaseNotes').then((module) => ({
+    default: module.ReleaseNotes,
+  }))
+);
 import {
   Popover,
   PopoverContent,
@@ -376,12 +381,14 @@ export function UpdateAvailableBadge() {
             <div className="text-xs text-muted-foreground">
               {t('update.releaseNotesTitle')}
             </div>
-            <ReleaseNotes
-              notes={available.body}
-              locale={i18n.language}
-              label={t('update.releaseNotesTitle')}
-              className="status-bar-release-notes max-h-48 text-xs"
-            />
+            <Suspense fallback={null}>
+              <LazyReleaseNotes
+                notes={available.body}
+                locale={i18n.language}
+                label={t('update.releaseNotesTitle')}
+                className="status-bar-release-notes max-h-48 text-xs"
+              />
+            </Suspense>
           </div>
         ) : null}
 

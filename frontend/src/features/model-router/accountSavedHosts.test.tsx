@@ -331,4 +331,56 @@ describe('accountSavedHosts', () => {
     });
     expect(mocks.setSyncAccount).toHaveBeenCalledWith(null);
   });
+
+  it('filters out self hostId, loopback origins, and local LAN IPs regardless of port before uploading saved-hosts', async () => {
+    const { filterSelfHostProfiles } = await import('./accountSavedHosts');
+    const profiles: SyncableHostProfile[] = [
+      {
+        profileId: 'p-self-lan-17894',
+        hostId: 'different-or-old-id',
+        name: 'Local LAN 17894',
+        origin: 'http://192.168.31.12:17894',
+      },
+      {
+        profileId: 'p-self-lan-17899',
+        hostId: 'different-or-old-id-2',
+        name: 'Local LAN 17899',
+        origin: 'http://192.168.31.12:17899',
+      },
+      {
+        profileId: 'p-self-hostid',
+        hostId: 'host:local-uuid-1',
+        name: 'Self via Tunnel',
+        origin: 'https://dimo-ai.com/t/local-uuid-1',
+      },
+      {
+        profileId: 'p-self-loopback',
+        name: 'Loopback',
+        origin: 'http://127.0.0.1:17891',
+      },
+      {
+        profileId: 'p-remote-ssh',
+        hostId: 'remote-ssh-uuid',
+        name: 'GPU Server',
+        origin: 'http://127.0.0.1:43210',
+        provisionKind: 'ssh',
+        provision: { host: '10.0.0.8', port: 22, user: 'ubuntu' },
+      },
+      {
+        profileId: 'p-remote-lan',
+        hostId: 'remote-mac-uuid',
+        name: 'Office Mac',
+        origin: 'http://192.168.31.50:17891',
+      },
+    ];
+
+    const filtered = filterSelfHostProfiles(profiles, {
+      localHostId: 'local-uuid-1',
+      localAddresses: ['127.0.0.1:17899', 'http://192.168.31.12:17899'],
+    });
+    expect(filtered.map((item) => item.profileId)).toEqual([
+      'p-remote-ssh',
+      'p-remote-lan',
+    ]);
+  });
 });

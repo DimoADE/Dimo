@@ -17,7 +17,6 @@ import {
   frontendPreferencesApi,
   hostClientApi,
   hostTunnelApi,
-  webServiceApi,
 } from '@/lib/api';
 import { backendListen } from '@/lib/backendTransport';
 import {
@@ -46,7 +45,14 @@ import {
   type AccountOwnerSummary,
   type RouterOverview,
 } from './account';
+import {
+  resetHostIdentityCacheForTests,
+  resolveCurrentHostIdentity,
+  type AccountHostKind,
+} from './hostIdentity';
 import { resolveAccountDisplayName, useDimoAccount } from './useDimoAccount';
+
+export { resolveCurrentHostIdentity, type AccountHostKind };
 
 export const ACCOUNT_HOST_CONFIGS_STORAGE_KEY = 'dimo.account.hostConfigs.v1';
 export const DESKTOP_SHARED_HOST_CONFIGS_KEY = '__account_host_configs_v1';
@@ -62,8 +68,6 @@ const RELAY_LEASE_TERMINAL_ERRORS = new Set([
   'host_id_conflict',
   'invalid_host_id',
 ]);
-
-export type AccountHostKind = 'local' | 'ssh' | 'remote' | 'web';
 
 type NonPortableUserConfigKey =
   | 'config_version'
@@ -143,12 +147,6 @@ type StoredHostConfigsEnvelope = {
   accounts: Record<string, AccountBucket>;
 };
 
-type CurrentHostIdentity = {
-  hostId: string;
-  hostName: string;
-  kind: AccountHostKind;
-};
-
 type AccountHostConfigStoreState = {
   accountKey: string | null;
   currentHostId: string | null;
@@ -168,11 +166,6 @@ const NON_PORTABLE_USER_CONFIG_KEYS = new Set<string>([
   'last_app_version',
   'github',
 ]);
-
-const webHealthCache = new Map<
-  string,
-  { hostId: string | null; name: string | null }
->();
 
 let storeState: AccountHostConfigStoreState = {
   accountKey: null,
@@ -270,6 +263,32 @@ export function computeHostConfigFingerprint(payload: {
   agents: HostAgentEnablementItem[];
 }): string {
   return hashFingerprint(stableStringify(payload));
+}
+
+function snapshotConfigContentHash(
+  snapshot: Pick<
+    AccountHostConfigSnapshot,
+    'hostName' | 'kind' | 'osType' | 'osArch' | 'dimoSettings' | 'agents'
+  >
+): string {
+  return computeHostConfigFingerprint({
+    hostName: snapshot.hostName,
+    kind: snapshot.kind,
+    osType: snapshot.osType,
+    osArch: snapshot.osArch,
+    dimoSettings: snapshot.dimoSettings,
+    agents: snapshot.agents,
+  });
+}
+
+function hasHostSnapshotChanged(
+  existing: AccountHostConfigSnapshot,
+  next: AccountHostConfigSnapshot
+): boolean {
+  return (
+    existing.fingerprint !== next.fingerprint ||
+    snapshotConfigContentHash(existing) !== snapshotConfigContentHash(next)
+  );
 }
 
 export function extractPortableUserConfig(
@@ -584,117 +603,21 @@ async function persistCombinedEnvelope(
   );
 }
 
-function formatOriginLabel(origin: string): string {
-  try {
-    const parsed = new URL(origin);
-    return parsed.host || origin;
-  } catch {
-    return origin;
-  }
-}
-
-async function probeWebHostHealth(
-  origin: string
-): Promise<{ hostId: string | null; name: string | null }> {
-  const cached = webHealthCache.get(origin);
-  if (cached) return cached;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 1_500);
-  try {
-    const response = await fetch(`${origin.replace(/\/+$/, '')}/health`, {
-      method: 'GET',
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      const fallback = { hostId: null, name: null };
-      webHealthCache.set(origin, fallback);
-      return fallback;
-    }
-    const payload = (await response.json().catch(() => null)) as {
-      host_id?: unknown;
-      name?: unknown;
-    } | null;
-    const resolved = {
-      hostId:
-        typeof payload?.host_id === 'string' && payload.host_id.trim()
-          ? payload.host_id.trim()
-          : null,
-      name:
-        typeof payload?.name === 'string' && payload.name.trim()
-          ? payload.name.trim()
-          : null,
-    };
-    webHealthCache.set(origin, resolved);
-    return resolved;
-  } catch {
-    return { hostId: null, name: null };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-export async function resolveCurrentHostIdentity(): Promise<CurrentHostIdentity> {
-  const transport = getBackendTransport();
-  if (transport.environment === 'desktop') {
-    const status = await webServiceApi.getStatus().catch(() => null);
-    const hostId = status?.host_id?.trim()
-      ? `host:${status.host_id.trim()}`
-      : 'host:local-desktop';
-    return {
-      hostId,
-      hostName: 'Local Host',
-      kind: 'local',
-    };
-  }
-
-  if (transport.environment === 'remote-desktop') {
-    const status = await hostClientApi.status().catch(() => null);
-    const profile = status?.profile;
-    const hostId = profile?.host_id?.trim()
-      ? `host:${profile.host_id.trim()}`
-      : profile?.id?.trim()
-        ? `profile:${profile.id.trim()}`
-        : profile?.origin?.trim()
-          ? `origin:${profile.origin.trim()}`
-          : 'host:remote-desktop';
-    const hostName =
-      profile?.name?.trim() ||
-      (profile?.origin ? formatOriginLabel(profile.origin) : 'Remote Host');
-    const kind: AccountHostKind =
-      profile?.provision_kind === 'ssh' ? 'ssh' : 'remote';
-    return { hostId, hostName, kind };
-  }
-
-  const origin =
-    (transport as { origin?: string }).origin?.trim() ||
-    (typeof window !== 'undefined' ? window.location.origin : '');
-  const health = origin
-    ? await probeWebHostHealth(origin)
-    : { hostId: null, name: null };
-  const hostId = health.hostId
-    ? `host:${health.hostId}`
-    : `web:${origin || 'default'}`;
-  const isLoopback =
-    /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(origin);
-  const hostName =
-    health.name ||
-    (isLoopback ? 'Local Host' : formatOriginLabel(origin || 'Web Host'));
-  return {
-    hostId,
-    hostName,
-    kind: isLoopback ? 'local' : 'web',
-  };
-}
-
-export async function captureCurrentHostSnapshot(
-  accountKey: string
-): Promise<AccountHostConfigSnapshot> {
+async function captureCurrentHostSnapshotWithMeta(accountKey: string): Promise<{
+  snapshot: AccountHostConfigSnapshot;
+  agentsLoaded: boolean;
+}> {
+  agentManagementApi.invalidateBarCache?.();
+  let agentsLoaded = true;
   const [identity, systemInfo, frontendPreferences, agentRows] =
     await Promise.all([
       resolveCurrentHostIdentity(),
       configApi.getConfig(),
       collectPortableFrontendPreferences(),
-      agentManagementApi.bar().catch(() => []),
+      agentManagementApi.bar().catch(() => {
+        agentsLoaded = false;
+        return [];
+      }),
     ]);
 
   const userConfig = extractPortableUserConfig(systemInfo.config);
@@ -714,28 +637,40 @@ export async function captureCurrentHostSnapshot(
     userConfig,
     frontendPreferences,
   };
-  const fingerprint = computeHostConfigFingerprint({
-    hostName: identity.hostName,
-    kind: identity.kind,
-    osType,
-    osArch,
-    dimoSettings,
-    agents,
-  });
+  const fingerprint =
+    identity.fingerprint?.trim() ||
+    computeHostConfigFingerprint({
+      hostName: identity.hostName,
+      kind: identity.kind,
+      osType,
+      osArch,
+      dimoSettings,
+      agents,
+    });
 
   return {
-    schemaVersion: 1,
-    accountKey,
-    hostId: identity.hostId,
-    hostName: identity.hostName,
-    kind: identity.kind,
-    osType,
-    osArch,
-    updatedAt: new Date().toISOString(),
-    fingerprint,
-    dimoSettings,
-    agents,
+    agentsLoaded,
+    snapshot: {
+      schemaVersion: 1,
+      accountKey,
+      hostId: identity.hostId,
+      hostName: identity.hostName,
+      kind: identity.kind,
+      osType,
+      osArch,
+      updatedAt: new Date().toISOString(),
+      fingerprint,
+      dimoSettings,
+      agents,
+    },
   };
+}
+
+export async function captureCurrentHostSnapshot(
+  accountKey: string
+): Promise<AccountHostConfigSnapshot> {
+  const { snapshot } = await captureCurrentHostSnapshotWithMeta(accountKey);
+  return snapshot;
 }
 
 function sortHostSnapshots(
@@ -1009,10 +944,22 @@ export async function syncCurrentHostRelayLease(options?: {
   ) {
     return true;
   }
+  const cachedHost = storeState.hosts.find(
+    (item) => item.hostId === identity.hostId
+  );
+  let osType = cachedHost?.osType?.trim() || '';
+  let osArch = cachedHost?.osArch?.trim() || '';
+  if (!osType || !osArch) {
+    const systemInfo = await configApi.getConfig().catch(() => null);
+    osType = osType || systemInfo?.environment?.os_type?.trim() || '';
+    osArch = osArch || systemInfo?.environment?.os_architecture?.trim() || '';
+  }
   return issueAndApplyLocalRelayLease(
     {
       hostId: identity.hostId,
       hostName: identity.hostName,
+      osType: osType || undefined,
+      osArch: osArch || undefined,
     },
     storeState.accountKey
   );
@@ -1125,17 +1072,27 @@ export async function syncAccountHostConfigs(
           ? await reconcileRemoteHostAccount(user)
           : { syncedToRemote: true, differentAccount: null };
 
-      const captured = await captureCurrentHostSnapshot(accountKey);
+      const { snapshot: rawCaptured, agentsLoaded } =
+        await captureCurrentHostSnapshotWithMeta(accountKey);
       const isDifferentRemoteAccount = Boolean(
         reconciledRemote.differentAccount
       );
-      const existingCurrent = bucket.hosts[captured.hostId];
+      const existingCurrent = bucket.hosts[rawCaptured.hostId];
+      const fallbackAgents = existingCurrent?.agents.length
+        ? existingCurrent.agents
+        : cloudHosts[rawCaptured.hostId]?.agents.length
+          ? cloudHosts[rawCaptured.hostId].agents
+          : null;
+      const captured: AccountHostConfigSnapshot =
+        rawCaptured.agents.length === 0 && fallbackAgents
+          ? { ...rawCaptured, agents: fallbackAgents }
+          : rawCaptured;
+
       const shouldUpdateLocalCurrent =
         !isDifferentRemoteAccount &&
         (Boolean(options?.forceSaveCurrent) ||
           !existingCurrent ||
-          existingCurrent.fingerprint !== captured.fingerprint ||
-          (existingCurrent.agents.length === 0 && captured.agents.length > 0));
+          hasHostSnapshotChanged(existingCurrent, captured));
 
       const effectiveCurrent = shouldUpdateLocalCurrent
         ? captured
@@ -1169,17 +1126,13 @@ export async function syncAccountHostConfigs(
         const isCurrent = snapshot.hostId === captured.hostId;
         const cloudExisting = cloudHosts[snapshot.hostId];
         const needsCloudPush = isCurrent
-          ? shouldUpdateLocalCurrent ||
-            (cloudListLoaded &&
-              Boolean(cloudExisting) &&
-              (cloudExisting.fingerprint !== snapshot.fingerprint ||
-                (cloudExisting.agents.length === 0 &&
-                  snapshot.agents.length > 0)))
+          ? (agentsLoaded || snapshot.agents.length > 0) &&
+            (shouldUpdateLocalCurrent ||
+              (cloudListLoaded &&
+                Boolean(cloudExisting) &&
+                hasHostSnapshotChanged(cloudExisting, snapshot)))
           : cloudListLoaded &&
-            (!cloudExisting ||
-              cloudExisting.fingerprint !== snapshot.fingerprint ||
-              (cloudExisting.agents.length === 0 &&
-                snapshot.agents.length > 0));
+            (!cloudExisting || hasHostSnapshotChanged(cloudExisting, snapshot));
         if (needsCloudPush) {
           snapshotsToPush.push(snapshot);
         }
@@ -1409,7 +1362,7 @@ export async function importHostConfigToCurrentHost(params: {
 }
 
 export function resetAccountHostConfigsForTests(): void {
-  webHealthCache.clear();
+  resetHostIdentityCacheForTests();
   importingDepth = 0;
   activeSyncPromise = null;
   activeSyncAccountKey = null;
@@ -1670,6 +1623,7 @@ export function AccountHostConfigSyncBridge(): null {
 
     void backendListen<void>('agent-management-snapshot-invalidated', () => {
       if (!disposed) {
+        agentManagementApi.invalidateBarCache?.();
         scheduleAutoSync();
       }
     })

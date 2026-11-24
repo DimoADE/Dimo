@@ -764,6 +764,8 @@ where
     if let Some(name) = utils::net::local_hostname() {
         body["name"] = json!(name);
     }
+    let fallback_host_id = (!state.config.host_id.is_empty()).then_some(state.config.host_id.as_str());
+    body["fingerprint"] = json!(utils::assets::machine_fingerprint(fallback_host_id));
     Json(body)
 }
 

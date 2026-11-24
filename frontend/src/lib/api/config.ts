@@ -440,6 +440,8 @@ export interface WebServerStatus {
   started_at: string | null;
   message: string | null;
   host_id?: string | null;
+  host_name?: string | null;
+  machine_fingerprint?: string | null;
   reachability?: Array<{ origin: string; kind: string }>;
   serves_web_ui?: boolean;
 }
@@ -498,6 +500,7 @@ export interface HostClientProfile {
   needs_token: boolean;
   has_credential: boolean;
   connected: boolean;
+  connected_window_label?: string | null;
   provision_kind?: string | null;
   provision?: Record<string, unknown> | null;
 }

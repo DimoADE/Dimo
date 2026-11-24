@@ -648,5 +648,87 @@ describe('accountHostConfigs', () => {
     nowSeconds = Math.floor(Date.now() / 1000);
     await syncAccountHostConfigs(testUser);
     expect(issueLeaseSpy).toHaveBeenCalledTimes(4);
+    expect(issueLeaseSpy).toHaveBeenLastCalledWith({
+      hostId: 'host:mac-studio-01',
+      hostName: 'Local Host',
+      osType: 'macOS',
+      osArch: 'aarch64',
+    });
+  });
+
+  it('reports real hostname and stable machine fingerprint, pushes on agent toggle, and never overwrites agents with empty list on transient error', async () => {
+    const machineFp = 'b'.repeat(64);
+    vi.spyOn(webServiceApi, 'getStatus').mockResolvedValue({
+      running: true,
+      port: 17899,
+      address: '127.0.0.1:17899',
+      token_configured: true,
+      started_at: '2026-11-24T00:00:00Z',
+      message: null,
+      host_id: 'stable-uuid-1234',
+      host_name: 'DEV-WORKSTATION',
+      machine_fingerprint: machineFp,
+    });
+    vi.spyOn(configApi, 'getConfig').mockResolvedValue({
+      config: makeConfig(),
+      environment: makeEnvironment({
+        os_type: 'Windows',
+        os_architecture: 'x86_64',
+      }),
+      capabilities: {},
+      executors: {},
+    });
+
+    const invalidateSpy = vi.spyOn(agentManagementApi, 'invalidateBarCache');
+    const barSpy = vi
+      .spyOn(agentManagementApi, 'bar')
+      .mockResolvedValueOnce([
+        makeAgent('CLAUDE_CODE', 'Claude Code', true, 0),
+        makeAgent('CODEX', 'Codex', false, 1),
+      ])
+      .mockResolvedValueOnce([
+        makeAgent('CLAUDE_CODE', 'Claude Code', true, 0),
+        makeAgent('CODEX', 'Codex', true, 1),
+      ])
+      .mockRejectedValueOnce(new Error('transient rpc failure'));
+
+    vi.spyOn(accountApi, 'listHostConfigs').mockResolvedValue({ hosts: [] });
+    const saveCloudSpy = vi
+      .spyOn(accountApi, 'saveHostConfig')
+      .mockResolvedValue({ ok: true });
+
+    const first = await syncAccountHostConfigs(testUser);
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+    expect(first[0]?.hostId).toBe('host:stable-uuid-1234');
+    expect(first[0]?.hostName).toBe('DEV-WORKSTATION');
+    expect(first[0]?.fingerprint).toBe(machineFp);
+    expect(first[0]?.agents.find((a) => a.agentId === 'CODEX')?.enabled).toBe(
+      false
+    );
+    expect(saveCloudSpy).toHaveBeenCalledTimes(1);
+
+    // Toggling CODEX enabled must still trigger a cloud push even though machine fingerprint stays constant
+    saveCloudSpy.mockClear();
+    const second = await syncAccountHostConfigs(testUser);
+    expect(invalidateSpy).toHaveBeenCalledTimes(2);
+    expect(second[0]?.fingerprint).toBe(machineFp);
+    expect(second[0]?.agents.find((a) => a.agentId === 'CODEX')?.enabled).toBe(
+      true
+    );
+    expect(saveCloudSpy).toHaveBeenCalledTimes(1);
+    const pushedSnapshot = saveCloudSpy.mock.calls[0]?.[0] as
+      | AccountHostConfigSnapshot
+      | undefined;
+    expect(pushedSnapshot?.agents).toEqual([
+      expect.objectContaining({ agentId: 'CLAUDE_CODE', enabled: true }),
+      expect.objectContaining({ agentId: 'CODEX', enabled: true }),
+    ]);
+
+    // Transient bar() failure must not wipe existing synced agents with []
+    saveCloudSpy.mockClear();
+    const third = await syncAccountHostConfigs(testUser);
+    expect(barSpy).toHaveBeenCalledTimes(3);
+    expect(third[0]?.agents).toHaveLength(2);
+    expect(saveCloudSpy).not.toHaveBeenCalled();
   });
 });

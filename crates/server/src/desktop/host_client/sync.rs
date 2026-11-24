@@ -202,6 +202,23 @@ pub fn sanitize_provision_for_sync(
     (!out.is_empty()).then_some(serde_json::Value::Object(out))
 }
 
+pub(crate) fn is_own_lan_origin(origin: &str, own_lan_ips: &[std::net::Ipv4Addr]) -> bool {
+    if own_lan_ips.is_empty() {
+        return false;
+    }
+    let Ok(parsed) = url::Url::parse(origin.trim()) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let trimmed = host.trim_matches(|ch| ch == '[' || ch == ']');
+    let Ok(ip) = trimmed.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    own_lan_ips.contains(&ip)
+}
+
 pub fn resolve_syncable_origin(
     origin: &str,
     provision_kind: Option<&str>,
@@ -507,6 +524,7 @@ impl HostClientRuntime {
             ));
         }
         let local_host_id = normalize_raw_host_id(self.local_host_id().await.as_deref());
+        let own_lan_ips = utils::net::lan_ipv4_addrs();
         let mut state = self.load_state().await?;
         let mut dirty = false;
 
@@ -549,6 +567,9 @@ impl HostClientRuntime {
             ) else {
                 continue;
             };
+            if kind.as_deref() != Some("ssh") && is_own_lan_origin(&sync_origin, &own_lan_ips) {
+                continue;
+            }
 
             let credential = if !profile.needs_token {
                 profile
@@ -667,6 +688,7 @@ impl HostClientRuntime {
             ));
         }
         let local_host_id = normalize_raw_host_id(self.local_host_id().await.as_deref());
+        let own_lan_ips = utils::net::lan_ipv4_addrs();
         let active_bound_ids = self.active_bound_profile_ids().await;
         let mut state = self.load_state().await?;
         let mut changed = false;
@@ -702,6 +724,9 @@ impl HostClientRuntime {
             ) else {
                 continue;
             };
+            if kind.as_deref() != Some("ssh") && is_own_lan_origin(&sync_origin, &own_lan_ips) {
+                continue;
+            }
 
             if matches_pending_delete(
                 &state.pending_cloud_deletes,
@@ -1123,5 +1148,18 @@ mod tests {
         let final_a = runtime.status(&registry, "main").await.expect("final A");
         assert_eq!(final_a.profiles.len(), 1);
         assert_eq!(final_a.profiles[0].id, "prof-ssh");
+    }
+
+    #[test]
+    fn detects_own_lan_origin_regardless_of_port() {
+        let own = vec![
+            std::net::Ipv4Addr::new(192, 168, 1, 88),
+            std::net::Ipv4Addr::new(10, 0, 0, 12),
+        ];
+        assert!(is_own_lan_origin("http://192.168.1.88:17894", &own));
+        assert!(is_own_lan_origin("http://192.168.1.88:17899/", &own));
+        assert!(is_own_lan_origin("https://10.0.0.12:443", &own));
+        assert!(!is_own_lan_origin("http://192.168.1.99:17894", &own));
+        assert!(!is_own_lan_origin("https://remote.example.com", &own));
     }
 }

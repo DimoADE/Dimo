@@ -760,23 +760,34 @@ pub fn local_hostname() -> Option<String> {
     {
         let mut buf = [0u8; 256];
         let result = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
-        if result != 0 {
-            return None;
+        if result == 0 {
+            let end = buf.iter().position(|&byte| byte == 0).unwrap_or(buf.len());
+            if let Ok(raw) = std::str::from_utf8(&buf[..end]) {
+                let name = raw.trim();
+                if !name.is_empty() {
+                    return Some(name.to_string());
+                }
+            }
         }
-        let end = buf.iter().position(|&byte| byte == 0).unwrap_or(buf.len());
-        let name = std::str::from_utf8(&buf[..end]).ok()?.trim();
-        (!name.is_empty()).then(|| name.to_string())
+        std::env::var("HOSTNAME")
+            .ok()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
     }
     #[cfg(windows)]
     {
         std::env::var("COMPUTERNAME")
             .ok()
+            .or_else(|| std::env::var("HOSTNAME").ok())
             .map(|name| name.trim().to_string())
             .filter(|name| !name.is_empty())
     }
     #[cfg(not(any(unix, windows)))]
     {
-        None
+        std::env::var("HOSTNAME")
+            .ok()
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty())
     }
 }
 
