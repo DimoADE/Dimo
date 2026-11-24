@@ -1,7 +1,11 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { normalizeProjectRoute } from '@/lib/paths';
-import type { ProjectRailPosition } from '@/components/layout/projectRailPosition';
+
+export interface ProjectRailPosition {
+  x: number;
+  y: number;
+}
 
 export type ProjectActivityVisualState =
   | 'idle'

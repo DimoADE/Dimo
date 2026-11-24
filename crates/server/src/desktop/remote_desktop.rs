@@ -113,15 +113,6 @@ impl RemoteDesktopRegistry {
             .retain(|(connected_window, _), _| connected_window != window_label);
     }
 
-    pub async fn disconnect_profile(&self, profile_id: &str) {
-        self.cancel_pumps(|pump| pump.profile_id == profile_id)
-            .await;
-        self.profiles
-            .write()
-            .await
-            .retain(|(_, connected_profile), _| connected_profile != profile_id);
-    }
-
     async fn cancel_pumps(&self, predicate: impl Fn(&RemotePump) -> bool) {
         let mut pumps = self.pumps.write().await;
         let ids = pumps

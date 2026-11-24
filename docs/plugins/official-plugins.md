@@ -44,7 +44,7 @@
 - **定位**：从 Agent 对话与可视化编辑页中设计、检查、调试并安全改写 `*.dimo-workflow.json` DAG 工作流。
 - **核心能力**：
   - 通过 `file.opener` + `app.surface(slot: artifact.editor)` 打开 `*.dimo-workflow.json` 进入 **Workflow Studio** 可视化编排器，按修订号保存防盲覆盖，显式 `publish` 生成不可变版本；
-  - 投影 `dimo-workflow-creator` Skill，并配合宿主家族 [`dimo-workflow-mcp`](../../packages/dimo-workflow-mcp/README.md) 向 Agent 暴露完整的读写、校验、发布、断点调试、暂停恢复与候选输出接受工具。
+  - 投影 `dimo-workflow-creator` Skill，并配合宿主内置 `Dimo-superagent-mcp`（`dimo-mcp`）向 Agent 暴露完整的读写、校验、发布、断点调试、暂停恢复与候选输出接受工具。
 
 ### 5. 会话增强（`dimo.session-enhance`）
 

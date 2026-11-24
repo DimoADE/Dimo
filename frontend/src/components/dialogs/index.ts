@@ -1,6 +1,3 @@
-// Global app dialogs
-export { ReleaseNotesDialog } from './global/ReleaseNotesDialog';
-
 // Project-related dialogs
 export {
   ProjectFormDialog,
@@ -14,15 +11,6 @@ export {
 
 // Workspace/session-related dialogs
 export { CreatePRDialog } from './tasks/CreatePRDialog';
-export {
-  EditorSelectionDialog,
-  type EditorSelectionDialogProps,
-} from './tasks/EditorSelectionDialog';
-export {
-  TagEditDialog,
-  type TagEditDialogProps,
-  type TagEditResult,
-} from './tasks/TagEditDialog';
 export {
   ChangeTargetBranchDialog,
   type ChangeTargetBranchDialogProps,
@@ -39,17 +27,9 @@ export {
   type RestoreLogsDialogResult,
 } from './tasks/RestoreLogsDialog';
 export {
-  ViewProcessesDialog,
-  type ViewProcessesDialogProps,
-} from './tasks/ViewProcessesDialog';
-export {
   GitActionsDialog,
   type GitActionsDialogProps,
 } from './tasks/GitActionsDialog';
-export {
-  EditBranchNameDialog,
-  type EditBranchNameDialogResult,
-} from './tasks/EditBranchNameDialog';
 
 // Auth dialogs
 export { GhCliSetupDialog } from './auth/GhCliSetupDialog';

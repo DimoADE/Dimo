@@ -20,7 +20,6 @@ import { useOptionalCollaborationSpaceStore } from '@/features/collaboration/spa
 import { effectiveWorkspaceTab } from '@/lib/hostSurfaceIds';
 import { useKanbanSessionContext } from '@/contexts/KanbanSessionContext';
 import { kanbanBindsExecutionConversation } from '@/lib/kanbanViews';
-import { RightPanelSessionCreationProvider } from '@/contexts/RightPanelSessionCreationContext';
 import {
   isKnownRightPanelHost,
   useIsRightPanelHostAttached,
@@ -813,11 +812,6 @@ export function RightPanelContent() {
     };
   }, [openCreateSessionOverlay]);
 
-  const sessionCreationContextValue = useMemo(
-    () => ({ openCreateSessionOverlay }),
-    [openCreateSessionOverlay]
-  );
-
   useEffect(() => {
     if (searchParams.get('newSession') !== '1') {
       return;
@@ -997,65 +991,63 @@ export function RightPanelContent() {
   };
 
   return (
-    <RightPanelSessionCreationProvider value={sessionCreationContextValue}>
-      <div ref={rootRef} className="h-full flex overflow-hidden bg-transparent">
-        <div className="relative flex-1 min-w-0 flex flex-col overflow-hidden">
-          {isSlotSurfaceAttached && isGitProject ? <BranchInfoHeader /> : null}
-          <div className="right-panel-conversation-region relative flex-1 min-h-0 overflow-hidden">
-            {isSlotSurfaceAttached ? (
-              isWorkspaceRoute && workspaceExecutionWorkspaceId ? (
-                <div className="h-full min-h-0 overflow-hidden">
-                  <KanbanSessionConversationView
-                    {...workspaceConversationViewProps}
-                  />
+    <div ref={rootRef} className="h-full flex overflow-hidden bg-transparent">
+      <div className="relative flex-1 min-w-0 flex flex-col overflow-hidden">
+        {isSlotSurfaceAttached && isGitProject ? <BranchInfoHeader /> : null}
+        <div className="right-panel-conversation-region relative flex-1 min-h-0 overflow-hidden">
+          {isSlotSurfaceAttached ? (
+            isWorkspaceRoute && workspaceExecutionWorkspaceId ? (
+              <div className="h-full min-h-0 overflow-hidden">
+                <KanbanSessionConversationView
+                  {...workspaceConversationViewProps}
+                />
+              </div>
+            ) : bindExecutionConversation &&
+              showRightSession &&
+              visibleRightSession &&
+              rightSessionConversationViewProps ? (
+              <div className="h-full min-h-0 overflow-hidden">
+                <KanbanSessionConversationView
+                  {...rightSessionConversationViewProps}
+                />
+              </div>
+            ) : bindExecutionConversation && isRightSessionPending ? (
+              <div className="workspace-loading-state flex h-full min-h-0 flex-col items-center justify-center gap-3 p-6 text-sm">
+                <Loader2 className="h-6 w-6 animate-spin" />
+                <div className="workspace-loading-panel flex flex-col items-center gap-1 px-5 py-4">
+                  <p className="font-medium text-foreground">
+                    {i18n.t('panels:ui.rightPanel.loadingSession')}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {i18n.t(
+                      'panels:ui.rightPanel.preparingTheConversationPanel'
+                    )}
+                  </p>
                 </div>
-              ) : bindExecutionConversation &&
-                showRightSession &&
-                visibleRightSession &&
-                rightSessionConversationViewProps ? (
-                <div className="h-full min-h-0 overflow-hidden">
-                  <KanbanSessionConversationView
-                    {...rightSessionConversationViewProps}
-                  />
-                </div>
-              ) : bindExecutionConversation && isRightSessionPending ? (
-                <div className="workspace-loading-state flex h-full min-h-0 flex-col items-center justify-center gap-3 p-6 text-sm">
-                  <Loader2 className="h-6 w-6 animate-spin" />
-                  <div className="workspace-loading-panel flex flex-col items-center gap-1 px-5 py-4">
-                    <p className="font-medium text-foreground">
-                      {i18n.t('panels:ui.rightPanel.loadingSession')}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {i18n.t(
-                        'panels:ui.rightPanel.preparingTheConversationPanel'
-                      )}
-                    </p>
-                  </div>
-                </div>
-              ) : null
-            ) : null}
+              </div>
+            ) : null
+          ) : null}
 
-            {isSlotSurfaceAttached &&
-            !(isCreateOverlayVisible && stageCreationHost) &&
-            (isCreateOverlayVisible || showEmptyCreateForm) ? (
-              <CreateSessionOverlay
-                key={effectiveProjectId ?? 'create-session'}
-                {...overlayProps}
-              />
-            ) : null}
-            {isCreateOverlayVisible && stageCreationHost
-              ? createPortal(
-                  <CreateSessionOverlay
-                    key={effectiveProjectId ?? 'create-session'}
-                    {...overlayProps}
-                    dismissible
-                  />,
-                  stageCreationHost
-                )
-              : null}
-          </div>
+          {isSlotSurfaceAttached &&
+          !(isCreateOverlayVisible && stageCreationHost) &&
+          (isCreateOverlayVisible || showEmptyCreateForm) ? (
+            <CreateSessionOverlay
+              key={effectiveProjectId ?? 'create-session'}
+              {...overlayProps}
+            />
+          ) : null}
+          {isCreateOverlayVisible && stageCreationHost
+            ? createPortal(
+                <CreateSessionOverlay
+                  key={effectiveProjectId ?? 'create-session'}
+                  {...overlayProps}
+                  dismissible
+                />,
+                stageCreationHost
+              )
+            : null}
         </div>
       </div>
-    </RightPanelSessionCreationProvider>
+    </div>
   );
 }

@@ -1386,14 +1386,21 @@ function parseArgs(args) {
     else if (token === "--detach") flags.detach = true;
     else if (token === "--json") flags.json = true;
     else if (token === "--delete-data") flags.deleteData = true;
-    else if (token === "--host") flags.host = true;
+    else if (token === "--host") {
+      const next = args[index + 1];
+      if (next && /^https?:\/\//i.test(next)) {
+        flags.host = args[++index];
+      } else {
+        flags.host = true;
+      }
+    }
     else if (token === "--ref") flags.ref = requireValue(args, ++index, "--ref");
     else if (token === "--sha256") flags.sha256 = requireValue(args, ++index, "--sha256");
     else if (token === "--plugin") flags.plugin = requireValue(args, ++index, "--plugin");
     else if (token === "--web") flags.web = requireValue(args, ++index, "--web");
     else if (token === "--profile") flags.profile = requireValue(args, ++index, "--profile");
     else if (token === "--dev") flags.dev = requireValue(args, ++index, "--dev");
-    else if (token === "--host" || token === "--http") {
+    else if (token === "--http") {
       flags.host = requireValue(args, ++index, token);
     }
     else if (token === "--token") flags.token = requireValue(args, ++index, "--token");

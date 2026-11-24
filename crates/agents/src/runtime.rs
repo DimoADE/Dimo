@@ -301,6 +301,14 @@ pub struct EnsureAgentSessionInput {
 }
 
 #[derive(Debug, Clone)]
+pub struct ProbeNativeProviderControlsInput {
+    pub agent_id: AgentId,
+    pub launch_lock: SessionLaunchLock,
+    pub auto_approve_mode: AgentAutoApproveMode,
+    pub env: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ResumeAgentSessionInput {
     pub agent_id: AgentId,
     pub launch_lock: SessionLaunchLock,
@@ -397,6 +405,7 @@ pub struct AgentRuntime {
     /// activity; the UI only adds and removes ids.
     keepalive_sessions: Arc<Mutex<HashSet<AgentSessionId>>>,
     idle_extension: crate::idle_sweep::IdleExtension,
+    driver_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -464,6 +473,7 @@ impl AgentRuntime {
             session_locks,
             keepalive_sessions: Arc::clone(&keepalive_sessions),
             idle_extension: idle_extension.clone(),
+            driver_enabled,
         };
         Self::spawn_manager_event_pump(
             Arc::clone(&state),
@@ -1422,6 +1432,111 @@ impl AgentRuntime {
 
         self.new_session_with_id(connection_id, input.session_id, input.acp_session_id)
             .await
+    }
+
+    /// Lightweight provider-level capability probe for dedicated native engines.
+    ///
+    /// Returns `Ok(Some(snapshot))` when the agent routes to a native engine that
+    /// supports provider-level model probing without creating a temporary workspace
+    /// directory or binding an ACP session. Returns `Ok(None)` for ACP-only agents,
+    /// in-memory test runtimes (`driver_enabled == false`), or when ACP fallback is
+    /// permitted after a pre-handshake native error.
+    pub async fn probe_native_provider_controls(
+        &self,
+        input: ProbeNativeProviderControlsInput,
+    ) -> AgentResult<Option<AgentSessionControlsSnapshot>> {
+        if !self.driver_enabled {
+            return Ok(None);
+        }
+        if input.launch_lock.agent_id != input.agent_id {
+            return Err(AgentError::Runtime(
+                "Installation lock does not match agent id".to_string(),
+            ));
+        }
+        if !input.launch_lock.absolute_acp_program.is_absolute() {
+            return Err(AgentError::Runtime(
+                "Installation lock does not contain an absolute ACP program".to_string(),
+            ));
+        }
+
+        let mode_env = input
+            .env
+            .get("DIMO_ENGINE_MODE")
+            .cloned()
+            .or_else(|| std::env::var("DIMO_ENGINE_MODE").ok());
+        let force_native = mode_env
+            .as_deref()
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("native"));
+
+        let Some(driver) = crate::engine::EngineRegistry::bundled().resolve_driver_for_agent(
+            input.agent_id.as_str(),
+            crate::engine::EngineRuntimePreference::NativeFirst,
+            mode_env.as_deref(),
+        ) else {
+            return Ok(None);
+        };
+
+        let (launch_env, scrubbed_env_keys, _runtime_temp) =
+            crate::manager::prepare_native_engine_launch_env(
+                &input.agent_id,
+                &input.launch_lock,
+                &input.env,
+                driver.as_ref(),
+            )?;
+
+        let auth = driver.resolve_auth(&launch_env);
+        let provider_instance_id = launch_env
+            .get("DIMO_PROVIDER_INSTANCE_ID")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let isolate_profile = launch_env
+            .get("DIMO_ISOLATE_PROVIDER_PROFILE")
+            .is_some_and(|value| value.trim() == "1");
+        let working_dir = workspace_utils::path::get_dimo_temp_dir();
+        let _ = std::fs::create_dir_all(&working_dir);
+
+        let spec = crate::engine::EngineStartSpec {
+            workspace_id: Uuid::nil(),
+            working_dir,
+            provider_instance_id,
+            isolate_profile,
+            auth,
+            model: launch_env.get("DIMO_DEFAULT_MODEL").cloned(),
+            config_overrides: serde_json::json!({}),
+            env: launch_env,
+            scrubbed_env_keys,
+            additional_directories: Vec::new(),
+            mcp_servers: serde_json::json!({}),
+        };
+
+        match driver.probe_models_for_provider(&spec).await {
+            Ok(Some(models)) => {
+                let snapshot = crate::engine::build_native_controls_snapshot(
+                    driver.as_ref(),
+                    &models,
+                    &spec.env,
+                    input.auto_approve_mode == AgentAutoApproveMode::Yolo,
+                );
+                Ok(Some(snapshot))
+            }
+            Ok(None) => Ok(None),
+            Err(error)
+                if !force_native
+                    && crate::manager::can_fallback_launch_lock_to_acp(
+                        &input.launch_lock,
+                        mode_env.as_deref(),
+                    ) =>
+            {
+                tracing::warn!(
+                    agent_id = %input.agent_id,
+                    engine = %driver.engine_id(),
+                    %error,
+                    "native provider capability probe failed; falling back to ACP session probe"
+                );
+                Ok(None)
+            }
+            Err(error) => Err(AgentError::Runtime(error.to_string())),
+        }
     }
 
     /// Establish the concrete ACP session now and retain it for the future

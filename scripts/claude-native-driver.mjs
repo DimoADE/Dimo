@@ -30,7 +30,12 @@ import {
   readFiniteNumber,
   readString,
 } from './claude-native-events.mjs';
-import { discoverClaudeModels, readClaudeSettingsEnv } from './claude-native-models.mjs';
+import {
+  assembleClaudeModelList,
+  discoverClaudeModels,
+  readClaudeSettingsEnv,
+  resolveLocalClaudeModels,
+} from './claude-native-models.mjs';
 
 export {
   CACHE_TTL_1H_MS,
@@ -306,6 +311,7 @@ export class ClaudeNativeSidecarServer {
     this.establishedSessions = new Set();
     this.permissionSeq = 0;
     this.questionSeq = 0;
+    this.emittedLiveModels = false;
   }
 
   emitEvent(event) {
@@ -629,16 +635,23 @@ export class ClaudeNativeSidecarServer {
       throw new Error('Resolved Claude runtime does not export query()');
     }
 
-    const models = await discoverClaudeModels({
-      sdk,
-      env: effective,
-      workingDir: this.config.workingDir,
-      configuredModel: this.config.model,
-      auth: this.config.auth,
-      configOverrides: this.config.configOverrides,
-      fetchImpl: this.fetchImpl,
-      applyExecutableToOptions: applyClaudeExecutableToSdkOptions,
-    });
+    this.emittedLiveModels = false;
+    const skipModelProbe = readBoolean(params.skipModelProbe) === true;
+    const models = skipModelProbe
+      ? await resolveLocalClaudeModels({
+          env: effective,
+          configuredModel: this.config.model,
+        })
+      : await discoverClaudeModels({
+          sdk,
+          env: effective,
+          workingDir: this.config.workingDir,
+          configuredModel: this.config.model,
+          auth: this.config.auth,
+          configOverrides: this.config.configOverrides,
+          fetchImpl: this.fetchImpl,
+          applyExecutableToOptions: applyClaudeExecutableToSdkOptions,
+        });
 
     return {
       protocolVersion: '1.0',
@@ -646,6 +659,7 @@ export class ClaudeNativeSidecarServer {
       officialAnthropicSession: this.officialSession,
       transport: sdk.isCliFallback ? 'cli-fallback' : 'agent-sdk',
       models,
+      modelsProbeSkipped: skipModelProbe,
       capabilities: {
         steering: true,
         forkSession: true,
@@ -658,6 +672,57 @@ export class ClaudeNativeSidecarServer {
         hooks: true,
       },
     };
+  }
+
+  async handleModelsList(params = {}) {
+    const sdk = await this.getSdk();
+    if (typeof sdk?.query !== 'function') {
+      throw new Error('Resolved Claude runtime does not export query()');
+    }
+    const effective = this.effectiveEnv();
+    const models = await discoverClaudeModels({
+      sdk,
+      env: effective,
+      workingDir: readString(params.workingDir ?? params.cwd) ?? this.config.workingDir,
+      configuredModel: readString(params.model) ?? this.config.model,
+      auth: this.config.auth,
+      configOverrides: this.config.configOverrides,
+      fetchImpl: this.fetchImpl,
+      applyExecutableToOptions: applyClaudeExecutableToSdkOptions,
+    });
+    return { models };
+  }
+
+  async emitLiveSupportedModels(queryHandle, options) {
+    if (this.emittedLiveModels || typeof queryHandle?.supportedModels !== 'function') {
+      return;
+    }
+    this.emittedLiveModels = true;
+    try {
+      const list = await queryHandle.supportedModels();
+      if (!Array.isArray(list) || list.length === 0) {
+        this.emittedLiveModels = false;
+        return;
+      }
+      const env = options?.env ?? this.effectiveEnv();
+      const settingsEnv = await readClaudeSettingsEnv(env);
+      const effectiveEnv = { ...settingsEnv, ...env };
+      const models = assembleClaudeModelList({
+        gatewayItems: [],
+        sdkItems: list,
+        effectiveEnv,
+        configuredModel: readString(options?.model) ?? this.config.model,
+      });
+      if (models.length > 0) {
+        this.sendMessage({
+          jsonrpc: '2.0',
+          method: 'models/updated',
+          params: { models },
+        });
+      }
+    } catch {
+      this.emittedLiveModels = false;
+    }
   }
 
   async handlePromptSend(params = {}) {
@@ -730,6 +795,7 @@ export class ClaudeNativeSidecarServer {
     };
     this.activeTurn = turnState;
     this.emitEvent({ kind: 'turn_started', promptId, sessionId: currentSessionId });
+    void this.emitLiveSupportedModels(queryHandle, options);
 
     turnState.completionPromise = (async () => {
       let servedModel = null;
@@ -1132,6 +1198,9 @@ export class ClaudeNativeSidecarServer {
       switch (method) {
         case 'initialize':
           result = await this.handleInitialize(params);
+          break;
+        case 'models/list':
+          result = await this.handleModelsList(params);
           break;
         case 'prompt/send':
           result = await this.handlePromptSend(params);

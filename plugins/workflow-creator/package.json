@@ -4,17 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "validate": "node ../Dimo/packages/plugin-cli/dist/cli.js validate",
-    "test": "node ../Dimo/packages/plugin-cli/dist/cli.js test",
-    "test:mcp": "node --test test-mcp/source-artifact.test.mjs test-mcp/mcp-server.test.mjs",
-    "test:live": "node test-mcp/live-host.mjs",
-    "build": "node ../Dimo/packages/plugin-cli/dist/cli.js build",
-    "pack": "node ../Dimo/packages/plugin-cli/dist/cli.js pack"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/server": "^2.0.0"
-  },
-  "devDependencies": {
-    "@modelcontextprotocol/client": "^2.0.0"
+    "validate": "node ../../packages/plugin-cli/dist/cli.js validate",
+    "test": "node ../../packages/plugin-cli/dist/cli.js test",
+    "build": "node ../../packages/plugin-cli/dist/cli.js build",
+    "pack": "node ../../packages/plugin-cli/dist/cli.js pack"
   }
 }

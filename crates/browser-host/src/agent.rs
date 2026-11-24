@@ -6,7 +6,6 @@ use crate::{error::BrowserHostError, types::BrowserAction};
 pub const AGENT_BUNDLE: &str = include_str!("../js/agent.bundle.js");
 pub const AGENT_GLOBAL: &str = "__codegAgent";
 pub const ENGINE_ABSENT: &str = "absent";
-pub const CONTENT_WORLD: &str = "codeg";
 
 #[derive(Debug, Clone, Default)]
 pub struct SnapshotRequest {

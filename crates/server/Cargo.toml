@@ -40,7 +40,6 @@ reqwest = { workspace = true }
 ring = "0.17"
 rustls = { workspace = true }
 rustls-pki-types = "1"
-semver = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = "0.9"
@@ -75,5 +74,4 @@ windows = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
-futures = { workspace = true }
 tower = { version = "0.5", features = ["util"] }

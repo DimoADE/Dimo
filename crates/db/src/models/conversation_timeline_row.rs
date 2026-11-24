@@ -381,29 +381,6 @@ impl ConversationTimelineRowRecord {
         Ok(rows)
     }
 
-    /// Active session-level side rows (`sort_index < SORT_INDEX_SLOT_SPAN`) such as runtime
-    /// status banners and binding load-failure notices.
-    pub async fn list_slot_zero<'e, E>(
-        executor: E,
-        conversation_id: Uuid,
-    ) -> Result<Vec<Self>, sqlx::Error>
-    where
-        E: Executor<'e, Database = Sqlite>,
-    {
-        sqlx::query_as::<_, Self>(
-            r#"SELECT conversation_id, sort_index, row_id, revision, row_json, deleted_sequence
-               FROM conversation_timeline_rows
-               WHERE conversation_id = ?1
-                 AND sort_index < ?2
-                 AND deleted_sequence IS NULL
-               ORDER BY sort_index ASC"#,
-        )
-        .bind(conversation_id)
-        .bind(SORT_INDEX_SLOT_SPAN)
-        .fetch_all(executor)
-        .await
-    }
-
     pub async fn list_changed_since<'e, E>(
         executor: E,
         conversation_id: Uuid,

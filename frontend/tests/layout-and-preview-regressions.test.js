@@ -47,21 +47,6 @@ test('left sidebar width remains user-resizable instead of being forced back to 
   assert.doesNotMatch(source, /Math\.min\(leftWidth,\s*300\)/);
 });
 
-test('right sidebar network button removes the old dev-server config dialog and uses status coloring', () => {
-  const source = readFile('src/components/layout/RightPanelSidebar.tsx');
-
-  assert.doesNotMatch(source, /Configure Dev Server/);
-  assert.doesNotMatch(source, /showStartErrorDialog|setShowStartErrorDialog/);
-  assert.doesNotMatch(source, /showDevConfig|setShowDevConfig/);
-  assert.match(
-    source,
-    /const hasRunningDevServer = runningDevServers\.length > 0/
-  );
-  assert.match(source, /const hasFailedDevServer = devServerProcesses\.some/);
-  assert.match(source, /text-sky-600/);
-  assert.match(source, /text-destructive/);
-});
-
 test('git manager toggle shares the stable left-sidebar switching path', () => {
   const source = readFile('src/contexts/PanelActionsContext.tsx');
   const layoutSource = readFile('src/components/layout/IDELayout.tsx');

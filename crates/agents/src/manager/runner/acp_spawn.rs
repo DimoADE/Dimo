@@ -517,53 +517,67 @@ impl AgentConnectionRunner {
             )));
         }
 
-        let launch_lock = &self.snapshot.launch_lock;
-        let mut launch_env = merged_agent_env(&self.snapshot.env);
-        for (key, value) in &launch_lock.env {
-            if !self.snapshot.env.contains_key(key) {
-                launch_env.insert(key.clone(), value.clone());
-            }
-        }
-
-        let runtime_temp = crate::prepare_agent_runtime_temp_session(&self.snapshot.agent_id)
-            .map_err(|error| {
-                AgentError::Runtime(format!(
-                    "could not create a writable temporary directory for the native engine: {error}"
-                ))
-            })?;
-        runtime_temp.bind_env(&mut launch_env);
-        runtime_temp.record_owner_pid(std::process::id());
-
-        let mut scrubbed_keys = Vec::new();
-        for key in
-            crate::built_in_auth_mode_scrubbed_env_keys(&self.snapshot.agent_id, &self.snapshot.env)
-        {
-            launch_env.remove(*key);
-            scrubbed_keys.push((*key).to_string());
-        }
-        for key in crate::codex_shadow_home::scrub_keys_for_agent_launch(
+        prepare_native_engine_launch_env(
             &self.snapshot.agent_id,
+            &self.snapshot.launch_lock,
             &self.snapshot.env,
-        ) {
-            launch_env.remove(key);
-            scrubbed_keys.push(key.to_string());
-        }
-        launch_env.remove(PI_TRUST_WORKSPACE_ENV);
-        scrubbed_keys.push(PI_TRUST_WORKSPACE_ENV.to_string());
-        for key in workspace_utils::process::HOST_SECRET_ENV_KEYS {
-            launch_env.remove(key);
-            scrubbed_keys.push(key.to_string());
-        }
-
-        driver.prepare_launch_env(
-            &launch_lock.absolute_acp_program,
-            &self.snapshot.env,
-            &mut launch_env,
-            &mut scrubbed_keys,
-        );
-
-        Ok((launch_env, scrubbed_keys, runtime_temp))
+            driver,
+        )
     }
+}
+
+/// Builds the sanitized environment map, parent-env scrub list, and runtime temp
+/// session for a native engine invocation (either a workspace connection or a
+/// lightweight provider-level capability probe).
+pub(crate) fn prepare_native_engine_launch_env(
+    agent_id: &AgentId,
+    launch_lock: &SessionLaunchLock,
+    snapshot_env: &HashMap<String, String>,
+    driver: &dyn crate::engine::NativeEngineDriver,
+) -> AgentResult<(
+    HashMap<String, String>,
+    Vec<String>,
+    crate::AgentRuntimeTempSession,
+)> {
+    let mut launch_env = merged_agent_env(snapshot_env);
+    for (key, value) in &launch_lock.env {
+        if !snapshot_env.contains_key(key) {
+            launch_env.insert(key.clone(), value.clone());
+        }
+    }
+
+    let runtime_temp = crate::prepare_agent_runtime_temp_session(agent_id).map_err(|error| {
+        AgentError::Runtime(format!(
+            "could not create a writable temporary directory for the native engine: {error}"
+        ))
+    })?;
+    runtime_temp.bind_env(&mut launch_env);
+    runtime_temp.record_owner_pid(std::process::id());
+
+    let mut scrubbed_keys = Vec::new();
+    for key in crate::built_in_auth_mode_scrubbed_env_keys(agent_id, snapshot_env) {
+        launch_env.remove(*key);
+        scrubbed_keys.push((*key).to_string());
+    }
+    for key in crate::codex_shadow_home::scrub_keys_for_agent_launch(agent_id, snapshot_env) {
+        launch_env.remove(key);
+        scrubbed_keys.push(key.to_string());
+    }
+    launch_env.remove(PI_TRUST_WORKSPACE_ENV);
+    scrubbed_keys.push(PI_TRUST_WORKSPACE_ENV.to_string());
+    for key in workspace_utils::process::HOST_SECRET_ENV_KEYS {
+        launch_env.remove(key);
+        scrubbed_keys.push(key.to_string());
+    }
+
+    driver.prepare_launch_env(
+        &launch_lock.absolute_acp_program,
+        snapshot_env,
+        &mut launch_env,
+        &mut scrubbed_keys,
+    );
+
+    Ok((launch_env, scrubbed_keys, runtime_temp))
 }
 
 #[cfg(test)]

@@ -39,7 +39,7 @@ export function useComposerSessionControlsQuery({
         ? loadAgentSessionControlsCatalog(executor, selectedProviderInstanceId)
         : loadAgentSessionControlsCatalog(executor),
     enabled: Boolean(executor),
-    staleTime: 60_000,
+    staleTime: Infinity,
     gcTime: Infinity,
     retry: false,
   });

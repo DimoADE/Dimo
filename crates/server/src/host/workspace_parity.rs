@@ -59,15 +59,6 @@ struct CreatePrArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct WorkspaceRepoIdArgs {
-    #[serde(alias = "workspace_id")]
-    workspace_id: Uuid,
-    #[serde(alias = "repo_id")]
-    repo_id: Uuid,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct CreateWorkspaceFromPrRequest {
     #[serde(alias = "repo_id")]
     repo_id: Uuid,
@@ -153,20 +144,6 @@ enum PrError {
     GitCliNotInstalled,
     TargetBranchNotFound { branch: String },
     UnsupportedProvider,
-}
-
-#[derive(Debug, Serialize)]
-struct AttachPrResponse {
-    pub pr_attached: bool,
-    pub pr_url: Option<String>,
-    pub pr_number: Option<i64>,
-    pub pr_status: Option<MergeStatus>,
-}
-
-#[derive(Debug, Serialize)]
-struct AttachPrResult {
-    pub response: Option<AttachPrResponse>,
-    pub error: Option<PrError>,
 }
 
 #[derive(Debug, Serialize)]
@@ -535,144 +512,6 @@ impl ServerApplicationDomains {
                 GitHostError::AuthFailed(_) => Err(pr_error(PrError::CliNotLoggedIn { provider })),
                 _ => Err(internal_error(error)),
             },
-        }
-    }
-
-    pub(crate) async fn attach_workspace_pr_host(
-        &self,
-        args: Value,
-    ) -> Result<Value, ApplicationError> {
-        let args: WorkspaceRepoIdArgs = parse(args)?;
-        let workspace = self.require_workspace(args.workspace_id).await?;
-        let task = workspace
-            .parent_task(&self.pool)
-            .await
-            .map_err(internal_error)?
-            .ok_or_else(|| ApplicationError::not_found("Parent task not found"))?;
-        let workspace_repo =
-            WorkspaceRepo::find_by_workspace_and_repo_id(&self.pool, workspace.id, args.repo_id)
-                .await
-                .map_err(internal_error)?
-                .ok_or(RepoError::NotFound)
-                .map_err(internal_error)?;
-        let repo = Repo::find_by_id(&self.pool, workspace_repo.repo_id)
-            .await
-            .map_err(internal_error)?
-            .ok_or(RepoError::NotFound)
-            .map_err(internal_error)?;
-        let merges = Merge::find_by_workspace_and_repo_id(&self.pool, workspace.id, args.repo_id)
-            .await
-            .map_err(internal_error)?;
-        if let Some(Merge::Pr(pr_merge)) = merges.into_iter().next() {
-            return serialize(AttachPrResult {
-                response: Some(AttachPrResponse {
-                    pr_attached: true,
-                    pr_url: Some(pr_merge.pr_info.url.clone()),
-                    pr_number: Some(pr_merge.pr_info.number),
-                    pr_status: Some(pr_merge.pr_info.status.clone()),
-                }),
-                error: None,
-            });
-        }
-        let git = self.deployment.git().clone();
-        let repo_path_for_git = repo.path.clone();
-        let target_branch_for_git = workspace_repo.target_branch.clone();
-        let remote = tokio::task::spawn_blocking(move || {
-            git.resolve_remote_for_branch(&repo_path_for_git, &target_branch_for_git)
-        })
-        .await
-        .map_err(internal_error)?
-        .map_err(internal_error)?;
-        let git_host = match GitHostService::from_url(&remote.url) {
-            Ok(host) => host,
-            Err(GitHostError::UnsupportedProvider) => {
-                return serialize(AttachPrResult {
-                    response: None,
-                    error: Some(PrError::UnsupportedProvider),
-                });
-            }
-            Err(GitHostError::CliNotInstalled { provider }) => {
-                return serialize(AttachPrResult {
-                    response: None,
-                    error: Some(PrError::CliNotInstalled { provider }),
-                });
-            }
-            Err(error) => return Err(internal_error(error)),
-        };
-        let provider = git_host.provider_kind();
-        let prs = match git_host
-            .list_prs_for_branch(&repo.path, &remote.url, &workspace.branch)
-            .await
-        {
-            Ok(prs) => prs,
-            Err(GitHostError::CliNotInstalled { provider }) => {
-                return serialize(AttachPrResult {
-                    response: None,
-                    error: Some(PrError::CliNotInstalled { provider }),
-                });
-            }
-            Err(GitHostError::AuthFailed(_)) => {
-                return serialize(AttachPrResult {
-                    response: None,
-                    error: Some(PrError::CliNotLoggedIn { provider }),
-                });
-            }
-            Err(error) => return Err(internal_error(error)),
-        };
-        if let Some(pr_info) = prs.into_iter().next() {
-            let merge = Merge::create_pr(
-                &self.pool,
-                workspace.id,
-                workspace_repo.repo_id,
-                &workspace_repo.target_branch,
-                pr_info.number,
-                &pr_info.url,
-            )
-            .await
-            .map_err(internal_error)?;
-            if !matches!(pr_info.status, MergeStatus::Open) {
-                Merge::update_status(
-                    &self.pool,
-                    merge.id,
-                    pr_info.status.clone(),
-                    pr_info.merge_commit_sha.clone(),
-                )
-                .await
-                .map_err(internal_error)?;
-            }
-            if matches!(pr_info.status, MergeStatus::Merged) {
-                Task::update_status(&self.pool, task.id, TaskStatus::Done)
-                    .await
-                    .map_err(internal_error)?;
-                if !workspace.pinned
-                    && let Err(error) = self
-                        .deployment
-                        .container()
-                        .archive_workspace(workspace.id)
-                        .await
-                {
-                    tracing::error!("Failed to archive workspace {}: {error}", workspace.id);
-                }
-            }
-            serialize(AttachPrResult {
-                response: Some(AttachPrResponse {
-                    pr_attached: true,
-                    pr_url: Some(pr_info.url),
-                    pr_number: Some(pr_info.number),
-                    pr_status: Some(pr_info.status),
-                }),
-                error: None,
-            })
-        } else {
-            serialize(AttachPrResult {
-                response: Some(AttachPrResponse {
-                    pr_attached: false,
-                    pr_url: None,
-                    pr_number: None,
-                    pr_status: None,
-                }),
-                error: None,
-            })
         }
     }
 

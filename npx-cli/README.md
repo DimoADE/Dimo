@@ -11,7 +11,7 @@ Official CLI and Host-family launcher for **Dimo** — the all-in-one **Agent-Na
 
 ## What `dimoai` Does
 
-`npx dimoai` downloads and verifies (SHA-256 sidecar + inner `SHA256SUMS`) the matching platform **Dimo Host family** release bundle (`dimo-server`, `dimo-mcp`, `dimo-workflow-mcp`, and the production `web/` workbench), then gives you four workflows from one binary:
+`npx dimoai` downloads and verifies (SHA-256 sidecar + inner `SHA256SUMS`) the matching platform **Dimo Host family** release bundle (`dimo-server`, `dimo-mcp`, and the production `web/` workbench), then gives you four workflows from one binary:
 
 1. **Launch `dimo-server` + WebUI** (`17891` default) on loopback or LAN—bringing the full Dual-Stage IDE + Infinite Spatial Canvas workbench to any browser or paired Desktop / iOS / Android client.
 2. **Discover & install Coding Agents** (`list`, `install`) directly into the Host machine's user environment (`npm`, `uv`, or verified binaries) for dedicated native engines and ACP compatibility adapters.

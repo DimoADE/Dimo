@@ -98,6 +98,7 @@ mod usage;
 use protocol::*;
 use requests::*;
 pub use runner::LeadingEdgeThrottle;
+pub(crate) use runner::{can_fallback_launch_lock_to_acp, prepare_native_engine_launch_env};
 use runner::*;
 use terminal::*;
 use usage::*;

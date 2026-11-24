@@ -1,4 +1,3 @@
-use axum::{extract::ws::Message, response::sse::Event};
 use json_patch::Patch;
 use serde::{Deserialize, Serialize};
 
@@ -32,43 +31,6 @@ impl LogMsg {
             LogMsg::Ready => EV_READY,
             LogMsg::Finished => EV_FINISHED,
         }
-    }
-
-    pub fn to_sse_event(&self) -> Event {
-        match self {
-            LogMsg::Stdout(s) => Event::default().event(EV_STDOUT).data(s.clone()),
-            LogMsg::Stderr(s) => Event::default().event(EV_STDERR).data(s.clone()),
-            LogMsg::JsonPatch(patch) => {
-                let data = serde_json::to_string(patch).unwrap_or_else(|_| "[]".to_string());
-                Event::default().event(EV_JSON_PATCH).data(data)
-            }
-            LogMsg::SessionId(s) => Event::default().event(EV_SESSION_ID).data(s.clone()),
-            LogMsg::MessageId(s) => Event::default().event(EV_MESSAGE_ID).data(s.clone()),
-            LogMsg::Ready => Event::default().event(EV_READY).data(""),
-            LogMsg::Finished => Event::default().event(EV_FINISHED).data(""),
-        }
-    }
-
-    /// Convert LogMsg to WebSocket message with proper error handling
-    pub fn to_ws_message(&self) -> Result<Message, serde_json::Error> {
-        let json = serde_json::to_string(self)?;
-        Ok(Message::Text(json.into()))
-    }
-
-    /// Convert LogMsg to WebSocket message with fallback error handling
-    ///
-    /// This method mirrors the behavior of the original logmsg_to_ws function
-    /// but with better error handling than unwrap().
-    pub fn to_ws_message_unchecked(&self) -> Message {
-        // Finished and Ready use special JSON formats for frontend compatibility
-        let json = match self {
-            LogMsg::Ready => r#"{"Ready":true}"#.to_string(),
-            LogMsg::Finished => r#"{"finished":true}"#.to_string(),
-            _ => serde_json::to_string(self)
-                .unwrap_or_else(|_| r#"{"error":"serialization_failed"}"#.to_string()),
-        };
-
-        Message::Text(json.into())
     }
 
     /// Rough size accounting for your byte‑budgeted history.

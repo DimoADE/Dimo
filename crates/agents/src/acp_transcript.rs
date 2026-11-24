@@ -1001,18 +1001,6 @@ pub fn claim_replay_transcript_in(
     writeln!(file, "{line}").is_ok()
 }
 
-pub fn release_unrecorded_replay_claim(agent_dir: &str, session_id: &str) {
-    if has_recorded_history(agent_dir, session_id) {
-        return;
-    }
-    if let Ok(mut set) = CLAIMED_REPLAYS.lock() {
-        set.remove(&(agent_dir.to_string(), session_id.to_string()));
-    }
-    if legacy_jsonl_shadow_write_enabled() {
-        release_unrecorded_replay_claim_in(&dimo_acp_transcripts_root(), agent_dir, session_id);
-    }
-}
-
 pub fn release_unrecorded_replay_claim_in(root: &Path, agent_dir: &str, session_id: &str) {
     if has_recorded_history_in(root, agent_dir, session_id) {
         return;

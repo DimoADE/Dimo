@@ -9,16 +9,16 @@ Author Dimo DAG workflows as real files, then validate, debug, and publish them 
 Once enabled, three surfaces work together:
 
 - the `dimo-workflow-creator` Skill, so an Agent can design a valid DAG;
-- `dimo-workflow-mcp`, for read/write, validation, publish, run inspection, pause/continue, and debug runs;
+- `Dimo-superagent-mcp` (`dimo-mcp`), built into the Host for read/write, validation, publish, run inspection, pause/continue, and debug runs;
 - Workflow Studio, which opens `*.dimo-workflow.json` as an editable tab.
 
 The source file is the authoring fact. Saving uses an artifact revision and refuses a stale overwrite. Publishing creates an immutable version. Automations stay on the version they already reference until you point them at a new one.
 
 ## Enable
 
-This plugin ships with the Host, starts disabled, and cannot be uninstalled. Turn it on in Plugins. The first enable binds the Skill and MCP to compatible installed Agents. Later enable/disable cycles keep the selection you already made.
+This plugin ships with the Host, starts disabled, and cannot be uninstalled. Turn it on in Plugins. The first enable binds the Skill to compatible installed Agents. Later enable/disable cycles keep the selection you already made.
 
-Dimo Desktop must be running. The Host starts a loopback-only command gateway, launches the MCP with the managed Node.js runtime, and injects a per-app-lifetime bearer token. That token is never stored in this package or in `config.json`.
+Dimo Desktop must be running. The Host starts a loopback-only command gateway, launches `dimo-mcp` (`Dimo-superagent-mcp`) with a per-app-lifetime bearer token. That token is never stored in this package or in `config.json`.
 
 ## Edit a workflow
 

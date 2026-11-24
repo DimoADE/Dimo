@@ -162,6 +162,35 @@ pub fn resolve_native_engine_kind_with_env(
     }
 }
 
+/// Policy controlling whether an agent's capability catalog may be refreshed
+/// automatically in the background (at startup or on stale-while-revalidate)
+/// versus captured passively from live sessions / explicit user refresh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CatalogRefreshPolicy {
+    /// Lightweight native engine whose model catalog can be refreshed
+    /// asynchronously in the background without blocking UI or unpacking heavy binaries.
+    BackgroundNativeProbe,
+    /// ACP or heavy-startup agent (e.g. Antigravity PyInstaller ~1 GB bundle)
+    /// whose catalog is captured passively from live sessions or explicit user
+    /// refresh, never auto-spawned on startup or background TTL sweeps.
+    PassiveOnly,
+}
+
+/// Resolves the catalog refresh policy for an agent identifier.
+pub fn catalog_refresh_policy_for_agent(agent_kind_or_id: &str) -> CatalogRefreshPolicy {
+    match resolve_native_engine_kind_with_env(
+        agent_kind_or_id,
+        EngineRuntimePreference::NativeFirst,
+        None,
+    ) {
+        Some(NativeEngineKind::ClaudeNative | NativeEngineKind::CodexNative) => {
+            CatalogRefreshPolicy::BackgroundNativeProbe
+        }
+        _ => CatalogRefreshPolicy::PassiveOnly,
+    }
+}
+
 pub(crate) fn normalize_agent_token(raw: &str) -> String {
     let trimmed = raw.trim();
     let unprefixed = trimmed

@@ -18,7 +18,6 @@ use services::services::{
     container_actions,
     git_host::{GitHostError, GitHostProvider, GitHostService, ProviderKind},
 };
-use utils::approvals::ApprovalResponse;
 use uuid::Uuid;
 
 use crate::{
@@ -68,13 +67,6 @@ struct ResetSessionArgs {
     process_id: Uuid,
     force_when_dirty: Option<bool>,
     perform_git_reset: Option<bool>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ApprovalArgs {
-    approval_id: String,
-    response: ApprovalResponse,
 }
 
 #[derive(Deserialize)]
@@ -434,20 +426,6 @@ pub(super) async fn first_user_message(
             .await
             .map_err(internal_error)?,
     )
-}
-
-pub(super) async fn respond_to_approval(
-    domains: &ServerApplicationDomains,
-    args: Value,
-) -> Result<Value, ApplicationError> {
-    let args: ApprovalArgs = parse(args)?;
-    let (status, _) = domains
-        .deployment
-        .approvals()
-        .respond(&domains.pool, &args.approval_id, args.response)
-        .await
-        .map_err(internal_error)?;
-    serialize(status)
 }
 
 pub(super) async fn project_usage(

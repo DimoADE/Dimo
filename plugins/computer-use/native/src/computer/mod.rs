@@ -99,12 +99,3 @@ pub mod glow;
 #[cfg(target_os = "macos")]
 pub mod helper_app;
 pub mod local;
-
-// What only the desktop app has: a window above every other, the mark an
-// action leaves, and a shortcut held with the OS.
-#[cfg(feature = "tauri-runtime")]
-pub mod indicator;
-#[cfg(feature = "tauri-runtime")]
-pub mod marker;
-#[cfg(feature = "tauri-runtime")]
-pub mod stop_key;

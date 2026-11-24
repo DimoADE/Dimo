@@ -100,26 +100,6 @@ export function withoutStepOutputBindings(
   );
 }
 
-export function renameStepOutputBindings(
-  bindings: Record<string, WorkflowBinding | undefined>,
-  fromStepId: string,
-  toStepId: string
-) {
-  return Object.fromEntries(
-    Object.entries(bindings).flatMap(([name, binding]) => {
-      if (!binding) return [];
-      return [
-        [
-          name,
-          binding.source === 'step_output' && binding.step_id === fromStepId
-            ? { ...binding, step_id: toStepId }
-            : binding,
-        ],
-      ];
-    })
-  ) as Record<string, WorkflowBinding | undefined>;
-}
-
 function hasManualConfirmation(step: StudioWorkflowStep): boolean {
   return (
     (step.kind === 'agent' || step.kind === 'session') &&

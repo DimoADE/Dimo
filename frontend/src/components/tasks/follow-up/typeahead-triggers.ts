@@ -31,27 +31,3 @@ export function matchTypeaheadTrigger(
     replaceableString: match[0].slice(match[0].indexOf(trigger)),
   };
 }
-
-export function matchSlashCommandTrigger(
-  text: string
-): TypeaheadTriggerMatch | null {
-  return matchTypeaheadTrigger(text, '/', '/');
-}
-
-export function matchDollarCommandTrigger(
-  text: string
-): TypeaheadTriggerMatch | null {
-  return matchTypeaheadTrigger(text, '$', '$');
-}
-
-export function matchFileReferenceTrigger(
-  text: string
-): TypeaheadTriggerMatch | null {
-  return matchTypeaheadTrigger(text, '@', '#@');
-}
-
-export function matchTagReferenceTrigger(
-  text: string
-): TypeaheadTriggerMatch | null {
-  return matchTypeaheadTrigger(text, '#', '#@');
-}

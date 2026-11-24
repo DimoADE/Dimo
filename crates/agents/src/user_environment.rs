@@ -495,18 +495,6 @@ fn profile_component_id(component: crate::ProfileComponent) -> &'static str {
     }
 }
 
-pub fn uv_distribution_name(package_spec: &str) -> Option<&str> {
-    let without_version = package_spec
-        .split_once("==")
-        .map(|(name, _)| name)
-        .or_else(|| package_spec.rsplit_once('@').map(|(name, _)| name))
-        .unwrap_or(package_spec);
-    let name = without_version
-        .split_once('[')
-        .map_or(without_version, |(name, _)| name);
-    if name.is_empty() { None } else { Some(name) }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6,11 +6,10 @@
 use serde_json::Value;
 
 use crate::{
-    InstalledPlugin, PluginMcpToolStatus,
+    PluginMcpToolStatus,
     official_mcp::{
         SESSION_FEAT_ALL, advertised_mcp_tools, advertised_tools_from_spec, host_family_product,
-        live_plugin_config, live_plugin_mcp, official_product_mcp_name, projected_mcp_server_id,
-        session_features_from_config,
+        official_product_mcp_name, projected_mcp_server_id, session_features_from_config,
     },
 };
 
@@ -70,26 +69,6 @@ pub fn admit_plugin_mcp(
         product,
         tools,
     }
-}
-
-/// Admit every MCP resource declared by an installed plugin.
-pub fn admit_plugin_mcp_servers(plugin: &InstalledPlugin) -> Vec<PluginMcpAdmission> {
-    let live = live_plugin_mcp(plugin);
-    let servers = live.get("mcpServers").unwrap_or(&live);
-    let Some(object) = servers.as_object() else {
-        return Vec::new();
-    };
-    let config = live_plugin_config(plugin);
-    let mut rows = object
-        .iter()
-        .map(|(id, spec)| admit_plugin_mcp(plugin.id(), id, spec, &config))
-        .collect::<Vec<_>>();
-    rows.sort_by(|left, right| {
-        left.server_id
-            .cmp(&right.server_id)
-            .then_with(|| left.contribution_id.cmp(&right.contribution_id))
-    });
-    rows
 }
 
 fn mcp_kind(spec: &Value, product: Option<&str>) -> PluginMcpKind {

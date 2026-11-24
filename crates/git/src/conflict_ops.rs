@@ -61,41 +61,6 @@ impl GitService {
         })
     }
 
-    pub fn abort_conflicts(&self, worktree_path: &Path) -> Result<(), GitServiceError> {
-        let git = GitCli::new();
-        if git.is_rebase_in_progress(worktree_path).unwrap_or(false) {
-            let has_conflicts = !self
-                .get_conflicted_files(worktree_path)
-                .unwrap_or_default()
-                .is_empty();
-            if has_conflicts {
-                return self.abort_rebase(worktree_path);
-            }
-            return git.quit_rebase(worktree_path).map_err(|e| {
-                GitServiceError::InvalidRepository(format!("git rebase --quit failed: {e}"))
-            });
-        }
-        if git.is_merge_in_progress(worktree_path).unwrap_or(false) {
-            return git.abort_merge(worktree_path).map_err(|e| {
-                GitServiceError::InvalidRepository(format!("git merge --abort failed: {e}"))
-            });
-        }
-        if git
-            .is_cherry_pick_in_progress(worktree_path)
-            .unwrap_or(false)
-        {
-            return git.abort_cherry_pick(worktree_path).map_err(|e| {
-                GitServiceError::InvalidRepository(format!("git cherry-pick --abort failed: {e}"))
-            });
-        }
-        if git.is_revert_in_progress(worktree_path).unwrap_or(false) {
-            return git.abort_revert(worktree_path).map_err(|e| {
-                GitServiceError::InvalidRepository(format!("git revert --abort failed: {e}"))
-            });
-        }
-        Ok(())
-    }
-
     pub fn continue_conflicts(&self, worktree_path: &Path) -> Result<(), GitServiceError> {
         let git = GitCli::new();
         match self.detect_conflict_op(worktree_path)? {

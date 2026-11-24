@@ -20,12 +20,8 @@ export const STRUCTURE_KINDS = [
   "app.rail.section",
 ] as const;
 
-export type StructureKind = (typeof STRUCTURE_KINDS)[number];
-
 /** Static provider catalog templates. Host journey also asserts list/empty. */
 export const CATALOG_KINDS = ["provider.model.catalog"] as const;
-
-export type CatalogKind = (typeof CATALOG_KINDS)[number];
 
 const HOST_JOURNEY_KINDS = [
   ...CHROME_KINDS,
@@ -34,8 +30,6 @@ const HOST_JOURNEY_KINDS = [
 ] as const;
 
 export type HostJourneyKind = (typeof HOST_JOURNEY_KINDS)[number];
-
-const CHROME_KIND_SET = new Set<string>(CHROME_KINDS);
 
 /** Manifest `app.*` kinds vs Host catalog snake_case keys. */
 export const MANIFEST_KIND_TO_CATALOG: Record<string, string> = {
@@ -69,10 +63,6 @@ const LIVE_KIND_ALIASES: Record<string, readonly string[]> = {
 function liveHasKind(live: Set<string>, kind: string): boolean {
   if (live.has(kind) || live.has(catalogKindFor(kind))) return true;
   return (LIVE_KIND_ALIASES[kind] ?? []).some((alias) => live.has(alias));
-}
-
-export function isChromeKind(kind: string): kind is ChromeKind {
-  return CHROME_KIND_SET.has(kind);
 }
 
 function kindsFromIntegrations<T extends string>(

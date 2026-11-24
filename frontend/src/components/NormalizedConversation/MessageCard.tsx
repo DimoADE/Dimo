@@ -67,65 +67,6 @@ export const ExpandChevron: React.FC<{
   );
 };
 
-/************************
- * Collapsible container *
- ************************/
-
-export const CollapsibleEntry: React.FC<{
-  content: string;
-  markdown: boolean;
-  expansionKey: string;
-  variant: CollapsibleVariant;
-  contentClassName: string;
-  taskAttemptId?: string;
-  markdownContext?: MarkdownRenderContext;
-}> = ({
-  content,
-  markdown,
-  expansionKey,
-  variant,
-  contentClassName,
-  markdownContext,
-}) => {
-  const multiline = content.includes('\n');
-  const [expanded, toggle] = useExpandable(`entry:${expansionKey}`, false);
-
-  const Inner = (
-    <div className={contentClassName}>
-      {markdown ? (
-        <AstryxMarkdown value={content} {...markdownContext} />
-      ) : (
-        content
-      )}
-    </div>
-  );
-
-  const firstLine = content.split('\n')[0];
-  const PreviewInner = (
-    <div className={contentClassName}>
-      {markdown ? (
-        <AstryxMarkdown value={firstLine} {...markdownContext} />
-      ) : (
-        firstLine
-      )}
-    </div>
-  );
-
-  if (!multiline) {
-    return <MessageCard variant={variant}>{Inner}</MessageCard>;
-  }
-
-  return expanded ? (
-    <MessageCard variant={variant} expanded={expanded} onToggle={toggle}>
-      {Inner}
-    </MessageCard>
-  ) : (
-    <MessageCard variant={variant} expanded={expanded} onToggle={toggle}>
-      {PreviewInner}
-    </MessageCard>
-  );
-};
-
 export const CompactNoticeEntry: React.FC<{
   content: string;
   variant: CollapsibleVariant;

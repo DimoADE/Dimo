@@ -112,7 +112,7 @@ Typing `&Agent` in the Composer inserts a structured mention ([ADR-0031](adr/003
 ### Pulse Event-Driven Automation, Dual-Primitive Workflows & Scheduled Automations
 
 - **Pulse Event Engine (`crates/pulse`, `packages/pulse-sdk`, [ADR-0092](adr/0092-pulse-event-driven-automation-and-dual-primitive-workflows.md), [`docs/specs/pulse-automation-engine.md`](specs/pulse-automation-engine.md))**: Normalizes GitHub, Jira, Feishu, Custom SDK, and `TemporalSource` (Cron + one-shot timer + `InactivitySlaTracker`) events into `EventEnvelope`, verified by `StandardWebhookGateway` (HMAC + replay window + payload cap) and guarded by 3-layer anti-loop protection (`actor.isSelf`, `hopCount`, `ChainRateBreaker`) plus `enforce_mandate_origin`. Matched rules dispatch to `Session`, `Bot`, `Group`, `User`, or `Workflow` targets.
-- **Dual-Primitive DAG Workflows (`crates/workflows`, `crates/dimo-workflow-mcp`, [ADR-0045](adr/0045-workflows-orchestrate-conversation-turns.md))**: `*.dimo-workflow.json` source artifacts compile and publish into immutable `WorkflowDefinition` versions combining ephemeral `SessionStepSpec`, persistent `BotStepSpec` (with `BotMailboxPolicy`), `GroupStageStepSpec`, `UserGateStepSpec`, `BoundedLoopStepSpec`, `WaitForEventStepSpec`, `OutboxActionStepSpec`, and `ConditionBranchStepSpec`, supporting incremental `WorkflowGraphPatch`, breakpoints, `needs_review` safety stops, and checkpoint-verified partial reruns (`DerivedWorkflowRun`).
+- **Dual-Primitive DAG Workflows (`crates/workflows`, `crates/dimo-mcp`, [ADR-0045](adr/0045-workflows-orchestrate-conversation-turns.md))**: `*.dimo-workflow.json` source artifacts compile and publish into immutable `WorkflowDefinition` versions combining ephemeral `SessionStepSpec`, persistent `BotStepSpec` (with `BotMailboxPolicy`), `GroupStageStepSpec`, `UserGateStepSpec`, `BoundedLoopStepSpec`, `WaitForEventStepSpec`, `OutboxActionStepSpec`, and `ConditionBranchStepSpec`, supporting incremental `WorkflowGraphPatch`, breakpoints, `needs_review` safety stops, and checkpoint-verified partial reruns (`DerivedWorkflowRun`).
 - **Scheduled Automations (`crates/automation`)**: Single-owner database lease triggers pinned to a Turn or exact published Workflow version, running in isolated Git worktrees by default with 30-day / 10 GiB retention.
 
 ---
@@ -129,7 +129,7 @@ Under **Everything is a Plugin** ([ADR-0046](adr/0046-full-stack-plugin-platform
 
 ## 7. Repository & Workspace Map
 
-### Rust Cargo Workspace (26 Members)
+### Rust Cargo Workspace (24 Members)
 
 | Crate / Binary | Responsibility |
 | --- | --- |
@@ -139,10 +139,9 @@ Under **Everything is a Plugin** ([ADR-0046](adr/0046-full-stack-plugin-platform
 | `crates/agents` | Unified `AgentRuntime`: dedicated native Agent engine drivers (primary) + ACP v1/v2 compatibility runtime (secondary), 20 built-in profiles, ACP Registry client, auth/provider projection, and plan/usage probes. |
 | `crates/conversations` | SQLite single-authority Turn lifecycle, `StreamingThrottleCoalescer`, `DirtyRowMap` projections, durable input queue, Turn Steering, and deterministic cross-agent handoff. |
 | `crates/delegation` & `crates/delegation-proto` | Broker, spawner, Collaboration Space message/receipt engine, and wire protocol for agent-to-agent delegation. |
-| `crates/dimo-mcp` (`dimo-mcp`) | Host-managed stdio/HTTP MCP companion exposing delegation, Collaboration Space, Pulse, and `dimo.session-enhance` tools to agent sessions. |
+| `crates/dimo-mcp` (`dimo-mcp`) | Unified Host-managed stdio/HTTP MCP companion (`Dimo-superagent-mcp`) exposing delegation, Collaboration Space, Pulse, `workflow_*` authoring/debug, and `dimo.session-enhance` tools to agent sessions. |
 | `crates/pulse` | Event-driven automation engine: `EventEnvelope` bus, `StandardWebhookGateway`, source normalizers, bounded AST filters, 3-layer anti-loop & mandate guards, and `TemporalSource`. |
 | `crates/workflows` | Immutable Dual-Primitive DAG `WorkflowDefinition` compiler, checkpointed `WorkflowRun` state machine, `WorkflowGraphPatch`, debug runs, and run subscriptions. |
-| `crates/dimo-workflow-mcp` (`dimo-workflow-mcp`) | Host-managed MCP companion adapting `workflow_*` authoring, inspection, and debug tools to `crates/workflows`. |
 | `crates/automation` | Single-owner lease scheduler, due-claim transactions, recovery reconciliation, and worktree/disk retention GC. |
 | `crates/plugins` | Plugin Kernel v4: package inspector, marketplace/GitHub installer, runtime lock resolver, Full-Trust Node/Python/Rust worker supervisor, and contribution registry. |
 | `crates/plugin-sdk` | Rust Worker SDK for authoring native Dimo v4 plugin workers. |
@@ -154,7 +153,6 @@ Under **Everything is a Plugin** ([ADR-0046](adr/0046-full-stack-plugin-platform
 | `crates/db` | SQLite persistence layer (`WritePool(1)` / `ReadPool(4)` / `CommitVisibilityFence`), SQLx migrations, and offline `.sqlx` query cache. |
 | `crates/deployment` & `crates/local-deployment` | Core `Deployment` service trait and local process/PTY/worktree implementation. |
 | `crates/executors` | Workspace lifecycle shell scripts (`ScriptRequest`), `BaseCodingAgent` identity/config schemas, and shared log normalization. |
-| `crates/review` | Standalone CLI code-review utility. |
 | `crates/api-types` & `crates/utils` | Shared wire/API types (`#[derive(TS)]` → `shared/types.ts`) and cross-platform utilities. |
 
 ### Frontend, Desktop Shell, Packages, SDK, Plugins & Mobile
@@ -164,7 +162,7 @@ Under **Everything is a Plugin** ([ADR-0046](adr/0046-full-stack-plugin-platform
 | `electron/` | Thin Electron desktop shell (`@dimo/electron`), `dimo-server --desktop` sidecar supervisor, `<webview>` browser host bridge, custom protocols, and auto-updater. |
 | `frontend/` | React 19 + TypeScript + Vite workbench (Dockview IDE stage, `@xyflow/react` Spatial Canvas, `BackendTransport`, NormalizedConversation, Settings). |
 | `shared/` | Generated Rust→TS contracts (`shared/types.ts`) and unified Host command catalog (`shared/hostCommands.ts`). |
-| `packages/` | TypeScript toolchain & companion packages: `@dimoai/plugin-sdk` (`plugin-sdk/`), `@dimoai/plugin-cli` (`plugin-cli/`), `@dimo/plugin-contract` (`plugin-contract/`), `pulse-sdk/`, and `dimo-workflow-mcp/`. |
+| `packages/` | TypeScript toolchain & companion packages: `@dimoai/plugin-sdk` (`plugin-sdk/`), `@dimoai/plugin-cli` (`plugin-cli/`), `@dimo/plugin-contract` (`plugin-contract/`), and `pulse-sdk/`. |
 | `sdk/python/` | Python Worker SDK (`dimo-plugin`) for authoring v4 plugin workers in Python. |
 | `plugins/` | 15 official full-trust v4 plugins (`ayu-theme`, `browser`, `code-completion`, `computer-use`, `kanban-views`, `notes`, `office`, `plugin-development`, `prompt-enhancer`, `remote-ssh`, `science`, `session-enhance`, `tauri-ui-debugger`, `voice-input`, `workflow-creator`). |
 | `npx-cli/` | `dimoai` npm CLI (`dimo serve`, `dimo list/install`, remote Host commands, and `dimo plugin` management). |

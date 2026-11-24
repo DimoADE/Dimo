@@ -946,21 +946,6 @@ export const chatChannelApi = {
   },
 };
 
-// Claude Settings (~/.claude/settings.json) APIs
-export interface ClaudeSettings {
-  env: Record<string, string>;
-  enabled_plugins: Record<string, boolean>;
-}
-
-export const claudeSettingsApi = {
-  get: async (): Promise<ClaudeSettings> => {
-    return backendCall<ClaudeSettings>('get_claude_settings');
-  },
-  update: async (settings: ClaudeSettings): Promise<ClaudeSettings> => {
-    return backendCall<ClaudeSettings>('update_claude_settings', { settings });
-  },
-};
-
 // MCP marketplace (Smithery) + global hosting + per-agent sync.
 // One agent identity for MCP surfaces: the shared selectable-agent union
 // (canonical AgentKind keys), not a per-file copy.
@@ -1111,15 +1096,5 @@ export const mcpMarketApi = {
   },
   uninstall: async (serverId: string): Promise<LocalMcpServer[]> => {
     return backendCall<LocalMcpServer[]>('mcp_uninstall_server', { serverId });
-  },
-};
-
-// Profiles API
-export const profilesApi = {
-  load: async (): Promise<{ content: string; path: string }> => {
-    return backendCall<{ content: string; path: string }>('get_profiles');
-  },
-  save: async (content: string): Promise<string> => {
-    return backendCall<string>('update_profiles', { body: content });
   },
 };

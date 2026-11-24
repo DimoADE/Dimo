@@ -102,12 +102,6 @@ pub enum CliExposureError {
     Io(#[from] std::io::Error),
 }
 
-/// Ensure `~/.local/bin` is on the user PATH so user-environment Agent CLIs
-/// are visible after install. Does not write a Dimo-owned shim.
-pub fn ensure_user_cli_path(home_dir: &Path, shell: ShellFamily) -> Result<(), CliExposureError> {
-    ensure_shell_path(home_dir, shell)
-}
-
 /// Publish a shared toolchain (Node, npm, npx) into the user environment.
 ///
 /// Writes shims under `~/.local/bin` and puts that directory on the user PATH.
@@ -283,48 +277,6 @@ pub fn remove_managed_runtime_cli(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
     }
-}
-
-pub fn switch_managed_runtime_cli(
-    home_dir: &Path,
-    agent_id: &AgentId,
-    managed_install_root: &Path,
-    previous_runtime: Option<&Path>,
-    next_runtime: &Path,
-    runtime_path_entries: &[PathBuf],
-    shell: ShellFamily,
-) -> Result<PublishedCliCommand, CliExposureError> {
-    let effective_path = std::env::var_os("PATH");
-    switch_managed_runtime_cli_with_path(
-        CliPublication {
-            home_dir,
-            agent_id,
-            managed_install_root,
-            runtime_executable: next_runtime,
-            runtime_path_entries,
-            shell,
-            effective_path: effective_path.as_deref(),
-        },
-        previous_runtime,
-    )
-}
-
-fn switch_managed_runtime_cli_with_path(
-    publication: CliPublication<'_>,
-    previous_runtime: Option<&Path>,
-) -> Result<PublishedCliCommand, CliExposureError> {
-    let home_dir = publication.home_dir;
-    let agent_id = publication.agent_id;
-    let next_runtime = publication.runtime_executable;
-    let published = publish_managed_runtime_cli_with_path(publication)?;
-    if let Some(previous_runtime) = previous_runtime
-        && runtime_command_name(previous_runtime)? != published.command_name
-        && let Err(error) = remove_managed_runtime_cli(home_dir, agent_id, previous_runtime)
-    {
-        let _ = remove_managed_runtime_cli(home_dir, agent_id, next_runtime);
-        return Err(error);
-    }
-    Ok(published)
 }
 
 fn runtime_command_name(runtime_executable: &Path) -> Result<String, CliExposureError> {
@@ -524,22 +476,6 @@ fn read_published_shim(path: &Path) -> Option<(AgentId, Vec<u8>)> {
     let contents = fs::read(path).ok()?;
     let agent_id = AgentId::parse(shim_marker_owner(&contents)?).ok()?;
     Some((agent_id, contents))
-}
-
-/// Resolve a command to the *user's* executable, stepping over any Dimo
-/// published shim.
-///
-/// Dimo publishes its managed Runtime under the vendor command name, so a probe
-/// that stops at the first PATH hit reports Dimo's own installation as one the
-/// user already had: the Agent is adopted as user-provided and the user's real
-/// Runtime — when they have one — is never consulted. Resolving through here
-/// keeps that distinction: `None` means the user has no Runtime of their own,
-/// not that the command is missing.
-pub async fn resolve_user_runtime_command(command: &str) -> Option<PathBuf> {
-    resolve_user_runtime_commands(command)
-        .await
-        .into_iter()
-        .next()
 }
 
 /// Every user-owned Runtime on PATH, skipping Dimo shims and WindowsApps aliases.
@@ -1243,56 +1179,6 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&published.shim_path).unwrap(),
             "#!/bin/sh\n# installed by user\n"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn version_switch_repoints_the_command_and_removes_a_retired_command_name() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = tempfile::tempdir().unwrap();
-        let home = temp.path().join("home");
-        let install_root = temp.path().join("app-data/agents/grok-build");
-        let old_runtime = install_root.join("release-1/bin/grok");
-        let next_runtime = install_root.join("release-2/bin/xai-grok");
-        for (runtime, output) in [
-            (&old_runtime, "#!/bin/sh\nprintf 'old\\n'\n"),
-            (&next_runtime, "#!/bin/sh\nprintf 'new\\n'\n"),
-        ] {
-            fs::create_dir_all(runtime.parent().unwrap()).unwrap();
-            fs::write(runtime, output).unwrap();
-            fs::set_permissions(runtime, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        fs::create_dir_all(&home).unwrap();
-        let agent_id = AgentId::parse("grok-build").unwrap();
-        let old = publish_for_test(
-            &home,
-            &agent_id,
-            &install_root,
-            &old_runtime,
-            ShellFamily::Posix,
-        )
-        .unwrap();
-
-        let current = switch_managed_runtime_cli_with_path(
-            CliPublication {
-                home_dir: &home,
-                agent_id: &agent_id,
-                managed_install_root: &install_root,
-                runtime_executable: &next_runtime,
-                runtime_path_entries: &[],
-                shell: ShellFamily::Posix,
-                effective_path: Some(OsStr::new("")),
-            },
-            Some(&old_runtime),
-        )
-        .unwrap();
-
-        assert!(!old.shim_path.exists());
-        assert_eq!(
-            Command::new(&current.shim_path).output().unwrap().stdout,
-            b"new\n"
         );
     }
 

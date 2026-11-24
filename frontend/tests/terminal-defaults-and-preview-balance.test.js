@@ -29,17 +29,6 @@ test('终端默认高度为 300px', () => {
   assert.match(panelActionsSource, /DEFAULT_TERMINAL_PANEL_HEIGHT/);
 });
 
-test('TerminalHeaderActions 使用统一 workspace key 和默认终端来源', () => {
-  const source = readFrontendFile(
-    'src/components/layout/panels/TerminalHeaderActions.tsx'
-  );
-
-  assert.doesNotMatch(source, /projectId\s*\|\|/);
-  assert.match(source, /activeWorktreeId/);
-  assert.match(source, /default_terminal_shell|getDefaultTerminalShell/);
-  assert.match(source, /stopPropagation\(\)/);
-});
-
 test('通用设置页暴露默认终端设置项', () => {
   const source = readFrontendFile('src/pages/settings/GeneralSettings.tsx');
 

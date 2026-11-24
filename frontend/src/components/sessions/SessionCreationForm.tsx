@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { Banner } from '@astryxdesign/core/Banner';
@@ -193,7 +193,7 @@ export function SessionCreationForm({
     queryKey: sessionControlsQueryKey(executor ?? '', null, scopedInstanceId),
     queryFn: () => loadAgentSessionControlsCatalog(executor, scopedInstanceId),
     enabled: Boolean(executor && instanceOptionsReady),
-    staleTime: 60_000,
+    staleTime: Infinity,
     gcTime: Infinity,
     retry: false,
   });
@@ -242,21 +242,6 @@ export function SessionCreationForm({
     staleTime: Infinity,
     retry: false,
   });
-  const catalogFreshnessQuery = useQuery({
-    queryKey: [
-      'agentCapabilityCatalogFreshness',
-      executor,
-      ...(scopedInstanceId ? [scopedInstanceId] : []),
-    ],
-    queryFn: () =>
-      scopedInstanceId
-        ? agentsApi.capabilityCatalogFresh(executor!, scopedInstanceId)
-        : agentsApi.capabilityCatalogFresh(executor!),
-    enabled: Boolean(executor && activeControls),
-    staleTime: 0,
-    retry: false,
-  });
-  const backgroundRefreshAgent = useRef<string | null>(null);
   const [selectedMode, setSelectedMode] = useState<string | null>(null);
   const [selectedConfigValues, setSelectedConfigValues] = useState<
     Record<string, string>
@@ -270,7 +255,6 @@ export function SessionCreationForm({
   const [defaultsHydratedScope, setDefaultsHydratedScope] = useState<
     string | null
   >(null);
-  const [catalogRefreshFailed, setCatalogRefreshFailed] = useState(false);
   const [remoteSessionsOpen, setRemoteSessionsOpen] = useState(false);
   const [remoteSessionAction, setRemoteSessionAction] = useState<string | null>(
     null
@@ -287,45 +271,11 @@ export function SessionCreationForm({
     setDefaultsSaveState('idle');
     setSavedDefaultsFingerprint(null);
     setDefaultsHydratedScope(null);
-    setCatalogRefreshFailed(false);
     setRemoteSessionsOpen(false);
     setRemoteSessionAction(null);
     setRemoteSessionStatus('idle');
     setCompletedRemoteSessionIds(new Set());
-    backgroundRefreshAgent.current = null;
   }, [controlsWorkspaceId, executor, scopedInstanceId]);
-  useEffect(() => {
-    if (
-      !executor ||
-      !defaultsScopeKey ||
-      catalogFreshnessQuery.data !== false ||
-      backgroundRefreshAgent.current === defaultsScopeKey
-    ) {
-      return;
-    }
-    backgroundRefreshAgent.current = defaultsScopeKey;
-    void (
-      scopedInstanceId
-        ? agentsApi.refreshCapabilityCatalog(executor, scopedInstanceId)
-        : agentsApi.refreshCapabilityCatalog(executor)
-    )
-      .then(async (refreshed) => {
-        if (!refreshed) {
-          setCatalogRefreshFailed(true);
-          return;
-        }
-        setCatalogRefreshFailed(false);
-        await catalogQuery.refetch();
-        await catalogFreshnessQuery.refetch();
-      })
-      .catch(() => setCatalogRefreshFailed(true));
-  }, [
-    catalogFreshnessQuery,
-    catalogQuery,
-    defaultsScopeKey,
-    executor,
-    scopedInstanceId,
-  ]);
   useEffect(() => {
     if (!executor || !defaultsScopeKey || !defaultsQuery.isFetched) return;
     const savedValues = defaultsQuery.data?.values;
@@ -771,13 +721,6 @@ export function SessionCreationForm({
             ) : defaultsSaveState === 'error' ? (
               <p className="text-[11px] text-destructive" role="alert">
                 {t('sessionCreation.agentDefaultsSaveFailed')}
-              </p>
-            ) : null}
-            {catalogFreshnessQuery.data === false ? (
-              <p className="text-[11px] text-muted-foreground" role="status">
-                {catalogRefreshFailed
-                  ? t('sessionCreation.catalogRefreshFailed')
-                  : t('sessionCreation.catalogRefreshing')}
               </p>
             ) : null}
           </>

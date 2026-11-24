@@ -116,10 +116,6 @@ impl RepoService {
         Ok(Some(canonical_top_level))
     }
 
-    pub fn validate_git_repo_path(&self, path: &Path) -> Result<()> {
-        self.resolve_git_repo_path(path).map(|_| ())
-    }
-
     pub fn normalize_path(&self, path: &str) -> std::io::Result<PathBuf> {
         std::path::absolute(expand_tilde(path)).map(normalize_windows_extended_path_prefix)
     }

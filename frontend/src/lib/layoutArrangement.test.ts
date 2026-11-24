@@ -1,31 +1,22 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
-  DEFAULT_COLLABORATION_ARRANGEMENT,
   DEFAULT_KANBAN_ARRANGEMENT,
   DEFAULT_LAYOUT_ARRANGEMENT,
   arrangementsEqual,
-  collaborationSlotOfZone,
-  getCollaborationArrangement,
-  getKanbanArrangement,
   getLayoutArrangement,
   isDefaultArrangement,
-  isDefaultCollaborationArrangement,
   kanbanSessionResizeHandleSide,
   kanbanSlotOfZone,
-  resetCollaborationArrangement,
   resetKanbanArrangement,
-  resetLayoutArrangement,
-  setCollaborationArrangement,
   setKanbanArrangement,
-  setLayoutArrangement,
   slotOfZone,
-  subscribeLayoutArrangement,
-  swapArrangementSlots,
+  type LayoutArrangement,
 } from './layoutArrangement';
 
 describe('layoutArrangement', () => {
   beforeEach(() => {
-    resetLayoutArrangement();
+    localStorage.removeItem('dimo:layout-arrangement');
+    resetKanbanArrangement();
   });
 
   it('defaults to A/B/C/D in left/center/right/bottom', () => {
@@ -38,27 +29,14 @@ describe('layoutArrangement', () => {
     expect(isDefaultArrangement(getLayoutArrangement())).toBe(true);
   });
 
-  it('swaps two slots and keeps the mapping bijective', () => {
-    const swapped = swapArrangementSlots(
-      DEFAULT_LAYOUT_ARRANGEMENT,
-      'center',
-      'right'
-    );
-
-    expect(swapped.center).toBe('session');
-    expect(swapped.right).toBe('workspace');
-    expect(swapped.left).toBe('dock');
-    expect(swapped.bottom).toBe('terminal');
-    expect(new Set(Object.values(swapped)).size).toBe(4);
-  });
-
-  it('persists and reads back an arrangement', () => {
-    const next = swapArrangementSlots(
-      DEFAULT_LAYOUT_ARRANGEMENT,
-      'left',
-      'bottom'
-    );
-    setLayoutArrangement(next);
+  it('reads back valid persisted workspace arrangements', () => {
+    const next: LayoutArrangement = {
+      left: 'terminal',
+      center: 'workspace',
+      right: 'session',
+      bottom: 'dock',
+    };
+    localStorage.setItem('dimo:layout-arrangement', JSON.stringify(next));
 
     expect(getLayoutArrangement()).toEqual(next);
     expect(arrangementsEqual(getLayoutArrangement(), next)).toBe(true);
@@ -74,27 +52,13 @@ describe('layoutArrangement', () => {
     expect(getLayoutArrangement()).toEqual(DEFAULT_LAYOUT_ARRANGEMENT);
   });
 
-  it('notifies subscribers on change', () => {
-    let notified = 0;
-    const unsubscribe = subscribeLayoutArrangement(() => {
-      notified += 1;
-    });
-
-    setLayoutArrangement(
-      swapArrangementSlots(DEFAULT_LAYOUT_ARRANGEMENT, 'center', 'right')
-    );
-    unsubscribe();
-    resetLayoutArrangement();
-
-    expect(notified).toBe(1);
-  });
-
   it('finds the slot of a zone', () => {
-    const arrangement = swapArrangementSlots(
-      DEFAULT_LAYOUT_ARRANGEMENT,
-      'right',
-      'bottom'
-    );
+    const arrangement: LayoutArrangement = {
+      left: 'dock',
+      center: 'workspace',
+      right: 'terminal',
+      bottom: 'session',
+    };
 
     expect(slotOfZone(arrangement, 'session')).toBe('bottom');
     expect(slotOfZone(arrangement, 'terminal')).toBe('right');
@@ -102,40 +66,20 @@ describe('layoutArrangement', () => {
   });
 
   describe('kanban arrangement', () => {
-    beforeEach(() => {
-      resetKanbanArrangement();
-    });
-
-    it('defaults to list/monitor/session and is independent from workspace', () => {
-      expect(getKanbanArrangement()).toEqual({
-        left: 'list',
-        center: 'monitor',
-        right: 'session',
-      });
-
-      setLayoutArrangement(
-        swapArrangementSlots(DEFAULT_LAYOUT_ARRANGEMENT, 'center', 'right')
-      );
-      expect(getKanbanArrangement()).toEqual(DEFAULT_KANBAN_ARRANGEMENT);
-    });
-
-    it('persists a swap and reports zone slots', () => {
-      const swapped = swapArrangementSlots(
-        DEFAULT_KANBAN_ARRANGEMENT,
-        'center',
-        'right'
-      );
+    it('persists a swapped kanban arrangement and reports zone slots', () => {
+      const swapped = {
+        left: 'list' as const,
+        center: 'session' as const,
+        right: 'monitor' as const,
+      };
       setKanbanArrangement(swapped);
 
-      expect(getKanbanArrangement()).toEqual({
-        left: 'list',
-        center: 'session',
-        right: 'monitor',
-      });
-      expect(kanbanSlotOfZone(getKanbanArrangement(), 'session')).toBe(
-        'center'
-      );
-      // The workspace arrangement is unaffected by kanban changes.
+      expect(kanbanSlotOfZone(swapped, 'session')).toBe('center');
+      expect(
+        JSON.parse(
+          localStorage.getItem('dimo:kanban-layout-arrangement') ?? '{}'
+        )
+      ).toEqual(swapped);
       expect(getLayoutArrangement()).toEqual(DEFAULT_LAYOUT_ARRANGEMENT);
     });
 
@@ -164,60 +108,6 @@ describe('layoutArrangement', () => {
           right: 'list',
         })
       ).toBe('left');
-    });
-
-    it('rejects non-bijective values', () => {
-      localStorage.setItem(
-        'dimo:kanban-layout-arrangement',
-        JSON.stringify({ left: 'list', center: 'list', right: 'session' })
-      );
-
-      expect(getKanbanArrangement()).toEqual(DEFAULT_KANBAN_ARRANGEMENT);
-    });
-  });
-
-  describe('collaboration arrangement', () => {
-    beforeEach(() => {
-      resetCollaborationArrangement();
-    });
-
-    it('defaults to spaces/thread/preview and is independent from workspace and kanban', () => {
-      expect(getCollaborationArrangement()).toEqual({
-        left: 'spaces',
-        center: 'thread',
-        right: 'preview',
-      });
-      expect(
-        isDefaultCollaborationArrangement(getCollaborationArrangement())
-      ).toBe(true);
-
-      setLayoutArrangement(
-        swapArrangementSlots(DEFAULT_LAYOUT_ARRANGEMENT, 'center', 'right')
-      );
-      expect(getCollaborationArrangement()).toEqual(
-        DEFAULT_COLLABORATION_ARRANGEMENT
-      );
-    });
-
-    it('persists a swap and reports zone slots', () => {
-      const swapped = swapArrangementSlots(
-        DEFAULT_COLLABORATION_ARRANGEMENT,
-        'left',
-        'right'
-      );
-      setCollaborationArrangement(swapped);
-
-      expect(getCollaborationArrangement()).toEqual({
-        left: 'preview',
-        center: 'thread',
-        right: 'spaces',
-      });
-      expect(
-        collaborationSlotOfZone(getCollaborationArrangement(), 'spaces')
-      ).toBe('right');
-      expect(
-        isDefaultCollaborationArrangement(getCollaborationArrangement())
-      ).toBe(false);
     });
   });
 });

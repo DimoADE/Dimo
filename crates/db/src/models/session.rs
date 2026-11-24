@@ -426,23 +426,6 @@ impl Session {
         .await
     }
 
-    pub async fn update_executor(
-        pool: &SqlitePool,
-        id: Uuid,
-        executor: &str,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            r#"UPDATE sessions
-               SET executor = ?, updated_at = datetime('now', 'subsec')
-               WHERE id = ?"#,
-        )
-        .bind(executor)
-        .bind(id)
-        .execute(pool)
-        .await?;
-        Ok(())
-    }
-
     pub async fn update_provider_instance_id(
         pool: &SqlitePool,
         id: Uuid,

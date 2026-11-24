@@ -102,7 +102,7 @@ dimo plugin update acme.search --ref v1.3.0 --yes
 
 - **Dimo Office**：直接点击工作区 `.docx` / `.xlsx` / `.pptx` 打开实时预览，或在对话中使用 Office Skills / Workflows 创建与修改文档。
 - **会话增强**：启用后，新开或重绑定的会话可使用结构化提问、实时反馈、跨会话只读查询与子会话控制；配置页提供四个独立开关。
-- **Workflow Creator**：打开 `*.dimo-workflow.json` 进入 Workflow Studio 可视化编排器，并在新会话中使用 `dimo-workflow-mcp` 校验、发布与断点调试工作流。
+- **Workflow Creator**：打开 `*.dimo-workflow.json` 进入 Workflow Studio 可视化编排器，并在新会话中使用内置 `Dimo-superagent-mcp`（`dimo-mcp`）校验、发布与断点调试工作流。
 - **插件开发**：向兼容 Agent 投影 `dimo-plugin-development` 与 `dimo-plugin-creator` Skill，配合 `dimo-plugin` CLI 完成插件脚手架、校验与调试。
 - **内置协作空间**：协作空间与 `&Agent` 委派属于 Dimo Host 内置能力（「设置 → 常规 → 协作空间」，默认开启），无需安装插件。
 

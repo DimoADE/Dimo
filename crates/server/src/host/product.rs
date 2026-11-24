@@ -950,32 +950,12 @@ impl ServerApplicationDomains {
                         .map_err(internal_error)?,
                 )
             }
-            DomainCommand::WorkspaceShowStash => {
-                #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
-                struct ShowStashArgs {
-                    workspace_id: Uuid,
-                    repo_id: Option<Uuid>,
-                    index: Option<usize>,
-                }
-                let args: ShowStashArgs = parse(args)?;
-                let path = self
-                    .primary_worktree(args.workspace_id, args.repo_id)
-                    .await?;
-                serialize(
-                    self.deployment
-                        .git()
-                        .stash_show(&path, args.index.unwrap_or(0))
-                        .map_err(internal_error)?,
-                )
-            }
             DomainCommand::WorkspaceRunSetupScript
             | DomainCommand::WorkspaceRunCleanupScript
             | DomainCommand::WorkspaceRunArchiveScript => {
                 self.run_workspace_script(command, args).await
             }
             DomainCommand::WorkspaceCreatePr => self.create_workspace_pr_host(args).await,
-            DomainCommand::WorkspaceAttachPr => self.attach_workspace_pr_host(args).await,
             DomainCommand::WorkspaceCreateFromPr => self.create_workspace_from_pr_host(args).await,
             other => Err(ApplicationError::internal(format!(
                 "product command {} has no host implementation",

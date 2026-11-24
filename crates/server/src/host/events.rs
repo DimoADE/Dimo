@@ -97,6 +97,11 @@ pub const HOST_EVENT_CHANNELS: &[HostEventChannel] = &[
         required_scope: "application.call",
     },
     HostEventChannel {
+        prefix: "agent-capability-catalog-updated",
+        durability: EventDurability::Invalidation,
+        required_scope: "application.call",
+    },
+    HostEventChannel {
         prefix: "agent-terminal-events",
         durability: EventDurability::Invalidation,
         required_scope: "application.call",

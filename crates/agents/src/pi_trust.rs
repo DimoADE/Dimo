@@ -296,10 +296,6 @@ pub fn launch_preflight(env: &HashMap<String, String>) -> Option<String> {
     })
 }
 
-pub fn resolve_pi_command(command: &str) -> Option<PathBuf> {
-    resolve_pi_command_in_env(command, &HashMap::new())
-}
-
 pub fn resolve_pi_command_in_env(command: &str, env: &HashMap<String, String>) -> Option<PathBuf> {
     let command = command.trim();
     if command.is_empty() {

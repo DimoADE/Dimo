@@ -267,18 +267,4 @@ describe('shared raised controls', () => {
 
     expect(violations).toEqual([]);
   });
-
-  it('keeps handwritten selector triggers on the raised material', () => {
-    const selectorFiles = ['components/tasks/follow-up/SessionSelector.tsx'];
-
-    for (const relativePath of selectorFiles) {
-      const source = readFileSync(join(srcRoot, relativePath), 'utf8');
-      const trigger = [...source.matchAll(/<button\b[\s\S]*?>/g)].find(
-        (match) => match[0].includes('data-raised-selector')
-      );
-
-      expect(trigger?.[0], relativePath).toContain('raised-control');
-      expect(trigger?.[0], relativePath).not.toContain('rounded-full');
-    }
-  });
 });

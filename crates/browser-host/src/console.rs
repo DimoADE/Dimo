@@ -7,14 +7,12 @@
 use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 pub const MAX_ENTRIES: usize = 200;
 pub const MAX_ENTRY_CHARS: usize = 2_000;
 pub const MAX_RING_CHARS: usize = 100_000;
 pub const DEFAULT_READ_LIMIT: usize = 100;
 pub const MAX_READ_LIMIT: usize = 200;
-pub const CDP_MAX_EVENT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -220,142 +218,4 @@ fn cap_chars(raw: &str, max: usize) -> (String, bool) {
     } else {
         (raw.to_string(), false)
     }
-}
-
-pub fn cdp_context_origin(raw: Option<&str>) -> Option<String> {
-    let raw = raw?.trim();
-    if raw.is_empty() || raw == "null" || raw == "://" {
-        return None;
-    }
-    let parsed = url::Url::parse(raw).ok()?;
-    match parsed.scheme() {
-        "http" | "https" => Some(parsed.origin().ascii_serialization()),
-        _ => None,
-    }
-}
-
-pub fn cdp_console_line(
-    params: &Value,
-    at: i64,
-    top: bool,
-    frame_origin: Option<String>,
-) -> Option<ConsoleLine> {
-    let kind = params.get("type")?.as_str()?;
-    let level = ConsoleLevel::parse(kind)?;
-    let args = params
-        .get("args")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    let text = args
-        .iter()
-        .map(format_remote_object)
-        .collect::<Vec<_>>()
-        .join(" ");
-    let (url, line, column) = top_call_frame(params.get("stackTrace"));
-    Some(ConsoleLine {
-        level,
-        source: ConsoleSource::Console,
-        text,
-        url,
-        line,
-        column,
-        at,
-        top,
-        frame_origin,
-    })
-}
-
-pub fn cdp_exception_line(
-    params: &Value,
-    at: i64,
-    top: bool,
-    frame_origin: Option<String>,
-) -> Option<ConsoleLine> {
-    let details = params.get("exceptionDetails")?;
-    let head = details
-        .get("text")
-        .and_then(Value::as_str)
-        .unwrap_or("Uncaught");
-    let body = details
-        .get("exception")
-        .map(format_remote_object)
-        .filter(|s| !s.is_empty());
-    let text = match body {
-        Some(b) if head.ends_with(':') => format!("{head} {b}"),
-        Some(b) if b.starts_with(head) => b,
-        Some(b) => format!("{head}: {b}"),
-        None => head.to_string(),
-    };
-    let (stack_url, stack_line, stack_col) = top_call_frame(details.get("stackTrace"));
-    let url = details
-        .get("url")
-        .and_then(Value::as_str)
-        .filter(|u| !u.is_empty())
-        .map(str::to_string)
-        .or(stack_url);
-    let line = details
-        .get("lineNumber")
-        .and_then(Value::as_u64)
-        .and_then(|n| u32::try_from(n.saturating_add(1)).ok())
-        .or(stack_line);
-    let column = details
-        .get("columnNumber")
-        .and_then(Value::as_u64)
-        .and_then(|n| u32::try_from(n.saturating_add(1)).ok())
-        .or(stack_col);
-    Some(ConsoleLine {
-        level: ConsoleLevel::Error,
-        source: ConsoleSource::Error,
-        text,
-        url,
-        line,
-        column,
-        at,
-        top,
-        frame_origin,
-    })
-}
-
-fn format_remote_object(obj: &Value) -> String {
-    if let Some(u) = obj.get("unserializableValue").and_then(Value::as_str) {
-        return u.to_string();
-    }
-    if let Some(val) = obj.get("value") {
-        return match val {
-            Value::String(s) => s.clone(),
-            other => other.to_string(),
-        };
-    }
-    if let Some(desc) = obj.get("description").and_then(Value::as_str) {
-        return desc.to_string();
-    }
-    obj.get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("undefined")
-        .to_string()
-}
-
-fn top_call_frame(trace: Option<&Value>) -> (Option<String>, Option<u32>, Option<u32>) {
-    let Some(frame) = trace
-        .and_then(|t| t.get("callFrames"))
-        .and_then(Value::as_array)
-        .and_then(|frames| frames.first())
-    else {
-        return (None, None, None);
-    };
-    let url = frame
-        .get("url")
-        .and_then(Value::as_str)
-        .filter(|u| !u.is_empty())
-        .map(str::to_string);
-    let line = frame
-        .get("lineNumber")
-        .and_then(Value::as_u64)
-        .and_then(|n| u32::try_from(n.saturating_add(1)).ok());
-    let column = frame
-        .get("columnNumber")
-        .and_then(Value::as_u64)
-        .and_then(|n| u32::try_from(n.saturating_add(1)).ok());
-    (url, line, column)
 }

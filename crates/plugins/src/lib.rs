@@ -32,16 +32,13 @@ mod official_catalog;
 mod official_mcp;
 mod package;
 mod plugin_mcp;
-mod ports;
 mod preview_host;
 mod process_preview_host;
 mod provider_catalog;
 mod provider_presets;
 mod readiness;
 mod remote_profiles;
-mod resolver;
 mod runtime;
-mod service;
 mod theme;
 mod worker_host;
 mod worker_http;
@@ -55,15 +52,13 @@ pub use artifact_http::{artifact_origin, rewrite_remote_entry, set_artifact_orig
 pub use artifact_preview::PluginArtifactPreviewService;
 pub use catalog::{
     AUTHORING_SAMPLE_PLUGIN_IDS, COMMUNITY_PAGE_SIZE, CatalogListing, CatalogPage,
-    CatalogPluginDetail, CatalogVersion, DEFAULT_MARKETPLACE_ORIGIN, REPLACED_PLUGIN_IDS,
-    canonical_listing_id, canonical_plugin_id, collapse_replaced_official, detail_from_package,
-    fetch_artifact, fetch_catalog, fetch_listing, fetch_versions, filter_catalog_page,
-    fold_official_listings, is_authoring_sample_plugin_id, is_newer_version, listing_from_package,
-    listing_identity, listing_is_authoring_sample, listing_is_retired, listing_matches_query,
-    listings_from_official_index, marketplace_archive_suffix, marketplace_listing_url,
-    marketplace_origin, marketplace_plugin_ids, marketplace_plugin_slug,
-    merge_bundled_official_index, merge_offline_official, official_github_archive_urls,
-    official_github_repository_url, origin_kind, origin_owner_name, package_matches_marketplace,
+    CatalogPluginDetail, REPLACED_PLUGIN_IDS, canonical_listing_id, canonical_plugin_id,
+    collapse_replaced_official, detail_from_package, fetch_artifact, fetch_catalog, fetch_listing,
+    filter_catalog_page, fold_official_listings, is_authoring_sample_plugin_id, is_newer_version,
+    listing_from_package, listing_is_authoring_sample, listing_is_retired, listing_matches_query,
+    marketplace_archive_suffix, marketplace_listing_url, marketplace_origin,
+    marketplace_plugin_ids, marketplace_plugin_slug, official_github_archive_urls,
+    official_github_repository_url, origin_kind, package_matches_marketplace,
     prepare_marketplace_page, source_allows_remote_update, successor_plugin_id,
 };
 pub use collaboration_host::{
@@ -73,13 +68,13 @@ pub use contribution::{
     ContributionCatalog, ContributionDescriptor, ContributionKind, ResolvedFileOpener,
 };
 pub use control_plane::{
-    ActivationRecoveryFailure, BundledPluginActivation, ConflictDecision, HostAuditEntry,
-    ImportConflict, ImportDisposition, ImportResult, InMemoryPluginRegistry, InstalledPlugin,
-    PluginAuditEvent, PluginBusEvent, PluginCommandHandler, PluginControlPlane,
-    PluginEventSubscriptionBatch, PluginRegistry, RuntimeInstallation,
-    SYSTEM_BUNDLE_PLUGIN_MANIFESTS, SqlitePluginRegistry, SystemBundlePluginManifest,
-    candidate_capability_grants, is_system_bundle_plugin_id, resolve_system_bundle_domain_command,
-    system_bundle_plugin_manifest, system_bundle_plugin_manifests,
+    ActivationRecoveryFailure, BundledPluginActivation, ConflictDecision, ImportConflict,
+    ImportDisposition, ImportResult, InMemoryPluginRegistry, InstalledPlugin, PluginAuditEvent,
+    PluginBusEvent, PluginCommandHandler, PluginControlPlane, PluginEventSubscriptionBatch,
+    PluginRegistry, RuntimeInstallation, SYSTEM_BUNDLE_PLUGIN_MANIFESTS, SqlitePluginRegistry,
+    SystemBundlePluginManifest, candidate_capability_grants, is_system_bundle_plugin_id,
+    resolve_system_bundle_domain_command, system_bundle_plugin_manifest,
+    system_bundle_plugin_manifests,
 };
 pub use conversation_host::{
     PluginConversationCancelInput, PluginConversationCreate, PluginConversationDraftInsert,
@@ -108,14 +103,12 @@ pub use language_runtimes::{
     LanguageRuntimeLock, PLUGIN_WORKER_CPYTHON_VERSION, plugin_worker_cpython_lock,
 };
 pub use manifest::{
-    ActionId, ArtifactIntent, ConsoleBinding, Distribution, MANIFEST_DIR, MANIFEST_DIRS,
-    ManifestSource, PRE_RENAME_MANIFEST_DIR, PluginAction, PluginId, PluginManifest,
-    PluginMembership, PromptBlock, SkillDeclaration, SkillId, SkillSource, ToolDependency, ToolId,
-    ToolKind, existing_manifest_path, manifest_candidates, manifest_path,
+    ActionId, ArtifactIntent, MANIFEST_DIR, MANIFEST_DIRS, PRE_RENAME_MANIFEST_DIR, PluginAction,
+    PluginId, PromptBlock, SkillId, ToolId, existing_manifest_path, manifest_candidates,
+    manifest_path,
 };
 pub use marketplace::{
-    MarketplaceIndex, MarketplaceListing, PublisherTofu, archive_digest, default_index_path,
-    default_tofu_path, load_index, load_tofu, remember_publisher, save_tofu,
+    MarketplaceIndex, MarketplaceListing, archive_digest, default_index_path, load_index,
 };
 pub use native::{
     FilesystemNativePluginAdapter, NativeAdapterCapabilities, NativeEcosystem, NativePluginAdapter,
@@ -126,22 +119,21 @@ pub use official_catalog::{
     MONOREPO_OFFICIAL_PLUGIN_DIRS, OfficialPluginCatalog, OfficialPluginRecord,
     discover_monorepo_plugin_roots, github_archive_urls_for_repository,
     listings_from_host_official_catalog, merge_host_official_catalog,
-    monorepo_official_plugin_root, official_marketplace_home, official_marketplace_origin,
-    official_plugin_catalog, official_plugin_category, official_plugin_record,
+    monorepo_official_plugin_root, official_marketplace_origin, official_plugin_catalog,
+    official_plugin_category, official_plugin_record,
 };
 pub use official_mcp::{
     DELEGATION_MCP_FEATURES, DELEGATION_MCP_NAME, DELEGATION_MCP_SPACE_FEATURES,
     HOST_FAMILY_MCP_STARTUP_TIMEOUT_SEC, HOST_MULTI_AGENT_ID, HostDelegationLimits,
-    OfficialMcpBinding, OfficialMcpRuntime, OfficialProductMcpState, PLUGIN_DEV_MCP_NAME,
-    PluginMcpHeadline, PluginMcpPluginStatus, PluginMcpServerStatus, PluginMcpStatusReport,
-    PluginMcpToolStatus, RETIRED_PRODUCT_MCP_NAMES, SESSION_FEAT_ALL, SESSION_FEAT_ASK,
-    SESSION_FEAT_FEEDBACK, SESSION_FEAT_SESSION_CONTROL, SESSION_FEAT_SESSIONS, SESSION_MCP_NAME,
-    SUPERAGENT_MCP_NAME, WORKFLOW_MCP_NAME, advertised_mcp_tools, binding_has_delegation_mcp,
-    delegation_mcp_features, host_collaboration_mcp_row, host_family_product,
-    host_family_stdio_spec, is_product_mcp_name, legacy_projected_mcp_server_id,
-    official_product_mcp_name, plugin_mcp_status_report, projected_mcp_server_id,
-    session_feature_arg, session_features_from_config, superagent_mcp_features,
-    with_host_collaboration_mcp,
+    OfficialMcpBinding, OfficialMcpRuntime, OfficialProductMcpState, PluginMcpHeadline,
+    PluginMcpPluginStatus, PluginMcpServerStatus, PluginMcpStatusReport, PluginMcpToolStatus,
+    RETIRED_PRODUCT_MCP_NAMES, SESSION_FEAT_ALL, SESSION_FEAT_ASK, SESSION_FEAT_FEEDBACK,
+    SESSION_FEAT_SESSION_CONTROL, SESSION_FEAT_SESSIONS, SESSION_MCP_NAME, SUPERAGENT_MCP_NAME,
+    WORKFLOW_MCP_NAME, advertised_mcp_tools, binding_has_delegation_mcp,
+    host_collaboration_mcp_row, host_family_product, host_family_stdio_spec, is_product_mcp_name,
+    legacy_projected_mcp_server_id, official_product_mcp_name, plugin_mcp_status_report,
+    projected_mcp_server_id, session_feature_arg, session_features_from_config,
+    superagent_mcp_features, with_host_collaboration_mcp,
 };
 pub use package::{
     APP_PANEL_SLOT, APP_TAB_SLOT, AppCommandContribution, AppComposerActionContribution,
@@ -157,12 +149,7 @@ pub use package::{
     RemoteModuleRef, RemoteProvisionerContribution, RuntimeContribution, RuntimeInstall,
     SETTINGS_PAGE_SLOT, SETTINGS_SECTION_SLOT, TIMELINE_CARD_SLOT, package_content_digest,
 };
-pub use plugin_mcp::{
-    PluginMcpAdmission, PluginMcpKind, admit_plugin_mcp, admit_plugin_mcp_servers,
-};
-pub use ports::{
-    ManagedTool, PluginRuntimeError, SkillAvailabilityPort, ToolRuntimeAdapter, ToolRuntimePort,
-};
+pub use plugin_mcp::{PluginMcpAdmission, PluginMcpKind, admit_plugin_mcp};
 pub use preview_host::{
     PluginPreviewHost, PluginPreviewHostError, PluginPreviewRequest, PluginPreviewSession,
 };
@@ -170,34 +157,27 @@ pub use process_preview_host::ExternalProcessPreviewHost;
 pub use provider_catalog::{
     CatalogListInput, ProviderCatalogContribution, ProviderCatalogListView,
     ProviderCatalogSourceView, ProviderCatalogSurface, ProviderCatalogTemplate,
-    ProviderCatalogTemplateView, aggregate_provider_catalogs, catalog_unavailable,
+    ProviderCatalogTemplateView, aggregate_provider_catalogs,
 };
 pub use provider_presets::{
     PROVIDER_BIND_CONFIRMATION_TIMEOUT, ProviderBindDecision, ProviderBindPrompts,
     ProviderBindRequest, ProviderPreset, ProviderPresetDraft, ProviderPresetError,
     ProviderPresetErrorCode, ProviderPresetHost, UnavailableProviderPresetHost,
 };
-pub use readiness::{
-    DependencyState, EnableOperation, EnableOperationKind, EnableResult, PluginActivation,
-    PluginReadiness, PluginSnapshot, ProviderState, ReadinessIssue, SkillState,
-};
+pub use readiness::PluginActivation;
 pub use remote_profiles::{
     RemoteConnectRequest, RemoteConnectResult, RemoteHostProfile, RemoteHostProfileDraft,
     RemoteProfileError, RemoteProfileErrorCode, RemoteProfileHost, UnavailableRemoteProfileHost,
-};
-pub use resolver::{
-    Architecture, OperatingSystem, Platform, ResolvedToolDistribution, ToolDependencyResolver,
 };
 pub use runtime::{
     ContentAddressedRuntimeHost, GlobalRuntimeHost, GlobalRuntimeInstaller,
     PluginWorkerRuntimeProvider, RuntimeProcess, inherited_runtime_environment,
 };
-pub use service::PluginService;
 pub use worker_host::{
-    BrokerError, CapabilityBroker, CapabilityGrant, DenyCapabilityBroker, GrantLimits,
-    HostCapabilityGrant, PluginCrash, PluginLogLine, ScopedCapabilityBroker, SharedNodeWorkerHost,
-    WorkerActivation, WorkerHost, WorkerHostError, clear_plugin_crashes, recent_plugin_crashes,
-    recent_plugin_logs, record_plugin_crash, record_plugin_log, subscribe_worker_crashes,
+    CapabilityBroker, CapabilityGrant, DenyCapabilityBroker, GrantLimits, HostCapabilityGrant,
+    PluginCrash, PluginLogLine, ScopedCapabilityBroker, SharedNodeWorkerHost, WorkerActivation,
+    WorkerHost, WorkerHostError, clear_plugin_crashes, recent_plugin_crashes, recent_plugin_logs,
+    record_plugin_crash, record_plugin_log, subscribe_worker_crashes,
 };
 pub use worker_http::{
     validate_loopback_mcp_url, worker_http_handler, worker_http_mcp_spec_from_endpoint,

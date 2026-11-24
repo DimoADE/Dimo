@@ -2520,7 +2520,7 @@ export default function ComputerUseSettingsView({
           : JSON.parse(JSON.stringify(params ?? {}))
       ) as Record<string, unknown>;
 
-      const tryRenewedTauriInvoke = async (): Promise<unknown> => {
+      const tryRenewedHostInvoke = async (): Promise<unknown> => {
         const electronBackend = (
           globalThis as unknown as {
             dimoDesktop?: {
@@ -2528,21 +2528,9 @@ export default function ComputerUseSettingsView({
             };
           }
         ).dimoDesktop?.backend;
-        const tauriInternals = (
-          globalThis as unknown as {
-            __TAURI_INTERNALS__?: {
-              invoke?: (
-                cmd: string,
-                args?: Record<string, unknown>
-              ) => Promise<unknown>;
-            };
-          }
-        ).__TAURI_INTERNALS__;
-        const hasElectron = Boolean(
-          electronBackend?.baseUrl?.trim() && electronBackend?.token?.trim()
-        );
-        const hasTauri = typeof tauriInternals?.invoke === 'function';
-        if (!hasElectron && !hasTauri) {
+        const baseUrl = electronBackend?.baseUrl?.trim().replace(/\/+$/, '');
+        const token = electronBackend?.token?.trim();
+        if (!baseUrl || !token) {
           throw new Error('Host invoke bridge unavailable');
         }
         const pluginId = environment?.pluginId || 'dimo-plugin-computer-use';
@@ -2552,39 +2540,27 @@ export default function ComputerUseSettingsView({
           command: string,
           args: Record<string, unknown>
         ) => {
-          if (hasElectron) {
-            const baseUrl = electronBackend!.baseUrl!.trim().replace(/\/+$/, '');
-            const token = electronBackend!.token!.trim();
-            const response = await fetch(
-              `${baseUrl}/api/v1/call/${encodeURIComponent(command)}`,
-              {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  Authorization: `Bearer ${token}`,
-                },
-                body: JSON.stringify({
-                  operation_id: globalThis.crypto.randomUUID(),
-                  args,
-                }),
-              }
-            );
-            if (!response.ok) {
-              throw new Error(`Host command ${command} failed (${response.status})`);
+          const response = await fetch(
+            `${baseUrl}/api/v1/call/${encodeURIComponent(command)}`,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${token}`,
+              },
+              body: JSON.stringify({
+                operation_id: globalThis.crypto.randomUUID(),
+                args,
+              }),
             }
-            const envelope = (await response.json()) as { data?: unknown } | unknown;
-            return envelope && typeof envelope === 'object' && 'data' in envelope
-              ? (envelope as { data: unknown }).data
-              : envelope;
+          );
+          if (!response.ok) {
+            throw new Error(`Host command ${command} failed (${response.status})`);
           }
-          const res = (await tauriInternals!.invoke!('application_call', {
-            command,
-            operationId: globalThis.crypto.randomUUID(),
-            args,
-          })) as { data?: unknown } | unknown;
-          return res && typeof res === 'object' && 'data' in res
-            ? (res as { data: unknown }).data
-            : res;
+          const envelope = (await response.json()) as { data?: unknown } | unknown;
+          return envelope && typeof envelope === 'object' && 'data' in envelope
+            ? (envelope as { data: unknown }).data
+            : envelope;
         };
 
         if (!renewedSessionRef.current) {
@@ -2664,14 +2640,14 @@ export default function ComputerUseSettingsView({
               throw hostErr;
             }
             try {
-              return await tryRenewedTauriInvoke();
+              return await tryRenewedHostInvoke();
             } catch {
               throw hostErr;
             }
           }
         }
 
-        return await tryRenewedTauriInvoke();
+        return await tryRenewedHostInvoke();
       };
 
       const next = invokeQueueRef.current.then(run, run);

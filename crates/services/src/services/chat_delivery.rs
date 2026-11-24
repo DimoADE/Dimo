@@ -126,10 +126,6 @@ impl ImLang {
     }
 }
 
-pub fn build_rich(event: &AgentEvent, include_prompt_text: bool) -> RichMessage {
-    build_rich_localized(event, include_prompt_text, ImLang::En)
-}
-
 pub fn build_rich_localized(
     event: &AgentEvent,
     include_prompt_text: bool,
@@ -1092,20 +1088,6 @@ pub async fn load_channel_tokens(channel_ids: &[String]) -> HashMap<String, Stri
         }
     }
     out
-}
-
-/// One-time migration of legacy plaintext-JSON channel tokens into `~/.dimo/.env`
-/// (ADR-0004). Writes each `(channel_id, token)` and reports success so the caller can
-/// delete the old file. Idempotent: re-running just re-upserts the same values.
-pub async fn import_legacy_channel_tokens(
-    tokens: &HashMap<String, String>,
-) -> Result<(), NotificationError> {
-    for (channel_id, token) in tokens {
-        if !token.trim().is_empty() {
-            save_channel_token(channel_id, token).await?;
-        }
-    }
-    Ok(())
 }
 
 fn im_env_write_lock() -> &'static tokio::sync::Mutex<()> {

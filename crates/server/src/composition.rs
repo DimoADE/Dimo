@@ -94,16 +94,6 @@ impl ServerBootstrapConfig {
         self
     }
 
-    pub fn with_resources_dir(mut self, dir: impl AsRef<Path>) -> Self {
-        self.resources_dir = Some(dir.as_ref().to_path_buf());
-        self
-    }
-
-    pub fn with_shutdown_notify(mut self, notify: Arc<Notify>) -> Self {
-        self.shutdown_notify = Some(notify);
-        self
-    }
-
     pub fn with_autostart_web_service(mut self, autostart: bool) -> Self {
         self.autostart_web_service = autostart;
         self
@@ -129,6 +119,7 @@ pub struct HeadlessServer {
     automation_owner: Option<AutomationEngine<File>>,
     automation_recovery: Option<StartupRecoveryReport>,
     agent_event_task: Option<JoinHandle<()>>,
+    catalog_event_task: Option<JoinHandle<()>>,
     terminal_task: Option<JoinHandle<()>>,
     idle_recycle_task: Option<JoinHandle<()>>,
     local_discovery_task: Option<JoinHandle<()>>,
@@ -244,6 +235,21 @@ impl HeadlessServer {
                     }
                 },
             )
+        };
+        let catalog_event_task = {
+            let events = events.clone();
+            tokio::spawn(async move {
+                let mut rx = conversations::subscribe_capability_catalog_updates();
+                loop {
+                    match rx.recv().await {
+                        Ok(event) => {
+                            events.emit("agent-capability-catalog-updated", event);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            })
         };
         let terminal_task = {
             let pool = pool.clone();
@@ -584,6 +590,7 @@ impl HeadlessServer {
         };
         let local_discovery_task = {
             let runtime = host.agent_management_runtime.clone();
+            let agent_runtime = agent_runtime.clone();
             let events = host.events.clone();
             let pool = pool.clone();
             let desktop_mode = config.desktop_mode;
@@ -609,6 +616,7 @@ impl HeadlessServer {
                 } else {
                     events.emit("agent-management-snapshot-invalidated", ());
                 }
+                warm_native_capability_catalogs(&pool, &agent_runtime).await;
             })
         };
         let workflow_dispatcher =
@@ -765,6 +773,7 @@ impl HeadlessServer {
             automation_owner,
             automation_recovery,
             agent_event_task: Some(agent_event_task),
+            catalog_event_task: Some(catalog_event_task),
             terminal_task: Some(terminal_task),
             idle_recycle_task: Some(idle_recycle_task),
             local_discovery_task: Some(local_discovery_task),
@@ -794,10 +803,6 @@ impl HeadlessServer {
     /// such as delegation and durable conversation event persistence.
     pub const fn agent_runtime(&self) -> &Arc<AgentRuntime> {
         &self._agent_runtime
-    }
-
-    pub fn shutdown_handle(&self) -> Arc<Notify> {
-        Arc::clone(&self.shutdown_notify)
     }
 
     pub fn take_issued_token(&mut self) -> Option<ServerToken> {
@@ -888,6 +893,7 @@ impl HeadlessServer {
             automation_task,
             plugin_dev_task,
             self.agent_event_task.take(),
+            self.catalog_event_task.take(),
             self.workflow_dispatch_task.take(),
             self.startup_recovery_task.take(),
             self.plugin_startup_task.take(),
@@ -971,6 +977,68 @@ impl HeadlessServer {
             }
         }
         result
+    }
+}
+
+/// Background startup hydration of capability catalogs for enabled, ready,
+/// authenticated native engines (`CatalogRefreshPolicy::BackgroundNativeProbe`).
+/// Explicitly skips `PassiveOnly` engines (e.g. Antigravity) so heavy ACP
+/// servers are never auto-spawned on startup.
+async fn warm_native_capability_catalogs(pool: &SqlitePool, agent_runtime: &Arc<AgentRuntime>) {
+    let Ok(views) =
+        services::services::agent_management::AgentManagementApplicationService::new(pool.clone())
+            .list()
+            .await
+    else {
+        return;
+    };
+    for view in views {
+        if !view.enabled || view.retired {
+            continue;
+        }
+        if view.lifecycle != api_types::AgentLifecycleState::Ready {
+            continue;
+        }
+        if !matches!(
+            view.authentication,
+            api_types::AgentAuthenticationStatus::Account
+                | api_types::AgentAuthenticationStatus::ApiKey
+                | api_types::AgentAuthenticationStatus::NotRequired
+        ) {
+            continue;
+        }
+        if agents::catalog_refresh_policy_for_agent(view.agent_id.as_str())
+            != agents::CatalogRefreshPolicy::BackgroundNativeProbe
+        {
+            continue;
+        }
+        let Ok(resolved) =
+            conversations::resolve_instant_capability_catalog_for_provider_instance(
+                pool,
+                &view.agent_id,
+                None,
+            )
+            .await
+        else {
+            continue;
+        };
+        if !resolved.needs_background_refresh {
+            continue;
+        }
+        if let Err(error) = conversations::refresh_open_capability_catalog_for_provider_instance(
+            pool,
+            agent_runtime,
+            &view.agent_id,
+            None,
+        )
+        .await
+        {
+            tracing::debug!(
+                agent_id = %view.agent_id,
+                %error,
+                "startup background capability catalog hydration skipped"
+            );
+        }
     }
 }
 

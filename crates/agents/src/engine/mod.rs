@@ -4,6 +4,7 @@
 //! synthesis, native steering, session forking, and atomic session+file rewind while
 //! keeping long-tail agents on ACP.
 
+pub mod baseline;
 pub mod claude;
 pub mod claude_events;
 pub mod codex;
@@ -24,6 +25,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+pub use baseline::{build_native_controls_snapshot, bundled_controls_snapshot};
 use chrono::{DateTime, Utc};
 pub use claude::{ClaudeNativeDriver, ClaudeSidecarClient};
 pub use codex::{
@@ -31,7 +33,8 @@ pub use codex::{
     CodexTurnRecord,
 };
 pub use descriptor::{
-    EngineRuntimePreference, NativeEngineDescriptor, NativeEngineKind, resolve_native_engine_kind,
+    CatalogRefreshPolicy, EngineRuntimePreference, NativeEngineDescriptor, NativeEngineKind,
+    catalog_refresh_policy_for_agent, resolve_native_engine_kind,
     resolve_native_engine_kind_with_env,
 };
 use futures::Stream;
@@ -436,39 +439,6 @@ impl EngineStartSpec {
             );
         }
         self.resolve_home_dir().map(|home| home.join(".codex"))
-    }
-
-    /// Resolves the effective `~/.claude` (or `CLAUDE_CONFIG_DIR`) directory visible to
-    /// a `ClaudeNativeDriver` session.
-    pub fn effective_claude_config_dir(&self) -> Option<PathBuf> {
-        if let Some(explicit) = self
-            .env
-            .get("CLAUDE_CONFIG_DIR")
-            .map(String::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            return Some(PathBuf::from(explicit));
-        }
-        if self.isolate_profile
-            && let Some(instance_id) = self
-                .provider_instance_id
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-        {
-            let root_base = self
-                .env
-                .get("DIMO_PROVIDER_INSTANCES_ROOT")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| std::env::temp_dir().join("dimo-provider-instances"));
-            return Some(
-                root_base
-                    .join(stream_router::sanitize_instance_dir_segment(instance_id))
-                    .join("claude-config"),
-            );
-        }
-        self.resolve_home_dir().map(|home| home.join(".claude"))
     }
 
     /// Resolves the effective `~/.config/muse` (respecting `XDG_CONFIG_HOME`) directory
@@ -1244,6 +1214,12 @@ pub trait NativeEngineDriver: Send + Sync + 'static {
         HashMap::new()
     }
 
+    /// Static bundled model baseline returned synchronously before any live
+    /// provider probe runs. Empty for engines without a static baseline.
+    fn bundled_models(&self) -> Vec<EngineModelInfo> {
+        Vec::new()
+    }
+
     /// Applies environment/settings-derived model labels, custom models, and default flags onto discovered models.
     fn apply_env_to_models(
         &self,
@@ -1366,6 +1342,16 @@ pub trait NativeEngineDriver: Send + Sync + 'static {
         _handle: &EngineHandle,
     ) -> Result<Vec<EngineModelInfo>, EngineError> {
         Ok(Vec::new())
+    }
+
+    /// Probes the live model catalog at provider scope without establishing or
+    /// discarding a throwaway session. Returns `Ok(None)` when the driver does
+    /// not provide a lightweight provider-level probe.
+    async fn probe_models_for_provider(
+        &self,
+        _spec: &EngineStartSpec,
+    ) -> Result<Option<Vec<EngineModelInfo>>, EngineError> {
+        Ok(None)
     }
 
     /// Returns the most recently observed rate-limit snapshot for `handle`.

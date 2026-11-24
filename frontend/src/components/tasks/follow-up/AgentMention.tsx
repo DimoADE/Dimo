@@ -8,7 +8,6 @@ import {
 } from 'react';
 import type { AgentId } from 'shared/types';
 import type { BackendTransport } from '@/lib/backendTransport';
-import type { TypeaheadTriggerMatch } from './typeahead-triggers';
 
 export type AgentMention = {
   agent_kind: AgentId;
@@ -394,20 +393,5 @@ export function createAgentMentionCodeContextScanner(
     inlinePos = step.pos;
     inlineDelimiter = step.delimiter;
     return step.resultAtLimit;
-  };
-}
-
-export function matchAgentMentionTrigger(
-  text: string
-): TypeaheadTriggerMatch | null {
-  const match = /(?:^|[\s([{])&([^\s&]*)$/.exec(text);
-  if (!match) return null;
-
-  const triggerOffset = match.index + match[0].indexOf('&');
-  if (isAgentMentionCodeContext(text, triggerOffset)) return null;
-  return {
-    leadOffset: triggerOffset,
-    matchingString: match[1],
-    replaceableString: match[0].slice(match[0].indexOf('&')),
   };
 }

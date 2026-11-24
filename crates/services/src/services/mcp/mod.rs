@@ -5289,14 +5289,6 @@ pub async fn list_marketplaces() -> Result<Vec<McpMarketplaceProvider>, McpError
     ])
 }
 
-pub async fn search_marketplace(
-    provider_id: String,
-    query: Option<String>,
-    limit: Option<u32>,
-) -> Result<Vec<McpMarketplaceItem>, McpError> {
-    search_marketplace_with_category(provider_id, query, None, limit).await
-}
-
 pub async fn search_marketplace_with_category(
     provider_id: String,
     query: Option<String>,

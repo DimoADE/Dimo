@@ -2,13 +2,7 @@ import type { WorkflowEventRecord } from 'shared/types';
 
 import type { MemberBotAvatarConfig } from '@/features/collaboration/MemberBotAvatar';
 import i18n from '@/i18n';
-import type {
-  BotMailboxPolicy,
-  EventSourceKind,
-  GroupDispatchMode,
-  PulseTemporalSpec,
-  PulseWorkspaceIsolation,
-} from '@/lib/api/pulse';
+import type { EventSourceKind, PulseTemporalSpec } from '@/lib/api/pulse';
 
 import {
   resolveStaticBotIdentity,
@@ -72,23 +66,6 @@ export function resolveNodeCategory(
   }
 }
 
-export function resolveSessionIsolation(
-  step: Extract<StudioWorkflowStep, { kind: 'session' | 'agent' }>
-): PulseWorkspaceIsolation {
-  if (step.workspaceIsolation) {
-    return step.workspaceIsolation;
-  }
-  if (step.kind === 'agent') {
-    if (step.workspaceAccess === 'write_isolated') {
-      return 'isolated_worktree';
-    }
-    if (step.workspaceAccess === 'read_only_shared') {
-      return 'scratch';
-    }
-  }
-  return 'project_root';
-}
-
 export function formatWorkflowEventSource(
   source: EventSourceKind,
   t?: WorkflowTranslateFn
@@ -127,41 +104,6 @@ export function formatWorkflowTemporalBadge(
   }
 }
 
-export function formatWorkflowMailboxPolicy(
-  policy: BotMailboxPolicy,
-  t?: WorkflowTranslateFn,
-  detailed = false
-): string {
-  const tr = getWorkflowTranslator(t);
-  if (detailed) {
-    return tr(`inspector.bot.mailboxOptions.${policy}_detail`);
-  }
-  return tr(`nodes.mailbox.${policy}`);
-}
-
-export function formatWorkflowGroupDispatch(
-  mode: GroupDispatchMode,
-  t?: WorkflowTranslateFn
-): string {
-  const tr = getWorkflowTranslator(t);
-  switch (mode.type) {
-    case 'specific_seat':
-      return tr('nodes.groupDispatch.specific_seat', {
-        memberId: mode.memberId,
-      });
-    case 'mention_seats':
-      return tr('nodes.groupDispatch.mention_seats', {
-        count: mode.memberIds.length,
-      });
-    case 'moderator_triage':
-      return tr('nodes.groupDispatch.moderator_triage', {
-        memberId: mode.moderatorMemberId,
-      });
-    case 'broadcast_log_only':
-      return tr('nodes.groupDispatch.broadcast_log_only');
-  }
-}
-
 export function formatOutboxActionLabel(
   kind: OutboxActionKind | (string & NonNullable<unknown>) | undefined,
   t?: WorkflowTranslateFn
@@ -172,32 +114,6 @@ export function formatOutboxActionLabel(
   return tr(`nodes.outboxKinds.${safeKind}`, {
     defaultValue: tr('nodes.defaults.outboxTitle'),
   });
-}
-
-export function formatWorkflowOrchestratorLabel(
-  preset: string,
-  t?: WorkflowTranslateFn
-): string {
-  const tr = getWorkflowTranslator(t);
-  return tr(`studio.orchestrators.${preset}`, { defaultValue: preset });
-}
-
-export type StepTextSegment = string | { tag: string };
-
-export function tokenizeStepSegments(text: string): StepTextSegment[] {
-  if (!text) return [];
-  const parts = text.split(/(\{\{[^{}]+\}\})/g);
-  const segments: StepTextSegment[] = [];
-  for (const part of parts) {
-    if (!part) continue;
-    if (part.startsWith('{{') && part.endsWith('}}')) {
-      const inner = part.slice(2, -2).trim();
-      segments.push({ tag: inner || part });
-    } else {
-      segments.push(part);
-    }
-  }
-  return segments;
 }
 
 function distinctFromId(

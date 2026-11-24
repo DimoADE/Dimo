@@ -196,32 +196,6 @@ impl StopShortcut {
     }
 }
 
-#[cfg(feature = "tauri-runtime")]
-impl StopShortcut {
-    /// The hotkey to register with the OS. `None` only for a key outside the
-    /// list, which [`StopShortcut::parse`] never lets through.
-    pub fn hotkey(&self) -> Option<tauri_plugin_global_shortcut::Shortcut> {
-        use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
-        if !is_allowed_key(&self.code) {
-            return None;
-        }
-        let code: Code = self.code.parse().ok()?;
-        let m = &self.modifiers;
-        let mut modifiers = Modifiers::empty();
-        for (held, flag) in [
-            (m.control, Modifiers::CONTROL),
-            (m.alt, Modifiers::ALT),
-            (m.shift, Modifiers::SHIFT),
-            (m.command, Modifiers::SUPER),
-        ] {
-            if held {
-                modifiers |= flag;
-            }
-        }
-        Some(Shortcut::new(Some(modifiers), code))
-    }
-}
-
 impl fmt::Display for StopShortcut {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let m = &self.modifiers;
@@ -355,29 +329,6 @@ mod tests {
             StopShortcut::default_for(Platform::Windows).to_string(),
             "Control+Alt+Escape"
         );
-    }
-
-    /// Every key on the list is one the hotkey library knows, by the same
-    /// name.
-    #[cfg(feature = "tauri-runtime")]
-    #[test]
-    fn every_listed_key_becomes_a_hotkey() {
-        let letters = ('A'..='Z').map(|c| format!("Key{c}"));
-        let digits = ('0'..='9').map(|c| format!("Digit{c}"));
-        let fkeys = (1..=12).map(|n| format!("F{n}"));
-        let others = PUNCTUATION
-            .iter()
-            .map(|s| s.to_string())
-            .chain(["Escape".to_string()]);
-        for code in letters.chain(digits).chain(fkeys).chain(others) {
-            let shortcut =
-                StopShortcut::parse(&format!("Control+Alt+{code}"), Platform::Linux).unwrap();
-            let hotkey = shortcut.hotkey().unwrap_or_else(|| panic!("{code}"));
-            assert_eq!(hotkey.key.to_string(), code);
-        }
-        let mac = StopShortcut::default_for(Platform::Mac).hotkey().unwrap();
-        use tauri_plugin_global_shortcut::Modifiers;
-        assert_eq!(mac.mods, Modifiers::CONTROL | Modifiers::SUPER);
     }
 
     /// Empty is off; a spelling that is no shortcut here falls back to the

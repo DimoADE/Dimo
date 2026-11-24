@@ -18,5 +18,4 @@ sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite", "chrono", "uu
 subtle = "2.6"
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tracing = { workspace = true }
 uuid = { workspace = true }

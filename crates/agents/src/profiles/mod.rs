@@ -423,8 +423,6 @@ pub fn resolve_native_engine_cli(
     None
 }
 
-pub const ACP_ADAPTER_DOCS_URL: &str = "https://agentclientprotocol.com";
-
 /// Vendor CLI wrapped by a Built-in Profile whose ACP entry point is a
 /// third-party adapter (`zcode-acp-server`).
 ///

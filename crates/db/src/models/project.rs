@@ -137,36 +137,6 @@ impl Project {
         ))
     }
 
-    pub async fn find_most_active(pool: &SqlitePool, limit: i32) -> Result<Vec<Self>, sqlx::Error> {
-        let projects = sqlx::query_as::<_, Project>(
-            r#"
-            SELECT
-                p.id,
-                p.name,
-                p.root_path,
-                p.parent_project_id,
-                p.hidden,
-                EXISTS(SELECT 1 FROM project_repos pr WHERE pr.project_id = p.id) AS is_git,
-                p.default_agent_working_dir,
-                p.default_main_branch,
-                p.created_at,
-                p.updated_at
-            FROM projects p
-            WHERE p.hidden = 0 AND p.id IN (
-                SELECT DISTINCT t.project_id
-                FROM tasks t
-                INNER JOIN workspaces w ON w.task_id = t.id
-                ORDER BY w.updated_at DESC
-            )
-            LIMIT ?
-            "#,
-        )
-        .bind(limit)
-        .fetch_all(pool)
-        .await?;
-        exclude_plugin_scratch_projects(pool, projects).await
-    }
-
     pub async fn find_by_id(pool: &SqlitePool, id: Uuid) -> Result<Option<Self>, sqlx::Error> {
         Ok(
             sqlx::query_as::<_, Project>(&format!("{PROJECT_SELECT} WHERE id = ?"))
@@ -207,18 +177,6 @@ impl Project {
         .fetch_optional(pool)
         .await?;
         Ok(found.is_some())
-    }
-
-    pub async fn find_visible_by_root_path(
-        pool: &SqlitePool,
-        root_path: &str,
-    ) -> Result<Option<Self>, sqlx::Error> {
-        sqlx::query_as::<_, Project>(&format!(
-            "{PROJECT_SELECT} WHERE root_path = ? AND hidden = 0 LIMIT 1"
-        ))
-        .bind(root_path)
-        .fetch_optional(pool)
-        .await
     }
 
     pub async fn find_any_by_root_path(

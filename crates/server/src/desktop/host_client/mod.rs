@@ -317,11 +317,6 @@ impl HostClientRuntime {
             .collect()
     }
 
-    pub async fn profile_id_for_window(&self, window_label: &str) -> Option<String> {
-        let lookup = host_app_window_label(window_label).unwrap_or(window_label);
-        self.active.lock().await.get(lookup).cloned()
-    }
-
     pub async fn unbind_window(&self, window_label: &str) {
         self.active.lock().await.remove(window_label);
     }

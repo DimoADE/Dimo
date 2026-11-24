@@ -7,7 +7,6 @@ pub const DEFAULT_OFFICIAL_RELAY_HOST: &str = "dimo-ai.com";
 pub const DEFAULT_OFFICIAL_RELAY_PORT: u16 = 443;
 pub const RELAY_HEARTBEAT_INTERVAL_MS: u64 = 15_000;
 pub const RELAY_CONTROL_TIMEOUT_MS: u64 = 45_000;
-pub const HAPPY_EYEBALLS_LAN_WINDOW_MS: u64 = 250;
 
 /// Returns the configured official multi-tenant domestic relay endpoint.
 /// Precedence: `DIMO_RELAY_URL` / `DIMO_RELAY_HOST` env var -> `fallback_host` -> `DEFAULT_OFFICIAL_RELAY_HOST`.

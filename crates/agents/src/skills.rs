@@ -801,19 +801,6 @@ impl CodexSkillsTraversalOverflow {
     }
 }
 
-/// Fast, bounded preflight walker mirroring Codex CLI's skills traversal limits.
-/// Stops immediately once `CODEX_MAX_SKILLS_ENTRIES` or `CODEX_MAX_SKILLS_DIRS`
-/// is exceeded, follows directory symlinks/junctions with a canonical-path
-/// cycle guard, and reports the heaviest immediate subdirectories under `root`.
-pub fn check_codex_skills_traversal_budget(root: &Path) -> Option<CodexSkillsTraversalOverflow> {
-    check_codex_skills_traversal_budget_with_limits(
-        root,
-        CODEX_MAX_SKILLS_ENTRIES,
-        CODEX_MAX_SKILLS_DIRS,
-        CODEX_MAX_SCAN_DEPTH,
-    )
-}
-
 pub(crate) fn check_codex_skills_traversal_budget_with_limits(
     root: &Path,
     max_entries: usize,
@@ -1015,13 +1002,6 @@ fn workspace_dir(workspace_path: Option<String>) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-pub async fn list_agent_skills(
-    agent_type: String,
-    workspace_path: Option<String>,
-) -> Result<AgentSkillsListResult, SkillError> {
-    list_agent_skills_with_storage(agent_type, workspace_path, None).await
-}
-
 pub async fn list_agent_skills_with_storage(
     agent_type: String,
     workspace_path: Option<String>,
@@ -1100,15 +1080,6 @@ fn resolve_skill_entry(dir: &SkillDir, id: &str, allow_md: bool) -> Option<PathB
     None
 }
 
-pub async fn read_agent_skill(
-    agent_type: String,
-    scope: AgentSkillScope,
-    skill_id: String,
-    workspace_path: Option<String>,
-) -> Result<AgentSkillContent, SkillError> {
-    read_agent_skill_with_storage(agent_type, scope, skill_id, workspace_path, None).await
-}
-
 pub async fn read_agent_skill_with_storage(
     agent_type: String,
     scope: AgentSkillScope,
@@ -1142,16 +1113,6 @@ pub async fn read_agent_skill_with_storage(
     }
 
     Err(SkillError::NotFound(format!("Skill not found: {id}")))
-}
-
-pub async fn save_agent_skill(
-    agent_type: String,
-    scope: AgentSkillScope,
-    skill_id: String,
-    content: String,
-    workspace_path: Option<String>,
-) -> Result<AgentSkillItem, SkillError> {
-    save_agent_skill_with_storage(agent_type, scope, skill_id, content, workspace_path, None).await
 }
 
 pub async fn save_agent_skill_with_storage(
@@ -1266,15 +1227,6 @@ fn clear_readonly_recursive(path: &Path) {
             clear_readonly_if_needed(&child);
         }
     }
-}
-
-pub async fn delete_agent_skill(
-    agent_type: String,
-    scope: AgentSkillScope,
-    skill_id: String,
-    workspace_path: Option<String>,
-) -> Result<(), SkillError> {
-    delete_agent_skill_with_storage(agent_type, scope, skill_id, workspace_path, None).await
 }
 
 pub async fn delete_agent_skill_with_storage(
@@ -1815,44 +1767,6 @@ fn apply_hosting_with_layout(
     Ok(())
 }
 
-fn configure_bundled_skills_with_layout(
-    skills: &[(&str, &str)],
-    global: bool,
-    agents: &BTreeSet<String>,
-    link: bool,
-    layout: &SkillHostingLayout,
-) -> Result<(), SkillError> {
-    let validated = skills
-        .iter()
-        .map(|(id, source)| {
-            let id = validate_skill_id(id)?;
-            if source.trim().is_empty() {
-                return Err(SkillError::Validation(format!(
-                    "Bundled skill content is empty: {id}"
-                )));
-            }
-            Ok((id, *source))
-        })
-        .collect::<Result<Vec<_>, SkillError>>()?;
-
-    let staging = staging_dir();
-    std::fs::create_dir_all(&staging)
-        .map_err(|error| SkillError::Other(format!("创建暂存目录失败: {error}")))?;
-    let result = (|| {
-        for (id, source) in validated {
-            let skill_dir = staging.join(&id);
-            std::fs::create_dir_all(&skill_dir)
-                .map_err(|error| SkillError::Other(format!("创建暂存技能失败: {error}")))?;
-            std::fs::write(skill_dir.join("SKILL.md"), source)
-                .map_err(|error| SkillError::Other(format!("写入暂存技能失败: {error}")))?;
-            apply_hosting_with_layout(&skill_dir, &id, global, agents, link, layout, &[])?;
-        }
-        Ok(())
-    })();
-    let _ = std::fs::remove_dir_all(&staging);
-    result
-}
-
 /// Project a portable Plugin's Skill directories without overwriting entries
 /// not owned by that Plugin. Sources are first copied into a stable Dimo
 /// provenance store, then linked to Agent directories with copy fallback.
@@ -2347,18 +2261,10 @@ async fn run_skills_add(source: &str, skill_id: &str, staging: &Path) -> Result<
     Ok(())
 }
 
-pub async fn scan_local_skills() -> Result<Vec<LocalSkill>, SkillError> {
-    scan_local_skills_with_custom_targets(Vec::new()).await
-}
-
 pub async fn scan_local_skills_with_custom_targets(
     custom_targets: Vec<CustomAgentSkillStorage>,
 ) -> Result<Vec<LocalSkill>, SkillError> {
     Ok(scan_all_skills(&custom_targets).await)
-}
-
-pub async fn read_local_skill(skill_id: String) -> Result<LocalSkillContent, SkillError> {
-    read_local_skill_with_custom_targets(skill_id, Vec::new()).await
 }
 
 pub async fn read_local_skill_with_custom_targets(
@@ -2714,12 +2620,6 @@ async fn fetch_popular_skills_for_view(
     Ok(order_snapshot_for_view(view, limit))
 }
 
-pub async fn search_skill_market(
-    query: Option<String>,
-) -> Result<Vec<SkillMarketItem>, SkillError> {
-    search_skill_market_with_view(query, None).await
-}
-
 pub async fn search_skill_market_with_view(
     query: Option<String>,
     view: Option<String>,
@@ -2991,16 +2891,6 @@ pub async fn get_market_skill_detail(
     })
 }
 
-pub async fn install_market_skill(
-    source: String,
-    skill_id: String,
-    global: bool,
-    apps: Vec<String>,
-    link: bool,
-) -> Result<Vec<LocalSkill>, SkillError> {
-    install_market_skill_with_custom_targets(source, skill_id, global, apps, link, Vec::new()).await
-}
-
 pub async fn install_market_skill_with_custom_targets(
     source: String,
     skill_id: String,
@@ -3036,15 +2926,6 @@ pub async fn install_market_skill_with_custom_targets(
     Ok(scan_all_skills(&custom_targets).await)
 }
 
-pub async fn set_skill_hosting(
-    skill_id: String,
-    global: bool,
-    apps: Vec<String>,
-    link: bool,
-) -> Result<Vec<LocalSkill>, SkillError> {
-    set_skill_hosting_with_custom_targets(skill_id, global, apps, link, Vec::new()).await
-}
-
 pub async fn set_skill_hosting_with_custom_targets(
     skill_id: String,
     global: bool,
@@ -3076,29 +2957,6 @@ pub async fn set_skill_hosting_with_custom_targets(
     let _ = std::fs::remove_dir_all(&staging);
     result?;
     Ok(scan_all_skills(&custom_targets).await)
-}
-
-/// Materialize trusted, embedded skills and assign them to either every
-/// supported Agent or an exact set of Agent hosts.
-pub async fn configure_bundled_skills(
-    skills: &[(&str, &str)],
-    global: bool,
-    apps: Vec<String>,
-    link: bool,
-) -> Result<Vec<LocalSkill>, SkillError> {
-    let agents = parse_agent_keys(&apps, &[])?;
-    configure_bundled_skills_with_layout(
-        skills,
-        global,
-        &agents,
-        link,
-        &system_skill_hosting_layout(),
-    )?;
-    Ok(scan_all_skills(&[]).await)
-}
-
-pub async fn uninstall_skill(skill_id: String) -> Result<Vec<LocalSkill>, SkillError> {
-    uninstall_skill_with_custom_targets(skill_id, Vec::new()).await
 }
 
 pub async fn uninstall_skill_with_custom_targets(
@@ -3303,46 +3161,6 @@ mod tests {
                     && dir.path == root.path().join(".dsh").join("skills")
             }),
             "DeepSeek project skills must hang off the git root, not the nested cwd"
-        );
-    }
-
-    #[test]
-    fn bundled_skills_are_hosted_to_the_exact_agent_set() {
-        let temp = tempfile::tempdir().unwrap();
-        let layout = SkillHostingLayout {
-            store: temp.path().join("store"),
-            agent_dirs: BTreeMap::from([
-                ("codex".to_string(), temp.path().join("codex")),
-                ("claude_code".to_string(), temp.path().join("claude")),
-            ]),
-        };
-
-        configure_bundled_skills_with_layout(
-            &[("office-pptx", "---\nname: office-pptx\n---\n")],
-            false,
-            &BTreeSet::from(["codex".to_string()]),
-            false,
-            &layout,
-        )
-        .unwrap();
-
-        assert!(temp.path().join("codex/office-pptx/SKILL.md").is_file());
-        assert!(!temp.path().join("claude/office-pptx").exists());
-        assert!(!temp.path().join("store/office-pptx").exists());
-
-        configure_bundled_skills_with_layout(
-            &[("office-pptx", "---\nname: office-pptx\n---\nupdated")],
-            false,
-            &BTreeSet::from(["claude_code".to_string()]),
-            false,
-            &layout,
-        )
-        .unwrap();
-
-        assert!(!temp.path().join("codex/office-pptx").exists());
-        assert_eq!(
-            std::fs::read_to_string(temp.path().join("claude/office-pptx/SKILL.md")).unwrap(),
-            "---\nname: office-pptx\n---\nupdated"
         );
     }
 
@@ -3697,31 +3515,6 @@ mod tests {
                     .join("skills")
             )
         );
-    }
-
-    #[test]
-    fn bundled_skills_can_be_applied_globally_to_every_agent() {
-        let temp = tempfile::tempdir().unwrap();
-        let layout = SkillHostingLayout {
-            store: temp.path().join("store"),
-            agent_dirs: BTreeMap::from([
-                ("codex".to_string(), temp.path().join("codex")),
-                ("claude_code".to_string(), temp.path().join("claude")),
-            ]),
-        };
-
-        configure_bundled_skills_with_layout(
-            &[("office-pptx", "---\nname: office-pptx\n---\n")],
-            true,
-            &BTreeSet::new(),
-            false,
-            &layout,
-        )
-        .unwrap();
-
-        assert!(temp.path().join("store/office-pptx/SKILL.md").is_file());
-        assert!(temp.path().join("codex/office-pptx/SKILL.md").is_file());
-        assert!(temp.path().join("claude/office-pptx/SKILL.md").is_file());
     }
 
     #[test]

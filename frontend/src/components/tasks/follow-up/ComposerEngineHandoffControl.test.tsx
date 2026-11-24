@@ -655,7 +655,7 @@ describe('ComposerEngineHandoffControl', () => {
     );
   });
 
-  it('serializes beginBind and touch until confirmEngineHandoff resolves', async () => {
+  it('tracks handoffPending until confirmEngineHandoff resolves without triggering eager bind or touch', async () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
@@ -700,20 +700,19 @@ describe('ComposerEngineHandoffControl', () => {
     );
 
     await waitFor(() => {
-      expect(ensureControlsSpy).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId('session-facts-probe')).toHaveAttribute(
+        'data-agent-id',
+        'claude_code'
+      );
     });
-    await waitFor(() => {
-      expect(touchSpy).toHaveBeenCalledTimes(1);
-    });
-
-    ensureControlsSpy.mockClear();
-    touchSpy.mockClear();
+    expect(ensureControlsSpy).not.toHaveBeenCalled();
+    expect(touchSpy).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByTestId('switch-to-codex'));
 
     expect(getConversationHandoffPending('conv-serial-1')).toBe(true);
     expect(ensureControlsSpy).not.toHaveBeenCalled();
-    expect(touchSpy).not.toHaveBeenCalledWith('conv-serial-1', true);
+    expect(touchSpy).not.toHaveBeenCalled();
     expect(screen.getByTestId('session-facts-probe')).toHaveAttribute(
       'data-agent-id',
       'codex'
@@ -724,13 +723,7 @@ describe('ComposerEngineHandoffControl', () => {
     await waitFor(() => {
       expect(getConversationHandoffPending('conv-serial-1')).toBe(false);
     });
-    await waitFor(() => {
-      expect(ensureControlsSpy).toHaveBeenCalledWith('conv-serial-1', {
-        reload: false,
-      });
-    });
-    await waitFor(() => {
-      expect(touchSpy).toHaveBeenCalledWith('conv-serial-1', true);
-    });
+    expect(ensureControlsSpy).not.toHaveBeenCalled();
+    expect(touchSpy).not.toHaveBeenCalled();
   });
 });

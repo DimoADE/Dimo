@@ -275,37 +275,6 @@ impl DbConversationSummary {
         Ok(())
     }
 
-    /// Update cached external session metadata (message count + last-seen model).
-    pub async fn update_cached_agent_metadata(
-        pool: &SqlitePool,
-        id: Uuid,
-        message_count: i64,
-        model: Option<&str>,
-    ) -> Result<(), sqlx::Error> {
-        let mut conn = pool.acquire().await?;
-        Self::update_cached_agent_metadata_on_connection(&mut conn, id, message_count, model).await
-    }
-
-    pub async fn update_cached_agent_metadata_on_connection(
-        conn: &mut SqliteConnection,
-        id: Uuid,
-        message_count: i64,
-        model: Option<&str>,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            r#"UPDATE sessions
-               SET message_count = ?, model = COALESCE(?, model),
-                   updated_at = datetime('now', 'subsec')
-               WHERE id = ?"#,
-        )
-        .bind(message_count)
-        .bind(model)
-        .bind(id)
-        .execute(&mut *conn)
-        .await?;
-        Ok(())
-    }
-
     pub async fn update_cached_model_on_connection(
         conn: &mut SqliteConnection,
         id: Uuid,
@@ -554,25 +523,6 @@ impl ConversationRecord {
         .execute(&mut *conn)
         .await?;
         bump_active_turn_mutation_epoch();
-        Ok(())
-    }
-
-    pub async fn set_history_times_on_connection(
-        conn: &mut SqliteConnection,
-        id: Uuid,
-        created_at: DateTime<Utc>,
-        updated_at: DateTime<Utc>,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            r#"UPDATE sessions
-               SET created_at = ?, updated_at = ?
-               WHERE id = ?"#,
-        )
-        .bind(created_at)
-        .bind(updated_at)
-        .bind(id)
-        .execute(&mut *conn)
-        .await?;
         Ok(())
     }
 }

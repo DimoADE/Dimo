@@ -101,7 +101,7 @@ pub use account_session::{
     AccountSessionConfirmation, account_label_from_codex_auth, account_label_from_document,
     account_session_from_codex_http, account_session_from_http, account_still_present,
     authentication_from_account_command, authentication_with_bound_provider,
-    confirm_account_session, extract_codex_access_token, jwt_identity, official_account_present,
+    extract_codex_access_token, jwt_identity, official_account_present,
     prefer_recorded_account_over_residue, resolve_account_label, resolve_account_label_with_env,
     resolve_observed_authentication,
 };
@@ -137,12 +137,11 @@ pub use auth_status::{
 };
 pub use capability::AcpCapabilityNormalizer;
 pub use cli_exposure::{
-    CliExposureError, PublishedCliCommand, ShellFamily, ensure_user_cli_path,
-    export_managed_bun_to_user_environment, export_managed_node_to_user_environment,
-    path_is_dimo_toolchain_shim, publish_managed_runtime_cli, publish_user_toolchain_commands,
-    published_cli_shim_agent, published_cli_shim_target, remove_managed_runtime_cli,
-    remove_orphaned_cli_shims, resolve_user_runtime_command, resolve_user_runtime_commands,
-    switch_managed_runtime_cli,
+    CliExposureError, PublishedCliCommand, ShellFamily, export_managed_bun_to_user_environment,
+    export_managed_node_to_user_environment, path_is_dimo_toolchain_shim,
+    publish_managed_runtime_cli, publish_user_toolchain_commands, published_cli_shim_agent,
+    published_cli_shim_target, remove_managed_runtime_cli, remove_orphaned_cli_shims,
+    resolve_user_runtime_commands,
 };
 pub use codex_auth::{
     CODEX_AUTH_MODES, CodexAuthModeProjection, apply_codex_auth_mode, project_codex_auth_mode,
@@ -191,6 +190,10 @@ pub use end_turn_usage::{
     is_unresolved_model_alias, merge_agent_usage, model_id_from_config_options, model_id_from_meta,
     prompt_usage_from_value, usage_from_error_data, usage_from_session_notification_params,
     usage_from_session_update,
+};
+pub use engine::{
+    CatalogRefreshPolicy, build_native_controls_snapshot, bundled_controls_snapshot,
+    catalog_refresh_policy_for_agent,
 };
 pub use error::{AgentError, AgentResult};
 pub use events::{
@@ -278,11 +281,11 @@ pub use manager::{
     AgentConnectionManagerEvent, ManagedAgentConnectionSnapshot,
 };
 pub use metadata::{
-    AgentCapability, agent_capabilities, claude_config_path, codex_auth_path, codex_config_path,
-    codex_home, mimo_auth_path_from_env, mimo_cache_dir_from_env, mimo_config_dir_from_env,
-    mimo_config_path_from_env, mimo_native_binding_path, opencode_auth_path,
-    opencode_auth_path_from_env, opencode_cache_dir_from_env, opencode_config_dir,
-    opencode_config_dir_from_env, opencode_config_path,
+    AgentCapability, agent_capabilities, claude_config_path, codex_auth_path, codex_home,
+    mimo_auth_path_from_env, mimo_cache_dir_from_env, mimo_config_path_from_env,
+    mimo_native_binding_path, opencode_auth_path, opencode_auth_path_from_env,
+    opencode_cache_dir_from_env, opencode_config_dir, opencode_config_dir_from_env,
+    opencode_config_path,
 };
 pub use native_config::{
     ConfigApplyEffect, NativeConfigError, NativeConfigFieldSnapshot, NativeConfigFilePatch,
@@ -312,18 +315,18 @@ pub use plan_usage::{
     PlanUsageWindow, cached_plan_usage, probe_plan_usage, probe_plan_usage_with,
 };
 pub use profiles::{
-    ACP_ADAPTER_DOCS_URL, AccountEvidence, AccountEvidenceKind, AcpAdapterRelation,
-    AuthenticationPrecedence, BuiltInProfile, BuiltInProfileCatalog, NativeConfigBinding,
-    NativeConfigField, NativeConfigFieldKind, NativeConfigFormat, NativeConfigSurface,
-    ProfileBinaryArtifact, ProfileBinaryEntry, ProfileComponent, ProfileDependency,
-    ProfileExternalCandidate, ProfileIcon, ProfileInstallSource, ProfileManagementAction,
-    ProfileManagementActionKind, ProfileManagementProgram, ProfileRegistryBinding, ProfileTopology,
-    RegistryEntryIdentity, acp_adapter_relation, acp_launch_args, acp_launch_args_for_program,
-    adapter_bundles_runtime, bundled_adapter_runtime_env_keys, candidate_command_matches,
-    external_candidate_for_program, native_engine_extra_dirs,
-    normalize_acp_launch_args_for_program, profile_delivers_session_mcp, resolve_native_engine_cli,
-    resolve_vendor_cli, resolve_vendor_cli_in_extra_dirs, suppressed_registry_built_in_agent_id,
-    suppressed_registry_ids_for_built_ins, version_args_for_program,
+    AccountEvidence, AccountEvidenceKind, AcpAdapterRelation, AuthenticationPrecedence,
+    BuiltInProfile, BuiltInProfileCatalog, NativeConfigBinding, NativeConfigField,
+    NativeConfigFieldKind, NativeConfigFormat, NativeConfigSurface, ProfileBinaryArtifact,
+    ProfileBinaryEntry, ProfileComponent, ProfileDependency, ProfileExternalCandidate, ProfileIcon,
+    ProfileInstallSource, ProfileManagementAction, ProfileManagementActionKind,
+    ProfileManagementProgram, ProfileRegistryBinding, ProfileTopology, RegistryEntryIdentity,
+    acp_adapter_relation, acp_launch_args, acp_launch_args_for_program, adapter_bundles_runtime,
+    bundled_adapter_runtime_env_keys, candidate_command_matches, external_candidate_for_program,
+    native_engine_extra_dirs, normalize_acp_launch_args_for_program, profile_delivers_session_mcp,
+    resolve_native_engine_cli, resolve_vendor_cli, resolve_vendor_cli_in_extra_dirs,
+    suppressed_registry_built_in_agent_id, suppressed_registry_ids_for_built_ins,
+    version_args_for_program,
 };
 pub use registry_client::{
     OfficialRegistryHttpFetcher, REGISTRY_CONNECT_TIMEOUT, REGISTRY_ICON_FETCH_BUDGET,
@@ -334,10 +337,10 @@ pub use registry_client::{
 };
 pub use runtime::{
     AgentRuntime, CancelAgentPromptInput, ConnectAgentInput, EnsureAgentSessionInput,
-    NoopEventSink, RespondAgentElicitationInput, RespondAgentPermissionInput,
-    ResumeAgentSessionInput, RuntimeEventSink, RuntimeSnapshot, SendAgentPromptInput,
-    SteerAgentPromptInput, is_placeholder_acp_session_id, is_restorable_acp_session_id,
-    runtime_event_channel,
+    NoopEventSink, ProbeNativeProviderControlsInput, RespondAgentElicitationInput,
+    RespondAgentPermissionInput, ResumeAgentSessionInput, RuntimeEventSink, RuntimeSnapshot,
+    SendAgentPromptInput, SteerAgentPromptInput, is_placeholder_acp_session_id,
+    is_restorable_acp_session_id, runtime_event_channel,
 };
 pub use runtime_temp::{
     AgentRuntimeTempSession, agent_runtime_temp_dir, bind_agent_runtime_temp_env,
@@ -362,8 +365,7 @@ pub use terminal::{
     TerminalOutputTx, apply_configured_terminal_shell, configured_terminal_shell,
 };
 pub use timeline_images::{
-    TimelineImageBytes, TimelineImageError, externalize_image_data, read_timeline_image,
-    read_timeline_image_in,
+    TimelineImageBytes, TimelineImageError, read_timeline_image, read_timeline_image_in,
 };
 pub use user_definition::{UserAgentDefinition, UserAgentInstallTarget};
 pub use user_environment::{
@@ -373,5 +375,5 @@ pub use user_environment::{
     npm_global_install_args_with_registry, npm_install_permission_denied,
     npm_install_resource_busy, npm_install_unsupported_node_engine, npm_prefix_is_writable,
     npm_shim_candidates, observed_satisfies_profile, plan_required_components,
-    planned_preflight_updates, profile_required_versions, resolve_npm_shim, uv_distribution_name,
+    planned_preflight_updates, profile_required_versions, resolve_npm_shim,
 };

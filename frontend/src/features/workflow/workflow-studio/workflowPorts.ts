@@ -184,12 +184,6 @@ export function resolveValidTargetHandle(
   return 'target';
 }
 
-export function isNamedBranchHandle(
-  handleId: string | null | undefined
-): handleId is string {
-  return Boolean(handleId && handleId.startsWith('branch:'));
-}
-
 export function isPersistedSourceHandle(
   handleId: string | null | undefined
 ): handleId is string {
@@ -269,18 +263,5 @@ export function withoutRemovedBranchPorts(
   const entries = Object.entries(branchPorts).filter(
     ([stepId, handleId]) => Boolean(handleId) && !removedStepIds.has(stepId)
   );
-  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
-}
-
-export function renameBranchPortKeys(
-  branchPorts: Record<string, string> | undefined,
-  fromStepId: string,
-  toStepId: string
-): Record<string, string> | undefined {
-  if (!branchPorts) return undefined;
-  const entries = Object.entries(branchPorts).map(([stepId, handleId]) => [
-    stepId === fromStepId ? toStepId : stepId,
-    handleId,
-  ]);
   return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }

@@ -36,10 +36,6 @@ const panelActionMocks = vi.hoisted(() => ({
   hasRightSidebarPanels: vi.fn(() => false),
 }));
 
-vi.mock('@/components/layout/WorktreeSelector', () => ({
-  WorktreeSelector: () => <button type="button">Select workspace</button>,
-}));
-
 vi.mock('@/components/layout/ProjectQuickSwitcher', () => ({
   ProjectQuickSwitcher: () => (
     <button type="button" data-testid="toolbar-project-switcher">
@@ -64,20 +60,6 @@ vi.mock('@/contexts/KanbanSessionContext', () => ({
 
 vi.mock('@/hooks/usePanelActions', () => ({
   usePanelActions: () => panelActionMocks,
-}));
-
-vi.mock('@/hooks/useWorkspaceBranchStatus', () => ({
-  useWorkspaceBranchStatus: () => ({
-    data: [
-      {
-        target_branch_name: 'main',
-        commits_ahead: 0,
-        commits_behind: 0,
-        is_rebase_in_progress: false,
-        conflicted_files: [],
-      },
-    ],
-  }),
 }));
 
 describe('KanbanLayoutToggles', () => {

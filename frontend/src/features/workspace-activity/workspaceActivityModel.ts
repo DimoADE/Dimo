@@ -8,7 +8,6 @@ import i18n from '@/i18n';
 import type { TerminalSession } from '@/stores/useTerminalStore';
 import type {
   ContentBlock,
-  ConversationTimeline,
   ExecutionProcess,
   JsonValue,
   MessageTurn,
@@ -312,33 +311,6 @@ export function activityChartsFromTurns(turns: MessageTurn[]): ActivityChart[] {
   return charts.filter(
     (chart) => chart.divider != null || chart.spans.length > 0
   );
-}
-
-export function activityChartsFromTimeline(
-  timeline: ConversationTimeline | null | undefined
-): ActivityChart[] {
-  const rows = timeline?.rows ?? [];
-  const turns = rows.flatMap((row) =>
-    row.row.kind === 'message_turn' ? [row.row.turn] : []
-  );
-  return activityChartsFromTurns(turns);
-}
-
-export function activityNoticesFromRows(rows: TimelineRow[]): string[] {
-  const notices: string[] = [];
-  for (const row of rows) {
-    if (row.row.kind === 'session_notice') {
-      if (isResendColdStartNotice(row.row_id, row.row.notice)) continue;
-      const text = row.row.notice.message?.trim() || row.row.notice.title;
-      if (text) {
-        notices.push(text);
-      }
-    }
-    if (row.row.kind === 'turn_error') {
-      notices.push(row.row.error.error.message);
-    }
-  }
-  return notices;
 }
 
 export function formatDurationMs(durationMs: number): string {

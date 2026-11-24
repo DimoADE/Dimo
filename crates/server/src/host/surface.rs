@@ -166,14 +166,6 @@ struct AgentResetCheckpointArgs {
     force_when_dirty: Option<bool>,
 }
 
-#[allow(dead_code)]
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AgentEnabledArgs {
-    agent_id: AgentId,
-    enabled: bool,
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AgentReorderArgs {
@@ -225,16 +217,6 @@ struct WorkspaceRepoSpec {
 struct PluginPathArgs {
     path: String,
     developer_link: Option<bool>,
-    #[allow(dead_code)]
-    package_kind: Option<String>,
-    #[allow(dead_code)]
-    plugin_id: Option<String>,
-    #[allow(dead_code)]
-    permission_ids: Option<Vec<String>>,
-    #[allow(dead_code)]
-    source: Option<Value>,
-    #[allow(dead_code)]
-    conflict: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1610,15 +1592,26 @@ impl ServerApplicationDomains {
         let valid = if requested.is_empty() {
             BTreeMap::new()
         } else {
-            let snapshot =
-                conversations::load_capability_catalog_for_session_defaults_for_provider_instance(
-                    &self.pool,
-                    &self.conversations.agent_runtime,
-                    &args.agent_id,
-                    args.provider_instance_id.as_deref(),
-                )
-                .await
-                .map_err(conversation_error)?;
+            let instant = conversations::resolve_instant_capability_catalog_for_provider_instance(
+                &self.pool,
+                &args.agent_id,
+                args.provider_instance_id.as_deref(),
+            )
+            .await
+            .map_err(conversation_error)?;
+            let snapshot = match instant.snapshot {
+                Some(snapshot) => snapshot,
+                None => {
+                    conversations::load_capability_catalog_for_session_defaults_for_provider_instance(
+                        &self.pool,
+                        &self.conversations.agent_runtime,
+                        &args.agent_id,
+                        args.provider_instance_id.as_deref(),
+                    )
+                    .await
+                    .map_err(conversation_error)?
+                }
+            };
             let validation = agents::validate_session_defaults(requested, &snapshot.config_options);
             if !validation.stale_ids.is_empty() {
                 return Err(ApplicationError::conflict(format!(
@@ -2303,15 +2296,26 @@ impl ServerApplicationDomains {
         {
             tracing::warn!(%error, "failed to invalidate capability catalog");
         }
-        if let Err(error) = conversations::refresh_open_capability_catalog_for_provider_instance(
-            &self.pool,
-            &self.conversations.agent_runtime,
-            agent_id,
-            instance_id,
-        )
-        .await
+        if agents::catalog_refresh_policy_for_agent(agent_id.as_str())
+            == agents::CatalogRefreshPolicy::BackgroundNativeProbe
         {
-            tracing::warn!(%error, "failed to refresh capability catalog");
+            let pool = self.pool.clone();
+            let runtime = self.conversations.agent_runtime.clone();
+            let agent_id = agent_id.clone();
+            let instance_id = instance_id.map(str::to_string);
+            tokio::spawn(async move {
+                if let Err(error) =
+                    conversations::refresh_open_capability_catalog_for_provider_instance(
+                        &pool,
+                        &runtime,
+                        &agent_id,
+                        instance_id.as_deref(),
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, "failed to refresh capability catalog in background");
+                }
+            });
         }
     }
 

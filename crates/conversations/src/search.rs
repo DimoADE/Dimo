@@ -4,9 +4,7 @@
 
 use std::collections::HashSet;
 
-use agents::conversation::{
-    ContentBlock, ConversationTimeline, ConversationTimelineRow, TimelineRow, TurnRole,
-};
+use agents::conversation::{ContentBlock, ConversationTimelineRow, TimelineRow, TurnRole};
 use serde::Serialize;
 use sqlx::{Row, SqliteConnection, SqlitePool};
 use ts_rs::TS;
@@ -101,18 +99,6 @@ pub fn extract_row_searchable_text(row: &TimelineRow) -> Option<(&'static str, S
         return None;
     }
     Some((role, parts.join("\n")))
-}
-
-/// Concatenate the user- and assistant-visible text of a projected timeline into
-/// a single searchable blob (thinking, tool I/O and images are excluded).
-pub fn extract_searchable_text(timeline: &ConversationTimeline) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    for row in &timeline.rows {
-        if let Some((_, text)) = extract_row_searchable_text(row) {
-            parts.push(text);
-        }
-    }
-    parts.join("\n")
 }
 
 const FTS_ROWID_INDEX_META_CONV: &str = "__meta__";
@@ -293,32 +279,6 @@ pub async fn reindex_timeline_rows_on_conn(
         )
         .await?;
     }
-    Ok(())
-}
-
-/// Replace the FTS index for `conversation_id` with a single body blob (compatibility helper).
-pub async fn reindex_conversation(
-    conn: &mut SqliteConnection,
-    conversation_id: Uuid,
-    body: &str,
-) -> Result<(), sqlx::Error> {
-    let exists: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)")
-        .bind(conversation_id)
-        .fetch_one(&mut *conn)
-        .await?;
-    if exists == 0 {
-        return delete_from_index(conn, conversation_id).await;
-    }
-
-    delete_from_index(&mut *conn, conversation_id).await?;
-    let trimmed = body.trim();
-    let (row_id, role) = if trimmed.is_empty() {
-        (INDEXED_SENTINEL_ROW_ID, "system")
-    } else {
-        (LEGACY_BODY_ROW_ID, "assistant")
-    };
-    let conv_id_str = conversation_id.to_string();
-    insert_fts_row_indexed(&mut *conn, &conv_id_str, row_id, role, trimmed).await?;
     Ok(())
 }
 

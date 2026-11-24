@@ -62,16 +62,9 @@ test('preview panel keeps Office rendering behind plugin file openers', () => {
   assert.match(popoverSource, /ZoomableImagePreview/);
 });
 
-test('diff panel and diff cards no longer force-load readonly assets as UTF-8 text', () => {
-  const diffPanelSource = readFrontendFile(
-    'src/components/panels/DockviewDiffPanel.tsx'
-  );
+test('diff cards no longer force-load readonly assets as UTF-8 text', () => {
   const diffCardSource = readFrontendFile('src/components/DiffCard.tsx');
 
-  assert.match(diffPanelSource, /shouldFetchTextDiff = previewKind === 'text'/);
-  assert.match(diffPanelSource, /Binary diff is not supported/);
-  assert.match(diffPanelSource, /PDF diff is not supported here/);
-  assert.match(diffPanelSource, /Word document diff is not supported here/);
   assert.match(
     diffCardSource,
     /canForceLoadTextContent = previewKind === 'text'/

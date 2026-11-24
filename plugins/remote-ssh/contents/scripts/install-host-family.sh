@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 #
-# Install the Dimo Host family (dimo-server, dimo-mcp, dimo-workflow-mcp
+# Install the Dimo Host family (dimo-server, dimo-mcp,
 # and the web bundle) from a GitHub Release.
 #
 # The desktop app is not installed by this script; it ships as an Electron
@@ -251,8 +251,7 @@ main() {
         mv "$unpacked" "$family_root"
     fi
 
-    chmod +x "${family_root}/dimo-server" "${family_root}/dimo-mcp" \
-        "${family_root}/dimo-workflow-mcp" 2>/dev/null || true
+    chmod +x "${family_root}/dimo-server" "${family_root}/dimo-mcp" 2>/dev/null || true
 
     launcher=$(write_launcher "$family_root")
     printf '\nInstalled Dimo Host family %s to %s\n' "$tag" "$family_root"

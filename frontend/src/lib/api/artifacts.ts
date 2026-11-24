@@ -1,7 +1,4 @@
-import {
-  configuredBackendTransport,
-  type BackendTransport,
-} from '@/lib/backendTransport';
+import type { BackendTransport } from '@/lib/backendTransport';
 
 export type ArtifactRecordView = {
   id: string;
@@ -58,5 +55,3 @@ export function createArtifactApi(transport: BackendTransport) {
       }) as Promise<void>,
   };
 }
-
-export const artifactApi = createArtifactApi(configuredBackendTransport);

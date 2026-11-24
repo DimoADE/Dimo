@@ -1,4 +1,4 @@
-# Install the Dimo Host family (dimo-server, dimo-mcp, dimo-workflow-mcp
+# Install the Dimo Host family (dimo-server, dimo-mcp,
 # and the web bundle) from a GitHub Release.
 #
 # The desktop app is not installed by this script; it ships as an Electron

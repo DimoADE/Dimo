@@ -22,7 +22,6 @@ const FORBIDDEN_STARTUP_PRELOAD_PREFIXES = [
   'vendor-gsap-',
   'vendor-xyflow-',
   'vendor-markdown-',
-  'vendor-codemirror-',
 ];
 
 const files = readdirSync(assetsDir);

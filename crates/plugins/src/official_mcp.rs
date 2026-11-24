@@ -35,14 +35,6 @@ pub const DELEGATION_MCP_FEATURES: &str = "delegation,sessions,collaboration";
 /// Same as [`DELEGATION_MCP_FEATURES`] plus Space-internal tools.
 pub const DELEGATION_MCP_SPACE_FEATURES: &str = "delegation,sessions,collaboration,space";
 
-pub fn delegation_mcp_features(space_session: bool) -> &'static str {
-    if space_session {
-        DELEGATION_MCP_SPACE_FEATURES
-    } else {
-        DELEGATION_MCP_FEATURES
-    }
-}
-
 /// Build the unified `--features` list for `Dimo-superagent-mcp`.
 /// `pulse` and `workflow` are built-in and always enabled.
 pub fn superagent_mcp_features(delegation: bool, space_session: bool, session_bits: u8) -> String {
@@ -99,9 +91,6 @@ impl Default for HostDelegationLimits {
 
 /// Host-injected / native-projected MCP identity for session enhancement.
 pub const SESSION_MCP_NAME: &str = "dimo-session-mcp";
-
-/// Host-injected MCP identity for plugin development link requests.
-pub const PLUGIN_DEV_MCP_NAME: &str = "dimo-plugin-dev-mcp";
 
 /// Host-injected / native-projected MCP identity for Workflow Creator.
 pub const WORKFLOW_MCP_NAME: &str = "dimo-workflow-mcp";
@@ -195,10 +184,6 @@ impl OfficialMcpRuntime {
         vec![SUPERAGENT_MCP_NAME.to_string()]
     }
 
-    pub fn set_session_features(&self, bits: u8) {
-        self.session_features.store(bits, Ordering::SeqCst);
-    }
-
     pub fn session_features(&self) -> u8 {
         if !self.allow_session_mcp() {
             return 0;
@@ -223,10 +208,6 @@ impl OfficialMcpRuntime {
 
     pub fn delegation_token(&self) -> Option<String> {
         self.token_for_product("delegation")
-    }
-
-    pub fn session_token(&self) -> Option<String> {
-        self.token_for_product("session")
     }
 
     pub fn superagent_token(&self) -> String {

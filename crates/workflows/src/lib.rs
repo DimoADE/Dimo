@@ -1,7 +1,5 @@
 //! Durable, transport-neutral Workflow domain (ADR-0045) and Pulse Dual-Primitive Orchestration.
 
-mod graph_patch;
-mod presets;
 mod pulse_steps;
 mod service;
 mod spec;
@@ -22,15 +20,6 @@ mod service_tests_reconcile;
 #[cfg(test)]
 mod spec_tests;
 
-pub use graph_patch::{WorkflowGraphPatch, WorkflowGraphPatchOp, apply_workflow_graph_patch};
-pub use presets::{
-    DirectReflexPresetConfig, DualPrimitiveActorSpec, EventSagaPresetConfig,
-    HybridPipelinePresetConfig, PresetOrchestratorSpec, SpecialistSessionSpec,
-    SuperagentRouterPresetConfig, WindowAggregatorPresetConfig, build_direct_reflex_workflow,
-    build_event_saga_workflow, build_hybrid_pipeline_workflow, build_preset_workflow,
-    build_superagent_router_workflow, build_window_aggregator_workflow,
-    build_workflow_from_pulse_rule, default_preset_workflow,
-};
 pub use pulse_steps::{
     ApprovalOptionSpec, BotConversationScope, BotMailboxPolicy, BotStepSpec, BoundedLoopStepSpec,
     ConditionBranchStepSpec, EventActor, EventEnvelope, EventSourceKind, EventSourceMeta,

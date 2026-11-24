@@ -275,10 +275,6 @@ fn validate_auth_mode_json(raw: &str) -> Result<String, ProviderInstanceStoreErr
 }
 
 impl ProviderInstanceRecord {
-    pub async fn ensure_schema(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-        ensure_provider_instances_schema(pool).await
-    }
-
     pub async fn list_all(pool: &SqlitePool) -> Result<Vec<Self>, ProviderInstanceStoreError> {
         ensure_provider_instances_schema(pool).await?;
         let mut rows = sqlx::query_as::<_, Self>(&format!(

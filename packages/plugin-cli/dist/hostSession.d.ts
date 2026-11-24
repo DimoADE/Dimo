@@ -15,7 +15,6 @@ export declare function normalizeHostUrl(value: string): string;
 export declare function hostSessionPath(home?: string): string;
 export declare function saveHostSession(session: HostSession, file?: string): void;
 export declare function loadHostSession(file?: string): HostSession | null;
-export declare function clearHostSession(file?: string): void;
 export declare function mergeHostSession(flags: HostFlags, saved: HostSession | null, discovered?: HostFlags): HostSession | null;
 export declare function requireHostSession(session: HostSession | null): HostSession;
 export declare function hostDataDirs(home?: string, environment?: Record<string, string | undefined>): string[];

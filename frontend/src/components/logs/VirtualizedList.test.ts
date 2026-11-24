@@ -28,8 +28,6 @@ import {
   unscaledElementRect,
   wheelDetachesConversationFollow,
   ESTIMATED_CONVERSATION_ROW_HEIGHT,
-  pendingAgentPermissionsFromEvents,
-  pendingAgentPermissionsForSession,
 } from './VirtualizedList';
 
 describe('virtualized user-message navigation', () => {
@@ -720,85 +718,5 @@ describe('conversation virtualizer layout coordinates', () => {
     expect(startAlignedVirtualOffset(0)).toBe(0);
     expect(startAlignedVirtualOffset(12)).toBe(0);
     expect(startAlignedVirtualOffset(400)).toBe(388);
-  });
-});
-
-describe('pendingAgentPermissionsFromEvents', () => {
-  it('keeps permission requests pending until a response event arrives', () => {
-    const requested = {
-      sequence: 1,
-      workspace_id: 'workspace',
-      connection_id: 'connection',
-      session_id: 'session',
-      created_at: '2026-06-11T00:00:01.000Z',
-      event: {
-        kind: 'permission_requested' as const,
-        request: {
-          id: 'permission-1',
-          session_id: 'session',
-          title: 'Run tests',
-          options: [{ id: 'allow', label: 'Allow once' }],
-        },
-      },
-    };
-
-    expect(pendingAgentPermissionsFromEvents([requested])).toEqual([
-      {
-        connectionId: 'connection',
-        request: requested.event.request,
-      },
-    ]);
-
-    expect(
-      pendingAgentPermissionsFromEvents([
-        requested,
-        {
-          sequence: 2,
-          workspace_id: 'workspace',
-          connection_id: 'connection',
-          session_id: 'session',
-          created_at: '2026-06-11T00:00:02.000Z',
-          event: {
-            kind: 'permission_responded',
-            permission_id: 'permission-1',
-            response: { kind: 'selected', option_id: 'allow' },
-          },
-        },
-      ])
-    ).toEqual([]);
-  });
-
-  it('merges snapshot permissions when request events are no longer in the window', () => {
-    expect(
-      pendingAgentPermissionsForSession(
-        [],
-        {
-          'permission-1': {
-            id: 'permission-1',
-            session_id: 'session',
-            title: 'Run tests',
-            options: [{ id: 'allow', label: 'Allow once' }],
-          },
-          'permission-2': {
-            id: 'permission-2',
-            session_id: 'other-session',
-            title: 'Edit file',
-            options: [{ id: 'reject', label: 'Reject' }],
-          },
-        },
-        'session',
-        'connection'
-      )
-    ).toEqual([
-      {
-        connectionId: 'connection',
-        request: {
-          id: 'permission-1',
-          session_id: 'session',
-          title: 'Run tests',
-          options: [{ id: 'allow', label: 'Allow once' }],
-        },
-      },
-    ]);
   });
 });

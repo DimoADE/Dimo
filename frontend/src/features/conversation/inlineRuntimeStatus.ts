@@ -132,15 +132,18 @@ export function deriveInlineStreamRuntimeStatus(
   const connectionPlacement: RuntimeStatusPlacement =
     !hasUserMessage || !isTurnInFlight ? 'composer' : 'stream';
 
+  const connectionClosed = connection?.status === 'closed';
   const connectionFailed =
-    connection?.status === 'error' || connection?.status === 'closed';
+    connection?.status === 'error' ||
+    (connectionClosed && (isTurnInFlight || Boolean(connectErrorNotice)));
   const connectionPending =
     connecting ||
     Boolean(reconnectNotice) ||
     (!sessionBindReady &&
       connection != null &&
       !connection.bound &&
-      !connectionFailed);
+      !connectionFailed &&
+      !connectionClosed);
   const isConnectionRecovering =
     Boolean(reconnectNotice) ||
     (!sessionBindReady && connection?.status === 'recovering');
@@ -159,14 +162,16 @@ export function deriveInlineStreamRuntimeStatus(
     }
 
     const resolvedConnection: ConversationConnectionStatus =
-      connection && !connectionFailed && !connection.bound
+      connection && !connectionFailed && !connectionClosed && !connection.bound
         ? connection
         : {
             status: reconnectNotice ? 'recovering' : 'connecting',
             bound: false,
             connection_id: connection?.connection_id ?? null,
             message:
-              (!connectionFailed ? connection?.message : null) ??
+              (!connectionFailed && !connectionClosed
+                ? connection?.message
+                : null) ??
               reconnectNotice?.message ??
               null,
             since: connectingSince ?? '',

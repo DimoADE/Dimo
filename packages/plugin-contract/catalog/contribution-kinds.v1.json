@@ -100,9 +100,10 @@
     },
     {
       "id": "provider.model.catalog",
-      "status": "ready",
+      "status": "preview",
       "handler": false,
-      "consumer": "frontend/src/features/plugins/providers/hostProviderServices.ts"
+      "consumer": "frontend/src/features/plugins/providers/hostProviderServices.ts",
+      "notes": "Host consumer exists, but no official plugin ships this kind yet (ADR-0069 principle 3)."
     },
     {
       "id": "app.panel",
@@ -139,7 +140,7 @@
       "id": "app.rail.section",
       "status": "ready",
       "handler": false,
-      "consumer": "frontend/src/components/layout/RightPanelSidebar.tsx"
+      "consumer": "frontend/src/components/layout/panels/WorkspaceTabAddMenu.tsx"
     },
     {
       "id": "provider.remote.provisioner",

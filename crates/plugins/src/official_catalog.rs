@@ -79,18 +79,6 @@ pub fn official_marketplace_origin() -> &'static str {
     catalog().marketplace.origin.trim_end_matches('/')
 }
 
-pub fn official_marketplace_home() -> String {
-    let origin = crate::catalog::marketplace_origin();
-    let path = catalog().marketplace.path.trim();
-    if path.is_empty() {
-        format!("{origin}/marketplace")
-    } else if path.starts_with('/') {
-        format!("{origin}{path}")
-    } else {
-        format!("{origin}/{path}")
-    }
-}
-
 pub fn official_plugin_record(plugin_id: &str) -> Option<&'static OfficialPluginRecord> {
     catalog().official.iter().find(|plugin| {
         plugin_ids_match(plugin_id, &plugin.id)

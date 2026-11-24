@@ -14,6 +14,7 @@ import { isSettingsSurfacePath } from '@/lib/settingsPreload';
 import { scheduleIdleWork } from '@/lib/scheduleIdleWork';
 import { useTauriClient } from '@/lib/desktopShell';
 import { usePluginContributionCatalogSync } from '@/hooks/usePluginHostContributions';
+import { useAgentCapabilityCatalogSync } from '@/features/agents/capabilityCatalogSync';
 import { AppContextMenuHost } from '@/components/context-menu';
 
 const SettingsAppRoutes = lazy(() =>
@@ -66,6 +67,7 @@ function SettingsSurfaceContent() {
 
   useLegacyDesignBodyClass();
   useOptionMenuViewportFit();
+  useAgentCapabilityCatalogSync();
 
   return (
     <ThemeProvider initialTheme={config?.theme || ThemeMode.SYSTEM}>

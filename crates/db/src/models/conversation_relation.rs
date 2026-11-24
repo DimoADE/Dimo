@@ -112,20 +112,6 @@ impl ConversationRelationRecord {
         .await
     }
 
-    pub async fn list_parents(
-        pool: &SqlitePool,
-        child_conversation_id: Uuid,
-    ) -> Result<Vec<Self>, sqlx::Error> {
-        sqlx::query_as::<_, Self>(&format!(
-            r#"SELECT {COLUMNS} FROM conversation_relations
-               WHERE child_conversation_id = ?
-               ORDER BY created_at, id"#
-        ))
-        .bind(child_conversation_id)
-        .fetch_all(pool)
-        .await
-    }
-
     pub async fn is_descendant(
         pool: &SqlitePool,
         ancestor: Uuid,

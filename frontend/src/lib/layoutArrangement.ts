@@ -19,19 +19,16 @@ import { useSyncExternalStore } from 'react';
 import { persistFrontendPreference } from '@/lib/frontendPreferences';
 
 export type LayoutZone = 'dock' | 'workspace' | 'session' | 'terminal';
-export type LayoutSlot = 'left' | 'center' | 'right' | 'bottom';
+type LayoutSlot = 'left' | 'center' | 'right' | 'bottom';
 export type LayoutArrangement = Record<LayoutSlot, LayoutZone>;
 
 export type KanbanZone = 'list' | 'monitor' | 'session';
-export type KanbanSlot = 'left' | 'center' | 'right';
-export type KanbanArrangement = Record<KanbanSlot, KanbanZone>;
+type KanbanSlot = 'left' | 'center' | 'right';
+type KanbanArrangement = Record<KanbanSlot, KanbanZone>;
 
-export type CollaborationZone = 'spaces' | 'thread' | 'preview';
-export type CollaborationSlot = 'left' | 'center' | 'right';
-export type CollaborationArrangement = Record<
-  CollaborationSlot,
-  CollaborationZone
->;
+type CollaborationZone = 'spaces' | 'thread' | 'preview';
+type CollaborationSlot = 'left' | 'center' | 'right';
+type CollaborationArrangement = Record<CollaborationSlot, CollaborationZone>;
 
 export const LAYOUT_SLOTS: readonly LayoutSlot[] = [
   'left',
@@ -40,52 +37,28 @@ export const LAYOUT_SLOTS: readonly LayoutSlot[] = [
   'bottom',
 ];
 
-export const LAYOUT_ZONES: readonly LayoutZone[] = [
+const LAYOUT_ZONES: readonly LayoutZone[] = [
   'dock',
   'workspace',
   'session',
   'terminal',
 ];
 
-export const KANBAN_SLOTS: readonly KanbanSlot[] = ['left', 'center', 'right'];
+const KANBAN_SLOTS: readonly KanbanSlot[] = ['left', 'center', 'right'];
 
-export const KANBAN_ZONES: readonly KanbanZone[] = [
-  'list',
-  'monitor',
-  'session',
-];
+const KANBAN_ZONES: readonly KanbanZone[] = ['list', 'monitor', 'session'];
 
-export const COLLABORATION_SLOTS: readonly CollaborationSlot[] = [
+const COLLABORATION_SLOTS: readonly CollaborationSlot[] = [
   'left',
   'center',
   'right',
 ];
 
-export const COLLABORATION_ZONES: readonly CollaborationZone[] = [
+const COLLABORATION_ZONES: readonly CollaborationZone[] = [
   'spaces',
   'thread',
   'preview',
 ];
-
-/** Stable schematic letters: they follow the zone, not the slot. */
-export const ZONE_LETTERS: Record<LayoutZone, string> = {
-  dock: 'A',
-  workspace: 'B',
-  session: 'C',
-  terminal: 'D',
-};
-
-export const KANBAN_ZONE_LETTERS: Record<KanbanZone, string> = {
-  list: 'A',
-  monitor: 'B',
-  session: 'C',
-};
-
-export const COLLABORATION_ZONE_LETTERS: Record<CollaborationZone, string> = {
-  spaces: 'A',
-  thread: 'B',
-  preview: 'C',
-};
 
 export const DEFAULT_LAYOUT_ARRANGEMENT: LayoutArrangement = {
   left: 'dock',
@@ -100,7 +73,7 @@ export const DEFAULT_KANBAN_ARRANGEMENT: KanbanArrangement = {
   right: 'session',
 };
 
-export const DEFAULT_COLLABORATION_ARRANGEMENT: CollaborationArrangement = {
+const DEFAULT_COLLABORATION_ARRANGEMENT: CollaborationArrangement = {
   left: 'spaces',
   center: 'thread',
   right: 'preview',
@@ -111,15 +84,6 @@ export function arrangementsEqual<A extends Record<string, string>>(
   b: A
 ): boolean {
   return (Object.keys(a) as (keyof A)[]).every((slot) => a[slot] === b[slot]);
-}
-
-export function swapArrangementSlots<A extends Record<string, string>>(
-  arrangement: A,
-  a: keyof A,
-  b: keyof A
-): A {
-  if (a === b) return arrangement;
-  return { ...arrangement, [a]: arrangement[b], [b]: arrangement[a] };
 }
 
 interface ArrangementPreference<S extends string, Z extends string> {
@@ -275,18 +239,6 @@ export function getLayoutArrangement(): LayoutArrangement {
   return workspacePreference.get();
 }
 
-export function setLayoutArrangement(arrangement: LayoutArrangement): void {
-  workspacePreference.set(arrangement);
-}
-
-export function resetLayoutArrangement(): void {
-  workspacePreference.reset();
-}
-
-export function subscribeLayoutArrangement(listener: () => void): () => void {
-  return workspacePreference.subscribe(listener);
-}
-
 export function useLayoutArrangement(): LayoutArrangement {
   return useSyncExternalStore(
     workspacePreference.subscribe,
@@ -296,12 +248,6 @@ export function useLayoutArrangement(): LayoutArrangement {
 }
 
 // --- Kanban page arrangement ---
-
-export function isDefaultKanbanArrangement(
-  arrangement: KanbanArrangement
-): boolean {
-  return arrangementsEqual(arrangement, DEFAULT_KANBAN_ARRANGEMENT);
-}
 
 export function kanbanSlotOfZone(
   arrangement: KanbanArrangement,
@@ -326,20 +272,12 @@ export function kanbanSessionResizeHandleSide(
   return sessionIndex < monitorIndex ? 'right' : 'left';
 }
 
-export function getKanbanArrangement(): KanbanArrangement {
-  return kanbanPreference.get();
-}
-
 export function setKanbanArrangement(arrangement: KanbanArrangement): void {
   kanbanPreference.set(arrangement);
 }
 
 export function resetKanbanArrangement(): void {
   kanbanPreference.reset();
-}
-
-export function subscribeKanbanArrangement(listener: () => void): () => void {
-  return kanbanPreference.subscribe(listener);
 }
 
 export function useKanbanArrangement(): KanbanArrangement {
@@ -351,41 +289,6 @@ export function useKanbanArrangement(): KanbanArrangement {
 }
 
 // --- Collaboration page arrangement ---
-
-export function isDefaultCollaborationArrangement(
-  arrangement: CollaborationArrangement
-): boolean {
-  return arrangementsEqual(arrangement, DEFAULT_COLLABORATION_ARRANGEMENT);
-}
-
-export function collaborationSlotOfZone(
-  arrangement: CollaborationArrangement,
-  zone: CollaborationZone
-): CollaborationSlot {
-  return (
-    COLLABORATION_SLOTS.find((slot) => arrangement[slot] === zone) ?? 'center'
-  );
-}
-
-export function getCollaborationArrangement(): CollaborationArrangement {
-  return collaborationPreference.get();
-}
-
-export function setCollaborationArrangement(
-  arrangement: CollaborationArrangement
-): void {
-  collaborationPreference.set(arrangement);
-}
-
-export function resetCollaborationArrangement(): void {
-  collaborationPreference.reset();
-}
-
-export function subscribeCollaborationArrangement(
-  listener: () => void
-): () => void {
-  return collaborationPreference.subscribe(listener);
-}
 
 export function useCollaborationArrangement(): CollaborationArrangement {
   return useSyncExternalStore(

@@ -10,7 +10,6 @@ import { formatEventSourceLabel } from '@/features/pulse';
 import {
   formatOutboxActionLabel,
   formatWorkflowTemporalBadge,
-  toBackendWorkflowDefinition,
   toStudioWorkflowDefinition,
   type OutboxActionKind,
   type StudioWorkflowDefinition,
@@ -24,7 +23,6 @@ import {
 import type { WorkflowStudioAgentOption } from '@/features/workflow/workflowAgent';
 import type {
   EventSourceKind,
-  GateFilterAst,
   PulseCallbackKind,
   PulseCallbackSpec,
   PulseRuleSpec,
@@ -93,14 +91,6 @@ const DEFAULT_STUDIO_OUTPUT_SCHEMA: JsonValue = {
   type: 'object',
   required: ['summary'],
   properties: { summary: { type: 'string' } },
-};
-
-export const EMPTY_GATE_FILTER: GateFilterAst = {
-  sourceKinds: [],
-  sourceInstanceIds: [],
-  eventTypes: [],
-  allowedActors: [],
-  conditions: [],
 };
 
 export function stripTemplateNoise(raw: string | null | undefined): string {
@@ -351,15 +341,6 @@ export function convertRuleSpecToStudioWorkflow(
     },
     steps,
   };
-}
-
-export function convertFastTaskToWorkflowDefinition(
-  spec: PulseRuleSpec,
-  outputLanguage = 'zh-CN'
-): WorkflowDefinition {
-  return toBackendWorkflowDefinition(
-    convertRuleSpecToStudioWorkflow(spec, outputLanguage)
-  );
 }
 
 export function extractSemanticChain(

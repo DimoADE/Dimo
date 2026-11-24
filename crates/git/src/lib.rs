@@ -8,7 +8,6 @@ mod init_ops;
 mod panel_ops;
 mod remote_ops;
 mod stash_ops;
-mod stats_ops;
 mod types;
 mod validation;
 mod worktree_ops;
@@ -72,10 +71,6 @@ impl GitService {
     pub fn new() -> Self {
         ensure_libgit2_owner_validation_disabled();
         Self {}
-    }
-
-    pub fn is_branch_name_valid(&self, name: &str) -> bool {
-        git2::Branch::name_is_valid(name).unwrap_or(false)
     }
 }
 

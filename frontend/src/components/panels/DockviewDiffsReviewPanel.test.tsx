@@ -57,20 +57,6 @@ vi.mock('@/hooks/useDiffStream', () => ({
   }),
 }));
 
-vi.mock('@/hooks/useDiffSummary', () => ({
-  useDiffSummary: () => ({
-    fileCount: diffState.current.length,
-    added: diffState.current.reduce(
-      (total, diff) => total + (diff.additions ?? 0),
-      0
-    ),
-    deleted: diffState.current.reduce(
-      (total, diff) => total + (diff.deletions ?? 0),
-      0
-    ),
-  }),
-}));
-
 vi.mock('@/stores/useCommitDiffStore', () => ({
   useCommitDiffStore: () => commitDiffState.current,
 }));

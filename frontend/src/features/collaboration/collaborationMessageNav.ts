@@ -1,4 +1,4 @@
-import type { ConversationMessageNavEntry } from '@/components/conversation-thread/messageNavEntries';
+import type { ConversationMessageNavEntry } from '@/components/NormalizedConversation/thread/messageNavEntries';
 
 import { isCollabThreadUserBubble } from './collaborationThreadLog';
 import { bubbleText } from './SpaceMessageBody';

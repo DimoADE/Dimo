@@ -46,11 +46,6 @@ export interface BrowserBoundsInput {
   visible?: boolean;
 }
 
-export interface BrowserRpcErrorShape {
-  code: string;
-  message: string;
-}
-
 export class BrowserRpcError extends Error {
   readonly code: string;
 

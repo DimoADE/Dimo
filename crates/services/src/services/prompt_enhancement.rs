@@ -87,17 +87,6 @@ pub fn selected_prompt_enhancement_agent(config: &Config) -> Option<&str> {
     }
 }
 
-/// Legacy model field. Kept so older settings still deserialize; new runs
-/// apply the Agent session config instead.
-pub fn selected_prompt_enhancement_model(config: &Config) -> Option<&str> {
-    let trimmed = config.prompt_enhancement_model.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
-}
-
 fn selected_prompt_enhancement_instruction(config: &Config) -> Cow<'_, str> {
     let trimmed = config
         .prompt_enhancement_prompt

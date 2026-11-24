@@ -53,8 +53,6 @@ pub enum ExecutorError {
     CommandBuild(#[from] CommandBuildError),
     #[error("Executable `{program}` not found in PATH")]
     ExecutableNotFound { program: String },
-    #[error("Setup helper not supported")]
-    SetupHelperNotSupported,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, Display)]

@@ -120,7 +120,7 @@ const CONSUMERS = {
     symbol: 'composer_action',
   },
   'app.rail.section': {
-    file: 'frontend/src/components/layout/RightPanelSidebar.tsx',
+    file: 'frontend/src/components/layout/panels/WorkspaceTabAddMenu.tsx',
     symbol: 'app_rail_section',
   },
   'provider.remote.provisioner': {

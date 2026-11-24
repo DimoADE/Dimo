@@ -92,19 +92,6 @@ where
         }
     }
 
-    pub fn with_ports<E, D>(conversations: R, execution: Arc<E>, domains: Arc<D>) -> Self
-    where
-        E: ConversationExecutionPort + 'static,
-        D: ApplicationDomainPort + 'static,
-    {
-        Self {
-            conversations,
-            execution,
-            domains,
-            workflows: Arc::new(UnavailableWorkflowExecution),
-        }
-    }
-
     pub fn with_all_ports<E, D, W>(
         conversations: R,
         execution: Arc<E>,
@@ -120,23 +107,6 @@ where
             conversations,
             execution,
             domains,
-            workflows,
-        }
-    }
-
-    pub fn with_execution_and_workflows<E, W>(
-        conversations: R,
-        execution: Arc<E>,
-        workflows: Arc<W>,
-    ) -> Self
-    where
-        E: ConversationExecutionPort + 'static,
-        W: WorkflowExecutionPort + 'static,
-    {
-        Self {
-            conversations,
-            execution,
-            domains: unavailable_domains(),
             workflows,
         }
     }

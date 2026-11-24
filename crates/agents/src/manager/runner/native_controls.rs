@@ -163,37 +163,42 @@ fn current_select_option_value(options: &[AcpSessionConfigOption], key: &str) ->
     (!val.is_empty()).then(|| val.to_string())
 }
 
+pub(crate) fn can_fallback_launch_lock_to_acp(
+    launch_lock: &SessionLaunchLock,
+    mode_env: Option<&str>,
+) -> bool {
+    let explicit_acp = mode_env.is_some_and(|v| {
+        let trimmed = v.trim();
+        trimmed.eq_ignore_ascii_case("acp") || trimmed.eq_ignore_ascii_case("acp-fallback")
+    });
+    let locked = &launch_lock.absolute_acp_program;
+    let stem = locked
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let has_acp_arg = launch_lock
+        .args
+        .iter()
+        .any(|arg| arg.eq_ignore_ascii_case("acp"));
+    let is_acp_adapter_binary = stem.ends_with("-acp") || stem.ends_with("_acp") || has_acp_arg;
+
+    if !is_acp_adapter_binary {
+        return false;
+    }
+    if explicit_acp {
+        return true;
+    }
+    let resolved = crate::prefer_path_launch_program(locked);
+    crate::launch_program_available(&resolved)
+}
+
 impl AgentConnectionRunner {
     /// Checks whether a failed pre-handshake `run_native` attempt may safely fall back to
     /// `run_acp`. Standalone `claude` and `codex` CLIs are NOT ACP stdio servers and must
     /// never be spawned via `run_acp` when native startup fails (`[F1]`).
     pub(in crate::manager) fn can_fallback_to_acp_adapter(&self, mode_env: Option<&str>) -> bool {
-        let explicit_acp = mode_env.is_some_and(|v| {
-            let trimmed = v.trim();
-            trimmed.eq_ignore_ascii_case("acp") || trimmed.eq_ignore_ascii_case("acp-fallback")
-        });
-        let locked = &self.snapshot.launch_lock.absolute_acp_program;
-        let stem = locked
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let has_acp_arg = self
-            .snapshot
-            .launch_lock
-            .args
-            .iter()
-            .any(|arg| arg.eq_ignore_ascii_case("acp"));
-        let is_acp_adapter_binary = stem.ends_with("-acp") || stem.ends_with("_acp") || has_acp_arg;
-
-        if !is_acp_adapter_binary {
-            return false;
-        }
-        if explicit_acp {
-            return true;
-        }
-        let resolved = crate::prefer_path_launch_program(locked);
-        crate::launch_program_available(&resolved)
+        can_fallback_launch_lock_to_acp(&self.snapshot.launch_lock, mode_env)
     }
 
     fn merged_native_env(&self) -> HashMap<String, String> {

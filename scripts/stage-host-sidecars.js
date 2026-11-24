@@ -43,7 +43,6 @@ function resolveSidecarBinDir({
 
 const MCP_SIDECAR_BINS = [
   "dimo-mcp",
-  "dimo-workflow-mcp",
 ];
 
 const ELECTRON_SIDECAR_BINS = [

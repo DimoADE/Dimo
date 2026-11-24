@@ -49,7 +49,7 @@ test('sidecar layout prefers DIMO_BUILD_TARGET and the active cargo profile', ()
   );
 });
 
-test('sidecar rebuild is skipped only when both Host binaries are non-empty', () => {
+test('sidecar rebuild is skipped only when the Host MCP binary is non-empty', () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'dimo-sidecars-'));
   const env = {
     CARGO_TARGET_DIR: path.join(repo, 'target'),
@@ -73,12 +73,10 @@ test('sidecar rebuild is skipped only when both Host binaries are non-empty', ()
   assert.equal(sidecarBinsExist(probe), false);
 
   fs.writeFileSync(path.join(binDir, 'dimo-mcp'), '');
-  fs.writeFileSync(path.join(binDir, 'dimo-workflow-mcp'), '');
   assert.equal(sidecarBinsExist(probe), false);
   assert.equal(isBuiltSidecar(path.join(binDir, 'dimo-mcp')), false);
 
   fs.writeFileSync(path.join(binDir, 'dimo-mcp'), 'mcp-bin');
-  fs.writeFileSync(path.join(binDir, 'dimo-workflow-mcp'), 'workflow-bin');
   assert.equal(sidecarBinsExist(probe), true);
 });
 
@@ -97,9 +95,7 @@ test('sidecar lookup accepts a native cargo profile binary when the triple dir i
   fs.mkdirSync(binDir, { recursive: true });
   fs.mkdirSync(nativeBinDir, { recursive: true });
   fs.writeFileSync(path.join(binDir, 'dimo-mcp.exe'), '');
-  fs.writeFileSync(path.join(binDir, 'dimo-workflow-mcp.exe'), '');
   fs.writeFileSync(path.join(nativeBinDir, 'dimo-mcp.exe'), 'mcp-bin');
-  fs.writeFileSync(path.join(nativeBinDir, 'dimo-workflow-mcp.exe'), 'workflow-bin');
 
   assert.equal(
     sidecarBinsExist({
@@ -144,7 +140,7 @@ test('copySidecar replaces existing staged binary and sweeps retired leftovers',
   assert.equal(fs.existsSync(path.join(outDir, `${baseName}.old-100-1`)), false);
 });
 
-test('stageElectronSidecars stages dimo-server, dimo-mcp, and dimo-workflow-mcp into electron/resources/bin', () => {
+test('stageElectronSidecars stages dimo-server and dimo-mcp into electron/resources/bin', () => {
   const { stageElectronSidecars } = require('./stage-host-sidecars');
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'dimo-electron-sidecars-'));
   const targetDir = path.join(repo, 'target');
@@ -153,7 +149,6 @@ test('stageElectronSidecars stages dimo-server, dimo-mcp, and dimo-workflow-mcp 
   fs.mkdirSync(binDir, { recursive: true });
   fs.writeFileSync(path.join(binDir, 'dimo-server.exe'), 'server-bin');
   fs.writeFileSync(path.join(binDir, 'dimo-mcp.exe'), 'mcp-bin');
-  fs.writeFileSync(path.join(binDir, 'dimo-workflow-mcp.exe'), 'workflow-bin');
 
   const staged = stageElectronSidecars({
     repo,
@@ -170,7 +165,6 @@ test('stageElectronSidecars stages dimo-server, dimo-mcp, and dimo-workflow-mcp 
   assert.deepEqual(staged, [
     path.join(expectedDir, 'dimo-server.exe'),
     path.join(expectedDir, 'dimo-mcp.exe'),
-    path.join(expectedDir, 'dimo-workflow-mcp.exe'),
   ]);
   assert.equal(
     fs.readFileSync(path.join(expectedDir, 'dimo-server.exe'), 'utf8'),

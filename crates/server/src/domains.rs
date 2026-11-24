@@ -1,4 +1,3 @@
-#![allow(unused_imports)]
 #[path = "domains/automation_and_projects.rs"]
 mod automation_and_projects;
 #[path = "domains/plugins_catalog.rs"]
@@ -37,8 +36,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-#[allow(unused_imports)]
-use self::plugins_marketplace::*;
+use self::plugins_marketplace::plugin_control_item_with_quarantine;
 pub(crate) use self::plugins_marketplace::{is_legacy_plugin_api_error, plugin_control_item};
 use crate::{
     PreviewProxyRegistry,
@@ -190,6 +188,7 @@ impl ServerApplicationDomains {
             | DomainCommand::RepoBranches
             | DomainCommand::AgentManagementBar
             | DomainCommand::AgentCapabilityCatalog
+            | DomainCommand::AgentCapabilityCatalogsSnapshot
             | DomainCommand::AgentCapabilityCatalogFresh
             | DomainCommand::AgentRefreshCapabilityCatalog
             | DomainCommand::AgentSkillsList
@@ -249,9 +248,7 @@ impl ServerApplicationDomains {
             DomainCommand::WorkspaceContinueConflicts
             | DomainCommand::WorkspaceConflictFile
             | DomainCommand::WorkspaceWriteConflictResolution
-            | DomainCommand::WorkspaceShowStash
             | DomainCommand::WorkspaceCreatePr
-            | DomainCommand::WorkspaceAttachPr
             | DomainCommand::WorkspaceCreateFromPr
             | DomainCommand::WorkspaceRunSetupScript
             | DomainCommand::WorkspaceRunCleanupScript
@@ -586,6 +583,9 @@ impl ServerApplicationDomains {
             DomainCommand::RepoBranches => Box::pin(self.repo_branches(args)),
             DomainCommand::AgentManagementBar => Box::pin(self.agent_management_bar()),
             DomainCommand::AgentCapabilityCatalog => Box::pin(self.agent_capability_catalog(args)),
+            DomainCommand::AgentCapabilityCatalogsSnapshot => {
+                Box::pin(self.agent_capability_catalogs_snapshot())
+            }
             DomainCommand::AgentCapabilityCatalogFresh => {
                 Box::pin(self.agent_capability_catalog_fresh(args))
             }
@@ -1162,9 +1162,7 @@ pub(crate) fn resolve_bridged_domain_command(
 
 #[cfg(test)]
 mod plugin_invoke_contribution_args {
-    use serde_json::json;
-
-    use super::*;
+    use super::{plugins_marketplace::tag_matches_monorepo_official_plugin, *};
 
     #[test]
     fn saved_host_reconnect_payload_is_a_worker_invoke() {

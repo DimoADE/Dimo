@@ -114,10 +114,6 @@ impl ActivationLease {
 }
 
 impl ActivationManager {
-    pub fn shared_node_host(&self) -> Arc<SharedNodeWorkerHost> {
-        Arc::clone(&self.shared_node)
-    }
-
     /// Total OS worker subprocesses currently alive for this manager.
     ///
     /// - 0 when only Tier-0/Tier-1 plugins are active or when all Tier-2

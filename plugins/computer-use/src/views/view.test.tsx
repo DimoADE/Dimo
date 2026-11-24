@@ -352,7 +352,7 @@ describe('ComputerUseSettingsView with live dimo-computer-helper daemon payloads
     container.remove();
   });
 
-  it('formats plain-object Tauri invoke errors instead of rendering [object Object]', async () => {
+  it('formats plain-object host invoke errors instead of rendering [object Object]', async () => {
     const invokeMock = vi.fn(
       async (handler: string, input?: Record<string, unknown> | null) => {
         const method = (input?.rpcMethod as string) ?? handler;

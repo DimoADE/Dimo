@@ -1,21 +1,11 @@
-//! Managed, verified runtime for declarative tool dependencies.
+//! Verified HTTPS downloader for managed tool and runtime distributions.
 
 mod adapters;
 mod error;
-mod install;
 mod ports;
 mod types;
 
-pub use adapters::{
-    CommandProcessProbe, FileInstallationLockStore, HostResolver, HttpDownloader,
-    LocalToolFilesystem, SystemHostResolver,
-};
-pub use error::{PortError, ToolRuntimeError};
-pub use install::ToolRuntime;
-pub use ports::{
-    Downloader, InstallationLockGuard, InstallationLockStore, ProcessProbe, ToolFilesystem,
-};
-pub use types::{
-    CancellationToken, InstallationAttempt, ToolInstallationLock, ToolLease, ToolRequest,
-    ToolRuntimeConfig, validate_distribution_url,
-};
+pub use adapters::{HostResolver, HttpDownloader, SystemHostResolver};
+pub use error::PortError;
+pub use ports::Downloader;
+pub use types::validate_distribution_url;

@@ -21,7 +21,6 @@ pub mod host_isolation;
 pub mod input;
 pub mod isolated_workspace;
 pub mod jsonl_history;
-mod legacy_transcript_checkpoint;
 pub mod live_coalescer;
 pub mod live_pipeline;
 pub mod member_memory;
@@ -43,6 +42,7 @@ pub use bundle::{
     import_conversation_bundle, resolve_agent_fork_point,
 };
 pub use capability_catalog::{
+    CapabilityCatalogUpdatedEvent, CatalogResolutionSource, InstantCapabilityCatalog,
     capability_catalog_is_fresh, capability_catalog_is_fresh_for_provider_instance,
     invalidate_open_capability_catalog, invalidate_open_capability_catalog_for_provider_instance,
     load_capability_catalog_for_session_defaults,
@@ -52,6 +52,7 @@ pub use capability_catalog::{
     read_matching_open_capability_catalog,
     read_matching_open_capability_catalog_for_provider_instance, record_open_capability_catalog,
     refresh_open_capability_catalog, refresh_open_capability_catalog_for_provider_instance,
+    resolve_instant_capability_catalog_for_provider_instance, subscribe_capability_catalog_updates,
 };
 pub use checkpoint_safety::{
     CheckpointRollbackSafety, DEFAULT_ROLLBACK_LEASE_TTL_SECS, RollbackSafetyError,

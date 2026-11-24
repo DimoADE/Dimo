@@ -1,113 +1,13 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use sha2::{Digest, Sha256};
 use sqlx::{FromRow, SqlitePool};
-use tokio::fs;
-use tool_runtime::{InstallationLockStore, ToolRuntime};
 use uuid::Uuid;
 
 use crate::{
-    ArtifactFilesystem, ArtifactRecord, ArtifactRepository, Clock, PendingPreviewEvent,
-    PendingRevisionEvent, PortError, ProducerEvidence, ResolvedToolInstallation,
-    ToolInstallationResolver, ToolLockEvidence,
+    ArtifactRecord, ArtifactRepository, PendingPreviewEvent, PendingRevisionEvent, PortError,
+    ProducerEvidence, ToolLockEvidence,
 };
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct LocalArtifactFilesystem;
-
-#[async_trait]
-impl ArtifactFilesystem for LocalArtifactFilesystem {
-    async fn canonicalize(&self, path: &Path) -> Result<PathBuf, PortError> {
-        fs::canonicalize(path).await.map_err(port_error)
-    }
-
-    async fn read(&self, path: &Path) -> Result<Vec<u8>, PortError> {
-        fs::read(path).await.map_err(port_error)
-    }
-}
-
-pub struct CurrentToolInstallationResolver {
-    locks: Arc<dyn InstallationLockStore>,
-    runtime: Arc<ToolRuntime>,
-}
-
-impl CurrentToolInstallationResolver {
-    pub fn new(locks: Arc<dyn InstallationLockStore>, runtime: Arc<ToolRuntime>) -> Self {
-        Self { locks, runtime }
-    }
-}
-
-#[async_trait]
-impl ToolInstallationResolver for CurrentToolInstallationResolver {
-    async fn resolve(
-        &self,
-        evidence: &ToolLockEvidence,
-    ) -> Result<Option<ResolvedToolInstallation>, PortError> {
-        let lock = self
-            .locks
-            .load_version(&evidence.tool_id, &evidence.version)
-            .await
-            .map_err(|error| PortError::new(error.to_string()))?;
-        let Some(lock) = lock.filter(|lock| {
-            lock.tool_id == evidence.tool_id
-                && lock.version == evidence.version
-                && lock.target == evidence.target
-                && lock.sha256 == evidence.sha256
-                && lock.executable_path == evidence.executable_path
-                && lock.executable_path.is_absolute()
-                && lock_identity(lock) == evidence.id
-        }) else {
-            return Ok(None);
-        };
-        let bytes = match fs::read(&lock.executable_path).await {
-            Ok(bytes) => bytes,
-            Err(_) => return Ok(None),
-        };
-        let actual = format!("{:x}", Sha256::digest(bytes));
-        if !actual.eq_ignore_ascii_case(&lock.sha256) {
-            return Ok(None);
-        }
-        let lease = self
-            .runtime
-            .lease_installed(&lock)
-            .map_err(|error| PortError::new(error.to_string()))?;
-        Ok(Some(ResolvedToolInstallation::leased(lock, lease)))
-    }
-
-    async fn release(&self, installation: &mut ResolvedToolInstallation) -> Result<(), PortError> {
-        let Some(lease) = installation.lease.as_ref().cloned() else {
-            return Ok(());
-        };
-        self.runtime
-            .release(lease)
-            .await
-            .map_err(|error| PortError::new(error.to_string()))?;
-        installation.lease = None;
-        Ok(())
-    }
-}
-
-fn lock_identity(lock: &tool_runtime::ToolInstallationLock) -> String {
-    let serialized = serde_json::to_vec(lock).expect("tool installation lock serializes");
-    format!("{:x}", Sha256::digest(serialized))
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now_unix_ms(&self) -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
-    }
-}
 
 #[derive(Clone)]
 pub struct SqliteArtifactRepository {

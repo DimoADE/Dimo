@@ -21,7 +21,6 @@ module.exports = {
     'unused-imports',
     'eslint-comments',
     'check-file',
-    'deprecation',
   ],
   parserOptions: {
     ecmaVersion: 'latest',
@@ -174,7 +173,6 @@ module.exports = {
         'src/lib/modals.ts',
         'src/components/legacy-design/LegacyDesignScope.tsx',
         'src/components/dialogs/**/*.{ts,tsx}',
-        'src/pages/settings/AgentUpdateConfirmDialog.tsx',
       ],
       rules: {
         'no-restricted-imports': 'off',

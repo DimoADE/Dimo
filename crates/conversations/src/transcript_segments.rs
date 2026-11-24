@@ -197,15 +197,6 @@ pub async fn read_in(
     read_segments(root, conversation_id, segments).await
 }
 
-pub async fn read_on_connection(
-    conn: &mut sqlx::SqliteConnection,
-    root: &Path,
-    conversation_id: Uuid,
-) -> Result<Option<Vec<MessageTurn>>, sqlx::Error> {
-    let segments = Segment::list_on_connection(conn, conversation_id).await?;
-    read_segments(root, conversation_id, segments).await
-}
-
 async fn read_segments(
     root: &Path,
     conversation_id: Uuid,

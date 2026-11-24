@@ -350,25 +350,18 @@ describe('loadAgentSessionControlsCatalog', () => {
     expect(refreshCapabilityCatalog).not.toHaveBeenCalled();
   });
 
-  it('throws when refresh reports that discovery did not persist a catalog', async () => {
+  it('returns null without blocking on refreshCapabilityCatalog when no catalog is cached yet', async () => {
     capabilityCatalog.mockResolvedValue(null);
-    refreshCapabilityCatalog.mockResolvedValue(false);
 
-    await expect(loadAgentSessionControlsCatalog('grok')).rejects.toThrow(
-      'Agent session controls discovery failed'
-    );
+    await expect(loadAgentSessionControlsCatalog('antigravity')).resolves.toBeNull();
+    expect(capabilityCatalog).toHaveBeenCalledWith('antigravity');
+    expect(refreshCapabilityCatalog).not.toHaveBeenCalled();
   });
 
-  it('reads the catalog after a successful refresh', async () => {
-    capabilityCatalog
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(CONTROLS);
-    refreshCapabilityCatalog.mockResolvedValue(true);
-
-    await expect(loadAgentSessionControlsCatalog('grok')).resolves.toEqual(
-      CONTROLS
-    );
-    expect(refreshCapabilityCatalog).toHaveBeenCalledWith('grok');
+  it('returns null without calling IPC when agentType is empty', async () => {
+    await expect(loadAgentSessionControlsCatalog('')).resolves.toBeNull();
+    expect(capabilityCatalog).not.toHaveBeenCalled();
+    expect(refreshCapabilityCatalog).not.toHaveBeenCalled();
   });
 });
 

@@ -81,51 +81,6 @@ test('right panel session creation uses a local centered overlay form and create
   assert.match(source, /if \(!isCreateOverlayVisible \|\| isLoadingWorktrees\)/);
 });
 
-test('workspace right-panel new-session triggers route through the shared overlay context instead of the inline input form', () => {
-  const panelSource = readFile('src/components/layout/RightPanelContent.tsx');
-  const contextSource = readFile(
-    'src/contexts/RightPanelSessionCreationContext.tsx'
-  );
-  const conversationSource = readFile(
-    'src/components/kanban/KanbanSessionConversationView.tsx'
-  );
-  const followUpSource = readFile(
-    'src/components/tasks/TaskFollowUpSection.tsx'
-  );
-  const promptSource = readFile(
-    'src/components/layout/RightPanelNewSessionPrompt.tsx'
-  );
-
-  assert.match(contextSource, /RightPanelSessionCreationProvider/);
-  assert.match(contextSource, /openCreateSessionOverlay/);
-  assert.match(
-    panelSource,
-    /<RightPanelSessionCreationProvider\s+value=\{\{ openCreateSessionOverlay \}\}/
-  );
-  assert.match(
-    conversationSource,
-    /if \(rightPanelSessionCreation\) \{\s*rightPanelSessionCreation\.openCreateSessionOverlay\(\);/
-  );
-  assert.match(
-    followUpSource,
-    /const isNewSessionConfigVisible =\s*isNewSessionMode && !rightPanelSessionCreation;/
-  );
-  assert.match(
-    followUpSource,
-    /if \(rightPanelSessionCreation\) \{\s*rightPanelSessionCreation\.openCreateSessionOverlay\(\);/
-  );
-  assert.match(conversationSource, /autoSelectFirstSession: interactive/);
-  assert.match(
-    conversationSource,
-    /!activeSession &&\s*sessionState\.sessions\.length === 0 &&\s*!sessionState\.isNewSessionMode/
-  );
-  assert.match(conversationSource, /<RightPanelNewSessionPrompt/);
-  assert.match(
-    promptSource,
-    /className=\{cn\(\s*'flex h-full min-h-0 flex-col items-center justify-center/
-  );
-});
-
 test('workspace route binds the right panel to the current workspace instead of reusing a stale persisted right-session', () => {
   const source = readFile('src/components/layout/RightPanelContent.tsx');
 

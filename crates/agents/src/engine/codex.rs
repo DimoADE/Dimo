@@ -171,6 +171,7 @@ pub struct CodexAppServer {
     turn_router: TurnEventRouter,
     event_tx: broadcast::Sender<EngineEvent>,
     latest_rate_limits: Arc<RwLock<Option<EngineRateLimits>>>,
+    models_cache: Arc<RwLock<Option<Vec<EngineModelInfo>>>>,
     compaction_states: Arc<RwLock<HashMap<String, CodexAutoCompactionThreadState>>>,
     alive: Arc<AtomicBool>,
 }
@@ -336,6 +337,7 @@ impl CodexAppServer {
             turn_router: turn_router.clone(),
             event_tx: event_tx.clone(),
             latest_rate_limits: Arc::new(RwLock::new(None)),
+            models_cache: Arc::new(RwLock::new(None)),
             compaction_states: Arc::new(RwLock::new(HashMap::new())),
             alive: Arc::new(AtomicBool::new(true)),
         });
@@ -382,16 +384,6 @@ impl CodexAppServer {
 
     pub fn latest_rate_limits(&self) -> Option<EngineRateLimits> {
         self.latest_rate_limits.read().ok().and_then(|g| g.clone())
-    }
-
-    pub fn thread_compaction_state(
-        &self,
-        thread_id: &str,
-    ) -> Option<CodexAutoCompactionThreadState> {
-        self.compaction_states
-            .read()
-            .ok()
-            .and_then(|m| m.get(thread_id).cloned())
     }
 
     pub fn mark_thread_loaded(&self, thread_id: &str) {
@@ -774,6 +766,16 @@ impl CodexAppServer {
     }
 
     pub async fn list_models(&self) -> Vec<EngineModelInfo> {
+        if let Ok(guard) = self.models_cache.read()
+            && let Some(cached) = guard.as_ref()
+            && !cached.is_empty()
+        {
+            return cached.clone();
+        }
+        self.list_models_fresh().await
+    }
+
+    pub async fn list_models_fresh(&self) -> Vec<EngineModelInfo> {
         if let Ok(Ok(result)) = timeout(
             Duration::from_secs(3),
             self.request("model/list", json!({})),
@@ -782,10 +784,46 @@ impl CodexAppServer {
         {
             let parsed = parse_codex_models_response(&result);
             if !parsed.is_empty() {
+                if let Ok(mut guard) = self.models_cache.write() {
+                    *guard = Some(parsed.clone());
+                }
                 return parsed;
             }
         }
+        if let Ok(guard) = self.models_cache.read()
+            && let Some(cached) = guard.as_ref()
+            && !cached.is_empty()
+        {
+            return cached.clone();
+        }
         default_codex_models()
+    }
+
+    pub async fn probe_models_fresh(&self) -> Result<Vec<EngineModelInfo>, EngineError> {
+        match timeout(
+            Duration::from_secs(5),
+            self.request("model/list", json!({})),
+        )
+        .await
+        {
+            Ok(Ok(result)) => {
+                let parsed = parse_codex_models_response(&result);
+                if !parsed.is_empty() {
+                    if let Ok(mut guard) = self.models_cache.write() {
+                        *guard = Some(parsed.clone());
+                    }
+                    Ok(parsed)
+                } else {
+                    Ok(default_codex_models())
+                }
+            }
+            Ok(Err(EngineError::Rpc { code: -32601, .. })) => Ok(default_codex_models()),
+            Ok(Err(err)) => Err(err),
+            Err(_) => Err(EngineError::Timeout {
+                method: "model/list".to_string(),
+                timeout_ms: 5_000,
+            }),
+        }
     }
 
     pub async fn read_rate_limits(&self) -> Result<Option<EngineRateLimits>, EngineError> {
@@ -1184,6 +1222,18 @@ async fn get_or_spawn_workspace_server(
     Ok(spawned)
 }
 
+async fn find_alive_server_for_provider(spec: &EngineStartSpec) -> Option<Arc<CodexAppServer>> {
+    let target = CodexServerCacheKey::from_spec(spec);
+    let guard = global_codex_servers().read().await;
+    guard.iter().find_map(|(key, server)| {
+        (server.is_alive()
+            && key.provider_instance_id == target.provider_instance_id
+            && key.auth_fingerprint == target.auth_fingerprint
+            && key.native_config_fingerprint == target.native_config_fingerprint)
+            .then(|| Arc::clone(server))
+    })
+}
+
 #[async_trait]
 impl NativeEngineDriver for CodexNativeDriver {
     fn engine_id(&self) -> &str {
@@ -1237,6 +1287,10 @@ impl NativeEngineDriver for CodexNativeDriver {
 
     fn resolve_default_mode(&self, env: &HashMap<String, String>) -> Option<String> {
         resolve_codex_default_mode(env)
+    }
+
+    fn bundled_models(&self) -> Vec<EngineModelInfo> {
+        default_codex_models()
     }
 
     fn accepts_model_id(&self, model_id: &str, env: &HashMap<String, String>) -> bool {
@@ -1444,6 +1498,21 @@ impl NativeEngineDriver for CodexNativeDriver {
     ) -> Result<Vec<EngineModelInfo>, EngineError> {
         let (_, server) = self.ensure_server_for_handle(handle).await?;
         Ok(server.list_models().await)
+    }
+
+    async fn probe_models_for_provider(
+        &self,
+        spec: &EngineStartSpec,
+    ) -> Result<Option<Vec<EngineModelInfo>>, EngineError> {
+        if let Some(existing) = find_alive_server_for_provider(spec).await {
+            return existing.probe_models_fresh().await.map(Some);
+        }
+        let mut probe_spec = spec.clone();
+        probe_spec.workspace_id = Uuid::nil();
+        let server = CodexAppServer::spawn_for_workspace(&probe_spec).await?;
+        let probe_res = server.probe_models_fresh().await;
+        let _ = server.shutdown().await;
+        probe_res.map(Some)
     }
 
     fn rate_limits(&self, handle: &EngineHandle) -> Option<EngineRateLimits> {

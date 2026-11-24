@@ -232,29 +232,6 @@ export function ToolFacts({ facts }: { facts: ArtifactFact[] }) {
   );
 }
 
-export function ToolChoiceList({
-  items,
-  selected,
-}: {
-  items: string[];
-  selected?: string | null;
-}) {
-  if (items.length === 0) return null;
-
-  return (
-    <ul className="conv-tool-choices">
-      {items.map((item) => (
-        <li
-          key={item}
-          className={cn('conv-tool-choice', selected === item && 'is-selected')}
-        >
-          {item}
-        </li>
-      ))}
-    </ul>
-  );
-}
-
 export function ToolTerminal({
   command,
   output,

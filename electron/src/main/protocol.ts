@@ -372,77 +372,6 @@ export function parseByteRange(
   return { start, end };
 }
 
-export function resolveAppDistFile(
-  distRoot: string,
-  requestUrl: string,
-  platform: NodeJS.Platform = process.platform
-): string | null {
-  let parsed: URL;
-  try {
-    parsed = new URL(requestUrl);
-  } catch {
-    return null;
-  }
-
-  if (parsed.hostname.toLowerCase() !== 'localhost') {
-    return null;
-  }
-
-  const canonicalRoot = canonicalizeExisting(distRoot, platform);
-  if (!canonicalRoot) {
-    return null;
-  }
-
-  let pathname: string;
-  try {
-    pathname = decodeURIComponent(parsed.pathname);
-  } catch {
-    return null;
-  }
-
-  if (pathname.includes('\0')) {
-    return null;
-  }
-
-  const relative = pathname.replace(/^\/+/, '');
-  const candidate = path.resolve(
-    canonicalRoot,
-    relative.length === 0 ? 'index.html' : relative
-  );
-
-  if (!isWithinDirectory(candidate, canonicalRoot, platform)) {
-    return null;
-  }
-
-  const canonicalCandidate = canonicalizeExisting(candidate, platform);
-  if (
-    canonicalCandidate &&
-    isWithinDirectory(canonicalCandidate, canonicalRoot, platform) &&
-    fs.statSync(canonicalCandidate).isFile()
-  ) {
-    return canonicalCandidate;
-  }
-
-  // SPA fallback to index.html for client routes (including dotted routes like
-  // `/plugins/com.dimo.foo`), while returning 404 for missing static assets.
-  const ext = path.extname(relative).toLowerCase();
-  if (!STATIC_ASSET_EXTENSIONS.has(ext)) {
-    const indexPath = canonicalizeExisting(
-      path.join(canonicalRoot, 'index.html'),
-      platform
-    );
-    if (
-      indexPath &&
-      isWithinDirectory(indexPath, canonicalRoot, platform) &&
-      fs.statSync(indexPath).isFile()
-    ) {
-      return indexPath;
-    }
-  }
-
-  return null;
-}
-
 /**
  * Bridges a Node `Readable` into a Web `ReadableStream<Uint8Array>` with an
  * eager `'error'` listener and clean `destroy()` on cancel/abort so mid-read
@@ -704,24 +633,6 @@ function buildStreamingFileResponse(
   });
 }
 
-export function createStreamingFileResponse(
-  filePath: string,
-  request: Request,
-  options?: { extraHeaders?: Readonly<Record<string, string>> }
-): Response {
-  const extraHeaders = options?.extraHeaders;
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(filePath);
-  } catch {
-    return new Response('Not Found', {
-      status: 404,
-      ...(extraHeaders ? { headers: { ...extraHeaders } } : {}),
-    });
-  }
-  return buildStreamingFileResponse(filePath, stat, request, options);
-}
-
 async function createStreamingFileResponseAsync(
   filePath: string,
   request: Request,
@@ -853,21 +764,7 @@ export async function resolveAppDistFileAsync(
   return null;
 }
 
-export function handleAppProtocolRequest(
-  frontendDistDir: string,
-  request: Request
-): Response {
-  const resolved = resolveAppDistFile(frontendDistDir, request.url);
-  if (!resolved) {
-    return new Response('Not Found', { status: 404 });
-  }
-  const extraHeaders = mimeTypeForPath(resolved).startsWith('text/html')
-    ? { 'Content-Security-Policy': APP_CONTENT_SECURITY_POLICY }
-    : undefined;
-  return createStreamingFileResponse(resolved, request, { extraHeaders });
-}
-
-async function handleAppProtocolRequestAsync(
+export async function handleAppProtocolRequestAsync(
   frontendDistDir: string,
   request: Request
 ): Promise<Response> {
@@ -881,36 +778,7 @@ async function handleAppProtocolRequestAsync(
   return createStreamingFileResponseAsync(resolved, request, { extraHeaders });
 }
 
-export function handleAssetProtocolRequest(
-  assetScope: PreviewAssetScope,
-  request: Request
-): Response {
-  if (request.method.toUpperCase() === 'OPTIONS') {
-    return new Response(null, {
-      status: 204,
-      headers: ASSET_PREFLIGHT_HEADERS,
-    });
-  }
-
-  const targetPath = decodeAssetUrlPath(request.url);
-  if (!targetPath) {
-    return new Response('Bad Request', {
-      status: 400,
-      headers: ASSET_CORS_HEADERS,
-    });
-  }
-  if (!assetScope.isAllowed(targetPath)) {
-    return new Response('Forbidden', {
-      status: 403,
-      headers: ASSET_CORS_HEADERS,
-    });
-  }
-  return createStreamingFileResponse(targetPath, request, {
-    extraHeaders: ASSET_CORS_HEADERS,
-  });
-}
-
-async function handleAssetProtocolRequestAsync(
+export async function handleAssetProtocolRequestAsync(
   assetScope: PreviewAssetScope,
   request: Request
 ): Promise<Response> {

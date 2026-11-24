@@ -12,12 +12,9 @@ function readFile(relativePath) {
   return fs.readFileSync(path.join(frontendRoot, relativePath), 'utf8');
 }
 
-test('Workspace 左右工具栏共用宽度、表面与按钮交互', () => {
+test('Workspace 左侧工具栏保持统一宽度、表面与按钮交互', () => {
   const activityRail = readFile(
     'src/components/layout/WorkspaceActivityRail.tsx'
-  );
-  const rightPanelSidebar = readFile(
-    'src/components/layout/RightPanelSidebar.tsx'
   );
   const styles = readFile('src/styles/legacy/index.css');
 
@@ -25,13 +22,7 @@ test('Workspace 左右工具栏共用宽度、表面与按钮交互', () => {
     activityRail,
     /workspace-activity-rail workspace-divider-right relative flex w-9 shrink-0 flex-col items-center gap-0\.5 bg-secondary\/30 pt-2/
   );
-  assert.match(
-    rightPanelSidebar,
-    /workspace-divider-left relative flex w-9 shrink-0 flex-col items-center gap-0\.5 bg-secondary\/30 pt-2/
-  );
   assert.match(activityRail, /workspace-side-rail-button flex h-7 w-7/);
-  assert.match(rightPanelSidebar, /workspace-side-rail-button flex h-7 w-7/);
-  assert.match(rightPanelSidebar, /transport\.environment !== 'web'/);
   assert.match(styles, /\.workspace-side-rail-button:hover\s*\{/);
   assert.match(styles, /\.workspace-side-rail-button:active\s*\{/);
   assert.match(styles, /\.workspace-side-rail-button\.is-active\s*\{/);
@@ -39,23 +30,6 @@ test('Workspace 左右工具栏共用宽度、表面与按钮交互', () => {
     styles,
     /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.workspace-side-rail-button\s*\{[\s\S]*?transition: none;/
   );
-});
-
-test('Workspace 右侧工具栏由 Dockview 外层布局固定持有', () => {
-  const ideLayout = readFile('src/components/layout/IDELayout.tsx');
-  const rightPanelContent = readFile(
-    'src/components/layout/RightPanelContent.tsx'
-  );
-
-  assert.match(
-    ideLayout,
-    /import \{ RightPanelSidebar \} from '@\/components\/layout\/RightPanelSidebar';/
-  );
-  assert.match(
-    ideLayout,
-    /<\/RightPanelSlotContext\.Provider>[\s\S]*?effectiveActiveTab === 'workspace'[\s\S]*?<RightPanelSidebar \/>/
-  );
-  assert.doesNotMatch(rightPanelContent, /RightPanelSidebar/);
 });
 
 test('会话消息导航的基础与 Hover 宽度缩小为原来的 70%', () => {

@@ -7,10 +7,9 @@ use uuid::Uuid;
 
 use crate::{
     DebugRunScope, EventEnvelope, UserInteractionKind, WaitingWorkflowStep, WorkflowDefinition,
-    WorkflowDefinitionSummary, WorkflowGraphPatchOp, WorkflowPolicy, WorkflowRunView,
-    WorkflowStepSpec, WorkflowStore, WorkflowVersionView, apply_workflow_graph_patch,
-    match_waiting_step, normalize_definition,
-    spec::{MAX_WORKFLOW_INPUT_BYTES, validate_definition_errors},
+    WorkflowDefinitionSummary, WorkflowPolicy, WorkflowRunView, WorkflowStepSpec, WorkflowStore,
+    WorkflowVersionView, match_waiting_step, normalize_definition,
+    spec::MAX_WORKFLOW_INPUT_BYTES,
     store::{PersistDerivedWorkflowRun, PersistWorkflowRun},
     validate_json_value,
 };
@@ -213,26 +212,6 @@ impl WorkflowCore {
         let normalized = normalize_definition(definition)?;
         let digest = digest_json(&normalized)?;
         Ok(WorkflowValidationView { normalized, digest })
-    }
-
-    /// Runs single-pass exhaustive No-Fail-Fast validation and returns every error found.
-    pub fn validate_exhaustive(&self, definition: &WorkflowDefinition) -> Vec<String> {
-        validate_definition_errors(definition)
-    }
-
-    /// Applies declarative graph patch operations and returns a normalized, validated view
-    /// or all validation/patch errors collected without fail-fast termination.
-    pub fn apply_graph_patch(
-        &self,
-        definition: &WorkflowDefinition,
-        ops: &[WorkflowGraphPatchOp],
-    ) -> Result<WorkflowValidationView, Vec<String>> {
-        let patched = apply_workflow_graph_patch(definition, ops)?;
-        let digest = digest_json(&patched).map_err(|err| vec![err.to_string()])?;
-        Ok(WorkflowValidationView {
-            normalized: patched,
-            digest,
-        })
     }
 
     pub async fn publish(

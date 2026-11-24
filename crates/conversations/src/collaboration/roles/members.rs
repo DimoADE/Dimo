@@ -133,13 +133,6 @@ pub(crate) async fn batch_load_space_members_by_space(
     Ok(grouped)
 }
 
-pub async fn member_space_context_text(
-    pool: &SqlitePool,
-    conversation_id: Uuid,
-) -> Result<Option<String>, CollaborationError> {
-    member_space_context_text_for(pool, conversation_id, None).await
-}
-
 /// Number of recent activity entries injected at turn start
 /// (`DIMO_MEMBER_ACTIVITY_LIMIT`, default 8, 0 disables).
 pub fn member_activity_limit() -> usize {

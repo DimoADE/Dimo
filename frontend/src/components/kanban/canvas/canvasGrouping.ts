@@ -212,13 +212,6 @@ export function canvasNodeIndex(
   return built;
 }
 
-export function rootAncestorId(
-  nodes: readonly SessionCanvasNode[],
-  id: string
-): string {
-  return canvasNodeIndex(nodes).rootOf.get(id) ?? id;
-}
-
 export function canvasNodeZIndex(
   nodes: readonly SessionCanvasNode[],
   node: SessionCanvasNode,
@@ -294,10 +287,6 @@ export function nodeById(
   return canvasNodeIndex(nodes).byId.get(id);
 }
 
-export function containingGroupId(node: SessionCanvasNode): string | null {
-  return isGroupNode(node) ? node.id : node.parentId;
-}
-
 export function groupDepth(
   nodes: readonly SessionCanvasNode[],
   id: string
@@ -340,18 +329,6 @@ export function lastSelectedCanvasSessionId(
 ): string | null {
   const sessionIds = selectedSessionIdsForViewed(nodes, selectedIds);
   return sessionIds[sessionIds.length - 1] ?? null;
-}
-
-export function groupSessionCount(
-  nodes: readonly SessionCanvasNode[],
-  groupId: string
-): number {
-  return nodes.filter(
-    (node) =>
-      isSessionNode(node) &&
-      !node.expanded &&
-      (node.parentId === groupId || belongsToAncestor(nodes, node, groupId))
-  ).length;
 }
 
 function belongsToAncestor(
@@ -2088,18 +2065,4 @@ export function isOverflowHidden(
   );
   const plan = planSessionGrid(sessions.length, parent);
   return sessions.findIndex((child) => child.id === node.id) >= plan.visible;
-}
-
-export function applyDescendantDelta(
-  nodes: readonly SessionCanvasNode[],
-  groupId: string,
-  dx: number,
-  dy: number
-): SessionCanvasNode[] {
-  if (dx === 0 && dy === 0) return [...nodes];
-  return nodes.map((node) =>
-    node.id === groupId || belongsToAncestor(nodes, node, groupId)
-      ? { ...node, x: node.x + dx, y: node.y + dy }
-      : node
-  );
 }

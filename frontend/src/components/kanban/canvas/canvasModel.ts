@@ -794,33 +794,11 @@ export function preferLiveKanbanSessions<T>(
   return live.length > 0 ? live : previous.length > 0 ? previous : live;
 }
 
-export function upsertCanvasNode(
-  nodes: readonly SessionCanvasNode[],
-  next: SessionCanvasNode
-): SessionCanvasNode[] {
-  const index = nodes.findIndex((node) => node.id === next.id);
-  if (index === -1) return [...nodes, next];
-  const copy = [...nodes];
-  copy[index] = next;
-  return copy;
-}
-
 export function removeCanvasNode(
   nodes: readonly SessionCanvasNode[],
   instanceId: string
 ): SessionCanvasNode[] {
   return nodes.filter((node) => node.id !== instanceId);
-}
-
-export function nodeToRect(node: SessionCanvasNode): CanvasRect {
-  const size = sizeForNode(node);
-  return {
-    id: node.id,
-    x: node.x,
-    y: node.y,
-    width: size.width,
-    height: size.height,
-  };
 }
 
 export interface ReusableFlowNode {

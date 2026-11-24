@@ -1,6 +1,5 @@
 import {
   createContext,
-  useContext,
   useEffect,
   useReducer,
   useMemo,
@@ -562,12 +561,4 @@ export function TerminalProvider({ children }: TerminalProviderProps) {
       {children}
     </TerminalContext.Provider>
   );
-}
-
-export function useTerminal() {
-  const context = useContext(TerminalContext);
-  if (!context) {
-    throw new Error('useTerminal must be used within TerminalProvider');
-  }
-  return context;
 }

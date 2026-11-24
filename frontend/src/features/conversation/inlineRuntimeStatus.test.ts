@@ -470,4 +470,52 @@ describe('deriveInlineStreamRuntimeStatus', () => {
     expect(res.status).toBeNull();
     expect(res.placement).toBeNull();
   });
+
+  it('stays silent when an idle connection is closed without an explicit error notice', () => {
+    const res = deriveInlineStreamRuntimeStatus({
+      connecting: false,
+      sessionBindReady: false,
+      connection: readyConnection({
+        status: 'closed',
+        bound: false,
+        message: null,
+      }),
+      request: null,
+      connectErrorNotice: null,
+      hasUserMessage: true,
+      isTurnInFlight: false,
+      hasStreamingAssistantRow: false,
+    });
+
+    expect(res).toEqual({
+      status: null,
+      placement: null,
+      suppressLiveTurnStatsStatus: false,
+      suppressAssistantStreamingStatus: false,
+      isConnectionRecovering: false,
+    });
+  });
+
+  it('surfaces a stream reconnect error when the connection closes during an in-flight turn', () => {
+    const res = deriveInlineStreamRuntimeStatus({
+      connecting: false,
+      sessionBindReady: false,
+      connection: readyConnection({
+        status: 'closed',
+        bound: false,
+        message: 'process exited',
+      }),
+      request: requestStatus('waiting_agent'),
+      hasUserMessage: true,
+      isTurnInFlight: true,
+      hasStreamingAssistantRow: false,
+    });
+
+    expect(res.placement).toBe('stream');
+    expect(res.status?.kind).toBe('connection');
+    expect(res.status?.canReconnect).toBe(true);
+    expect(res.status?.notice.connection_status?.message).toBe(
+      'process exited'
+    );
+  });
 });

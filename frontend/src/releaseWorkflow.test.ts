@@ -31,7 +31,7 @@ function cargoBinaryNames(packageDirectory: string): string[] {
 
 describe('release workflow contract', () => {
   it('builds and packages the Cargo binary targets that actually exist', () => {
-    const packages = ['crates/server', 'crates/dimo-mcp', 'crates/review'].map(
+    const packages = ['crates/server', 'crates/dimo-mcp'].map(
       (directory) => ({
         directory,
         packageName: cargoPackageName(directory),
@@ -50,15 +50,10 @@ describe('release workflow contract', () => {
         packageName: 'dimo-mcp',
         binaryNames: ['dimo-mcp'],
       },
-      {
-        directory: 'crates/review',
-        packageName: 'review',
-        binaryNames: ['review'],
-      },
     ]);
 
     const devOnlyBinaries = new Set(['generate_types']);
-    for (const workflowPath of ['.github/workflows/pre-release.yml']) {
+    for (const workflowPath of ['.github/workflows/host-family-release.yml']) {
       const workflow = read(workflowPath);
       for (const { packageName, binaryNames } of packages) {
         expect(workflow, workflowPath).toContain(`-p ${packageName}`);

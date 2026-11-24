@@ -17,7 +17,7 @@ import {
 import { PluginBoundary } from '@/components/plugins/PluginBoundary';
 import { Button } from '@/components/ui/button';
 import { Loader } from '@/components/ui/loader';
-import { PANEL_IDS, type PanelId } from '@/stores/useLayoutStore';
+import { type PanelId } from '@/stores/useLayoutStore';
 import { builtinPanelTitle } from '@/lib/builtinPanelTitles';
 import {
   BUILTIN_PANEL_MANIFESTS,
@@ -334,88 +334,4 @@ export interface PanelMeta {
   id: PanelId;
   title: string;
   defaultPosition: 'left' | 'center' | 'bottom';
-}
-
-export function usePanelMeta(): PanelMeta[] {
-  const { t } = useTranslation(['panels', 'common']);
-
-  return [
-    {
-      id: PANEL_IDS.FILE_TREE,
-      title: t('panelRegistry.fileExplorer'),
-      defaultPosition: 'left',
-    },
-    {
-      id: PANEL_IDS.KANBAN,
-      title: builtinPanelTitle(PANEL_IDS.KANBAN),
-      defaultPosition: 'center',
-    },
-    {
-      id: PANEL_IDS.PREVIEW,
-      title: builtinPanelTitle(PANEL_IDS.PREVIEW),
-      defaultPosition: 'center',
-    },
-    {
-      id: PANEL_IDS.DIFFS,
-      title: builtinPanelTitle(PANEL_IDS.DIFFS),
-      defaultPosition: 'center',
-    },
-    {
-      id: PANEL_IDS.MERGE,
-      title: builtinPanelTitle(PANEL_IDS.MERGE),
-      defaultPosition: 'center',
-    },
-    {
-      id: PANEL_IDS.TERMINAL,
-      title: builtinPanelTitle(PANEL_IDS.TERMINAL),
-      defaultPosition: 'bottom',
-    },
-    {
-      id: PANEL_IDS.GIT,
-      title: t('panelRegistry.gitManager'),
-      defaultPosition: 'left',
-    },
-    {
-      id: PANEL_IDS.WELCOME,
-      title: t('panelRegistry.welcome'),
-      defaultPosition: 'center',
-    },
-    {
-      id: PANEL_IDS.LOGS,
-      title: builtinPanelTitle(PANEL_IDS.LOGS),
-      defaultPosition: 'center',
-    },
-    {
-      id: PANEL_IDS.NOTES,
-      title: t('panelRegistry.notes'),
-      defaultPosition: 'center',
-    },
-    {
-      id: PANEL_IDS.SESSION_DETAILS,
-      title: t('panelRegistry.sessionDetails'),
-      defaultPosition: 'center',
-    },
-    {
-      id: PANEL_IDS.PROCESSES,
-      title: t('panelRegistry.processes'),
-      defaultPosition: 'center',
-    },
-    {
-      id: PANEL_IDS.SEARCH,
-      title: t('panelRegistry.search'),
-      defaultPosition: 'left',
-    },
-    {
-      id: PANEL_IDS.SESSION_LIST,
-      title: t('panelRegistry.sessionList'),
-      defaultPosition: 'left',
-    },
-    {
-      id: PANEL_IDS.WORKFLOW_STUDIO,
-      title: t('tabCreation.workflowStudio', {
-        defaultValue: 'Workflow Studio',
-      }),
-      defaultPosition: 'center',
-    },
-  ];
 }

@@ -1,6 +1,4 @@
-use api_types::{
-    AgentAuthenticationStatus, AgentId, AgentLifecycleState, AgentManagementIdentity, AgentSource,
-};
+use api_types::AgentId;
 
 #[test]
 fn agent_id_rejects_invalid_values_and_preserves_stable_ids() {
@@ -49,26 +47,4 @@ fn agent_id_rejects_invalid_values_and_preserves_stable_ids() {
             "expected {raw:?} to be rejected"
         );
     }
-}
-
-#[test]
-fn management_identity_serializes_open_id_and_orthogonal_states() {
-    let identity = AgentManagementIdentity {
-        agent_id: AgentId::parse("vendor.agent-v2").expect("valid Registry Agent id"),
-        source: AgentSource::OfficialRegistry,
-        lifecycle: AgentLifecycleState::NeedsRepair,
-        authentication: AgentAuthenticationStatus::ApiKey,
-        enabled: false,
-    };
-
-    assert_eq!(
-        serde_json::to_value(identity).expect("management identity should serialize"),
-        serde_json::json!({
-            "agent_id": "vendor.agent-v2",
-            "source": "official_registry",
-            "lifecycle": "needs_repair",
-            "authentication": "api_key",
-            "enabled": false,
-        })
-    );
 }

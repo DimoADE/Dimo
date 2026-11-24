@@ -200,12 +200,6 @@ impl HostCapabilityBroker {
         }
     }
 
-    pub fn set_workspace_root(&self, root: impl Into<std::path::PathBuf>) {
-        if let Ok(mut guard) = self.workspace_root.write() {
-            *guard = Some(root.into());
-        }
-    }
-
     pub fn set_plugin_data_root(&self, root: impl Into<std::path::PathBuf>) {
         if let Ok(mut guard) = self.plugin_data_root.write() {
             *guard = Some(root.into());
@@ -223,17 +217,6 @@ impl HostCapabilityBroker {
             .entry(plugin_id.into())
             .or_default()
             .push(grant);
-    }
-
-    pub async fn set_capability_grants(
-        &self,
-        plugin_id: impl Into<String>,
-        grants: Vec<crate::HostCapabilityGrant>,
-    ) {
-        self.capability_grants
-            .lock()
-            .await
-            .insert(plugin_id.into(), grants);
     }
 
     pub async fn register_agent_handler(

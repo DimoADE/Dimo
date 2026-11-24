@@ -1,4 +1,3 @@
-import { useEffect, useRef, useState } from 'react';
 import { stripAnsi } from 'fancy-ansi';
 
 const urlPatterns = [
@@ -61,48 +60,4 @@ export const detectDevserverUrl = (line: string): DevserverUrlInfo | null => {
   }
 
   return null;
-};
-
-export const useDevserverUrlFromLogs = (
-  logs: Array<{ content: string }> | undefined
-): DevserverUrlInfo | undefined => {
-  const [urlInfo, setUrlInfo] = useState<DevserverUrlInfo | undefined>();
-  const lastIndexRef = useRef(0);
-
-  useEffect(() => {
-    if (!logs) {
-      setUrlInfo(undefined);
-      lastIndexRef.current = 0;
-      return;
-    }
-
-    if (logs.length < lastIndexRef.current) {
-      lastIndexRef.current = 0;
-      setUrlInfo(undefined);
-    }
-
-    if (urlInfo) {
-      lastIndexRef.current = logs.length;
-      return;
-    }
-
-    let detectedUrl: DevserverUrlInfo | undefined;
-    const newEntries = logs.slice(lastIndexRef.current);
-    newEntries.some((entry) => {
-      const detected = detectDevserverUrl(entry.content);
-      if (detected) {
-        detectedUrl = detected;
-        return true;
-      }
-      return false;
-    });
-
-    if (detectedUrl) {
-      setUrlInfo((prev) => prev ?? detectedUrl);
-    }
-
-    lastIndexRef.current = logs.length;
-  }, [logs, urlInfo]);
-
-  return urlInfo;
 };

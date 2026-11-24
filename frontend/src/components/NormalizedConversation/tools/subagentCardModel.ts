@@ -879,49 +879,6 @@ export function applySubagentLifecycle(
   };
 }
 
-export function summarizeSubagentChildTool(child: SubagentChildTool): {
-  id: string;
-  label: string;
-  target: string | null;
-  status: 'running' | 'completed' | 'failed';
-} {
-  const { use, result } = child;
-  const input = inputRecord(use);
-  const meta = asObject(use.meta);
-  const claudeMeta = asObject(meta?.claudeCode);
-  const airMeta = asObject(asObject(meta?.jetbrains)?.air);
-  const metaTitle =
-    readString(claudeMeta as JsonValue, 'title') ??
-    readString(airMeta as JsonValue, 'commandTitle');
-  const label = metaTitle ?? use.tool_name;
-  const candidateTarget =
-    readString(input as JsonValue, [
-      'command',
-      'cmd',
-      'file_path',
-      'filePath',
-      'path',
-      'pattern',
-      'query',
-      'url',
-      'description',
-    ]) ?? null;
-  const target =
-    candidateTarget && candidateTarget !== label ? candidateTarget : null;
-  const status =
-    result?.is_error || use.status === 'failed'
-      ? 'failed'
-      : use.status === 'completed' || result != null
-        ? 'completed'
-        : 'running';
-  return {
-    id: use.tool_use_id ?? `${use.tool_name}-${target ?? ''}`,
-    label,
-    target,
-    status,
-  };
-}
-
 function progressRecord(
   use: ToolUseBlock,
   result: ToolResultBlock | null

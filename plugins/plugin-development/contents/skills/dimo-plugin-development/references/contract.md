@@ -125,7 +125,7 @@ Agent 侧贡献在新开或 rebind 会话中注入。UI 与 Provider 贡献启�
 
 `protocolRevision` 必须是 `2026-07-28`。`defaultBinding` 只能省略或为 `all-compatible-agents`。hostFamilyBinary 必须带 `binaryId`。包内 MCP 必须能解析 `entrypoint`；`source` 若出现也必须存在，并由 `build` 编译到 `entrypoint`。
 
-官方产品面：`session`、`delegation` 走 `binaryId: "dimo-mcp"`；Workflow Creator 走 `binaryId: "dimo-workflow-mcp"`。第三方包使用自有 `entrypoint`。
+官方产品面：`session`、`delegation`、`pulse`、`workflow` 均通过宿主家族 `binaryId: "dimo-mcp"`（`Dimo-superagent-mcp`）提供。第三方包使用自有 `entrypoint`。
 
 已注入的 STDIO MCP 通常不会热增到旧会话。binding 变化后提示用户新开或 rebind 会话。
 

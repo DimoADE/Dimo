@@ -32,10 +32,6 @@ pub fn codex_home() -> Option<std::path::PathBuf> {
         .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
 }
 
-pub fn codex_config_path() -> Option<std::path::PathBuf> {
-    codex_home().map(|home| home.join("config.toml"))
-}
-
 pub fn codex_auth_path() -> Option<std::path::PathBuf> {
     codex_home().map(|home| home.join("auth.json"))
 }
@@ -127,10 +123,6 @@ pub fn mimo_native_binding_path(
         "mimo_config" => Some(mimo_config_file(home, &env)),
         _ => None,
     }
-}
-
-pub fn mimo_config_dir_from_env(env: &HashMap<String, String>) -> Option<PathBuf> {
-    dirs::home_dir().map(|home| mimo_config_dir(&home, env))
 }
 
 pub fn mimo_auth_path_from_env(env: &HashMap<String, String>) -> Option<PathBuf> {

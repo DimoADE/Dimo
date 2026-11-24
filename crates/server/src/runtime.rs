@@ -128,23 +128,6 @@ where
         .with_idempotency_ledger(crate::SqliteIdempotencyLedger::new(pool))
     }
 
-    pub fn from_sqlite_auth_with_preview_proxy_and_pty(
-        config: ServerConfig,
-        pool: sqlx::SqlitePool,
-        core: ApplicationCore<R>,
-        preview_proxy: crate::PreviewProxyRegistry,
-        pty: PtyService,
-    ) -> Self {
-        Self::from_auth_with_preview_proxy_inner(
-            config,
-            Arc::new(SqliteServerAuth::new(pool.clone())),
-            core,
-            preview_proxy,
-            pty,
-        )
-        .with_idempotency_ledger(crate::SqliteIdempotencyLedger::new(pool))
-    }
-
     pub fn with_idempotency_ledger(mut self, ledger: crate::SqliteIdempotencyLedger) -> Self {
         if let Some(state) = Arc::get_mut(&mut self.state) {
             state.idempotency_ledger = Some(ledger);

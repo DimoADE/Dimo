@@ -266,11 +266,6 @@ pub fn continuation_ancestors_in(root: &Path, agent_dir: &str, session_id: &str)
     out
 }
 
-/// [`continuation_ancestors_in`] against the real transcripts root.
-pub fn continuation_ancestors(agent_dir: &str, session_id: &str) -> Vec<String> {
-    continuation_ancestors_in(&dimo_acp_transcripts_root(), agent_dir, session_id)
-}
-
 /// Session ids under `<root>/<agent_dir>/` that some other transcript continues.
 pub fn superseded_session_ids_in(
     root: &Path,

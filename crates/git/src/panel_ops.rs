@@ -397,11 +397,6 @@ impl GitService {
             })
     }
 
-    /// Get ahead/behind counts for the current branch vs its upstream.
-    pub fn get_log_status(&self, worktree_path: &Path) -> Result<GitLogStatus, GitServiceError> {
-        self.get_log_status_with_options(worktree_path, None, None)
-    }
-
     /// Get git log entries (optionally filtered to specific refs) plus current branch ahead/behind.
     pub fn get_log_status_with_options(
         &self,

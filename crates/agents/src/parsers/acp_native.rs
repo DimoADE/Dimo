@@ -121,7 +121,6 @@ impl AcpNativeParser {
     }
 }
 
-#[allow(dead_code)]
 enum PromptInputBlock {
     Text {
         text: String,
@@ -134,8 +133,6 @@ enum PromptInputBlock {
     ResourceLink {
         name: String,
         uri: String,
-        mime_type: Option<String>,
-        description: Option<String>,
     },
     Resource {
         uri: String,
@@ -159,7 +156,7 @@ fn user_turn_block(block: &PromptInputBlock) -> ContentBlock {
             width: None,
             height: None,
         },
-        PromptInputBlock::ResourceLink { name, uri, .. } => ContentBlock::Text {
+        PromptInputBlock::ResourceLink { name, uri } => ContentBlock::Text {
             text: format!("[{name}](<{uri}>)"),
         },
         PromptInputBlock::Resource {
@@ -284,8 +281,6 @@ fn prompt_block_from_content(
             Some(PromptInputBlock::ResourceLink {
                 name: non_empty(l.name).unwrap_or_else(|| uri.clone()),
                 uri,
-                mime_type: l.mime_type,
-                description: l.description,
             })
         }
         Wire::Resource(r) => {

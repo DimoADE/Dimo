@@ -128,6 +128,8 @@ export type ConversationTruncateToTurnRequest = {
   conversationId: string;
   /** User-turn ordinal to reset to; this turn and everything after it is removed. */
   ordinal: number;
+  /** When true, atomically preflight and restore workspace files from the turn checkpoint. */
+  restoreFiles?: boolean;
 };
 
 export type ConversationCheckpointPreviewRequest = {

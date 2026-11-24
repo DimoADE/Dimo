@@ -4,10 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "generate-skills": "node scripts/generate-skills.mjs",
-    "validate": "node ../Dimo/packages/plugin-cli/dist/cli.js validate",
-    "test": "node ../Dimo/packages/plugin-cli/dist/cli.js test",
-    "build": "node scripts/generate-skills.mjs && node ../Dimo/packages/plugin-cli/dist/cli.js build",
-    "pack": "node ../Dimo/packages/plugin-cli/dist/cli.js pack"
+    "validate": "node ../../packages/plugin-cli/dist/cli.js validate",
+    "test": "node ../../packages/plugin-cli/dist/cli.js test",
+    "build": "node ../../packages/plugin-cli/dist/cli.js build",
+    "pack": "node ../../packages/plugin-cli/dist/cli.js pack"
   }
 }

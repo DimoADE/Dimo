@@ -764,12 +764,6 @@ pub fn pending_legacy_data_dir_adoptions() -> Vec<LegacyDataDirAdoption> {
         .collect()
 }
 
-/// First pending adoption in candidate order, before activity scoring.
-/// Startup ranks every entry from [`pending_legacy_data_dir_adoptions`].
-pub fn pending_legacy_data_dir_adoption() -> Option<LegacyDataDirAdoption> {
-    pending_legacy_data_dir_adoptions().into_iter().next()
-}
-
 pub fn legacy_data_dir_adoption(
     legacy_dir: PathBuf,
     target_dir: PathBuf,
@@ -1142,10 +1136,6 @@ fn restrict_owner_read_write(path: &Path) {
 #[derive(RustEmbed)]
 #[folder = "../../assets/sounds"]
 pub struct SoundAssets;
-
-#[derive(RustEmbed)]
-#[folder = "../../assets/scripts"]
-pub struct ScriptAssets;
 
 /// Official plugin packages are no longer rust-embedded into the Host.
 /// Older Hosts may still have copies under `builtin-plugins/`; keep those

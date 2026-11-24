@@ -1,6 +1,4 @@
 import type {
-  ApprovalStatus,
-  ApprovalResponse,
   DirectoryListResponse,
   DirectoryEntry,
   ExecutionProcess,
@@ -96,10 +94,6 @@ export const executionProcessesApi = {
       'get_execution_process_repo_states',
       { id: processId }
     );
-  },
-
-  stopExecutionProcess: async (processId: string): Promise<void> => {
-    return backendCall<void>('stop_execution_process', { id: processId });
   },
 };
 
@@ -437,13 +431,6 @@ export const imagesApi = {
     });
   },
 
-  uploadForTask: async (taskId: string, file: File): Promise<ImageResponse> => {
-    return backendCall<ImageResponse>('upload_image_for_task', {
-      taskId,
-      payload: await imageUploadPayload(file),
-    });
-  },
-
   /**
    * Upload an image for a task attempt and immediately copy it to the container.
    * Returns the image with a file_path that can be used in markdown.
@@ -460,23 +447,6 @@ export const imagesApi = {
 
   delete: async (imageId: string): Promise<void> => {
     return backendCall<void>('delete_image', { imageId });
-  },
-
-  getTaskImages: async (taskId: string): Promise<ImageResponse[]> => {
-    return backendCall<ImageResponse[]>('get_task_images', { taskId });
-  },
-};
-
-// Approval API
-export const approvalsApi = {
-  respond: async (
-    approvalId: string,
-    payload: ApprovalResponse
-  ): Promise<ApprovalStatus> => {
-    return backendCall<ApprovalStatus>('respond_to_approval', {
-      approvalId,
-      response: payload,
-    });
   },
 };
 
@@ -577,62 +547,6 @@ export interface AgentSkillsListResult {
   locations: AgentSkillLocation[];
   skills: AgentSkillItem[];
 }
-
-export interface AgentSkillContent {
-  skill: AgentSkillItem;
-  content: string;
-}
-
-export const skillsApi = {
-  // Per-agent skills CRUD (global / project scope), backed by each agent's
-  // own skill directories; writes are scoped to a writable directory.
-  list: (
-    agentType: string,
-    workspacePath?: string | null
-  ): Promise<AgentSkillsListResult> =>
-    backendCall<AgentSkillsListResult>('list_agent_skills', {
-      agentType,
-      workspacePath: workspacePath ?? null,
-    }),
-  read: (params: {
-    agentType: string;
-    scope: AgentSkillScope;
-    skillId: string;
-    workspacePath?: string | null;
-  }): Promise<AgentSkillContent> =>
-    backendCall<AgentSkillContent>('read_agent_skill', {
-      agentType: params.agentType,
-      scope: params.scope,
-      skillId: params.skillId,
-      workspacePath: params.workspacePath ?? null,
-    }),
-  save: (params: {
-    agentType: string;
-    scope: AgentSkillScope;
-    skillId: string;
-    content: string;
-    workspacePath?: string | null;
-  }): Promise<AgentSkillItem> =>
-    backendCall<AgentSkillItem>('save_agent_skill', {
-      agentType: params.agentType,
-      scope: params.scope,
-      skillId: params.skillId,
-      content: params.content,
-      workspacePath: params.workspacePath ?? null,
-    }),
-  delete: (params: {
-    agentType: string;
-    scope: AgentSkillScope;
-    skillId: string;
-    workspacePath?: string | null;
-  }): Promise<void> =>
-    backendCall<void>('delete_agent_skill', {
-      agentType: params.agentType,
-      scope: params.scope,
-      skillId: params.skillId,
-      workspacePath: params.workspacePath ?? null,
-    }),
-};
 
 // --- Local skills view + skills.sh marketplace + global hosting ---
 

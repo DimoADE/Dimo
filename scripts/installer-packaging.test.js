@@ -150,7 +150,7 @@ test("Windows NSIS custom hook scopes staged companion termination to $INSTDIR a
   const nsh = fs.readFileSync(path.join(BUILD_DIR, "installer.nsh"), "utf8");
   assert.match(nsh, /dimo-server\.exe/);
   assert.match(nsh, /dimo-mcp\.exe/);
-  assert.match(nsh, /dimo-workflow-mcp\.exe/);
+  assert.doesNotMatch(nsh, /dimo-workflow-mcp\.exe/);
   assert.doesNotMatch(nsh, /dimo-computer-helper\.exe/);
   assert.doesNotMatch(
     nsh,

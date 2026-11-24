@@ -122,11 +122,6 @@ pub fn prepare_codex_shadow_home(
     Ok(())
 }
 
-/// Writes `auth.json` exclusively inside `shadow_home` (`0o600` on Unix).
-pub fn write_codex_shadow_auth(shadow_home: &Path, auth_bytes: &[u8]) -> std::io::Result<PathBuf> {
-    write_private_credential_file(shadow_home, "auth.json", auth_bytes)
-}
-
 /// Returns environment variable keys that must be removed from child processes for
 /// `claude_code` and `codex` unless explicitly provided by `explicit_env`:
 /// 1. Ambient credentials (`AMBIENT_PROVIDER_CREDENTIAL_ENV_KEYS`) so shell exports never bleed across instances.

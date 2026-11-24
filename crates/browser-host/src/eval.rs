@@ -44,11 +44,6 @@ pub const MAX_EVAL_CODE_CHARS: usize = 4000;
 /// this is also what stops a page from answering with a hundred megabytes.
 pub const MAX_EVAL_VALUE_CHARS: usize = 4000;
 
-/// The most the host will even parse from the page. The render above already
-/// bounds an honest answer; this bounds a dishonest one, before `serde_json`
-/// walks it.
-pub const MAX_EVAL_ANSWER_BYTES: usize = 256 * 1024;
-
 /// What an agent asks to run.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

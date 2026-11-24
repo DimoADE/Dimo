@@ -212,16 +212,6 @@ impl IdleCompaction {
 
         CompactionDecision::Skip(format!("cache still valid for {time_to_expiry}ms"))
     }
-
-    /// Async entrypoint checking whether `session_id` should run `/compact` right now.
-    pub async fn check_and_compact(
-        &self,
-        session_id: Uuid,
-        estimated_tokens: usize,
-        cache_expires_at: DateTime<Utc>,
-    ) -> CompactionDecision {
-        self.evaluate_at(session_id, estimated_tokens, cache_expires_at, Utc::now())
-    }
 }
 
 #[cfg(test)]

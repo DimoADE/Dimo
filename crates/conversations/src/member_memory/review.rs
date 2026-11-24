@@ -92,25 +92,6 @@ pub(super) static RUNTIME_REVIEW_MODEL: OnceLock<
     std::sync::RwLock<Option<Arc<dyn MemoryReviewModel>>>,
 > = OnceLock::new();
 
-/// Install or replace a process-wide [`MemoryReviewModel`] (used by tests or custom hosts).
-pub fn set_memory_review_model(model: Arc<dyn MemoryReviewModel>) -> bool {
-    let cell = REVIEW_MODEL.get_or_init(|| std::sync::RwLock::new(None));
-    if let Ok(mut guard) = cell.write() {
-        *guard = Some(model);
-        return true;
-    }
-    false
-}
-
-/// Clear any test-installed [`MemoryReviewModel`].
-pub fn clear_memory_review_model() {
-    if let Some(cell) = REVIEW_MODEL.get()
-        && let Ok(mut guard) = cell.write()
-    {
-        *guard = None;
-    }
-}
-
 pub(super) fn active_memory_review_model() -> Option<Arc<dyn MemoryReviewModel>> {
     if let Some(cell) = REVIEW_MODEL.get()
         && let Ok(guard) = cell.read()
@@ -892,11 +873,6 @@ impl FactDistiller for DefaultFactDistiller {
 }
 
 pub(super) static DISTILLER: OnceLock<Arc<dyn FactDistiller>> = OnceLock::new();
-
-/// Install a process-wide fact distiller (first call wins).
-pub fn set_fact_distiller(distiller: Arc<dyn FactDistiller>) -> bool {
-    DISTILLER.set(distiller).is_ok()
-}
 
 pub(super) fn fact_distiller() -> Arc<dyn FactDistiller> {
     DISTILLER

@@ -5,16 +5,18 @@ use std::{
 };
 
 use agents::{
-    AgentAuthenticationStatus, AgentId, AgentKind, AgentRuntime, AgentSessionControlsSnapshot,
-    AgentSessionId, EnsureAgentSessionInput, SessionAuthenticationEvidence,
+    AgentAuthenticationStatus, AgentAutoApproveMode, AgentId, AgentKind, AgentRuntime,
+    AgentSessionControlsSnapshot, AgentSessionId, CatalogRefreshPolicy, EnsureAgentSessionInput,
+    SessionAuthenticationEvidence, bundled_controls_snapshot, catalog_refresh_policy_for_agent,
     resolve_session_authentication_evidence,
 };
 use chrono::{Duration, Utc};
 use db::models::agent_capability_catalog::AgentCapabilityCatalogRecord;
+use serde::Serialize;
 use services::services::agent_management::AgentManagementApplicationService;
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 
 use crate::{
@@ -23,6 +25,65 @@ use crate::{
 };
 
 pub const CAPABILITY_CATALOG_TTL: Duration = Duration::minutes(10);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogResolutionSource {
+    /// Exact fingerprint match in SQLite `agent_capability_catalog` (fresh or TTL-expired).
+    Cached,
+    /// Most recent persisted catalog row for the same `agent_type` (local default instance only).
+    FallbackCached,
+    /// Static bundled baseline for native engines when no persisted catalog exists yet.
+    Bundled,
+}
+
+#[derive(Debug, Clone)]
+pub struct InstantCapabilityCatalog {
+    pub snapshot: Option<AgentSessionControlsSnapshot>,
+    pub needs_background_refresh: bool,
+    pub refresh_policy: CatalogRefreshPolicy,
+    pub source: Option<CatalogResolutionSource>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityCatalogUpdatedEvent {
+    pub agent_id: String,
+    pub provider_instance_id: Option<String>,
+    pub controls: AgentSessionControlsSnapshot,
+}
+
+static CAPABILITY_CATALOG_UPDATED_TX: OnceLock<broadcast::Sender<CapabilityCatalogUpdatedEvent>> =
+    OnceLock::new();
+
+fn capability_catalog_updated_tx() -> &'static broadcast::Sender<CapabilityCatalogUpdatedEvent> {
+    CAPABILITY_CATALOG_UPDATED_TX.get_or_init(|| {
+        let (tx, _rx) = broadcast::channel(64);
+        tx
+    })
+}
+
+pub fn subscribe_capability_catalog_updates() -> broadcast::Receiver<CapabilityCatalogUpdatedEvent>
+{
+    capability_catalog_updated_tx().subscribe()
+}
+
+fn emit_capability_catalog_updated(
+    agent_id: &AgentId,
+    launch: &AgentRuntimeLaunchSettings,
+    controls: &AgentSessionControlsSnapshot,
+) {
+    let provider_instance_id = db::models::session::normalize_provider_instance_id(
+        launch
+            .env
+            .get("DIMO_PROVIDER_INSTANCE_ID")
+            .map(String::as_str),
+    );
+    let _ = capability_catalog_updated_tx().send(CapabilityCatalogUpdatedEvent {
+        agent_id: agent_id.as_str().to_string(),
+        provider_instance_id,
+        controls: controls.clone(),
+    });
+}
 
 pub async fn open_capability_catalog_fingerprint(
     pool: &SqlitePool,
@@ -449,6 +510,133 @@ pub async fn read_matching_capability_catalog_for_defaults_for_provider_instance
     Ok(catalog_controls_for_defaults(record))
 }
 
+async fn agent_is_explicitly_signed_out(pool: &SqlitePool, agent_id: &AgentId) -> bool {
+    let Ok(Some(row)) = sqlx::query(
+        r#"SELECT authentication, authentication_required
+           FROM agent_probe
+           WHERE agent_id = ?"#,
+    )
+    .bind(agent_id.as_str())
+    .fetch_optional(pool)
+    .await
+    else {
+        return false;
+    };
+    let auth = row
+        .try_get::<String, _>(0)
+        .ok()
+        .map(|value| parse_management_authentication(&value))
+        .unwrap_or(AgentAuthenticationStatus::NotLoggedIn);
+    let auth_required = row.try_get::<bool, _>(1).unwrap_or(false);
+    auth == AgentAuthenticationStatus::NotLoggedIn && auth_required
+}
+
+async fn latest_persisted_catalog_for_agent(
+    pool: &SqlitePool,
+    agent_id: &AgentId,
+) -> Option<AgentSessionControlsSnapshot> {
+    let fallback_json: Option<String> = sqlx::query_scalar(
+        r#"SELECT controls_json
+           FROM agent_capability_catalog
+           WHERE agent_type = ?
+           ORDER BY retrieved_at DESC, generation DESC
+           LIMIT 1"#,
+    )
+    .bind(agent_id.as_str())
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    fallback_json.and_then(|raw| serde_json::from_str::<AgentSessionControlsSnapshot>(&raw).ok())
+}
+
+/// Non-blocking 0ms capability catalog resolution for UI and offline session-control
+/// synthesis. Never spawns an agent process.
+///
+/// Resolution order:
+/// 1. Exact fingerprint match in `agent_capability_catalog` (even when TTL-expired).
+/// 2. Latest persisted row for the same `agent_type` (local default instance only,
+///    and skipped if `agent_probe` explicitly reports signed-out).
+/// 3. Built-in static baseline (`bundled_controls_snapshot`) for native engines
+///    (ClaudeCode, Codex) when no persisted catalog exists yet.
+pub async fn resolve_instant_capability_catalog_for_provider_instance(
+    pool: &SqlitePool,
+    agent_id: &AgentId,
+    provider_instance_id: Option<&str>,
+) -> Result<InstantCapabilityCatalog, ConversationServiceError> {
+    let refresh_policy = catalog_refresh_policy_for_agent(agent_id.as_str());
+    let target_instance =
+        db::models::session::normalize_provider_instance_id(provider_instance_id);
+    let launch_result = resolve_agent_runtime_launch_settings_for_provider_instance(
+        pool,
+        agent_id,
+        provider_instance_id,
+    )
+    .await;
+
+    let (launch_available, baseline_env, yolo) = match &launch_result {
+        Ok(launch) => {
+            let fingerprint = open_capability_catalog_fingerprint(pool, launch).await?;
+            if let Some(record) =
+                AgentCapabilityCatalogRecord::find_matching(pool, agent_id.as_str(), &fingerprint)
+                    .await
+                    .map_err(|error| ConversationServiceError::Internal(error.to_string()))?
+            {
+                let is_stale = record.is_stale_at(Utc::now(), CAPABILITY_CATALOG_TTL);
+                if let Some(snapshot) = catalog_controls_for_defaults(record) {
+                    let needs_background_refresh =
+                        is_stale && refresh_policy == CatalogRefreshPolicy::BackgroundNativeProbe;
+                    return Ok(InstantCapabilityCatalog {
+                        snapshot: Some(snapshot),
+                        needs_background_refresh,
+                        refresh_policy,
+                        source: Some(CatalogResolutionSource::Cached),
+                    });
+                }
+            }
+            let effective_env: HashMap<String, String> =
+                effective_launch_environment(launch).into_iter().collect();
+            (
+                true,
+                effective_env,
+                launch.auto_approve_mode == AgentAutoApproveMode::Yolo,
+            )
+        }
+        Err(_) => (false, HashMap::new(), false),
+    };
+
+    let can_background_refresh =
+        launch_available && refresh_policy == CatalogRefreshPolicy::BackgroundNativeProbe;
+
+    if target_instance.is_none()
+        && !agent_is_explicitly_signed_out(pool, agent_id).await
+        && let Some(snapshot) = latest_persisted_catalog_for_agent(pool, agent_id).await
+    {
+        return Ok(InstantCapabilityCatalog {
+            snapshot: Some(snapshot),
+            needs_background_refresh: can_background_refresh,
+            refresh_policy,
+            source: Some(CatalogResolutionSource::FallbackCached),
+        });
+    }
+
+    if let Some(snapshot) = bundled_controls_snapshot(agent_id.as_str(), &baseline_env, yolo) {
+        return Ok(InstantCapabilityCatalog {
+            snapshot: Some(snapshot),
+            needs_background_refresh: can_background_refresh,
+            refresh_policy,
+            source: Some(CatalogResolutionSource::Bundled),
+        });
+    }
+
+    Ok(InstantCapabilityCatalog {
+        snapshot: None,
+        needs_background_refresh: can_background_refresh,
+        refresh_policy,
+        source: None,
+    })
+}
+
 pub async fn load_capability_catalog_for_session_defaults(
     pool: &SqlitePool,
     agent_runtime: &AgentRuntime,
@@ -521,12 +709,16 @@ pub async fn capability_catalog_is_fresh_for_provider_instance(
         Err(_) => return Ok(false),
     };
     let fingerprint = open_capability_catalog_fingerprint(pool, &launch).await?;
+    let refresh_policy = catalog_refresh_policy_for_agent(agent_id.as_str());
     Ok(
         match AgentCapabilityCatalogRecord::find_matching(pool, agent_id.as_str(), &fingerprint)
             .await
             .map_err(|error| ConversationServiceError::Internal(error.to_string()))?
         {
-            Some(record) => !record.is_stale_at(Utc::now(), CAPABILITY_CATALOG_TTL),
+            Some(record) => {
+                refresh_policy == CatalogRefreshPolicy::PassiveOnly
+                    || !record.is_stale_at(Utc::now(), CAPABILITY_CATALOG_TTL)
+            }
             None => false,
         },
     )
@@ -695,6 +887,43 @@ async fn refresh_open_capability_catalog_uncached(
             .await
             .map_err(|error| ConversationServiceError::Internal(error.to_string()))?
             .map(|record| record.generation);
+
+    match agent_runtime
+        .probe_native_provider_controls(agents::ProbeNativeProviderControlsInput {
+            agent_id: agent_id.clone(),
+            launch_lock: launch.launch_lock.clone(),
+            auto_approve_mode: launch.auto_approve_mode,
+            env: launch.env.clone(),
+        })
+        .await
+    {
+        Ok(Some(controls)) => {
+            let controls =
+                settle_session_authentication(pool, agent_id, is_custom_instance, Ok(controls))
+                    .await?;
+            persist_capability_catalog(pool, agent_id, launch, &controls).await?;
+            return Ok(true);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let settled =
+                settle_session_authentication::<()>(pool, agent_id, is_custom_instance, Err(error))
+                    .await
+                    .expect_err("Err input stays Err after settling auth");
+            if let Some(expected_generation) = expected_generation {
+                let _ = AgentCapabilityCatalogRecord::record_refresh_error_if_generation(
+                    pool,
+                    agent_id.as_str(),
+                    fingerprint,
+                    expected_generation,
+                    "probe_failed",
+                )
+                .await;
+            }
+            return Err(settled);
+        }
+    }
+
     let session_id = AgentSessionId(Uuid::new_v4());
     let working_dir = capability_probe_working_dir(agent_id, session_id);
     std::fs::create_dir_all(&working_dir).map_err(|error| {
@@ -771,6 +1000,7 @@ pub async fn record_open_capability_catalog(
     AgentCapabilityCatalogRecord::replace(pool, agent_id.as_str(), &fingerprint, &controls_json)
         .await
         .map_err(|error| ConversationServiceError::Internal(error.to_string()))?;
+    emit_capability_catalog_updated(agent_id, launch, controls);
     Ok(())
 }
 
@@ -788,7 +1018,7 @@ async fn persist_capability_catalog(
             .map(|record| record.generation);
     let controls_json = serde_json::to_string(controls)
         .map_err(|error| ConversationServiceError::Internal(error.to_string()))?;
-    AgentCapabilityCatalogRecord::replace_if_generation(
+    let replaced = AgentCapabilityCatalogRecord::replace_if_generation(
         pool,
         agent_id.as_str(),
         &persist_fingerprint,
@@ -797,6 +1027,9 @@ async fn persist_capability_catalog(
     )
     .await
     .map_err(|error| ConversationServiceError::Internal(error.to_string()))?;
+    if replaced.is_some() {
+        emit_capability_catalog_updated(agent_id, launch, controls);
+    }
     Ok(())
 }
 
@@ -1495,5 +1728,200 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn instant_catalog_returns_bundled_baseline_on_empty_db_for_native_engines_only() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("../db/migrations").run(&pool).await.unwrap();
+
+        let claude = resolve_instant_capability_catalog_for_provider_instance(
+            &pool,
+            &AgentId::parse("claude_code").unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(claude.source, Some(CatalogResolutionSource::Bundled));
+        assert_eq!(claude.refresh_policy, CatalogRefreshPolicy::BackgroundNativeProbe);
+        let claude_controls = claude.snapshot.expect("claude bundled baseline");
+        assert!(!claude_controls.modes.is_empty());
+        assert!(claude_controls.config_options.iter().any(|o| o.key == "model"));
+
+        let codex = resolve_instant_capability_catalog_for_provider_instance(
+            &pool,
+            &AgentId::parse("codex").unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(codex.source, Some(CatalogResolutionSource::Bundled));
+        let codex_controls = codex.snapshot.expect("codex bundled baseline");
+        assert!(codex_controls.config_options.iter().any(|o| o.key == "model"));
+
+        let agy = resolve_instant_capability_catalog_for_provider_instance(
+            &pool,
+            &AgentId::parse("antigravity").unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(agy.refresh_policy, CatalogRefreshPolicy::PassiveOnly);
+        assert!(!agy.needs_background_refresh);
+        assert!(agy.snapshot.is_none());
+    }
+
+    #[tokio::test]
+    async fn instant_catalog_serves_expired_cache_and_never_schedules_passive_only_refresh() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("../db/migrations").run(&pool).await.unwrap();
+
+        let now = "2026-11-16T00:00:00Z";
+        let expired = (Utc::now() - Duration::hours(2)).to_rfc3339();
+        let exe_path = std::env::current_exe().unwrap();
+        let lock_payload = serde_json::json!({
+            "absolute_acp_program": exe_path,
+            "args": ["acp"],
+            "env": {},
+            "runtime_version": "1.0.0",
+            "acp_version": "0.8"
+        })
+        .to_string();
+
+        for agent in ["codex", "antigravity"] {
+            let lock_id = format!("lock-{agent}");
+            sqlx::query(
+                r#"INSERT OR IGNORE INTO agent_membership (
+                       agent_id, source, built_in, retired, enabled, position, created_at, updated_at
+                   ) VALUES (?, 'built_in_profile', 1, 0, 1, 0, ?, ?)"#,
+            )
+            .bind(agent)
+            .bind(now)
+            .bind(now)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                r#"INSERT INTO agent_install_lock (
+                       id, agent_id, registry_version, platform, distribution_kind, resolved_json, created_at
+                   ) VALUES (?, ?, '1.0.0', 'test', 'binary', ?, ?)"#,
+            )
+            .bind(&lock_id)
+            .bind(agent)
+            .bind(&lock_payload)
+            .bind(now)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                r#"INSERT OR REPLACE INTO agent_installation (
+                       agent_id, ownership, lifecycle, current_lock_id, rollback_lock_id, active_operation, updated_at
+                   ) VALUES (?, 'external', 'ready', ?, NULL, NULL, ?)"#,
+            )
+            .bind(agent)
+            .bind(&lock_id)
+            .bind(now)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                r#"INSERT OR REPLACE INTO agent_probe (
+                       agent_id, lifecycle, authentication, detail_json, probed_at
+                   ) VALUES (?, 'ready', 'logged_in', '{}', ?)"#,
+            )
+            .bind(agent)
+            .bind(now)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+            let agent_id = AgentId::parse(agent).unwrap();
+            let launch =
+                resolve_agent_runtime_launch_settings_for_provider_instance(&pool, &agent_id, None)
+                    .await
+                    .unwrap();
+            let fp = open_capability_catalog_fingerprint(&pool, &launch)
+                .await
+                .unwrap();
+            let snapshot = AgentSessionControlsSnapshot {
+                current_mode: Some("cached-mode".to_string()),
+                ..Default::default()
+            };
+            let controls_json = serde_json::to_string(&snapshot).unwrap();
+            sqlx::query(
+                r#"INSERT INTO agent_capability_catalog (
+                       agent_type, fingerprint, generation, controls_json, retrieved_at, refresh_error_code
+                   ) VALUES (?, ?, 1, ?, ?, NULL)"#,
+            )
+            .bind(agent)
+            .bind(&fp)
+            .bind(&controls_json)
+            .bind(&expired)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let codex_id = AgentId::parse("codex").unwrap();
+        let codex = resolve_instant_capability_catalog_for_provider_instance(&pool, &codex_id, None)
+            .await
+            .unwrap();
+        assert_eq!(codex.source, Some(CatalogResolutionSource::Cached));
+        assert!(codex.needs_background_refresh);
+        assert_eq!(
+            codex.snapshot.as_ref().and_then(|s| s.current_mode.as_deref()),
+            Some("cached-mode")
+        );
+        assert!(
+            !capability_catalog_is_fresh_for_provider_instance(&pool, &codex_id, None)
+                .await
+                .unwrap()
+        );
+
+        let agy_id = AgentId::parse("antigravity").unwrap();
+        let agy = resolve_instant_capability_catalog_for_provider_instance(&pool, &agy_id, None)
+            .await
+            .unwrap();
+        assert_eq!(agy.source, Some(CatalogResolutionSource::Cached));
+        assert!(!agy.needs_background_refresh);
+        assert_eq!(
+            agy.snapshot.as_ref().and_then(|s| s.current_mode.as_deref()),
+            Some("cached-mode")
+        );
+        assert!(
+            capability_catalog_is_fresh_for_provider_instance(&pool, &agy_id, None)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn record_open_capability_catalog_broadcasts_update_event() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("../db/migrations").run(&pool).await.unwrap();
+        let mut rx = subscribe_capability_catalog_updates();
+        let agent_id = AgentId::parse("antigravity").unwrap();
+        let mut launch = launch();
+        launch.launch_lock.agent_id = agent_id.clone();
+        let controls = AgentSessionControlsSnapshot {
+            current_mode: Some("planning".to_string()),
+            ..Default::default()
+        };
+        record_open_capability_catalog(&pool, &agent_id, &launch, &controls)
+            .await
+            .unwrap();
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match rx.recv().await {
+                    Ok(ev) if ev.agent_id == "antigravity" => return ev,
+                    Ok(_) => continue,
+                    Err(error) => panic!("broadcast receive failed: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for catalog update event");
+        assert_eq!(event.provider_instance_id, None);
+        assert_eq!(event.controls.current_mode.as_deref(), Some("planning"));
     }
 }

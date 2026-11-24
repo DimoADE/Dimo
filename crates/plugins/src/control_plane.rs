@@ -51,8 +51,6 @@ pub struct PluginAuditEvent {
     pub evidence: serde_json::Value,
 }
 
-pub type HostAuditEntry = PluginAuditEvent;
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginBusEvent {
@@ -551,14 +549,6 @@ impl PluginControlPlane {
     /// 1:1 with the frontend `coreFoundationCatalogData.ts` System Bundle descriptors.
     pub fn system_bundle_manifests(&self) -> &'static [SystemBundlePluginManifest] {
         system_bundle_plugin_manifests()
-    }
-
-    /// Looks up a locked System Bundle foundation plugin manifest by `plugin_id`.
-    pub fn system_bundle_manifest(
-        &self,
-        plugin_id: &str,
-    ) -> Option<&'static SystemBundlePluginManifest> {
-        system_bundle_plugin_manifest(plugin_id)
     }
 
     /// Display name for a plugin, for Host prompts that must tell the user who

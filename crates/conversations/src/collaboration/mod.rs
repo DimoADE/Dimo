@@ -100,7 +100,7 @@ pub use roles::{
     list_space_members, list_space_members_detailed, list_spaces_for_caller, list_teams,
     list_workspace_conversations, list_workspace_spaces, load_conversation_member_session_config,
     load_member_session_config, load_space_generation, member_activity_limit,
-    member_space_context_text, member_space_context_text_for, member_worktree_workspace_id,
+    member_space_context_text_for, member_worktree_workspace_id,
     merge_bot_config_values, parse_unassigned_space_id, persona_prompt_text,
     persona_prompt_text_for_turn, plan_member_write, read_session_info_for_delegation,
     read_session_info_for_session_product, record_member_session_workspace, release_member_write,

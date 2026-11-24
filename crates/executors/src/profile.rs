@@ -127,26 +127,6 @@ impl ExecutorProfileId {
             reasoning_effort: None,
         }
     }
-
-    /// Create a new executor profile ID with specific variant
-    pub fn with_variant(executor: AgentKind, variant: String) -> Self {
-        Self {
-            executor: AgentId::parse(executor.as_str())
-                .expect("built-in AgentKind values are valid AgentIds"),
-            variant: Some(variant),
-            model: None,
-            fast_mode: None,
-            reasoning_effort: None,
-        }
-    }
-
-    /// Get cache key for this executor profile
-    pub fn cache_key(&self) -> String {
-        match &self.variant {
-            Some(variant) => format!("{}:{}", self.executor, variant),
-            None => self.executor.clone().to_string(),
-        }
-    }
 }
 
 impl std::fmt::Display for ExecutorProfileId {
@@ -208,14 +188,6 @@ impl ExecutorConfig {
             reasoning_effort: self.reasoning_id.clone(),
         }
     }
-
-    /// Returns true if any override field is set
-    pub fn has_overrides(&self) -> bool {
-        self.model_id.is_some()
-            || self.agent_id.is_some()
-            || self.reasoning_id.is_some()
-            || self.permission_policy.is_some()
-    }
 }
 
 impl TryFrom<ExecutorProfileId> for ExecutorConfig {
@@ -251,57 +223,6 @@ pub struct ExecutorProfile {
     pub recently_used_models: Option<ExecutorRecentModels>,
     #[serde(flatten)]
     pub configurations: HashMap<String, CodingAgent>,
-}
-
-impl ExecutorProfile {
-    /// Get variant configuration by name, or None if not found
-    pub fn get_variant(&self, variant: &str) -> Option<&CodingAgent> {
-        self.configurations.get(variant)
-    }
-
-    /// Get the default configuration for this executor
-    pub fn get_default(&self) -> Option<&CodingAgent> {
-        self.configurations.get("DEFAULT")
-    }
-
-    /// Create a new executor profile with just a default configuration
-    pub fn new_with_default(default_config: CodingAgent) -> Self {
-        let mut configurations = HashMap::new();
-        configurations.insert("DEFAULT".to_string(), default_config);
-        Self {
-            recently_used_models: None,
-            configurations,
-        }
-    }
-
-    /// Add or update a variant configuration
-    pub fn set_variant(
-        &mut self,
-        variant_name: String,
-        config: CodingAgent,
-    ) -> Result<(), &'static str> {
-        let key = canonical_variant_key(&variant_name);
-        if key == "DEFAULT" {
-            return Err(
-                "Cannot override 'DEFAULT' variant using set_variant, use set_default instead",
-            );
-        }
-        self.configurations.insert(key, config);
-        Ok(())
-    }
-
-    /// Set the default configuration
-    pub fn set_default(&mut self, config: CodingAgent) {
-        self.configurations.insert("DEFAULT".to_string(), config);
-    }
-
-    /// Get all variant names (excluding "DEFAULT")
-    pub fn variant_names(&self) -> Vec<&String> {
-        self.configurations
-            .keys()
-            .filter(|k| *k != "DEFAULT")
-            .collect()
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TS, Default)]
@@ -542,16 +463,6 @@ impl ExecutorConfigs {
             tracing::error!("Failed to parse embedded default_profiles.json: {}", e);
             panic!("Default profiles v3 JSON is invalid")
         })
-    }
-}
-
-pub fn to_default_variant(id: &ExecutorProfileId) -> ExecutorProfileId {
-    ExecutorProfileId {
-        executor: id.executor.clone(),
-        variant: None,
-        model: id.model.clone(),
-        fast_mode: id.fast_mode,
-        reasoning_effort: id.reasoning_effort.clone(),
     }
 }
 

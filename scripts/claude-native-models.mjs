@@ -318,45 +318,12 @@ function normalizeModelEntry(raw) {
   };
 }
 
-export async function discoverClaudeModels({
-  sdk,
-  env = {},
-  workingDir,
+export function assembleClaudeModelList({
+  gatewayItems = [],
+  sdkItems = [],
+  effectiveEnv = {},
   configuredModel,
-  auth = {},
-  configOverrides = {},
-  fetchImpl = globalThis.fetch,
-  applyExecutableToOptions,
 } = {}) {
-  const settingsEnv = await readClaudeSettingsEnv(env);
-  const effectiveEnv = { ...settingsEnv, ...env };
-  const baseUrl =
-    readString(auth?.baseUrl) ??
-    readString(configOverrides?.anthropicBaseUrl) ??
-    readString(configOverrides?.baseUrl) ??
-    readString(effectiveEnv.ANTHROPIC_BASE_URL);
-  const authToken = readString(effectiveEnv.ANTHROPIC_AUTH_TOKEN);
-  const apiKey = readString(auth?.apiKey) ?? readString(effectiveEnv.ANTHROPIC_API_KEY);
-  const isOfficial = isOfficialAnthropicSession({
-    env: effectiveEnv,
-    auth,
-    configOverrides,
-  });
-
-  const [gatewayRes, sdkRes] = await Promise.allSettled([
-    !isOfficial && baseUrl
-      ? fetchGatewayModels({ baseUrl, authToken, apiKey, fetchImpl })
-      : Promise.resolve([]),
-    probeSdkSupportedModels({
-      sdk,
-      env: effectiveEnv,
-      workingDir,
-      applyExecutableToOptions,
-    }),
-  ]);
-
-  const gatewayItems = gatewayRes.status === 'fulfilled' ? gatewayRes.value : [];
-  const sdkItems = sdkRes.status === 'fulfilled' ? sdkRes.value : [];
   const configuredItems = collectConfiguredClaudeModels(effectiveEnv, configuredModel);
 
   const concrete = [];
@@ -413,4 +380,67 @@ export async function discoverClaudeModels({
     }
   }
   return combined;
+}
+
+/**
+ * Fast local-only model resolution for `initialize({ skipModelProbe: true })`.
+ * Reads `~/.claude/settings.json` + env without spawning a throwaway Claude CLI
+ * process or issuing network gateway requests.
+ */
+export async function resolveLocalClaudeModels({ env = {}, configuredModel } = {}) {
+  const settingsEnv = await readClaudeSettingsEnv(env);
+  const effectiveEnv = { ...settingsEnv, ...env };
+  return assembleClaudeModelList({
+    gatewayItems: [],
+    sdkItems: [],
+    effectiveEnv,
+    configuredModel,
+  });
+}
+
+export async function discoverClaudeModels({
+  sdk,
+  env = {},
+  workingDir,
+  configuredModel,
+  auth = {},
+  configOverrides = {},
+  fetchImpl = globalThis.fetch,
+  applyExecutableToOptions,
+} = {}) {
+  const settingsEnv = await readClaudeSettingsEnv(env);
+  const effectiveEnv = { ...settingsEnv, ...env };
+  const baseUrl =
+    readString(auth?.baseUrl) ??
+    readString(configOverrides?.anthropicBaseUrl) ??
+    readString(configOverrides?.baseUrl) ??
+    readString(effectiveEnv.ANTHROPIC_BASE_URL);
+  const authToken = readString(effectiveEnv.ANTHROPIC_AUTH_TOKEN);
+  const apiKey = readString(auth?.apiKey) ?? readString(effectiveEnv.ANTHROPIC_API_KEY);
+  const isOfficial = isOfficialAnthropicSession({
+    env: effectiveEnv,
+    auth,
+    configOverrides,
+  });
+
+  const [gatewayRes, sdkRes] = await Promise.allSettled([
+    !isOfficial && baseUrl
+      ? fetchGatewayModels({ baseUrl, authToken, apiKey, fetchImpl })
+      : Promise.resolve([]),
+    probeSdkSupportedModels({
+      sdk,
+      env: effectiveEnv,
+      workingDir,
+      applyExecutableToOptions,
+    }),
+  ]);
+
+  const gatewayItems = gatewayRes.status === 'fulfilled' ? gatewayRes.value : [];
+  const sdkItems = sdkRes.status === 'fulfilled' ? sdkRes.value : [];
+  return assembleClaudeModelList({
+    gatewayItems,
+    sdkItems,
+    effectiveEnv,
+    configuredModel,
+  });
 }

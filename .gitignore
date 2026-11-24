@@ -138,3 +138,8 @@ logs/
 .agents/skills/xhs-redbook-cli/
 .agents/skills/xhs-topic-strategist/
 .agents/skills/zhihu-multiplatform-cli/
+
+# Impeccable visual audit/review scratch outputs
+.impeccable/review/
+.impeccable/verify/
+.impeccable/critique/

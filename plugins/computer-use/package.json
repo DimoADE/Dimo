@@ -14,14 +14,11 @@
     "pack": "dimo-plugin pack"
   },
   "dependencies": {
-    "@astryxdesign/core": "0.3.0",
     "@dimoai/plugin-sdk": "link:../../packages/plugin-sdk",
-    "lucide-react": "^1.16.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
   "devDependencies": {
-    "@module-federation/vite": "^1.9.0",
     "@types/node": "^22.10.2",
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",

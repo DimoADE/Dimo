@@ -35,20 +35,3 @@ test('loading history view uses the current scroll container instead of the old 
     /setTimeout\(\s*\(\)\s*=>\s*\{\s*setLoading\(false\);/
   );
 });
-
-test('worktree selector stays controlled while supporting branch-based project workspace switching', () => {
-  const source = readFile('src/components/layout/WorktreeSelector.tsx');
-
-  assert.match(source, /const\s*\[open,\s*setOpen\]\s*=\s*useState\(false\)/);
-  assert.match(
-    source,
-    /<DropdownMenu\s+open=\{open\}\s+onOpenChange=\{setOpen\}>/
-  );
-  assert.match(source, /buildWorkspaceBranchOptions/);
-  assert.match(source, /sessionsApi\.ensureProjectWorkspace/);
-  assert.match(
-    source,
-    /if\s*\(\s*option\.useWorktree\s*&&\s*option\.directWorkspaceId\s*\)/
-  );
-  assert.match(source, /setOpen\(false\);/);
-});

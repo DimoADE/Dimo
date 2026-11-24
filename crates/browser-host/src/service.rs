@@ -370,13 +370,6 @@ impl BrowserService {
         }
     }
 
-    pub fn release_occupant(&self, plugin_id: &str) {
-        let mut occupant = self.occupant.lock().unwrap_or_else(|p| p.into_inner());
-        if occupant.as_deref() == Some(plugin_id) {
-            occupant.take();
-        }
-    }
-
     pub async fn reset_local_data(&self) {
         let removed_tabs: Vec<(String, Arc<tokio::sync::Mutex<()>>)> = {
             let mut tabs = self.tabs.lock().unwrap_or_else(|p| p.into_inner());

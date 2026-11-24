@@ -63,10 +63,6 @@ pub fn account_flow_result_path_for_instance(
     }
 }
 
-pub fn launcher_script_path(agent_id: &AgentId, action_id: &str) -> PathBuf {
-    launcher_script_path_for_instance(agent_id, None, action_id)
-}
-
 pub fn launcher_script_path_for_instance(
     agent_id: &AgentId,
     instance_id: Option<&str>,
@@ -97,25 +93,6 @@ pub fn launcher_script_path_for_instance(
 /// records nothing, so authentication management polls a pending flow forever.
 /// Windows instead writes a launcher script and hands the terminal a single
 /// path, leaving nothing to be re-parsed or re-quoted.
-#[cfg_attr(not(windows), allow(unused_variables))]
-pub async fn prepare_management_launch(
-    agent_id: &AgentId,
-    action_id: &str,
-    command: &str,
-    assignments: &[String],
-    result_path: Option<&Path>,
-) -> std::io::Result<String> {
-    prepare_management_launch_for_instance(
-        agent_id,
-        None,
-        action_id,
-        command,
-        assignments,
-        result_path,
-    )
-    .await
-}
-
 #[cfg_attr(not(windows), allow(unused_variables))]
 pub async fn prepare_management_launch_for_instance(
     agent_id: &AgentId,
@@ -228,10 +205,6 @@ pub fn take_account_flow_for_instance(
 /// Forget a registration whose action never launched. Without this the pending
 /// view outlives the failed launch and authentication management polls an exit
 /// code that will never be written.
-pub fn cancel_account_flow(agent_id: &AgentId) {
-    cancel_account_flow_for_instance(agent_id, None);
-}
-
 pub fn cancel_account_flow_for_instance(agent_id: &AgentId, instance_id: Option<&str>) {
     if let Ok(mut flows) = pending_flows().lock() {
         flows.remove(&account_flow_key(agent_id, instance_id));
@@ -283,25 +256,27 @@ mod tests {
     #[test]
     fn cancelling_a_registration_leaves_the_agent_idle() {
         let agent = agent();
-        register_account_flow(
+        register_account_flow_for_instance(
             &agent,
+            None,
             "login",
             ProfileManagementActionKind::Login,
             PathBuf::from("/tmp/dimo-account-flow-grok.exit"),
         );
-        assert!(peek_account_flow(&agent).is_some());
+        assert!(peek_account_flow_for_instance(&agent, None).is_some());
 
-        cancel_account_flow(&agent);
+        cancel_account_flow_for_instance(&agent, None);
 
-        assert!(peek_account_flow(&agent).is_none());
+        assert!(peek_account_flow_for_instance(&agent, None).is_none());
     }
 
     #[cfg(not(windows))]
     #[tokio::test]
     async fn launch_prefixes_environment_and_captures_the_exit_code() {
         let result_path = PathBuf::from("/tmp/dimo-account-flow-grok.exit");
-        let launch = prepare_management_launch(
+        let launch = prepare_management_launch_for_instance(
             &agent(),
+            None,
             "login",
             "grok login",
             &["GROK_HOME='/a b'".to_string()],
@@ -319,9 +294,16 @@ mod tests {
     #[cfg(not(windows))]
     #[tokio::test]
     async fn launch_without_a_watched_action_runs_the_command_alone() {
-        let launch = prepare_management_launch(&agent(), "setup", "grok setup", &[], None)
-            .await
-            .expect("launch");
+        let launch = prepare_management_launch_for_instance(
+            &agent(),
+            None,
+            "setup",
+            "grok setup",
+            &[],
+            None,
+        )
+        .await
+        .expect("launch");
 
         assert_eq!(launch, "grok setup");
     }
@@ -332,8 +314,9 @@ mod tests {
     #[tokio::test]
     async fn launch_writes_a_script_that_records_the_exit_code() {
         let result_path = PathBuf::from(r"C:\Temp\dimo-account-flow-grok.exit");
-        let launch = prepare_management_launch(
+        let launch = prepare_management_launch_for_instance(
             &agent(),
+            None,
             "login",
             r#""C:\Program Files\grok\grok.cmd" login"#,
             &[r#"set "GROK_HOME=C:\a b\grok home""#.to_string()],
@@ -347,7 +330,7 @@ mod tests {
 
         assert_eq!(
             launch,
-            launcher_script_path(&agent(), "login")
+            launcher_script_path_for_instance(&agent(), None, "login")
                 .display()
                 .to_string()
         );
@@ -361,9 +344,16 @@ mod tests {
     #[cfg(windows)]
     #[tokio::test]
     async fn launch_without_a_watched_action_omits_the_exit_code() {
-        let launch = prepare_management_launch(&agent(), "setup", "grok setup", &[], None)
-            .await
-            .expect("launch");
+        let launch = prepare_management_launch_for_instance(
+            &agent(),
+            None,
+            "setup",
+            "grok setup",
+            &[],
+            None,
+        )
+        .await
+        .expect("launch");
 
         let script = tokio::fs::read_to_string(&launch).await.expect("script");
         let _ = tokio::fs::remove_file(&launch).await;

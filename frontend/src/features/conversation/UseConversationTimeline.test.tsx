@@ -2,12 +2,10 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useConversationTimeline } from './useConversationTimeline';
 import {
-  MAX_CONCURRENT_SESSION_BINDS,
   beginConversationEngineHandoff,
   cancelConversationEngineHandoff,
   completeConversationEngineHandoff,
   resetConversationTimelineRegistryForTests,
-  retainConversationSurface,
   retainConversationTimeline,
   streamFlushDelayMs,
 } from './conversationTimelineRegistry';
@@ -383,7 +381,7 @@ describe('useConversationTimeline', () => {
     expect(result.current.timeline.at(-1)?.phase).toBe('streaming');
   });
 
-  it('connects with the stored session after imported history detail succeeds', async () => {
+  it('becomes ready immediately after imported history detail succeeds without auto-binding', async () => {
     detailMock.mockResolvedValue({
       ...detail(),
       summary: {
@@ -401,12 +399,9 @@ describe('useConversationTimeline', () => {
     );
 
     await waitFor(() => expect(result.current.loading).toBe(false));
-    await waitFor(() =>
-      expect(ensureSessionControlsMock).toHaveBeenCalledWith(CONVERSATION_ID, {
-        reload: false,
-      })
-    );
-    await waitFor(() => expect(result.current.sessionBindReady).toBe(true));
+    expect(result.current.sessionBindReady).toBe(true);
+    expect(result.current.connecting).toBe(false);
+    expect(ensureSessionControlsMock).not.toHaveBeenCalled();
   });
 
   it('shows each older page when the user asks for it', async () => {
@@ -715,7 +710,7 @@ describe('useConversationTimeline', () => {
     await waitFor(() => expect(detailMock).toHaveBeenCalledTimes(1));
   });
 
-  it('does not connect while conversation detail is still loading', async () => {
+  it('does not auto-connect while loading or after conversation detail resolves', async () => {
     let resolveDetail: (value: DbConversationDetail) => void = () => {};
     detailMock.mockReturnValue(
       new Promise<DbConversationDetail>((resolve) => {
@@ -732,30 +727,13 @@ describe('useConversationTimeline', () => {
 
     resolveDetail(detail());
     await waitFor(() => expect(result.current.loading).toBe(false));
-    await waitFor(() =>
-      expect(ensureSessionControlsMock).toHaveBeenCalledWith(CONVERSATION_ID, {
-        reload: false,
-      })
-    );
+    expect(result.current.sessionBindReady).toBe(true);
+    expect(result.current.connecting).toBe(false);
+    expect(ensureSessionControlsMock).not.toHaveBeenCalled();
+    expect(touchMock).not.toHaveBeenCalled();
   });
 
-  it('auto-connects after opening a conversation with no turns', async () => {
-    detailMock.mockResolvedValue(detail());
-
-    const { result } = renderHook(() =>
-      useConversationTimeline(CONVERSATION_ID)
-    );
-
-    await waitFor(() => expect(result.current.loading).toBe(false));
-    await waitFor(() =>
-      expect(ensureSessionControlsMock).toHaveBeenCalledWith(CONVERSATION_ID, {
-        reload: false,
-      })
-    );
-    await waitFor(() => expect(result.current.sessionBindReady).toBe(true));
-  });
-
-  it('auto-connects a new session that has a workspace but no agent_id yet', async () => {
+  it('starts keepalive only after a live session_bind_ready event arrives', async () => {
     detailMock.mockResolvedValue({
       ...detail(),
       summary: {
@@ -769,12 +747,18 @@ describe('useConversationTimeline', () => {
     );
 
     await waitFor(() => expect(result.current.loading).toBe(false));
-    await waitFor(() =>
-      expect(ensureSessionControlsMock).toHaveBeenCalledWith(CONVERSATION_ID, {
-        reload: false,
-      })
-    );
-    await waitFor(() => expect(result.current.sessionBindReady).toBe(true));
+    await waitFor(() => expect(agentEventListeners.length).toBeGreaterThan(0));
+    expect(result.current.sessionBindReady).toBe(true);
+    expect(ensureSessionControlsMock).not.toHaveBeenCalled();
+    expect(touchMock).not.toHaveBeenCalled();
+
+    act(() => {
+      agentEventListeners[0]?.({
+        session_id: CONVERSATION_ID,
+        event: { kind: 'session_bind_ready', acp_session_id: 'acp-live-1' },
+      });
+    });
+
     await waitFor(() =>
       expect(touchMock).toHaveBeenCalledWith(CONVERSATION_ID, true)
     );
@@ -863,8 +847,8 @@ describe('useConversationTimeline', () => {
         other: useConversationTimeline('conversation-2'),
       }));
       await waitFor(() => {
-        expect(result.current.first.sessionBindReady).toBe(true);
-        expect(result.current.other.sessionBindReady).toBe(true);
+        expect(result.current.first.loading).toBe(false);
+        expect(result.current.other.loading).toBe(false);
       });
       const otherBefore = result.current.other;
       detailMock.mockClear();
@@ -884,12 +868,12 @@ describe('useConversationTimeline', () => {
     }
   );
 
-  it('auto-connects a newly created conversation before its first turn', async () => {
+  it('keeps a newly created zero-turn conversation ready immediately without spawning ensureSessionControls', async () => {
     detailMock.mockResolvedValue({
       ...detail(),
       summary: {
         ...detail().summary,
-        agent_id: 'claude_code',
+        agent_id: 'antigravity',
         message_count: 0n,
       },
     });
@@ -899,26 +883,13 @@ describe('useConversationTimeline', () => {
     );
 
     await waitFor(() => expect(result.current.loading).toBe(false));
-    await waitFor(() =>
-      expect(ensureSessionControlsMock).toHaveBeenCalledWith(CONVERSATION_ID, {
-        reload: false,
-      })
-    );
-    await waitFor(() => expect(result.current.sessionBindReady).toBe(true));
+    expect(result.current.sessionBindReady).toBe(true);
+    expect(result.current.connecting).toBe(false);
+    expect(ensureSessionControlsMock).not.toHaveBeenCalled();
   });
 
-  it('stays bind-ready when auto-connect succeeds after the surface is toggled', async () => {
+  it('restores lazy ready state immediately when a surface is toggled inactive and back active', async () => {
     detailMock.mockResolvedValue(detail());
-    let resolveControls: (value: {
-      modes: never[];
-      current_mode: null;
-      config_options: never[];
-    }) => void = () => {};
-    ensureSessionControlsMock.mockReturnValue(
-      new Promise((resolve) => {
-        resolveControls = resolve;
-      })
-    );
 
     const { result, rerender } = renderHook(
       ({ active }: { active: boolean }) =>
@@ -927,47 +898,19 @@ describe('useConversationTimeline', () => {
     );
 
     await waitFor(() => expect(result.current.loading).toBe(false));
-    await waitFor(() => expect(ensureSessionControlsMock).toHaveBeenCalled());
-    expect(result.current.connecting).toBe(true);
+    expect(result.current.sessionBindReady).toBe(true);
+    expect(result.current.connecting).toBe(false);
 
     rerender({ active: false });
+    expect(result.current.sessionBindReady).toBe(false);
+
     rerender({ active: true });
-
-    act(() => {
-      resolveControls({
-        modes: [],
-        current_mode: null,
-        config_options: [],
-      });
-    });
-
     await waitFor(() => expect(result.current.sessionBindReady).toBe(true));
     expect(result.current.connecting).toBe(false);
+    expect(ensureSessionControlsMock).not.toHaveBeenCalled();
   });
 
-  it('does not surface a stale auto-connect connection miss as a load error', async () => {
-    detailMock.mockResolvedValue(detail());
-    ensureSessionControlsMock.mockRejectedValueOnce(
-      new Error(
-        'Not found: agent connection `46054836-6607-4f56-a4c1-376afc469934` was not found'
-      )
-    );
-
-    const { result } = renderHook(() =>
-      useConversationTimeline(CONVERSATION_ID)
-    );
-
-    await waitFor(() => expect(result.current.loading).toBe(false));
-    await waitFor(() =>
-      expect(ensureSessionControlsMock).toHaveBeenCalledWith(CONVERSATION_ID, {
-        reload: false,
-      })
-    );
-    await waitFor(() => expect(result.current.error).toBeNull());
-    expect(result.current.connecting).toBe(true);
-  });
-
-  it('marks the session bind-ready from a live SessionBindReady event', async () => {
+  it('marks the session bind-ready from a live SessionBindReady event while reconnecting', async () => {
     detailMock.mockResolvedValue(detail());
     let resolveControls: (value: {
       modes: never[];
@@ -986,6 +929,10 @@ describe('useConversationTimeline', () => {
 
     await waitFor(() => expect(result.current.loading).toBe(false));
     await waitFor(() => expect(agentEventListeners.length).toBeGreaterThan(0));
+
+    act(() => {
+      void result.current.reconnectAndReload();
+    });
     expect(result.current.connecting).toBe(true);
 
     act(() => {
@@ -1011,6 +958,7 @@ describe('useConversationTimeline', () => {
       const { result } = renderHook(() =>
         useConversationTimeline(CONVERSATION_ID)
       );
+      await waitFor(() => expect(result.current.loading).toBe(false));
       await waitFor(() => expect(result.current.sessionBindReady).toBe(true));
       act(() => {
         agentEventListeners[0]?.({
@@ -1025,7 +973,30 @@ describe('useConversationTimeline', () => {
     }
   );
 
-  it('does not reopen the send gate when an older ensure promise resolves after failure', async () => {
+  it('keeps the session ready and silent when an idle connection transitions to closed', async () => {
+    detailMock.mockResolvedValue(detail());
+    const { result } = renderHook(() =>
+      useConversationTimeline(CONVERSATION_ID)
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await waitFor(() => expect(agentEventListeners.length).toBeGreaterThan(0));
+
+    act(() => {
+      agentEventListeners[0]?.({
+        session_id: CONVERSATION_ID,
+        event: {
+          kind: 'connection_status_changed',
+          snapshot: { status: 'closed' },
+        },
+      });
+    });
+
+    expect(result.current.sessionBindReady).toBe(true);
+    expect(result.current.connecting).toBe(false);
+    expect(ensureSessionControlsMock).not.toHaveBeenCalled();
+  });
+
+  it('does not reopen the send gate when an older reconnect promise resolves after failure', async () => {
     detailMock.mockResolvedValue(detail());
     let resolveControls: (value: {
       modes: never[];
@@ -1040,6 +1011,12 @@ describe('useConversationTimeline', () => {
     const { result } = renderHook(() =>
       useConversationTimeline(CONVERSATION_ID)
     );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    let reconnectPromise: Promise<void> | undefined;
+    act(() => {
+      reconnectPromise = result.current.reconnectAndReload();
+    });
     await waitFor(() => expect(ensureSessionControlsMock).toHaveBeenCalled());
     act(() =>
       agentEventListeners[0]?.({
@@ -1050,9 +1027,10 @@ describe('useConversationTimeline', () => {
         },
       })
     );
-    await act(async () =>
-      resolveControls({ modes: [], current_mode: null, config_options: [] })
-    );
+    await act(async () => {
+      resolveControls({ modes: [], current_mode: null, config_options: [] });
+      await reconnectPromise;
+    });
     expect(result.current.sessionBindReady).toBe(false);
     expect(result.current.connecting).toBe(false);
   });
@@ -1062,6 +1040,7 @@ describe('useConversationTimeline', () => {
     const { result } = renderHook(() =>
       useConversationTimeline(CONVERSATION_ID)
     );
+    await waitFor(() => expect(result.current.loading).toBe(false));
     await waitFor(() => expect(result.current.sessionBindReady).toBe(true));
 
     act(() => {
@@ -1101,7 +1080,7 @@ describe('useConversationTimeline', () => {
     expect(result.current.sessionBindReady).toBe(true);
   });
 
-  it('does not reopen the send gate when bind resolves after recovery starts', async () => {
+  it('does not reopen the send gate when reconnect resolves after recovery starts', async () => {
     detailMock.mockResolvedValue(detail());
     let resolveControls: (value: {
       modes: never[];
@@ -1116,6 +1095,12 @@ describe('useConversationTimeline', () => {
     const { result } = renderHook(() =>
       useConversationTimeline(CONVERSATION_ID)
     );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    let reconnectPromise: Promise<void> | undefined;
+    act(() => {
+      reconnectPromise = result.current.reconnectAndReload();
+    });
     await waitFor(() => expect(ensureSessionControlsMock).toHaveBeenCalled());
 
     act(() => {
@@ -1129,15 +1114,16 @@ describe('useConversationTimeline', () => {
         },
       });
     });
-    await act(async () =>
-      resolveControls({ modes: [], current_mode: null, config_options: [] })
-    );
+    await act(async () => {
+      resolveControls({ modes: [], current_mode: null, config_options: [] });
+      await reconnectPromise;
+    });
 
     expect(result.current.sessionBindReady).toBe(false);
     expect(result.current.connecting).toBe(true);
   });
 
-  it('ignores a bind rejection after a newer bind-ready event', async () => {
+  it('ignores a reconnect rejection after a newer bind-ready event', async () => {
     detailMock.mockResolvedValue(detail());
     let rejectControls: (error: Error) => void = () => {};
     ensureSessionControlsMock.mockReturnValue(
@@ -1148,6 +1134,12 @@ describe('useConversationTimeline', () => {
     const { result } = renderHook(() =>
       useConversationTimeline(CONVERSATION_ID)
     );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    let reconnectPromise: Promise<void> | undefined;
+    act(() => {
+      reconnectPromise = result.current.reconnectAndReload();
+    });
     await waitFor(() => expect(ensureSessionControlsMock).toHaveBeenCalled());
 
     act(() => {
@@ -1160,52 +1152,15 @@ describe('useConversationTimeline', () => {
     });
     expect(result.current.sessionBindReady).toBe(true);
 
-    await act(async () => rejectControls(new Error('stale bind failure')));
+    await act(async () => {
+      rejectControls(new Error('stale bind failure'));
+      await reconnectPromise;
+    });
     expect(result.current.sessionBindReady).toBe(true);
     expect(result.current.error).toBeNull();
   });
 
-  it('adopts an in-flight bind after full unmount and remount so connecting clears on resolve', async () => {
-    detailMock.mockResolvedValue(detail());
-    let resolveControls: (value: {
-      modes: never[];
-      current_mode: null;
-      config_options: never[];
-    }) => void = () => {};
-    ensureSessionControlsMock.mockReturnValue(
-      new Promise((resolve) => {
-        resolveControls = resolve;
-      })
-    );
-
-    const first = renderHook(() => useConversationTimeline(CONVERSATION_ID));
-    await waitFor(() => expect(ensureSessionControlsMock).toHaveBeenCalled());
-    expect(first.result.current.connecting).toBe(true);
-    expect(first.result.current.connectingSince).not.toBeNull();
-
-    first.unmount();
-
-    const second = renderHook(() => useConversationTimeline(CONVERSATION_ID));
-    await waitFor(() => expect(second.result.current.loading).toBe(false));
-    expect(second.result.current.connecting).toBe(true);
-    expect(second.result.current.connectingSince).not.toBeNull();
-
-    await act(async () => {
-      resolveControls({
-        modes: [],
-        current_mode: null,
-        config_options: [],
-      });
-    });
-
-    await waitFor(() =>
-      expect(second.result.current.sessionBindReady).toBe(true)
-    );
-    expect(second.result.current.connecting).toBe(false);
-    expect(second.result.current.connectingSince).toBeNull();
-  });
-
-  it('completes bind when connection recovers to ready before ensureSessionControls resolves without session_bind_ready', async () => {
+  it('completes reconnect when connection recovers to ready before ensureSessionControls resolves without session_bind_ready', async () => {
     detailMock.mockResolvedValue(detail());
     let resolveControls: (value: {
       modes: never[];
@@ -1221,6 +1176,12 @@ describe('useConversationTimeline', () => {
     const { result } = renderHook(() =>
       useConversationTimeline(CONVERSATION_ID)
     );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    let reconnectPromise: Promise<void> | undefined;
+    act(() => {
+      reconnectPromise = result.current.reconnectAndReload();
+    });
     await waitFor(() => expect(ensureSessionControlsMock).toHaveBeenCalled());
 
     act(() => {
@@ -1250,6 +1211,7 @@ describe('useConversationTimeline', () => {
         current_mode: null,
         config_options: [],
       });
+      await reconnectPromise;
     });
 
     await waitFor(() => expect(result.current.sessionBindReady).toBe(true));
@@ -1262,6 +1224,7 @@ describe('useConversationTimeline', () => {
     const { result } = renderHook(() =>
       useConversationTimeline(CONVERSATION_ID)
     );
+    await waitFor(() => expect(result.current.loading).toBe(false));
     await waitFor(() => expect(result.current.sessionBindReady).toBe(true));
 
     act(() => {
@@ -1317,7 +1280,7 @@ describe('useConversationTimeline', () => {
     expect(result.current.connectingSince).toBeNull();
   });
 
-  it('keeps projected controls for a zero-message conversation while auto-connecting', async () => {
+  it('keeps projected controls for a zero-message conversation immediately without auto-binding', async () => {
     const projectedFastOption = {
       key: 'fast-mode',
       label: 'Fast mode',
@@ -1345,11 +1308,9 @@ describe('useConversationTimeline', () => {
     expect(result.current.sessionConfigOptions).toEqual([
       expect.objectContaining({ key: 'fast-mode', value: 'off' }),
     ]);
-    await waitFor(() =>
-      expect(ensureSessionControlsMock).toHaveBeenCalledWith(CONVERSATION_ID, {
-        reload: false,
-      })
-    );
+    expect(result.current.sessionBindReady).toBe(true);
+    expect(result.current.connecting).toBe(false);
+    expect(ensureSessionControlsMock).not.toHaveBeenCalled();
   });
 
   it('does not add event-log rows on subscribe', async () => {
@@ -1762,35 +1723,6 @@ describe('useConversationTimeline', () => {
     }
   });
 
-  it('retries stale auto-connect errors up to 2 times and resets connecting=false without surfacing a load error', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    try {
-      detailMock.mockResolvedValue(detail());
-      const staleErr = new Error(
-        'Not found: agent connection `46054836-6607-4f56-a4c1-376afc469934` was not found'
-      );
-      ensureSessionControlsMock
-        .mockRejectedValueOnce(staleErr)
-        .mockRejectedValueOnce(staleErr)
-        .mockRejectedValueOnce(staleErr);
-
-      const { result } = renderHook(() =>
-        useConversationTimeline(CONVERSATION_ID)
-      );
-
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(1000);
-      });
-
-      expect(ensureSessionControlsMock).toHaveBeenCalledTimes(3);
-      expect(result.current.error).toBeNull();
-      expect(result.current.sessionBindReady).toBe(false);
-      expect(result.current.connecting).toBe(false);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
   it('hydrates optimistic turns published right before ConversationTimeline mounts', async () => {
     detailMock.mockReturnValue(new Promise(() => {}));
 
@@ -1955,7 +1887,7 @@ describe('useConversationTimeline', () => {
     expect(result.current.timeline.map((r) => r.turn.id)).toEqual(['t11:user']);
   });
 
-  it('defers bind, ignores stale bind events and detail controls while handoff is pending, and resumes or rolls back cleanly', async () => {
+  it('blocks stale bind events and detail controls while handoff is pending, and reloads controls lazily on complete or rollback without calling ensureSessionControls', async () => {
     detailMock.mockResolvedValue({
       ...detail(),
       summary: {
@@ -1976,29 +1908,16 @@ describe('useConversationTimeline', () => {
         },
       ],
     });
-    ensureSessionControlsMock.mockResolvedValue({
-      modes: [{ id: 'default', name: 'Default' }],
-      current_mode: 'default',
-      config_options: [
-        {
-          key: 'model',
-          label: 'Model',
-          category: 'model',
-          value: 'gpt-5',
-          choices: [{ value: 'gpt-5', label: 'GPT-5' }],
-        },
-      ],
-    });
 
     const { result } = renderHook(() =>
       useConversationTimeline(CONVERSATION_ID)
     );
 
+    await waitFor(() => expect(result.current.loading).toBe(false));
     await waitFor(() => expect(result.current.sessionBindReady).toBe(true));
     expect(result.current.sessionModes.modes).toHaveLength(1);
     expect(result.current.sessionConfigOptions).toHaveLength(1);
-
-    ensureSessionControlsMock.mockClear();
+    expect(ensureSessionControlsMock).not.toHaveBeenCalled();
 
     let handoffToken: number | null = null;
     act(() => {
@@ -2058,38 +1977,20 @@ describe('useConversationTimeline', () => {
     expect(result.current.sessionConfigOptions).toEqual([]);
     expect(ensureSessionControlsMock).not.toHaveBeenCalled();
 
-    // Completing handoff triggers bind for the target agent
-    ensureSessionControlsMock.mockResolvedValueOnce({
-      modes: [{ id: 'plan', name: 'Plan' }],
-      current_mode: 'plan',
-      config_options: [
-        {
-          key: 'model',
-          label: 'Model',
-          category: 'model',
-          value: 'claude-sonnet-4-6',
-          choices: [{ value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' }],
-        },
-      ],
-    });
+    // Completing handoff clears handoffPending and restores lazy ready state
+    // without spawning a live agent process via ensureSessionControls.
     act(() => {
       completeConversationEngineHandoff(CONVERSATION_ID, handoffToken);
     });
 
-    await waitFor(() =>
-      expect(ensureSessionControlsMock).toHaveBeenCalledWith(CONVERSATION_ID, {
-        reload: false,
-      })
-    );
-    await waitFor(() => expect(result.current.sessionBindReady).toBe(true));
+    expect(result.current.sessionBindReady).toBe(true);
+    expect(result.current.connecting).toBe(false);
     expect(result.current.handoffPending).toBe(false);
-    expect(result.current.sessionModes.current).toBe('plan');
-    expect(result.current.sessionConfigOptions[0]?.value).toBe(
-      'claude-sonnet-4-6'
-    );
+    expect(result.current.agentId).toBe('claude_code');
+    expect(result.current.controlsAgentId).toBe('claudecode');
+    expect(ensureSessionControlsMock).not.toHaveBeenCalled();
 
-    // Cancelling a subsequent handoff rolls back agentId and re-binds cleanly
-    ensureSessionControlsMock.mockClear();
+    // Cancelling a subsequent handoff rolls back agentId cleanly without auto-binding
     let cancelToken: number | null = null;
     act(() => {
       cancelToken = beginConversationEngineHandoff(CONVERSATION_ID, 'codex');
@@ -2107,11 +2008,9 @@ describe('useConversationTimeline', () => {
     });
     expect(result.current.handoffPending).toBe(false);
     expect(result.current.agentId).toBe('claude_code');
-    await waitFor(() =>
-      expect(ensureSessionControlsMock).toHaveBeenCalledWith(CONVERSATION_ID, {
-        reload: false,
-      })
-    );
+    expect(result.current.sessionBindReady).toBe(true);
+    expect(result.current.connecting).toBe(false);
+    expect(ensureSessionControlsMock).not.toHaveBeenCalled();
   });
 
   it('replays fresh unpersisted preDetailBatches beyond detail live_sequence without duplicating overlaid text', async () => {
@@ -2193,12 +2092,13 @@ describe('useConversationTimeline', () => {
     expect(text).toBe('overlaid fresh-delta');
   });
 
-  it('caps concurrent ensureSessionControls binds to MAX_CONCURRENT_SESSION_BINDS and prioritizes visible surfaces', async () => {
+  it('never triggers automatic ensureSessionControls across multiple opened conversations, tab switches, or optimistic sends', async () => {
     detailMock.mockImplementation(async (conversationId: string) => ({
       ...detail(),
       summary: {
         ...detail().summary,
         id: conversationId,
+        agent_id: 'antigravity',
       },
       timeline: {
         ...detail().timeline,
@@ -2206,86 +2106,28 @@ describe('useConversationTimeline', () => {
       },
     }));
 
-    const pendingBinds = new Map<
-      string,
-      (value: {
-        session_id: string;
-        available_modes: unknown[];
-        current_mode_id: string | null;
-        config_options: unknown[];
-      }) => void
-    >();
-    const bindOrder: string[] = [];
-    ensureSessionControlsMock.mockImplementation((conversationId: string) => {
-      bindOrder.push(conversationId);
-      return new Promise((resolve) => {
-        pendingBinds.set(conversationId, resolve);
-      });
-    });
-
-    const releaseSurface4 = retainConversationSurface('conv-4-visible');
     const release1 = retainConversationTimeline('conv-1');
     const release2 = retainConversationTimeline('conv-2');
-    const release3 = retainConversationTimeline('conv-3-bg');
-    const release4 = retainConversationTimeline('conv-4-visible');
+    const release3 = retainConversationTimeline('conv-3');
+    const release4 = retainConversationTimeline('conv-4');
 
     try {
       await waitFor(() => {
-        expect(bindOrder).toHaveLength(MAX_CONCURRENT_SESSION_BINDS);
+        expect(detailMock).toHaveBeenCalledTimes(4);
       });
-      // Even after giving idle/timer scheduling time to fire for all 4 slots,
-      // at most MAX_CONCURRENT_SESSION_BINDS (2) calls are active concurrently.
+      publishOptimisticConversationTurn({
+        type: 'add',
+        conversationId: 'conv-1',
+        turn: messageTurn('opt-1', 'user', [{ type: 'text', text: 'hello' }]),
+      });
       await new Promise((resolve) => setTimeout(resolve, 60));
-      expect(bindOrder).toEqual(['conv-1', 'conv-2']);
-      expect(pendingBinds.size).toBe(MAX_CONCURRENT_SESSION_BINDS);
-
-      // Resolving conv-1 must promote the visible surface (conv-4-visible) ahead of conv-3-bg.
-      pendingBinds.get('conv-1')?.({
-        session_id: 'conv-1',
-        available_modes: [],
-        current_mode_id: null,
-        config_options: [],
-      });
-      pendingBinds.delete('conv-1');
-
-      await waitFor(() => {
-        expect(bindOrder).toEqual(['conv-1', 'conv-2', 'conv-4-visible']);
-      });
-
-      // Resolving conv-2 drains the remaining background bind (conv-3-bg).
-      pendingBinds.get('conv-2')?.({
-        session_id: 'conv-2',
-        available_modes: [],
-        current_mode_id: null,
-        config_options: [],
-      });
-      pendingBinds.delete('conv-2');
-
-      await waitFor(() => {
-        expect(bindOrder).toEqual([
-          'conv-1',
-          'conv-2',
-          'conv-4-visible',
-          'conv-3-bg',
-        ]);
-      });
-
-      // Resolve remaining binds cleanly
-      for (const [id, resolve] of pendingBinds.entries()) {
-        resolve({
-          session_id: id,
-          available_modes: [],
-          current_mode_id: null,
-          config_options: [],
-        });
-      }
-      pendingBinds.clear();
+      expect(ensureSessionControlsMock).not.toHaveBeenCalled();
+      expect(touchMock).not.toHaveBeenCalled();
     } finally {
       release1();
       release2();
       release3();
       release4();
-      releaseSurface4();
     }
   });
 });

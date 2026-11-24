@@ -54,10 +54,6 @@ struct ImageSidecar {
     height: Option<u32>,
 }
 
-pub fn externalize_image_data(image: &mut ImageData) {
-    externalize_image_data_in(image, &default_timeline_image_dir());
-}
-
 pub fn externalize_image_data_in(image: &mut ImageData, dir: &Path) {
     if image.data.is_empty() {
         return;

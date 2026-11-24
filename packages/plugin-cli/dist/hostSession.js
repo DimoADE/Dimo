@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 export const PLUGIN_RC_NAME = "pluginrc";
@@ -67,9 +67,6 @@ export function loadHostSession(file = hostSessionPath()) {
     catch {
         return null;
     }
-}
-export function clearHostSession(file = hostSessionPath()) {
-    rmSync(file, { force: true });
 }
 export function mergeHostSession(flags, saved, discovered = {}) {
     const url = flags.url || saved?.url || discovered.url || "";

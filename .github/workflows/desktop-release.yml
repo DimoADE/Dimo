@@ -302,7 +302,7 @@ jobs:
           path: frontend/dist
 
       - name: Build Rust desktop sidecars
-        run: cargo build --release --target ${{ matrix.target }} -p server --bin dimo-server -p dimo-mcp --bin dimo-mcp -p dimo-workflow-mcp --bin dimo-workflow-mcp
+        run: cargo build --release --target ${{ matrix.target }} -p server --bin dimo-server -p dimo-mcp --bin dimo-mcp
 
       - name: Stage Electron sidecar binaries
         run: node scripts/stage-host-sidecars.js --electron --target ${{ matrix.target }} --profile release
@@ -553,8 +553,7 @@ jobs:
             $innerExes = @(
               (Join-Path $unpacked.FullName 'Dimo.exe'),
               (Join-Path $unpacked.FullName 'resources\bin\dimo-server.exe'),
-              (Join-Path $unpacked.FullName 'resources\bin\dimo-mcp.exe'),
-              (Join-Path $unpacked.FullName 'resources\bin\dimo-workflow-mcp.exe')
+              (Join-Path $unpacked.FullName 'resources\bin\dimo-mcp.exe')
             )
             foreach ($exePath in $innerExes) {
               if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {

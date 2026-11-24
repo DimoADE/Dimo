@@ -30,40 +30,6 @@ export type PluginActionDefinition = {
 
 export type PluginActionDraft = PluginActionDefinition;
 
-export function isPluginActionDraft(
-  value: unknown
-): value is PluginActionDraft {
-  if (typeof value !== 'object' || value === null) return false;
-  const candidate = value as Record<string, unknown>;
-  const artifactIntent = candidate.artifactIntent;
-  return (
-    typeof candidate.pluginId === 'string' &&
-    typeof candidate.actionId === 'string' &&
-    typeof candidate.label === 'string' &&
-    Array.isArray(candidate.requiredSkills) &&
-    candidate.requiredSkills.every((item) => typeof item === 'string') &&
-    Array.isArray(candidate.requiredTools) &&
-    candidate.requiredTools.every((item) => typeof item === 'string') &&
-    Array.isArray(candidate.promptBlocks) &&
-    candidate.promptBlocks.every(
-      (block) =>
-        typeof block === 'object' &&
-        block !== null &&
-        (block as Record<string, unknown>).type === 'text' &&
-        typeof (block as Record<string, unknown>).text === 'string'
-    ) &&
-    (artifactIntent === undefined ||
-      artifactIntent === null ||
-      (typeof artifactIntent === 'object' &&
-        Array.isArray((artifactIntent as Record<string, unknown>).mediaTypes) &&
-        (
-          (artifactIntent as Record<string, unknown>).mediaTypes as unknown[]
-        ).every((item) => typeof item === 'string') &&
-        typeof (artifactIntent as Record<string, unknown>).provider ===
-          'string'))
-  );
-}
-
 type PluginActionCatalog = {
   actions: PluginActionDefinition[];
   readiness?: {

@@ -61,8 +61,7 @@ use api_types::{
     AgentEnvironmentDiagnosticsView, AgentEnvironmentEntryView, AgentEnvironmentPatchRequest,
     AgentEnvironmentView, AgentId, AgentKind, AgentLifecycleState, AgentLocalRuntimeView,
     AgentManagementActionKind, AgentManagementActionReceipt, AgentManagementActionView,
-    AgentManagementActionsView, AgentManagementErrorCode, AgentManagementErrorView,
-    AgentManagementIdentity, AgentManagementView, AgentModelCatalogItemView,
+    AgentManagementActionsView, AgentManagementView, AgentModelCatalogItemView,
     AgentModelCatalogSource, AgentModelCatalogView, AgentModelProviderImportCandidateView,
     AgentModelProviderImportPreviewView, AgentModelProviderImportRequest,
     AgentModelProviderImportSource, AgentModelProviderProbeView, AgentModelProviderSaveRequest,
@@ -136,10 +135,9 @@ use remote_protocol::{
     SubscriptionRequest, SubscriptionResource, SubscriptionSnapshot,
 };
 use server::dto::{
-    ArtifactPreviewLeaseDto, AttentionInbox, AttentionItem, AttentionItemKind,
-    ConversationActiveBinding, ConversationCurrentTurn, CrashReportMeta, CrashReportsInfo,
-    DbConversationDetail, SessionCollaborationMemberRef, SessionCollaborationRef,
-    SessionContinuityMode, SessionSummary,
+    AttentionInbox, AttentionItem, AttentionItemKind, ConversationActiveBinding,
+    ConversationCurrentTurn, CrashReportMeta, CrashReportsInfo, DbConversationDetail,
+    SessionCollaborationMemberRef, SessionCollaborationRef, SessionContinuityMode, SessionSummary,
 };
 use services::services::{
     config::{
@@ -157,13 +155,10 @@ use services::services::{
 use ts_rs::TS;
 use workflows::{
     AgentStepSpec, ApprovalStepSpec, BotStepSpec, BoundedLoopStepSpec, ClaimedWorkflowStep,
-    CompletionPolicy, ConditionBranchStepSpec, DebugRunScope, DirectReflexPresetConfig,
-    DualPrimitiveActorSpec, EventSagaPresetConfig, GroupStageStepSpec, HybridPipelinePresetConfig,
-    NotifyStepSpec, OutboxActionKind, OutboxActionStepSpec, PresetOrchestratorSpec,
-    SessionStepSpec, SideEffectClass, SpecialistSessionSpec, SuperagentRouterPresetConfig,
-    UserGateStepSpec, WaitForEventStepSpec, WaitingWorkflowStep, WindowAggregatorPresetConfig,
-    WorkflowBinding, WorkflowDefinition, WorkflowDefinitionSummary, WorkflowEvent,
-    WorkflowEventRecord, WorkflowGraphPatch, WorkflowGraphPatchOp, WorkflowPolicy,
+    CompletionPolicy, ConditionBranchStepSpec, DebugRunScope, GroupStageStepSpec, NotifyStepSpec,
+    OutboxActionKind, OutboxActionStepSpec, SessionStepSpec, SideEffectClass, UserGateStepSpec,
+    WaitForEventStepSpec, WaitingWorkflowStep, WorkflowBinding, WorkflowDefinition,
+    WorkflowDefinitionSummary, WorkflowEvent, WorkflowEventRecord, WorkflowPolicy,
     WorkflowReviewDecision, WorkflowRunStatus, WorkflowRunView, WorkflowStep, WorkflowStepSpec,
     WorkflowStepStatus, WorkflowStepView, WorkflowValidationView, WorkflowVersionView,
     WorkspaceAccess,
@@ -552,6 +547,16 @@ fn removed_declarations() -> &'static std::collections::BTreeSet<&'static str> {
             "QwenCode",
             "RepoReviewContext",
             "ReviewRequest",
+            "WorkflowGraphPatch",
+            "WorkflowGraphPatchOp",
+            "DualPrimitiveActorSpec",
+            "SpecialistSessionSpec",
+            "DirectReflexPresetConfig",
+            "SuperagentRouterPresetConfig",
+            "HybridPipelinePresetConfig",
+            "EventSagaPresetConfig",
+            "WindowAggregatorPresetConfig",
+            "PresetOrchestratorSpec",
         ])
     })
 }
@@ -614,7 +619,6 @@ fn replacement_declarations() -> BTreeMap<String, String> {
     insert_declaration::<UserAgentDefinitionView>(&mut decls);
     insert_declaration::<AgentLifecycleState>(&mut decls);
     insert_declaration::<AgentAuthenticationStatus>(&mut decls);
-    insert_declaration::<AgentManagementIdentity>(&mut decls);
     insert_declaration::<AgentOperationKind>(&mut decls);
     insert_declaration::<AgentOperationStatus>(&mut decls);
     insert_declaration::<AgentLocalRuntimeView>(&mut decls);
@@ -626,8 +630,6 @@ fn replacement_declarations() -> BTreeMap<String, String> {
     insert_declaration::<AgentRegistryView>(&mut decls);
     insert_declaration::<AgentUpdateCheckView>(&mut decls);
     insert_declaration::<AgentOperationEvent>(&mut decls);
-    insert_declaration::<AgentManagementErrorCode>(&mut decls);
-    insert_declaration::<AgentManagementErrorView>(&mut decls);
     insert_declaration::<AgentPreflightSource>(&mut decls);
     insert_declaration::<AgentPreflightItemView>(&mut decls);
     insert_declaration::<AgentPreflightView>(&mut decls);
@@ -739,7 +741,6 @@ fn replacement_declarations() -> BTreeMap<String, String> {
     insert_declaration::<ConflictFileDetail>(&mut decls);
     insert_declaration::<WriteConflictResolutionResult>(&mut decls);
     insert_declaration::<ConversationSearchHit>(&mut decls);
-    insert_declaration::<ArtifactPreviewLeaseDto>(&mut decls);
     insert_declaration::<ExecutionProcessRunReason>(&mut decls);
     insert_declaration::<ChatChannelMessageLog>(&mut decls);
     insert_declaration::<AgentCapability>(&mut decls);
@@ -959,16 +960,6 @@ fn replacement_declarations() -> BTreeMap<String, String> {
     insert_declaration::<OutboxActionKind>(&mut decls);
     insert_declaration::<OutboxActionStepSpec>(&mut decls);
     insert_declaration::<WaitingWorkflowStep>(&mut decls);
-    insert_declaration::<WorkflowGraphPatch>(&mut decls);
-    insert_declaration::<WorkflowGraphPatchOp>(&mut decls);
-    insert_declaration::<DualPrimitiveActorSpec>(&mut decls);
-    insert_declaration::<SpecialistSessionSpec>(&mut decls);
-    insert_declaration::<DirectReflexPresetConfig>(&mut decls);
-    insert_declaration::<SuperagentRouterPresetConfig>(&mut decls);
-    insert_declaration::<HybridPipelinePresetConfig>(&mut decls);
-    insert_declaration::<EventSagaPresetConfig>(&mut decls);
-    insert_declaration::<WindowAggregatorPresetConfig>(&mut decls);
-    insert_declaration::<PresetOrchestratorSpec>(&mut decls);
     insert_declaration::<EventSourceKind>(&mut decls);
     insert_declaration::<EventTrustLevel>(&mut decls);
     insert_declaration::<MandateOrigin>(&mut decls);
@@ -1113,12 +1104,10 @@ mod tests {
             "AgentSource",
             "AgentLifecycleState",
             "AgentAuthenticationStatus",
-            "AgentManagementIdentity",
             "AgentManagementView",
             "AgentRegistryView",
             "CommunityAcpPresetView",
             "AgentOperationEvent",
-            "AgentManagementErrorView",
         ] {
             assert!(
                 declarations.contains_key(name),

@@ -42,10 +42,6 @@ export function getCurrentDraggedAnnotatedImage(): File | null {
   return dragState.file;
 }
 
-export function getAnnotatedImageDragState(): AnnotatedImageDragState {
-  return dragState;
-}
-
 export function updateAnnotatedImageDragPointer(
   pointer: { x: number; y: number } | null
 ) {

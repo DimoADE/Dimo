@@ -13,7 +13,6 @@ path = "src/main.rs"
 
 [features]
 default = []
-tauri-runtime = []
 computer-helper = []
 
 [dependencies]

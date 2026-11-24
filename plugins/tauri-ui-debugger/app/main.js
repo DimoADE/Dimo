@@ -327,9 +327,7 @@ export function isMainWindow({ label, pathname } = {}) {
 function currentWindowInfo() {
   const g = globalThis;
   return {
-    label:
-      g.dimoDesktop?.getWindowLabel?.() ??
-      g.__TAURI_INTERNALS__?.metadata?.currentWindow?.label,
+    label: g.dimoDesktop?.getWindowLabel?.(),
     pathname: g.location?.pathname,
   };
 }

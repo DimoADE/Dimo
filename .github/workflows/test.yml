@@ -283,7 +283,7 @@ jobs:
           - group: plugins
             flags: -p plugins -p dimo-plugin-sdk
           - group: server-services
-            flags: -p remote-protocol -p review -p server -p services -p tool-runtime -p utils -p dimo-mcp -p dimo-workflow-mcp -p workflows
+            flags: -p remote-protocol -p server -p services -p tool-runtime -p utils -p dimo-mcp -p workflows
     env:
       SCCACHE_GHA_ENABLED: "true"
       RUSTC_WRAPPER: "sccache"

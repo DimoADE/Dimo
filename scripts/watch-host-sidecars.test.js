@@ -14,7 +14,7 @@ const {
 
 const exe = process.platform === 'win32' ? '.exe' : '';
 
-test('desktop dev points official MCP sidecars at the debug cargo outputs', () => {
+test('desktop dev points official MCP sidecar at the debug cargo output', () => {
   const env = applySidecarDevEnv(
     { CARGO_TARGET_DIR: '/custom-target' },
     { repo: '/repo', platform: 'win32' }
@@ -24,10 +24,7 @@ test('desktop dev points official MCP sidecars at the debug cargo outputs', () =
     env.DIMO_MCP_BIN,
     path.join('/custom-target', 'debug', 'dimo-mcp.exe')
   );
-  assert.equal(
-    env.DIMO_WORKFLOW_MCP_BIN,
-    path.join('/custom-target', 'debug', 'dimo-workflow-mcp.exe')
-  );
+  assert.equal(env.DIMO_WORKFLOW_MCP_BIN, undefined);
 });
 
 test('sidecar debug binaries fall back to the workspace target directory', () => {
@@ -48,10 +45,7 @@ test('an explicit DIMO_MCP_BIN override is preserved', () => {
   );
 
   assert.equal(env.DIMO_MCP_BIN, '/opt/custom-mcp');
-  assert.equal(
-    env.DIMO_WORKFLOW_MCP_BIN,
-    path.join('/repo', 'target', 'debug', 'dimo-workflow-mcp')
-  );
+  assert.equal(env.DIMO_WORKFLOW_MCP_BIN, undefined);
 });
 
 test('only official product MCP crates trigger a sidecar rebuild', () => {
@@ -75,13 +69,6 @@ test('only official product MCP crates trigger a sidecar rebuild', () => {
     true
   );
   assert.equal(
-    isHostSidecarSourcePath(
-      path.join(repo, 'crates/dimo-workflow-mcp/src/main.rs'),
-      repo
-    ),
-    true
-  );
-  assert.equal(
     isHostSidecarSourcePath(path.join(repo, 'crates/delegation/src/lib.rs'), repo),
     false
   );
@@ -98,7 +85,7 @@ test('only official product MCP crates trigger a sidecar rebuild', () => {
   );
 });
 
-test('rebuildHostSidecars frees locked debug and deps binaries then cargo-builds both sidecars', () => {
+test('rebuildHostSidecars frees locked debug and deps binaries then cargo-builds dimo-mcp', () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'dimo-sidecar-rebuild-'));
   const debugDir = path.join(repo, 'target', 'debug');
   const depsDir = path.join(debugDir, 'deps');
@@ -139,8 +126,6 @@ test('rebuildHostSidecars frees locked debug and deps binaries then cargo-builds
     'build',
     '-p',
     'dimo-mcp',
-    '-p',
-    'dimo-workflow-mcp',
   ]);
   assert.equal(cargoCalls[0].cwd, repo);
   assert.deepEqual(staged, [path.join(repo, 'target')]);

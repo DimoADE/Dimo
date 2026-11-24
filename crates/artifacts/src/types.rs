@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tool_runtime::{ToolInstallationLock, ToolLease};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -20,17 +19,6 @@ pub struct ProducerEvidence {
     pub plugin_version: String,
     pub provider_id: String,
     pub tool_lock: ToolLockEvidence,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RecordArtifact {
-    pub conversation_id: Uuid,
-    pub turn_id: Uuid,
-    pub workspace_id: Option<Uuid>,
-    pub scope_root: PathBuf,
-    pub relative_path: PathBuf,
-    pub media_type: String,
-    pub producer: ProducerEvidence,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -109,30 +97,6 @@ pub struct ArtifactPreviewReference {
     pub lease_id: Uuid,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct OpenPreview {
-    pub artifact_id: Uuid,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct PreviewLease {
-    pub id: Uuid,
-    pub artifact_id: Uuid,
-    pub provider_id: String,
-    pub watch_key: String,
-    pub loopback_port: u16,
-    pub capability_token: String,
-    pub expires_at_unix_ms: u64,
-    pub reference_count: u32,
-    pub docx_fallback_supported: bool,
-}
-
-#[derive(Debug)]
-pub struct ResolvedToolInstallation {
-    pub lock: ToolInstallationLock,
-    pub(crate) lease: Option<ToolLease>,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingRevisionEvent {
     pub artifact_id: Uuid,
@@ -144,17 +108,4 @@ pub struct PendingRevisionEvent {
 pub struct PendingPreviewEvent {
     pub key: String,
     pub event: ArtifactEvent,
-}
-
-impl ResolvedToolInstallation {
-    pub fn unleased(lock: ToolInstallationLock) -> Self {
-        Self { lock, lease: None }
-    }
-
-    pub(crate) fn leased(lock: ToolInstallationLock, lease: ToolLease) -> Self {
-        Self {
-            lock,
-            lease: Some(lease),
-        }
-    }
 }

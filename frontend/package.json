@@ -29,7 +29,6 @@
     "@dnd-kit/utilities": "^3.2.2",
     "@ebay/nice-modal-react": "^1.2.13",
     "@fontsource-variable/inter": "^5.3.0",
-    "@fontsource-variable/noto-sans-sc": "^5.3.0",
     "@git-diff-view/file": "^0.0.30",
     "@git-diff-view/react": "^0.0.30",
     "@gsap/react": "^2.1.2",
@@ -92,7 +91,6 @@
     "zustand": "^4.5.4"
   },
   "devDependencies": {
-    "@astryxdesign/cli": "0.7.1",
     "@playwright/test": "^1.62.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
@@ -109,9 +107,7 @@
     "eslint": "^8.55.0",
     "eslint-config-prettier": "^10.1.5",
     "eslint-plugin-check-file": "^2.8.0",
-    "eslint-plugin-deprecation": "^3.0.0",
     "eslint-plugin-eslint-comments": "^3.2.0",
-    "eslint-plugin-prettier": "^5.5.0",
     "eslint-plugin-react-hooks": "^4.6.0",
     "eslint-plugin-react-refresh": "^0.4.5",
     "eslint-plugin-unused-imports": "^4.1.4",

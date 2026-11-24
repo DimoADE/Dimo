@@ -281,11 +281,6 @@ fn first_sentences(text: &str, sentences: usize, max_chars: usize) -> Option<Str
 
 static SUMMARIZER: OnceLock<Arc<dyn ActivitySummarizer>> = OnceLock::new();
 
-/// Install a process-wide summariser (first call wins).
-pub fn set_activity_summarizer(summarizer: Arc<dyn ActivitySummarizer>) -> bool {
-    SUMMARIZER.set(summarizer).is_ok()
-}
-
 fn summarizer() -> Arc<dyn ActivitySummarizer> {
     SUMMARIZER
         .get()

@@ -1,4 +1,4 @@
-//! Locate Host-family sidecar binaries (`dimo-mcp`, `dimo-workflow-mcp`).
+//! Locate Host-family sidecar binaries (`dimo-mcp`).
 //!
 //! Binaries resolved out of a Cargo or desktop build tree (`target/debug`,
 //! `target/release`, `CARGO_TARGET_DIR`, `electron/resources/bin`, or legacy
@@ -19,7 +19,7 @@ static NEXT_STAGE_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Resolve a Host-family sidecar, skipping empty Tauri stubs.
 ///
-/// Order: `DIMO_MCP_BIN` / `DIMO_WORKFLOW_MCP_BIN` → current-exe directory
+/// Order: `DIMO_MCP_BIN` → current-exe directory
 /// and ancestors (including `debug`/`release`/`binaries`) → `CARGO_TARGET_DIR`
 /// → `PATH` → previously staged `~/.local/share/dimo/host-bin` copy (for known
 /// Host-family sidecars when the build tree was cleaned). Empty files are never
@@ -76,10 +76,7 @@ pub fn locate_runnable_host_family_binary(base: &str) -> Option<PathBuf> {
 }
 
 fn is_known_host_family_binary(base: &str) -> bool {
-    matches!(
-        base,
-        "dimo-mcp" | "dimo-workflow-mcp" | "dimo-computer-helper"
-    )
+    matches!(base, "dimo-mcp" | "dimo-computer-helper")
 }
 
 fn locate_raw_host_family_binary(
@@ -253,7 +250,6 @@ fn sweep_retired_binaries(stage_dir: &Path, file_name: &str) {
 fn env_override(base: &str) -> Option<PathBuf> {
     let key = match base {
         "dimo-mcp" => "DIMO_MCP_BIN",
-        "dimo-workflow-mcp" => "DIMO_WORKFLOW_MCP_BIN",
         "dimo-computer-helper" => "DIMO_COMPUTER_HELPER_BIN",
         _ => return None,
     };

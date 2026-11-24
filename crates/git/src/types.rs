@@ -8,17 +8,6 @@ use ts_rs::TS;
 
 use super::GitCliError;
 
-/// Statistics for a single file based on git history
-#[derive(Clone, Debug)]
-pub struct FileStat {
-    /// Index in the commit history (0 = HEAD, 1 = parent of HEAD, ...)
-    pub last_index: usize,
-    /// Number of times this file was changed in recent commits
-    pub commit_count: u32,
-    /// Timestamp of the most recent change
-    pub last_time: DateTime<Utc>,
-}
-
 #[derive(Debug, Error)]
 pub enum GitServiceError {
     #[error(transparent)]
@@ -66,20 +55,6 @@ impl GitServiceError {
             ),
             other => Self::GitCLI(other),
         }
-    }
-
-    pub fn is_user_facing(&self) -> bool {
-        matches!(
-            self,
-            Self::WorktreeDirty(_, _)
-                | Self::RebaseInProgress
-                | Self::OperationInProgress { .. }
-                | Self::AlreadyCheckedOut { .. }
-                | Self::InvalidReference(_)
-                | Self::BranchNotFound(_)
-                | Self::MergeConflicts { .. }
-                | Self::TimedOut { .. }
-        )
     }
 
     pub fn is_user_facing_message(message: &str) -> bool {
@@ -246,7 +221,6 @@ mod classify_worktree_cli_error_tests {
     #[test]
     fn timeout_is_not_an_invalid_repository() {
         let error = GitServiceError::from_cli(GitCliError::TimedOut(60));
-        assert!(error.is_user_facing());
         match error {
             GitServiceError::TimedOut { seconds } => assert_eq!(seconds, 60),
             other => panic!("unexpected {other}"),

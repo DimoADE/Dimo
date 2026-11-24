@@ -119,7 +119,6 @@ pub(crate) fn handles(command: DomainCommand) -> bool {
             | DomainCommand::ResetSessionProcess
             | DomainCommand::StartWorkspaceDevServer
             | DomainCommand::GetFirstUserMessage
-            | DomainCommand::RespondToApproval
             | DomainCommand::GetProjectUsageStatistics
             | DomainCommand::ClearLocalAppData
             | DomainCommand::CheckAppRelease
@@ -241,7 +240,6 @@ pub(crate) async fn dispatch(
         DomainCommand::ResetSessionProcess => ops::reset_session_process(domains, args).await,
         DomainCommand::StartWorkspaceDevServer => ops::start_dev_server(domains, args).await,
         DomainCommand::GetFirstUserMessage => ops::first_user_message(domains, args).await,
-        DomainCommand::RespondToApproval => ops::respond_to_approval(domains, args).await,
         DomainCommand::GetProjectUsageStatistics => ops::project_usage(domains, args).await,
         DomainCommand::ClearLocalAppData => system::clear_local_app_data(domains).await,
         DomainCommand::CheckAppRelease => system::check_app_release().await,

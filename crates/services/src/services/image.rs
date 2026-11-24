@@ -279,10 +279,6 @@ impl ImageService {
         self.cache_dir.join(&image.file_path)
     }
 
-    pub async fn get_image(&self, id: Uuid) -> Result<Option<Image>, ImageError> {
-        Ok(Image::find_by_id(&self.pool, id).await?)
-    }
-
     pub async fn delete_image(&self, id: Uuid) -> Result<(), ImageError> {
         if let Some(image) = Image::find_by_id(&self.pool, id).await? {
             let file_path = self.cache_dir.join(&image.file_path);
@@ -310,20 +306,6 @@ impl ImageService {
             _ => worktree_path.to_path_buf(),
         };
         self.copy_images(&target_path, images)
-    }
-
-    pub async fn copy_images_by_ids_to_worktree(
-        &self,
-        worktree_path: &Path,
-        image_ids: &[Uuid],
-    ) -> Result<(), ImageError> {
-        let mut images = Vec::new();
-        for id in image_ids {
-            if let Some(image) = Image::find_by_id(&self.pool, *id).await? {
-                images.push(image);
-            }
-        }
-        self.copy_images(worktree_path, images)
     }
 
     /// Copy images to the worktree. Skips images that already exist at target.

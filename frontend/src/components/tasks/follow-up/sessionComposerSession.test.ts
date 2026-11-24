@@ -6,7 +6,6 @@ import {
   getComposerSessionSelectionNotification,
   getComposerScratchTargetId,
   getComposerWorkspaceId,
-  getSessionRenameInvalidation,
   truncateComposerSessionLabel,
 } from './sessionComposerSession';
 
@@ -145,28 +144,6 @@ describe('session composer session helpers', () => {
         profile: { variant: 'PLAN' },
       })
     ).toBeNull();
-  });
-
-  it('derives rename invalidation keys from the available workspace', () => {
-    expect(
-      getSessionRenameInvalidation({
-        targetSessionId: 'session-1',
-        workspaceId: 'workspace-1',
-      })
-    ).toEqual({
-      workspaceSessionsQueryKey: ['workspaceSessions', 'workspace-1'],
-      sessionQueryKey: ['session', 'session-1'],
-    });
-
-    expect(
-      getSessionRenameInvalidation({
-        targetSessionId: 'session-1',
-        workspaceId: undefined,
-      })
-    ).toEqual({
-      workspaceSessionsQueryKey: null,
-      sessionQueryKey: ['session', 'session-1'],
-    });
   });
 
   it('derives full and compact session selector labels', () => {

@@ -1226,38 +1226,6 @@ impl DBService {
         .await
     }
 
-    pub async fn new_with_after_connect<F>(after_connect: F) -> Result<DBService, Error>
-    where
-        F: for<'a> Fn(
-                &'a mut SqliteConnection,
-            ) -> std::pin::Pin<
-                Box<dyn std::future::Future<Output = Result<(), Error>> + Send + 'a>,
-            > + Send
-            + Sync
-            + 'static,
-    {
-        let hook: AfterConnectHook = Arc::new(after_connect);
-        Self::create_pools(&asset_dir(), Some(move |_reader, _fence| hook)).await
-    }
-
-    pub async fn new_at_with_after_connect<F>(
-        data_dir: impl AsRef<std::path::Path>,
-        after_connect: F,
-    ) -> Result<DBService, Error>
-    where
-        F: for<'a> Fn(
-                &'a mut SqliteConnection,
-            ) -> std::pin::Pin<
-                Box<dyn std::future::Future<Output = Result<(), Error>> + Send + 'a>,
-            > + Send
-            + Sync
-            + 'static,
-    {
-        std::fs::create_dir_all(data_dir.as_ref()).map_err(Error::Io)?;
-        let hook: AfterConnectHook = Arc::new(after_connect);
-        Self::create_pools(data_dir.as_ref(), Some(move |_reader, _fence| hook)).await
-    }
-
     /// Open `WritePool(1)` + `ReadPool(4)` at `data_dir` and build the writer-only
     /// `after_connect` hook from the freshly initialized [`ReadPool`] and
     /// [`CommitVisibilityFence`], eliminating any hidden third pool inside update hooks

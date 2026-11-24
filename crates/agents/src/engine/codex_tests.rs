@@ -977,3 +977,147 @@ async fn codex_skills_traversal_limit_rpc_error_is_enriched_without_fallback() {
 
     mock_peer.await.expect("mock peer finished cleanly");
 }
+
+#[tokio::test]
+async fn codex_app_server_caches_model_list_and_refreshes_on_fresh_call() {
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let (server_read, mut w) = tokio::io::split(server_io);
+
+    let spec = test_start_spec();
+    let app = CodexAppServer::connect_over_io(spec.workspace_id, client_read, client_write, None);
+    let rpc_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let rpc_count_peer = Arc::clone(&rpc_count);
+
+    let mock_peer = tokio::spawn(async move {
+        let mut lines = BufReader::new(server_read).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let req: Value = serde_json::from_str(&line).expect("valid jsonrpc");
+            let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+            let id = req.get("id").cloned();
+            match method {
+                "initialize" => {
+                    reply(&mut w, &id, json!({ "serverInfo": { "name": "codex" } })).await;
+                }
+                "initialized" => {}
+                "model/list" => {
+                    let call = rpc_count_peer.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    let model_id = if call == 1 {
+                        "gpt-5.4-cached"
+                    } else {
+                        "gpt-5.4-fresh"
+                    };
+                    reply(
+                        &mut w,
+                        &id,
+                        json!({
+                            "data": [{ "id": model_id, "displayName": model_id }]
+                        }),
+                    )
+                    .await;
+                    if call >= 2 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+
+    app.handshake().await.expect("handshake succeeds");
+    let first = app.list_models().await;
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].id, "gpt-5.4-cached");
+
+    let second = app.list_models().await;
+    assert_eq!(second.len(), 1);
+    assert_eq!(second[0].id, "gpt-5.4-cached");
+    assert_eq!(
+        rpc_count.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "second list_models call must hit in-memory cache without a second RPC"
+    );
+
+    let refreshed = app
+        .probe_models_fresh()
+        .await
+        .expect("fresh probe succeeds");
+    assert_eq!(refreshed.len(), 1);
+    assert_eq!(refreshed[0].id, "gpt-5.4-fresh");
+    assert_eq!(
+        rpc_count.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "probe_models_fresh must issue a fresh model/list RPC"
+    );
+
+    let after_refresh = app.list_models().await;
+    assert_eq!(after_refresh[0].id, "gpt-5.4-fresh");
+
+    mock_peer.await.expect("mock peer finished cleanly");
+}
+
+#[tokio::test]
+async fn codex_probe_models_for_provider_reuses_alive_pooled_server_across_workspaces() {
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let (server_read, mut w) = tokio::io::split(server_io);
+
+    let mut pooled_spec = test_start_spec();
+    pooled_spec.provider_instance_id = Some(format!("probe-pool-test-{}", Uuid::new_v4()));
+    let app = Arc::new(CodexAppServer::connect_over_io(
+        pooled_spec.workspace_id,
+        client_read,
+        client_write,
+        None,
+    ));
+
+    let mock_peer = tokio::spawn(async move {
+        let mut lines = BufReader::new(server_read).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let req: Value = serde_json::from_str(&line).expect("valid jsonrpc");
+            let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+            let id = req.get("id").cloned();
+            match method {
+                "initialize" => {
+                    reply(&mut w, &id, json!({ "serverInfo": { "name": "codex" } })).await;
+                }
+                "initialized" => {}
+                "model/list" => {
+                    reply(
+                        &mut w,
+                        &id,
+                        json!({
+                            "data": [{ "id": "gpt-5.4-pooled", "displayName": "GPT-5.4 Pooled" }]
+                        }),
+                    )
+                    .await;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+
+    app.handshake().await.expect("handshake succeeds");
+    let pool_key = CodexServerCacheKey::from_spec(&pooled_spec);
+    global_codex_servers()
+        .write()
+        .await
+        .insert(pool_key.clone(), Arc::clone(&app));
+
+    let mut probe_spec = pooled_spec.clone();
+    probe_spec.workspace_id = Uuid::new_v4();
+    let driver = CodexNativeDriver::new();
+    let probed = driver
+        .probe_models_for_provider(&probe_spec)
+        .await
+        .expect("probe should reuse alive pooled server without spawning");
+
+    global_codex_servers().write().await.remove(&pool_key);
+    let _ = app.shutdown().await;
+
+    let models = probed.expect("native driver returns Some(models)");
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, "gpt-5.4-pooled");
+    mock_peer.await.expect("mock peer finished cleanly");
+}

@@ -7,7 +7,6 @@
 //! (enforced by architecture invariant gate `I5`).
 
 pub mod actions;
-pub mod approvals;
 pub mod command;
 pub mod env;
 pub mod executors;

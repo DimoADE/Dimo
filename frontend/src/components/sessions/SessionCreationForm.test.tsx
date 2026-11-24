@@ -516,33 +516,25 @@ describe('SessionCreationForm agent capability catalog controls', () => {
     }
   );
 
-  it('discovers and persists controls once when no verified catalog exists yet', async () => {
-    capabilityCatalog
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce(CONTROLS);
+  it('does not block on refreshCapabilityCatalog when no catalog is cached yet for a passive agent', async () => {
+    capabilityCatalog.mockResolvedValueOnce(null);
     renderForm('antigravity', vi.fn(), 'new_workspace');
 
-    expect(
-      await screen.findByTestId('session-settings-summary')
-    ).toBeInTheDocument();
-    expect(refreshCapabilityCatalog).toHaveBeenCalledTimes(1);
-    expect(refreshCapabilityCatalog).toHaveBeenCalledWith('antigravity');
-    expect(capabilityCatalog).toHaveBeenCalledTimes(2);
+    await waitFor(() =>
+      expect(capabilityCatalog).toHaveBeenCalledWith('antigravity')
+    );
+    expect(refreshCapabilityCatalog).not.toHaveBeenCalled();
   });
 
-  it('shows stale cached controls while refreshing them in the background', async () => {
-    capabilityCatalogFresh
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce(true);
+  it('serves cached controls immediately without triggering a frontend background refresh probe', async () => {
     renderForm('antigravity', vi.fn(), 'new_workspace');
 
     expect(
       await screen.findByTestId('session-settings-summary')
     ).toBeInTheDocument();
-    await waitFor(() =>
-      expect(refreshCapabilityCatalog).toHaveBeenCalledWith('antigravity')
-    );
-    await waitFor(() => expect(capabilityCatalog).toHaveBeenCalledTimes(2));
+    expect(capabilityCatalog).toHaveBeenCalledTimes(1);
+    expect(capabilityCatalogFresh).not.toHaveBeenCalled();
+    expect(refreshCapabilityCatalog).not.toHaveBeenCalled();
   });
 
   it('reuses each agent catalog from the shared query cache', async () => {
@@ -897,8 +889,9 @@ describe('SessionCreationForm agent capability catalog controls', () => {
   });
 
   it('shows a contextual error instead of the misleading unavailable hint', async () => {
-    capabilityCatalog.mockResolvedValue(null);
-    refreshCapabilityCatalog.mockResolvedValue(false);
+    capabilityCatalog.mockRejectedValue(
+      new Error('Agent session controls discovery failed')
+    );
     renderForm('codex', vi.fn(), 'new_workspace');
 
     expect(
@@ -932,8 +925,7 @@ describe('SessionCreationForm agent capability catalog controls', () => {
   });
 
   it('shows the stored install diagnostic and a settings jump', async () => {
-    capabilityCatalog.mockResolvedValue(null);
-    refreshCapabilityCatalog.mockRejectedValue(
+    capabilityCatalog.mockRejectedValue(
       new Error(
         'Bad request: This Agent is not installed successfully. Repair or reinstall it in Settings.\n\nnpm view dist.integrity failed: npm error code ECONNREFUSED'
       )

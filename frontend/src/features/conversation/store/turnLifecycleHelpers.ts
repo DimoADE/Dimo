@@ -7,7 +7,7 @@ import type {
   TimelineRow,
 } from 'shared/types';
 
-import { plausibleTurnStartMs } from '@/components/conversation-thread/turnClock';
+import { plausibleTurnStartMs } from '@/components/NormalizedConversation/thread/turnClock';
 import {
   TERMINAL_ROW_PHASES,
   isLateSettledAssistantAppend,

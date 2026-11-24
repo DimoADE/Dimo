@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -149,7 +149,7 @@ export function AgentSessionConfigPicker({
     queryKey: sessionControlsQueryKey(selectedAgentId, null),
     queryFn: () => loadAgentSessionControlsCatalog(selectedAgentId),
     enabled: Boolean(selectedAgentId),
-    staleTime: 60_000,
+    staleTime: Infinity,
     gcTime: Infinity,
     retry: false,
   });
@@ -161,42 +161,14 @@ export function AgentSessionConfigPicker({
     gcTime: Infinity,
     retry: false,
   });
-  const catalogFreshnessQuery = useQuery({
-    queryKey: ['agentCapabilityCatalogFreshness', selectedAgentId],
-    queryFn: () => agentsApi.capabilityCatalogFresh(selectedAgentId),
-    enabled: Boolean(selectedAgentId && catalogQuery.data),
-    staleTime: 0,
-    retry: false,
-  });
   const sessionControls = mergeCreateSessionControls([
     catalogQuery.data,
     schemaQuery.data,
   ]);
   const sessionControlsLoading = catalogQuery.isFetching;
-  const backgroundRefreshAgent = useRef<string | null>(null);
   const [refreshError, setRefreshError] = useState<unknown>(null);
 
   useEffect(() => {
-    if (
-      !selectedAgentId ||
-      catalogFreshnessQuery.data !== false ||
-      backgroundRefreshAgent.current === selectedAgentId
-    ) {
-      return;
-    }
-    backgroundRefreshAgent.current = selectedAgentId;
-    void agentsApi
-      .refreshCapabilityCatalog(selectedAgentId)
-      .then(async (refreshed) => {
-        if (!refreshed) return;
-        await catalogQuery.refetch();
-        await catalogFreshnessQuery.refetch();
-      })
-      .catch(() => undefined);
-  }, [catalogFreshnessQuery, catalogQuery, selectedAgentId]);
-
-  useEffect(() => {
-    backgroundRefreshAgent.current = null;
     setRefreshError(null);
   }, [selectedAgentId]);
 

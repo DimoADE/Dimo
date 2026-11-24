@@ -71,15 +71,6 @@ pub fn retire_target(target: &TranscriptTarget) {
     }
 }
 
-pub fn is_bound(connection: AgentConnectionId) -> bool {
-    TARGETS
-        .read()
-        .expect("transcript target lock")
-        .map
-        .get(&connection)
-        .is_some_and(Option::is_some)
-}
-
 pub fn is_retired(connection: AgentConnectionId) -> bool {
     TARGETS
         .read()

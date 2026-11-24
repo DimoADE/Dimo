@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { isValidTauriEventName } from '@/lib/tauriEventName';
 import { BROWSER_HOST_EVENT } from './browserHostEvent';
 
 const repoRoot = resolve(__dirname, '../../../..');
@@ -11,8 +10,7 @@ function readRepoFile(relativePath: string) {
 }
 
 describe('BROWSER_HOST_EVENT', () => {
-  it('is a legal Tauri listen name', () => {
-    expect(isValidTauriEventName(BROWSER_HOST_EVENT)).toBe(true);
+  it('uses the canonical plugin:browser event name', () => {
     expect(BROWSER_HOST_EVENT).toBe('plugin:browser');
   });
 

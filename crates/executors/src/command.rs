@@ -87,58 +87,8 @@ impl CommandBuilder {
         self
     }
 
-    pub fn override_base<S: Into<String>>(mut self, base: S) -> Self {
-        self.base = base.into();
-        self
-    }
-
-    fn extend_shell_params<I>(mut self, more: I) -> Result<Self, CommandBuildError>
-    where
-        I: IntoIterator,
-        I::Item: Into<String>,
-    {
-        let joined = more
-            .into_iter()
-            .map(|p| p.into())
-            .collect::<Vec<String>>()
-            .join(" ");
-
-        if joined.trim().is_empty() {
-            return Ok(self);
-        }
-
-        let extra: Vec<String> = split_command_line(&joined)
-            .map_err(|err| CommandBuildError::InvalidShellParams(format!("{joined}: {err}")))?;
-
-        match &mut self.params {
-            Some(p) => p.extend(extra),
-            None => self.params = Some(extra),
-        }
-        Ok(self)
-    }
-
-    pub fn extend_params<I>(mut self, more: I) -> Self
-    where
-        I: IntoIterator,
-        I::Item: Into<String>,
-    {
-        let extra: Vec<String> = more.into_iter().map(|p| p.into()).collect();
-        match &mut self.params {
-            Some(p) => p.extend(extra),
-            None => self.params = Some(extra),
-        }
-        self
-    }
-
     pub fn build_initial(&self) -> Result<CommandParts, CommandBuildError> {
         self.build(&[])
-    }
-
-    pub fn build_follow_up(
-        &self,
-        additional_args: &[String],
-    ) -> Result<CommandParts, CommandBuildError> {
-        self.build(additional_args)
     }
 
     fn build(&self, additional_args: &[String]) -> Result<CommandParts, CommandBuildError> {
@@ -173,21 +123,5 @@ fn split_command_line(input: &str) -> Result<Vec<String>, CommandBuildError> {
     #[cfg(not(windows))]
     {
         shlex::split(input).ok_or_else(|| CommandBuildError::InvalidBase(input.to_string()))
-    }
-}
-
-pub fn apply_overrides(
-    builder: CommandBuilder,
-    overrides: &CmdOverrides,
-) -> Result<CommandBuilder, CommandBuildError> {
-    let builder = if let Some(ref base) = overrides.base_command_override {
-        builder.override_base(base.clone())
-    } else {
-        builder
-    };
-    if let Some(ref extra) = overrides.additional_params {
-        builder.extend_shell_params(extra.clone())
-    } else {
-        Ok(builder)
     }
 }

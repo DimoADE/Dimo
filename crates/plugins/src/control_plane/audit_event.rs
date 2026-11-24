@@ -447,14 +447,6 @@ impl PluginControlPlane {
         )
     }
 
-    pub fn unregister_command_handlers(&self, plugin_id: &str) -> Result<(), PluginError> {
-        self.command_handlers
-            .write()
-            .map_err(lock_error)?
-            .retain(|(owner, _), _| owner != plugin_id);
-        Ok(())
-    }
-
     pub fn has_command_handler(&self, plugin_id: &str, command_name: &str) -> bool {
         self.command_handlers.read().ok().is_some_and(|handlers| {
             handlers.contains_key(&(plugin_id.to_owned(), command_name.to_owned()))

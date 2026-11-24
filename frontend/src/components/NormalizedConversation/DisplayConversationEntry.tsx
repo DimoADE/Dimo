@@ -11,7 +11,6 @@ import {
 import type { WorkspaceWithSession } from '@/types/attempt';
 import type { ProcessStartPayload } from '@/types/logs';
 import UserMessage from './UserMessage';
-import PendingApprovalEntry from './PendingApprovalEntry';
 import { cn } from '@/lib/utils';
 import { useRetryUi } from '@/contexts/RetryUiContext';
 import { useTaskStopping } from '@/stores/useTaskDetailsUiStore';
@@ -23,7 +22,6 @@ import {
   shouldRenderMarkdown,
   getContentClassName,
   getToolStatusAppearance,
-  isPendingApprovalStatus,
   SCRIPT_TOOL_NAMES,
   getCompactMetaNoticeText,
   getCompactVerboseErrorText,
@@ -303,17 +301,6 @@ function DisplayConversationEntry({
         {body}
       </div>
     );
-
-    if (isPendingApprovalStatus(status)) {
-      return (
-        <PendingApprovalEntry
-          pendingStatus={status}
-          executionProcessId={executionProcessId}
-        >
-          {content}
-        </PendingApprovalEntry>
-      );
-    }
 
     return content;
   };

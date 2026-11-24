@@ -24,19 +24,6 @@ pub enum SpawnerError {
     Other(String),
 }
 
-impl SpawnerError {
-    /// Durable child identity, when setup progressed far enough that the broker
-    /// must emit a terminal lifecycle instead of treating the call as absent.
-    pub fn linked_child_session_id(&self) -> Option<Uuid> {
-        match self {
-            Self::SendPromptAfterLink {
-                child_session_id, ..
-            } => Some(*child_session_id),
-            Self::Spawn(_) | Self::SendPrompt(_) | Self::ParentGone | Self::Other(_) => None,
-        }
-    }
-}
-
 /// Spawns and drives child ACP sessions for a `delegate_to_agent` call.
 #[async_trait]
 pub trait ConnectionSpawner: Send + Sync {

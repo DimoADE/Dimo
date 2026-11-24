@@ -2,7 +2,6 @@ use std::sync::OnceLock;
 
 use directories::ProjectDirs;
 
-pub mod approvals;
 pub mod assets;
 pub mod browser;
 pub mod diff;
@@ -13,7 +12,6 @@ pub mod msg_store;
 pub mod net;
 pub mod parent_watch;
 pub mod path;
-pub mod port_file;
 pub mod process;
 pub mod proxy;
 pub mod shell;

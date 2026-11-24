@@ -1,7 +1,4 @@
-import {
-  configuredBackendTransport,
-  type BackendTransport,
-} from '@/lib/backendTransport';
+import type { BackendTransport } from '@/lib/backendTransport';
 
 export type WorkflowSourceDocument = {
   path: string;
@@ -48,7 +45,3 @@ export async function resolveWorkflowSourceRevision(
     return null;
   }
 }
-
-export const workflowSourceApi = createWorkflowSourceApi(
-  configuredBackendTransport
-);

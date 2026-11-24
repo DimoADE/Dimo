@@ -81,7 +81,7 @@ jobs:
         run: node frontend/scripts/check-bundle-budget.mjs
 
       - name: Build Host binaries
-        run: cargo build --release --target ${{ matrix.target }} -p server -p dimo-mcp -p dimo-workflow-mcp --bin dimo-server --bin dimo-mcp --bin dimo-workflow-mcp
+        run: cargo build --release --target ${{ matrix.target }} -p server -p dimo-mcp --bin dimo-server --bin dimo-mcp
 
       - name: Package Server
         shell: bash
@@ -96,7 +96,6 @@ jobs:
           node scripts/package-host-family.js \
             --server "target/${{ matrix.target }}/release/dimo-server${ext}" \
             --mcp "target/${{ matrix.target }}/release/dimo-mcp${ext}" \
-            --workflow-mcp "target/${{ matrix.target }}/release/dimo-workflow-mcp${ext}" \
             --web frontend/dist \
             --plugins assets/plugins \
             --output "dist/server/${{ matrix.release_name }}"

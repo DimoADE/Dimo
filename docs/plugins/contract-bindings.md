@@ -37,7 +37,7 @@ the Host consumer exists but no official plugin ships the kind yet), or `undecla
 | `app.settings.section` | preview | `frontend/src/components/plugins/PluginSettingsSections.tsx` | no official plugin declares it |
 | `host.service` | preview | `crates/plugins/src/package.rs` | no official plugin declares it |
 | `provider.model.importSource` | preview | `frontend/src/pages/settings/AgentModelProviderManager.tsx` | no official plugin declares it |
-| `provider.model.catalog` | ready | `frontend/src/features/plugins/providers/hostProviderServices.ts` | no official plugin declares it |
+| `provider.model.catalog` | preview | `frontend/src/features/plugins/providers/hostProviderServices.ts` | no official plugin declares it |
 | `app.tab` | preview | `frontend/src/components/layout/Toolbar.tsx` | no official plugin declares it |
 
 Capabilities declared but never called by an official plugin (informational, not a
@@ -87,6 +87,7 @@ failure by itself — some are host-side only):
 - no contribution binding has an unknown consumer or example plugin
 
 - `host.service`: contribution-bindings says `ready`, contribution-kinds says `preview`
+- `provider.model.catalog`: contribution-bindings says `ready`, contribution-kinds says `preview`
 - `app.tab`: contribution-bindings says `ready`, contribution-kinds says `preview`
 
 ## Appendix: host-api op bindings

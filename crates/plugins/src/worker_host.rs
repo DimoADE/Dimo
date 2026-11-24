@@ -241,8 +241,6 @@ fn default_grant_trust_tier() -> String {
     "sandboxed_worker".to_owned()
 }
 
-pub type BrokerError = WorkerHostError;
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerActivation {
@@ -702,31 +700,6 @@ impl SharedNodeWorkerHost {
         }
         let pid = self.pid.load(Ordering::Acquire);
         (pid != 0).then_some(pid)
-    }
-
-    pub async fn mounted_slot_count(&self) -> usize {
-        self.inner
-            .lock()
-            .await
-            .as_ref()
-            .map_or(0, |process| process.mounted_slots.len())
-    }
-
-    pub async fn mounted_plugin_ids(&self) -> Vec<String> {
-        self.inner
-            .lock()
-            .await
-            .as_ref()
-            .map(|process| {
-                process
-                    .mounted_slots
-                    .iter()
-                    .map(|(plugin_id, _)| plugin_id.clone())
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 
     pub(crate) fn lock_id(&self) -> usize {

@@ -10,7 +10,7 @@ import {
 } from 'react';
 import { Crown } from 'lucide-react';
 import { AgentIcon, getAgentName } from '@/components/agents/AgentIcon';
-import { ConversationMessageNav } from '@/components/conversation-thread/ConversationMessageNav';
+import { ConversationMessageNav } from '@/components/NormalizedConversation/thread/ConversationMessageNav';
 import { Button } from '@/components/ui/button';
 import { PermissionRequestStack } from '@/components/NormalizedConversation/conversation/PermissionRequestCard';
 import { ConversationSelectionToolbar } from '@/components/NormalizedConversation/ConversationSelectionToolbar';

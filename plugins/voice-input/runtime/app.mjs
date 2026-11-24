@@ -160,16 +160,6 @@ const appPlugin = {
             });
             return;
           }
-          if (
-            window.__TAURI_INTERNALS__ &&
-            typeof window.__TAURI_INTERNALS__.invoke === 'function'
-          ) {
-            void window.__TAURI_INTERNALS__.invoke('open_settings_window', {
-              title: '设置',
-              path: targetPath,
-            });
-            return;
-          }
           window.dispatchEvent(
             new CustomEvent('dimo:navigate', {
               detail: { path: `/settings${targetPath}` },

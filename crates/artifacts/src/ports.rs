@@ -1,11 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::{
     ArtifactEvent, ArtifactRecord, PendingPreviewEvent, PendingRevisionEvent, PortError,
-    ResolvedToolInstallation, ToolLockEvidence,
 };
 
 #[async_trait]
@@ -69,32 +68,4 @@ pub trait ArtifactRepository: Send + Sync {
     }
 
     async fn find(&self, artifact_id: Uuid) -> Result<Option<ArtifactRecord>, PortError>;
-}
-
-#[async_trait]
-pub trait ArtifactEventSink: Send + Sync {
-    async fn append(&self, event: &ArtifactEvent) -> Result<(), PortError>;
-}
-
-#[async_trait]
-pub trait ArtifactFilesystem: Send + Sync {
-    async fn canonicalize(&self, path: &Path) -> Result<PathBuf, PortError>;
-    async fn read(&self, path: &Path) -> Result<Vec<u8>, PortError>;
-}
-
-#[async_trait]
-pub trait ToolInstallationResolver: Send + Sync {
-    async fn resolve(
-        &self,
-        evidence: &ToolLockEvidence,
-    ) -> Result<Option<ResolvedToolInstallation>, PortError>;
-
-    async fn release(&self, installation: &mut ResolvedToolInstallation) -> Result<(), PortError> {
-        installation.lease = None;
-        Ok(())
-    }
-}
-
-pub trait Clock: Send + Sync {
-    fn now_unix_ms(&self) -> u64;
 }

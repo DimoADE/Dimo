@@ -152,6 +152,446 @@ fn sample_envelope(
     }
 }
 
+fn direct_reflex_workflow(
+    name: &str,
+    actor_spec: WorkflowStepSpec,
+    outbox_action_kind: OutboxActionKind,
+    outbox_target_template: &str,
+) -> WorkflowDefinition {
+    let mut handle_bindings = BTreeMap::new();
+    handle_bindings.insert(
+        "event".to_string(),
+        WorkflowBinding::RunInput {
+            pointer: String::new(),
+        },
+    );
+    let mut outbox_bindings = BTreeMap::new();
+    outbox_bindings.insert(
+        "reply".to_string(),
+        WorkflowBinding::StepOutput {
+            step_id: "reflex_actor".to_string(),
+            pointer: "/reply".to_string(),
+        },
+    );
+    normalize_definition(WorkflowDefinition {
+        format_version: WORKFLOW_DEFINITION_VERSION,
+        name: name.to_string(),
+        description: None,
+        input_schema: Some(serde_json::json!({ "type": "object" })),
+        steps: vec![
+            WorkflowStep {
+                id: "reflex_actor".to_string(),
+                depends_on: Vec::new(),
+                phase: Some("execute".to_string()),
+                input_bindings: handle_bindings,
+                spec: actor_spec,
+            },
+            WorkflowStep {
+                id: "emit_outbox".to_string(),
+                depends_on: vec!["reflex_actor".to_string()],
+                phase: Some("deliver".to_string()),
+                input_bindings: outbox_bindings,
+                spec: WorkflowStepSpec::OutboxAction(OutboxActionStepSpec {
+                    action_kind: outbox_action_kind,
+                    target_template: outbox_target_template.to_string(),
+                    payload_template: serde_json::json!({ "message": "{{reply}}" }),
+                }),
+            },
+        ],
+        policy: WorkflowPolicy::default(),
+    })
+    .unwrap()
+}
+
+fn reply_output_schema() -> Option<serde_json::Value> {
+    Some(serde_json::json!({
+        "type": "object",
+        "required": ["reply"],
+        "properties": { "reply": { "type": "string" } }
+    }))
+}
+
+fn superagent_router_workflow(name: &str) -> WorkflowDefinition {
+    let mut router_bindings = BTreeMap::new();
+    router_bindings.insert(
+        "event".to_string(),
+        WorkflowBinding::RunInput {
+            pointer: String::new(),
+        },
+    );
+    let mut branch_bindings = BTreeMap::new();
+    branch_bindings.insert(
+        "route".to_string(),
+        WorkflowBinding::StepOutput {
+            step_id: "router_bot".to_string(),
+            pointer: "/route".to_string(),
+        },
+    );
+    let specialist = |id: &str, prompt: &str, workspace_access: WorkspaceAccess| {
+        let mut bindings = BTreeMap::new();
+        bindings.insert(
+            "brief".to_string(),
+            WorkflowBinding::StepOutput {
+                step_id: "router_bot".to_string(),
+                pointer: "/brief".to_string(),
+            },
+        );
+        WorkflowStep {
+            id: id.to_string(),
+            depends_on: vec!["route_branch".to_string()],
+            phase: Some("specialists".to_string()),
+            input_bindings: bindings,
+            spec: WorkflowStepSpec::Session(SessionStepSpec {
+                agent_id: "codex".to_string(),
+                prompt_template: prompt.to_string(),
+                workspace_access,
+                model_override: None,
+                subscribe_thread: false,
+                completion: CompletionPolicy::Automatic,
+                output_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "required": ["findings"],
+                    "properties": { "findings": { "type": "string" } }
+                })),
+            }),
+        }
+    };
+    normalize_definition(WorkflowDefinition {
+        format_version: WORKFLOW_DEFINITION_VERSION,
+        name: name.to_string(),
+        description: None,
+        input_schema: Some(serde_json::json!({ "type": "object" })),
+        steps: vec![
+            WorkflowStep {
+                id: "router_bot".to_string(),
+                depends_on: Vec::new(),
+                phase: Some("triage".to_string()),
+                input_bindings: router_bindings,
+                spec: WorkflowStepSpec::Bot(BotStepSpec {
+                    member_id: "bot-router".to_string(),
+                    conversation_scope: BotConversationScope::FixedPrimary,
+                    mailbox_policy: BotMailboxPolicy::FifoSerial,
+                    prompt_template: "Classify incoming event and emit specialist brief."
+                        .to_string(),
+                    completion: CompletionPolicy::Automatic,
+                    output_schema: Some(serde_json::json!({
+                        "type": "object",
+                        "required": ["route", "brief"],
+                        "properties": {
+                            "route": { "type": "string" },
+                            "brief": { "type": "string" }
+                        }
+                    })),
+                }),
+            },
+            WorkflowStep {
+                id: "route_branch".to_string(),
+                depends_on: vec!["router_bot".to_string()],
+                phase: Some("route".to_string()),
+                input_bindings: branch_bindings,
+                spec: WorkflowStepSpec::ConditionBranch(ConditionBranchStepSpec {
+                    filter: GateFilterAst {
+                        conditions: vec![GateFilterCondition::Eq {
+                            pointer: "/route".to_string(),
+                            value: serde_json::Value::String("code".to_string()),
+                        }],
+                        ..GateFilterAst::default()
+                    },
+                    then_step_ids: vec![
+                        "code_specialist".to_string(),
+                        "security_auditor".to_string(),
+                    ],
+                    else_step_ids: vec!["research_specialist".to_string()],
+                }),
+            },
+            specialist(
+                "code_specialist",
+                "Implement or verify code changes in isolated worktree.",
+                WorkspaceAccess::WriteIsolated,
+            ),
+            specialist(
+                "security_auditor",
+                "Audit patch diff for security regressions.",
+                WorkspaceAccess::ReadOnlyShared,
+            ),
+            specialist(
+                "research_specialist",
+                "Investigate codebase and documentation in read-only mode.",
+                WorkspaceAccess::ReadOnlyShared,
+            ),
+            WorkflowStep {
+                id: "synthesizer_bot".to_string(),
+                depends_on: vec![
+                    "code_specialist".to_string(),
+                    "security_auditor".to_string(),
+                    "research_specialist".to_string(),
+                ],
+                phase: Some("synthesize".to_string()),
+                input_bindings: BTreeMap::new(),
+                spec: WorkflowStepSpec::Bot(BotStepSpec {
+                    member_id: "bot-router".to_string(),
+                    conversation_scope: BotConversationScope::FixedPrimary,
+                    mailbox_policy: BotMailboxPolicy::FifoSerial,
+                    prompt_template: "Synthesize specialist findings into a response.".to_string(),
+                    completion: CompletionPolicy::Automatic,
+                    output_schema: Some(serde_json::json!({
+                        "type": "object",
+                        "required": ["summary"],
+                        "properties": { "summary": { "type": "string" } }
+                    })),
+                }),
+            },
+        ],
+        policy: WorkflowPolicy::default(),
+    })
+    .unwrap()
+}
+
+fn hybrid_pipeline_workflow(name: &str) -> WorkflowDefinition {
+    let mut fix_bindings = BTreeMap::new();
+    fix_bindings.insert(
+        "event".to_string(),
+        WorkflowBinding::RunInput {
+            pointer: String::new(),
+        },
+    );
+    let mut review_bindings = BTreeMap::new();
+    review_bindings.insert(
+        "patchSummary".to_string(),
+        WorkflowBinding::StepOutput {
+            step_id: "reproduce_and_fix".to_string(),
+            pointer: "/patchSummary".to_string(),
+        },
+    );
+    normalize_definition(WorkflowDefinition {
+        format_version: WORKFLOW_DEFINITION_VERSION,
+        name: name.to_string(),
+        description: None,
+        input_schema: Some(serde_json::json!({ "type": "object" })),
+        steps: vec![
+            WorkflowStep {
+                id: "reproduce_and_fix".to_string(),
+                depends_on: Vec::new(),
+                phase: Some("implement".to_string()),
+                input_bindings: fix_bindings,
+                spec: WorkflowStepSpec::Session(SessionStepSpec {
+                    agent_id: "codex".to_string(),
+                    prompt_template: "Reproduce reported failure and produce a verified fix."
+                        .to_string(),
+                    workspace_access: WorkspaceAccess::WriteIsolated,
+                    model_override: None,
+                    subscribe_thread: false,
+                    completion: CompletionPolicy::Automatic,
+                    output_schema: Some(serde_json::json!({
+                        "type": "object",
+                        "required": ["patchSummary"],
+                        "properties": { "patchSummary": { "type": "string" } }
+                    })),
+                }),
+            },
+            WorkflowStep {
+                id: "group_review".to_string(),
+                depends_on: vec!["reproduce_and_fix".to_string()],
+                phase: Some("review".to_string()),
+                input_bindings: review_bindings,
+                spec: WorkflowStepSpec::GroupStage(GroupStageStepSpec {
+                    space_id: "engineering-review".to_string(),
+                    dispatch_mode: GroupDispatchMode::SpecificSeat {
+                        member_id: "reviewer".to_string(),
+                    },
+                    message_template: "Please review proposed patch: {{patchSummary}}".to_string(),
+                    quorum_count: Some(1),
+                }),
+            },
+            WorkflowStep {
+                id: "merge_approval".to_string(),
+                depends_on: vec!["group_review".to_string()],
+                phase: Some("approve".to_string()),
+                input_bindings: BTreeMap::new(),
+                spec: WorkflowStepSpec::UserGate(UserGateStepSpec {
+                    interaction_kind: UserInteractionKind::Approval,
+                    title_template: "Approve merge for {{name}}".to_string(),
+                    body_template: "Reviewer stage completed. Confirm merge.".to_string(),
+                    approval_options: vec![
+                        ApprovalOptionSpec {
+                            id: "approve_merge".to_string(),
+                            label: "Approve & Merge".to_string(),
+                            destructive: false,
+                            require_note: false,
+                        },
+                        ApprovalOptionSpec {
+                            id: "reject_changes".to_string(),
+                            label: "Reject".to_string(),
+                            destructive: true,
+                            require_note: true,
+                        },
+                    ],
+                    form_schema: None,
+                    sla_timeout_seconds: Some(3_600),
+                }),
+            },
+            WorkflowStep {
+                id: "publish_result".to_string(),
+                depends_on: vec!["merge_approval".to_string()],
+                phase: Some("deliver".to_string()),
+                input_bindings: BTreeMap::new(),
+                spec: WorkflowStepSpec::OutboxAction(OutboxActionStepSpec {
+                    action_kind: OutboxActionKind::ReplyChannel,
+                    target_template: "{{event.replyTo}}".to_string(),
+                    payload_template: serde_json::json!({ "status": "merged" }),
+                }),
+            },
+        ],
+        policy: WorkflowPolicy::default(),
+    })
+    .unwrap()
+}
+
+fn window_aggregator_workflow(name: &str) -> WorkflowDefinition {
+    let mut summarize_bindings = BTreeMap::new();
+    summarize_bindings.insert(
+        "windowEvents".to_string(),
+        WorkflowBinding::RunInput {
+            pointer: String::new(),
+        },
+    );
+    let mut notify_bindings = BTreeMap::new();
+    notify_bindings.insert(
+        "digestMarkdown".to_string(),
+        WorkflowBinding::StepOutput {
+            step_id: "summarize_window".to_string(),
+            pointer: "/digestMarkdown".to_string(),
+        },
+    );
+    normalize_definition(WorkflowDefinition {
+        format_version: WORKFLOW_DEFINITION_VERSION,
+        name: name.to_string(),
+        description: None,
+        input_schema: Some(serde_json::json!({ "type": "object" })),
+        steps: vec![
+            WorkflowStep {
+                id: "summarize_window".to_string(),
+                depends_on: Vec::new(),
+                phase: Some("aggregate".to_string()),
+                input_bindings: summarize_bindings,
+                spec: WorkflowStepSpec::Bot(BotStepSpec {
+                    member_id: "bot-digest".to_string(),
+                    conversation_scope: BotConversationScope::FixedPrimary,
+                    mailbox_policy: BotMailboxPolicy::CoalesceBatch,
+                    prompt_template: "Summarize windowed activity.".to_string(),
+                    completion: CompletionPolicy::Automatic,
+                    output_schema: Some(serde_json::json!({
+                        "type": "object",
+                        "required": ["digestMarkdown"],
+                        "properties": { "digestMarkdown": { "type": "string" } }
+                    })),
+                }),
+            },
+            WorkflowStep {
+                id: "digest_notify".to_string(),
+                depends_on: vec!["summarize_window".to_string()],
+                phase: Some("notify".to_string()),
+                input_bindings: notify_bindings,
+                spec: WorkflowStepSpec::UserGate(UserGateStepSpec {
+                    interaction_kind: UserInteractionKind::Notify,
+                    title_template: "Pulse Activity Digest".to_string(),
+                    body_template: "{{digestMarkdown}}".to_string(),
+                    approval_options: Vec::new(),
+                    form_schema: None,
+                    sla_timeout_seconds: None,
+                }),
+            },
+        ],
+        policy: WorkflowPolicy::default(),
+    })
+    .unwrap()
+}
+
+fn event_saga_workflow(name: &str) -> WorkflowDefinition {
+    let mut initial_bindings = BTreeMap::new();
+    initial_bindings.insert(
+        "trigger".to_string(),
+        WorkflowBinding::RunInput {
+            pointer: String::new(),
+        },
+    );
+    let mut wait_bindings = BTreeMap::new();
+    wait_bindings.insert(
+        "threadKey".to_string(),
+        WorkflowBinding::StepOutput {
+            step_id: "saga_initial".to_string(),
+            pointer: "/threadKey".to_string(),
+        },
+    );
+    let mut followup_bindings = BTreeMap::new();
+    followup_bindings.insert(
+        "receivedEvent".to_string(),
+        WorkflowBinding::StepOutput {
+            step_id: "wait_for_reply".to_string(),
+            pointer: String::new(),
+        },
+    );
+    normalize_definition(WorkflowDefinition {
+        format_version: WORKFLOW_DEFINITION_VERSION,
+        name: name.to_string(),
+        description: None,
+        input_schema: Some(serde_json::json!({ "type": "object" })),
+        steps: vec![
+            WorkflowStep {
+                id: "saga_initial".to_string(),
+                depends_on: Vec::new(),
+                phase: Some("initiate".to_string()),
+                input_bindings: initial_bindings,
+                spec: WorkflowStepSpec::Bot(BotStepSpec {
+                    member_id: "bot-triage".to_string(),
+                    conversation_scope: BotConversationScope::PerThreadTopic,
+                    mailbox_policy: BotMailboxPolicy::FifoSerial,
+                    prompt_template: "Request clarification and record threadKey.".to_string(),
+                    completion: CompletionPolicy::Automatic,
+                    output_schema: Some(serde_json::json!({
+                        "type": "object",
+                        "required": ["threadKey"],
+                        "properties": { "threadKey": { "type": "string" } }
+                    })),
+                }),
+            },
+            WorkflowStep {
+                id: "wait_for_reply".to_string(),
+                depends_on: vec!["saga_initial".to_string()],
+                phase: Some("await_event".to_string()),
+                input_bindings: wait_bindings,
+                spec: WorkflowStepSpec::WaitForEvent(WaitForEventStepSpec {
+                    event_types: vec!["connector.message.received".to_string()],
+                    thread_key_pointer: Some("/threadKey".to_string()),
+                    filter: Some(GateFilterAst {
+                        conditions: vec![GateFilterCondition::NotBotActor],
+                        ..GateFilterAst::default()
+                    }),
+                    timeout_seconds: Some(86_400),
+                }),
+            },
+            WorkflowStep {
+                id: "saga_followup".to_string(),
+                depends_on: vec!["wait_for_reply".to_string()],
+                phase: Some("resume".to_string()),
+                input_bindings: followup_bindings,
+                spec: WorkflowStepSpec::Session(SessionStepSpec {
+                    agent_id: "codex".to_string(),
+                    prompt_template: "Resume saga execution using correlated user reply."
+                        .to_string(),
+                    workspace_access: WorkspaceAccess::WriteIsolated,
+                    model_override: None,
+                    subscribe_thread: true,
+                    completion: CompletionPolicy::Automatic,
+                    output_schema: None,
+                }),
+            },
+        ],
+        policy: WorkflowPolicy::default(),
+    })
+    .unwrap()
+}
+
 #[test]
 fn all_eight_pulse_step_specs_round_trip_serde_cleanly() {
     let steps = vec![
@@ -417,122 +857,10 @@ fn exhaustive_validation_collects_all_errors_in_single_pass_without_fail_fast() 
     assert!(joined.contains("cycle outside BoundedLoop"));
 }
 
-#[test]
-fn graph_patch_applies_mutations_and_collects_exhaustive_patch_and_schema_errors() {
-    let base = default_preset_workflow(PresetOrchestratorKind::DirectReflex, "reflex").unwrap();
-    let patch = WorkflowGraphPatch::new(vec![
-        WorkflowGraphPatchOp::AddStep {
-            step: WorkflowStep {
-                id: "audit_bot".to_string(),
-                depends_on: Vec::new(),
-                phase: Some("audit".to_string()),
-                input_bindings: BTreeMap::new(),
-                spec: WorkflowStepSpec::Bot(BotStepSpec {
-                    member_id: "bot-auditor".to_string(),
-                    conversation_scope: BotConversationScope::FixedPrimary,
-                    mailbox_policy: BotMailboxPolicy::FifoSerial,
-                    prompt_template: "Audit outgoing reply".to_string(),
-                    completion: CompletionPolicy::Automatic,
-                    output_schema: None,
-                }),
-            },
-        },
-        WorkflowGraphPatchOp::DisconnectSteps {
-            from_step_id: "reflex_actor".to_string(),
-            to_step_id: "emit_outbox".to_string(),
-        },
-        WorkflowGraphPatchOp::ConnectSteps {
-            from_step_id: "reflex_actor".to_string(),
-            to_step_id: "audit_bot".to_string(),
-        },
-        WorkflowGraphPatchOp::ConnectSteps {
-            from_step_id: "audit_bot".to_string(),
-            to_step_id: "emit_outbox".to_string(),
-        },
-        WorkflowGraphPatchOp::SetPolicy {
-            policy: WorkflowPolicy {
-                max_concurrent_agent_steps: 8,
-                ..WorkflowPolicy::default()
-            },
-        },
-    ]);
-
-    let patched = patch.apply(&base).expect("valid graph patch");
-    assert_eq!(patched.steps.len(), 3);
-    assert_eq!(patched.policy.max_concurrent_agent_steps, 8);
-    let outbox = patched
-        .steps
-        .iter()
-        .find(|s| s.id == "emit_outbox")
-        .unwrap();
-    assert_eq!(outbox.depends_on, vec!["audit_bot".to_string()]);
-
-    // Verify RemoveStep cleans inbound edges cleanly.
-    let removed = apply_workflow_graph_patch(
-        &patched,
-        &[
-            WorkflowGraphPatchOp::ConnectSteps {
-                from_step_id: "reflex_actor".to_string(),
-                to_step_id: "emit_outbox".to_string(),
-            },
-            WorkflowGraphPatchOp::RemoveStep {
-                step_id: "audit_bot".to_string(),
-            },
-        ],
-    )
-    .expect("remove step");
-    assert_eq!(removed.steps.len(), 2);
-
-    // Invalid multi-op patch must collect ALL errors without stopping early.
-    let bad_errors = apply_workflow_graph_patch(
-        &base,
-        &[
-            WorkflowGraphPatchOp::UpdateStep {
-                step: WorkflowStep {
-                    id: "nonexistent".to_string(),
-                    depends_on: Vec::new(),
-                    phase: None,
-                    input_bindings: BTreeMap::new(),
-                    spec: WorkflowStepSpec::Notify(NotifyStepSpec {
-                        title: "hi".to_string(),
-                    }),
-                },
-            },
-            WorkflowGraphPatchOp::ConnectSteps {
-                from_step_id: "missing_src".to_string(),
-                to_step_id: "emit_outbox".to_string(),
-            },
-            WorkflowGraphPatchOp::AddStep {
-                step: WorkflowStep {
-                    id: "broken_bot".to_string(),
-                    depends_on: Vec::new(),
-                    phase: None,
-                    input_bindings: BTreeMap::new(),
-                    spec: WorkflowStepSpec::Bot(BotStepSpec {
-                        member_id: String::new(),
-                        conversation_scope: BotConversationScope::FixedPrimary,
-                        mailbox_policy: BotMailboxPolicy::FifoSerial,
-                        prompt_template: "broken".to_string(),
-                        completion: CompletionPolicy::Automatic,
-                        output_schema: None,
-                    }),
-                },
-            },
-        ],
-    )
-    .unwrap_err();
-    assert!(
-        bad_errors.len() >= 3,
-        "expected >= 3 errors, got: {bad_errors:?}"
-    );
-}
-
 #[tokio::test]
 async fn superagent_router_preset_branches_deterministically_and_reconverges_on_synthesizer() {
     let (core, store) = setup_pulse_core().await;
-    let router_def =
-        default_preset_workflow(PresetOrchestratorKind::SuperagentRouter, "superagent-flow")
-            .unwrap();
+    let router_def = superagent_router_workflow("superagent-flow");
 
     // Run 1: router selects `code` -> `code_specialist` + `security_auditor` execute, `research_specialist` is skipped.
     let (_, run_code) = publish_and_enable(
@@ -658,29 +986,20 @@ async fn superagent_router_preset_branches_deterministically_and_reconverges_on_
 async fn hybrid_pipeline_and_other_presets_execute_with_user_gate_and_outbox() {
     let (core, store) = setup_pulse_core().await;
 
-    // 1. DirectReflex (Session & PulseRuleSpec compiler)
-    let pulse_rule = PulseRuleSpec {
-        name: "pr-reflex".to_string(),
-        description: Some("Reflex from PulseRuleSpec".to_string()),
-        project_id: None,
-        workspace_id: None,
-        eval_mode: PulseEvalMode::Auto,
-        orchestrator: PresetOrchestratorKind::DirectReflex,
-        filter: GateFilterAst::default(),
-        temporal: None,
-        debounce_ms: 0,
-        claim_exclusive: false,
-        targets: vec![PulseTargetSpec::Bot {
+    // 1. DirectReflex (Bot -> OutboxAction)
+    let reflex_def = direct_reflex_workflow(
+        "pr-reflex",
+        WorkflowStepSpec::Bot(BotStepSpec {
             member_id: "bot-pr".to_string(),
             conversation_scope: BotConversationScope::PerThreadTopic,
             mailbox_policy: BotMailboxPolicy::FifoSerial,
-            subscribe_thread: true,
             prompt_template: "Reply to PR comment".to_string(),
-        }],
-        callback: None,
-        task_meta: None,
-    };
-    let reflex_def = build_workflow_from_pulse_rule(&pulse_rule).unwrap();
+            completion: CompletionPolicy::Automatic,
+            output_schema: reply_output_schema(),
+        }),
+        OutboxActionKind::ReplyChannel,
+        "{{event.replyTo}}",
+    );
     let (_, reflex_run) =
         publish_and_enable(&core, &store, reflex_def, serde_json::json!({"pr": 42})).await;
     let c1 = store
@@ -708,8 +1027,7 @@ async fn hybrid_pipeline_and_other_presets_execute_with_user_gate_and_outbox() {
     assert_eq!(done_reflex.status, "completed");
 
     // 2. HybridPipeline (`Session` -> `GroupStage` -> `UserGate(Approval)` -> `OutboxAction`)
-    let hybrid_def =
-        default_preset_workflow(PresetOrchestratorKind::HybridPipeline, "ci-fix-pipeline").unwrap();
+    let hybrid_def = hybrid_pipeline_workflow("ci-fix-pipeline");
     let (_, hybrid_run) = publish_and_enable(
         &core,
         &store,
@@ -792,8 +1110,7 @@ async fn hybrid_pipeline_and_other_presets_execute_with_user_gate_and_outbox() {
     assert_eq!(completed_hybrid.status, "completed");
 
     // 3. WindowAggregator (`Bot(CoalesceBatch)` -> `UserGate(Notify)` non-blocking completion)
-    let agg_def =
-        default_preset_workflow(PresetOrchestratorKind::WindowAggregator, "hourly-digest").unwrap();
+    let agg_def = window_aggregator_workflow("hourly-digest");
     let (_, agg_run) =
         publish_and_enable(&core, &store, agg_def, serde_json::json!({"window": "1h"})).await;
     let agg_claim = store
@@ -817,20 +1134,19 @@ async fn hybrid_pipeline_and_other_presets_execute_with_user_gate_and_outbox() {
 async fn bot_fifo_serial_mailbox_serializes_across_runs_while_isolated_sessions_run_concurrently() {
     let (core, store) = setup_pulse_core().await;
 
-    let bot_def = build_direct_reflex_workflow(DirectReflexPresetConfig {
-        name: "bot-serial-mailbox".to_string(),
-        description: None,
-        actor: DualPrimitiveActorSpec::Bot {
+    let bot_def = direct_reflex_workflow(
+        "bot-serial-mailbox",
+        WorkflowStepSpec::Bot(BotStepSpec {
             member_id: "bot-guardian".to_string(),
-            prompt_template: "Guard stateful deployment".to_string(),
             conversation_scope: BotConversationScope::FixedPrimary,
             mailbox_policy: BotMailboxPolicy::FifoSerial,
-        },
-        outbox_action_kind: OutboxActionKind::EmitEvent,
-        outbox_target_template: "pulse.done".to_string(),
-        policy: WorkflowPolicy::default(),
-    })
-    .unwrap();
+            prompt_template: "Guard stateful deployment".to_string(),
+            completion: CompletionPolicy::Automatic,
+            output_schema: reply_output_schema(),
+        }),
+        OutboxActionKind::EmitEvent,
+        "pulse.done",
+    );
 
     let version = core
         .publish(PublishWorkflow {
@@ -941,21 +1257,20 @@ async fn bot_fifo_serial_mailbox_serializes_across_runs_while_isolated_sessions_
     assert!(unlocked_claim.run.id == run_1.id || unlocked_claim.run.id == run_2.id);
 
     // Conversely, two `Session(WriteIsolated)` runs claim concurrently in parallel!
-    let session_def = build_direct_reflex_workflow(DirectReflexPresetConfig {
-        name: "ephemeral-sessions".to_string(),
-        description: None,
-        actor: DualPrimitiveActorSpec::Session {
+    let session_def = direct_reflex_workflow(
+        "ephemeral-sessions",
+        WorkflowStepSpec::Session(SessionStepSpec {
             agent_id: "codex".to_string(),
             prompt_template: "Fresh ephemeral session".to_string(),
             workspace_access: WorkspaceAccess::WriteIsolated,
             model_override: None,
             subscribe_thread: false,
-        },
-        outbox_action_kind: OutboxActionKind::EmitEvent,
-        outbox_target_template: "pulse.done".to_string(),
-        policy: WorkflowPolicy::default(),
-    })
-    .unwrap();
+            completion: CompletionPolicy::Automatic,
+            output_schema: reply_output_schema(),
+        }),
+        OutboxActionKind::EmitEvent,
+        "pulse.done",
+    );
     let (_, s_run_1) =
         publish_and_enable(&core, &store, session_def.clone(), serde_json::json!({})).await;
     let (_, s_run_2) = publish_and_enable(&core, &store, session_def, serde_json::json!({})).await;
@@ -1115,8 +1430,7 @@ async fn bounded_loop_iterates_until_condition_and_rebuilds_projection_cleanly()
 #[tokio::test]
 async fn event_saga_suspends_survives_restart_matches_correlated_event_and_enforces_sla_timeout() {
     let (core, store) = setup_pulse_core().await;
-    let saga_def =
-        default_preset_workflow(PresetOrchestratorKind::EventSaga, "support-saga").unwrap();
+    let saga_def = event_saga_workflow("support-saga");
 
     let (_, run) = publish_and_enable(
         &core,

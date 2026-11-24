@@ -140,15 +140,6 @@ function useCollaborationSpaceStore(): CollaborationSpaceStore {
   return store;
 }
 
-export function useCollaborationSpace(): CollaborationSpaceRuntime {
-  const store = useCollaborationSpaceStore();
-  return useSyncExternalStore(
-    store.subscribe,
-    store.getSnapshot,
-    store.getSnapshot
-  );
-}
-
 const RENDER_CLOSURE_KEYS = new Set<keyof CollaborationSpaceRuntime>([
   'renderChatEntry',
   'renderChatMeta',

@@ -272,6 +272,15 @@ pub(crate) fn host_application_core_with_outbox_policy(
             },
         ),
     );
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        spawn_rate_limit_observer(
+            &handle,
+            &conversations.agent_runtime,
+            pool.clone(),
+            rate_limit_recovery.clone(),
+            events.clone(),
+        );
+    }
     let domains = Arc::new(ServerApplicationDomains {
         pool: pool.clone(),
         plugin_updates: Arc::new(crate::host::plugin_updates::PluginUpdates::load(
@@ -377,4 +386,91 @@ async fn dispatch_rate_limit_auto_resume(
             provider_instance_id: None,
         })
         .await;
+}
+
+async fn resolve_rate_limit_engine_id(
+    runtime: Option<&agents::AgentRuntime>,
+    pool: &SqlitePool,
+    connection_id: agents::AgentConnectionId,
+    conversation_id: uuid::Uuid,
+) -> String {
+    if let Some(runtime) = runtime
+        && let Some(agent_id) = runtime.connection_agent_id(connection_id).await
+    {
+        return agent_id.into_string();
+    }
+    if let Ok(Some(binding)) =
+        db::models::conversation::ConversationAgentBindingRecord::latest_for_conversation(
+            pool,
+            conversation_id,
+        )
+        .await
+    {
+        return binding.agent_id.into_string();
+    }
+    if let Ok(Some(session)) =
+        db::models::session::Session::find_by_id(pool, conversation_id).await
+        && let Some(executor) = session.executor
+        && !executor.trim().is_empty()
+    {
+        return executor;
+    }
+    "unknown".to_string()
+}
+
+/// Spawns a background observer that feeds live `AgentEvent::SessionInfoUpdated`
+/// rate-limit patches into `UsageLimitRecovery` and broadcasts lifecycle updates on
+/// `conversation-rate-limit:{conversation_id}`.
+fn spawn_rate_limit_observer(
+    handle: &tokio::runtime::Handle,
+    agent_runtime: &Arc<agents::AgentRuntime>,
+    pool: SqlitePool,
+    rate_limit_recovery: Arc<agents::rate_limit_recovery::UsageLimitRecovery>,
+    events: Arc<HostEventBus>,
+) {
+    let mut rx = agent_runtime.subscribe_events();
+    let weak_runtime = Arc::downgrade(agent_runtime);
+    handle.spawn(async move {
+        loop {
+            let envelope = match rx.recv().await {
+                Ok(envelope) => envelope,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
+            let agents::AgentEvent::SessionInfoUpdated { ref patch } = envelope.event else {
+                continue;
+            };
+            let Some(session_id) = envelope.session_id else {
+                continue;
+            };
+            if agents::transcript_target::is_retired(envelope.connection_id) {
+                continue;
+            }
+            let Some((decision, _)) =
+                crate::host::rewind_and_recovery::classify_rate_limit_patch(patch)
+            else {
+                continue;
+            };
+            let conversation_id = session_id.0;
+            let engine_id = match decision {
+                crate::host::rewind_and_recovery::RateLimitPatchDecision::RateLimited => {
+                    resolve_rate_limit_engine_id(
+                        weak_runtime.upgrade().as_deref(),
+                        &pool,
+                        envelope.connection_id,
+                        conversation_id,
+                    )
+                    .await
+                }
+                crate::host::rewind_and_recovery::RateLimitPatchDecision::Cleared => String::new(),
+            };
+            crate::host::rewind_and_recovery::process_rate_limit_patch(
+                &rate_limit_recovery,
+                &events,
+                conversation_id,
+                &engine_id,
+                patch,
+            );
+        }
+    });
 }

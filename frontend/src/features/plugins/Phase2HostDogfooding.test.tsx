@@ -90,7 +90,6 @@ import {
   registerBuiltinPanels,
 } from '@/components/layout/panels/PanelRegistry';
 import PluginDockviewPanel from '@/components/layout/panels/PluginDockviewPanel';
-import { RightPanelSidebar } from '@/components/layout/RightPanelSidebar';
 import { AstryxMarkdown } from '@/components/NormalizedConversation/AstryxMarkdown';
 import { clearPluginCrashState } from '@/components/plugins/PluginBoundary';
 import {
@@ -403,7 +402,6 @@ describe('Phase 2: Host Shell Dogfooding + Tier-0/Tier-1 Single-File Loader + Ne
         <AppContextMenuHost>
           <div>
             <PluginStatusItems />
-            <RightPanelSidebar />
             <PluginOverlays />
             <SearchPalette />
             <ConversationModeHarness />
@@ -476,10 +474,10 @@ describe('Phase 2: Host Shell Dogfooding + Tier-0/Tier-1 Single-File Loader + Ne
     fireEvent.click(statusBtn);
     expect(statusActivated).toHaveBeenCalledTimes(1);
 
-    // 2. RightPanelSidebar button for 'Acme Inspector'
+    // 2. Registered panel entry for 'Acme Inspector'
     expect(
-      screen.getByRole('button', { name: 'Acme Inspector' })
-    ).toBeInTheDocument();
+      panelRegistry.getAll().some((panel) => panel.title === 'Acme Inspector')
+    ).toBe(true);
 
     // 3. Dockview panel content
     expect(screen.getByTestId('acme-inspector-panel')).toHaveTextContent(
@@ -521,7 +519,9 @@ describe('Phase 2: Host Shell Dogfooding + Tier-0/Tier-1 Single-File Loader + Ne
     });
 
     expect(screen.queryByText('🍅 25:00')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Acme Inspector' })).toBeNull();
+    expect(
+      panelRegistry.getAll().some((panel) => panel.title === 'Acme Inspector')
+    ).toBe(false);
     expect(screen.queryByTestId('acme-inspector-panel')).toBeNull();
     expect(screen.queryByTestId('acme-prefs-page')).toBeNull();
     expect(screen.queryByTestId('acme-floating-overlay')).toBeNull();

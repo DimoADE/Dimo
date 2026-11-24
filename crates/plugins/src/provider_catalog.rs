@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use url::Url;
 
-use crate::{PackageWarning, PluginError};
+use crate::PackageWarning;
 
 pub const MAX_CATALOGS_PER_PLUGIN: usize = 16;
 pub const MAX_TEMPLATES_PER_CONTRIBUTION: usize = 500;
@@ -743,13 +743,6 @@ fn warn(code: &str, message: String, contribution: Option<&str>) -> PackageWarni
         message,
         contribution: contribution.map(str::to_owned),
     }
-}
-
-pub fn catalog_unavailable() -> PluginError {
-    PluginError::coded(
-        "provider_catalog_unavailable",
-        "This Host has no provider catalog",
-    )
 }
 
 #[cfg(test)]

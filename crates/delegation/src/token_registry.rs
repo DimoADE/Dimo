@@ -202,19 +202,6 @@ impl TokenRegistry {
             .unwrap()
             .retain(|_, registered| registered.entry.parent_connection_id != parent_connection_id);
     }
-
-    pub fn parent_connection_ids(&self) -> Vec<String> {
-        let mut ids = self
-            .inner
-            .read()
-            .unwrap()
-            .values()
-            .map(|registered| registered.entry.parent_connection_id.clone())
-            .collect::<Vec<_>>();
-        ids.sort();
-        ids.dedup();
-        ids
-    }
 }
 
 #[cfg(test)]

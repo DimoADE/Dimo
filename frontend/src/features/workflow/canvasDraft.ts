@@ -14,9 +14,6 @@ export const UNNAMED_WORKFLOW_NAMES = ['新建任务', 'New Task'] as const;
 export const CANONICAL_UNNAMED_WORKFLOW_PATH =
   '~/.dimo/workflows/新建任务.dimo-workflow.json';
 
-/** Marker MCP catalog entries use for the workflow open on the canvas. */
-export const CANVAS_VIEWING_MARKER = 'dimo.canvas.viewing';
-
 export function isUnnamedWorkflowName(
   name: string | null | undefined
 ): boolean {

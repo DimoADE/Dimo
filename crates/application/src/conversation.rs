@@ -22,9 +22,6 @@ mod repository;
 
 pub use core::ApplicationCore;
 
-#[allow(unused_imports)]
-pub(crate) use repository::catalog_agent_usable;
-
 pub(super) const READ_CONVERSATIONS_SCOPE: &str = "conversation.read";
 pub(super) const WRITE_CONVERSATIONS_SCOPE: &str = "conversation.write";
 pub(super) const ATTACH_CONVERSATIONS_SCOPE: &str = "conversation.attach";

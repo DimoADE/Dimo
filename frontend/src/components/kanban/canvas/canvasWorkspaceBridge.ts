@@ -125,14 +125,6 @@ export function consumeCanvasParentNodeId(
   return null;
 }
 
-export function peekCanvasParentNodeId(): string | null {
-  if (scopedParentNodeId) return scopedParentNodeId;
-  if (pendingParentNode && Date.now() <= pendingParentNode.expiresAt) {
-    return pendingParentNode.nodeId;
-  }
-  return null;
-}
-
 export function runWithCanvasParentNode<T>(
   nodeId: string | null,
   fn: () => T

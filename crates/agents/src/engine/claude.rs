@@ -9,7 +9,7 @@ use std::{
     collections::HashMap,
     path::Path,
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, Mutex, OnceLock, RwLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
@@ -58,6 +58,66 @@ const EVENT_CHANNEL_CAPACITY: usize = 512;
 type PendingRpcEntry = (oneshot::Sender<Result<Value, EngineError>>, u64);
 type PendingRpcMap = HashMap<u64, PendingRpcEntry>;
 
+fn claude_provider_models_cache() -> &'static RwLock<HashMap<String, Vec<EngineModelInfo>>> {
+    static CACHE: OnceLock<RwLock<HashMap<String, Vec<EngineModelInfo>>>> = OnceLock::new();
+    CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+pub(crate) fn claude_provider_cache_key(spec: &EngineStartSpec) -> String {
+    let instance = spec
+        .provider_instance_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("default");
+    format!(
+        "{instance}:{}:{}",
+        spec.isolate_profile as u8,
+        spec.auth_fingerprint()
+    )
+}
+
+fn read_cached_claude_provider_models(key: &str) -> Option<Vec<EngineModelInfo>> {
+    claude_provider_models_cache()
+        .read()
+        .ok()
+        .and_then(|guard| guard.get(key).cloned())
+        .filter(|models| !models.is_empty())
+}
+
+fn store_cached_claude_provider_models(key: &str, models: &[EngineModelInfo]) {
+    if models.is_empty() {
+        return;
+    }
+    if let Ok(mut guard) = claude_provider_models_cache().write() {
+        guard.insert(key.to_string(), models.to_vec());
+    }
+}
+
+pub fn invalidate_claude_provider_model_cache() -> usize {
+    claude_provider_models_cache()
+        .write()
+        .map(|mut guard| {
+            let count = guard.len();
+            guard.clear();
+            count
+        })
+        .unwrap_or(0)
+}
+
+fn merge_local_models_with_defaults(local: Vec<EngineModelInfo>) -> Vec<EngineModelInfo> {
+    if local.is_empty() {
+        return default_claude_models();
+    }
+    let mut merged = local;
+    for fallback in default_claude_models() {
+        if !merged.iter().any(|existing| existing.id == fallback.id) {
+            merged.push(fallback);
+        }
+    }
+    merged
+}
+
 #[derive(Debug, Clone)]
 struct PendingSidecarServerRequest {
     raw_rpc_id: Value,
@@ -79,6 +139,7 @@ pub struct ClaudeSidecarClient {
     latest_rate_limits: Arc<RwLock<Option<EngineRateLimits>>>,
     latest_cache_status: Arc<RwLock<Option<EngineCacheStatus>>>,
     discovered_models: Arc<RwLock<Vec<EngineModelInfo>>>,
+    provider_cache_key: Option<String>,
     official_session: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
 }
@@ -163,13 +224,15 @@ impl ClaudeSidecarClient {
         let initial_official = spec
             .auth
             .is_official_anthropic_session(&spec.env, &spec.config_overrides);
-        let client = Self::connect_over_io_with_stderr(
+        let provider_cache_key = Some(claude_provider_cache_key(spec));
+        let client = Self::connect_over_io_with_stderr_and_cache_key(
             stdout,
             stdin,
             Some(child),
             Some(job),
             stderr_tail,
             initial_official,
+            provider_cache_key,
         );
 
         let mut merged_spec = spec.clone();
@@ -193,13 +256,14 @@ impl ClaudeSidecarClient {
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        Self::connect_over_io_with_stderr(
+        Self::connect_over_io_with_stderr_and_cache_key(
             reader,
             writer,
             child,
             None,
             Arc::new(StderrTail::new()),
             official_session,
+            None,
         )
     }
 
@@ -210,6 +274,30 @@ impl ClaudeSidecarClient {
         process_job: Option<ProcessTreeJob>,
         stderr_tail: Arc<StderrTail>,
         official_session: bool,
+    ) -> Arc<Self>
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::connect_over_io_with_stderr_and_cache_key(
+            reader,
+            writer,
+            child,
+            process_job,
+            stderr_tail,
+            official_session,
+            None,
+        )
+    }
+
+    pub(crate) fn connect_over_io_with_stderr_and_cache_key<R, W>(
+        reader: R,
+        writer: W,
+        child: Option<AsyncGroupChild>,
+        process_job: Option<ProcessTreeJob>,
+        stderr_tail: Arc<StderrTail>,
+        official_session: bool,
+        provider_cache_key: Option<String>,
     ) -> Arc<Self>
     where
         R: AsyncRead + Unpin + Send + 'static,
@@ -239,7 +327,8 @@ impl ClaudeSidecarClient {
             event_tx: event_tx.clone(),
             latest_rate_limits: Arc::clone(&latest_rate_limits),
             latest_cache_status: Arc::clone(&latest_cache_status),
-            discovered_models,
+            discovered_models: Arc::clone(&discovered_models),
+            provider_cache_key: provider_cache_key.clone(),
             official_session: Arc::clone(&official_flag),
             alive: Arc::clone(&alive),
         });
@@ -254,6 +343,8 @@ impl ClaudeSidecarClient {
             stderr_tail,
             latest_rate_limits,
             latest_cache_status,
+            discovered_models,
+            provider_cache_key,
             official_flag,
             alive,
         ));
@@ -295,14 +386,27 @@ impl ClaudeSidecarClient {
             "configOverrides": spec.config_overrides,
             "mcpServers": mcp_servers,
             "additionalDirectories": additional_dirs,
+            "skipModelProbe": true,
         });
         let result = self.request("initialize", params).await?;
 
         let parsed_models = parse_sidecar_models(result.get("models"));
-        if !parsed_models.is_empty()
-            && let Ok(mut guard) = self.discovered_models.write()
-        {
-            *guard = parsed_models;
+        let probe_skipped = result
+            .get("modelsProbeSkipped")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if probe_skipped {
+            let merged = merge_local_models_with_defaults(parsed_models);
+            if let Ok(mut guard) = self.discovered_models.write() {
+                *guard = merged;
+            }
+        } else if !parsed_models.is_empty() {
+            if let Some(ref cache_key) = self.provider_cache_key {
+                store_cached_claude_provider_models(cache_key, &parsed_models);
+            }
+            if let Ok(mut guard) = self.discovered_models.write() {
+                *guard = parsed_models;
+            }
         }
 
         let sidecar_official = result
@@ -339,6 +443,11 @@ impl ClaudeSidecarClient {
     }
 
     pub fn discovered_models(&self) -> Vec<EngineModelInfo> {
+        if let Some(ref cache_key) = self.provider_cache_key
+            && let Some(cached) = read_cached_claude_provider_models(cache_key)
+        {
+            return cached;
+        }
         let models = self
             .discovered_models
             .read()
@@ -350,6 +459,20 @@ impl ClaudeSidecarClient {
         } else {
             models
         }
+    }
+
+    pub async fn list_models_full(&self) -> Result<Vec<EngineModelInfo>, EngineError> {
+        let result = self.request("models/list", json!({})).await?;
+        let parsed = parse_sidecar_models(result.get("models"));
+        if !parsed.is_empty() {
+            if let Some(ref cache_key) = self.provider_cache_key {
+                store_cached_claude_provider_models(cache_key, &parsed);
+            }
+            if let Ok(mut guard) = self.discovered_models.write() {
+                *guard = parsed.clone();
+            }
+        }
+        Ok(parsed)
     }
 
     pub fn latest_rate_limits(&self) -> Option<EngineRateLimits> {
@@ -509,6 +632,8 @@ async fn run_sidecar_reader_loop<R>(
     stderr_tail: Arc<StderrTail>,
     latest_rate_limits: Arc<RwLock<Option<EngineRateLimits>>>,
     latest_cache_status: Arc<RwLock<Option<EngineCacheStatus>>>,
+    discovered_models: Arc<RwLock<Vec<EngineModelInfo>>>,
+    provider_cache_key: Option<String>,
     official_session: Arc<AtomicBool>,
     alive: Arc<AtomicBool>,
 ) where
@@ -598,6 +723,21 @@ async fn run_sidecar_reader_loop<R>(
                     }
                 });
                 let _ = super::write_jsonrpc_frame(&writer, &unsupported).await;
+            }
+            continue;
+        }
+
+        if method == Some("models/updated")
+            && let Some(params) = msg.get("params")
+        {
+            let parsed = parse_sidecar_models(params.get("models"));
+            if !parsed.is_empty() {
+                if let Some(ref cache_key) = provider_cache_key {
+                    store_cached_claude_provider_models(cache_key, &parsed);
+                }
+                if let Ok(mut guard) = discovered_models.write() {
+                    *guard = parsed;
+                }
             }
             continue;
         }
@@ -793,6 +933,10 @@ impl NativeEngineDriver for ClaudeNativeDriver {
 
     fn model_aliases(&self, env: &HashMap<String, String>) -> HashMap<String, String> {
         crate::end_turn_usage::collect_claude_model_aliases(env)
+    }
+
+    fn bundled_models(&self) -> Vec<EngineModelInfo> {
+        default_claude_models()
     }
 
     fn apply_env_to_models(
@@ -1025,12 +1169,31 @@ impl NativeEngineDriver for ClaudeNativeDriver {
             .await
     }
 
+    async fn invalidate_caches(&self) -> usize {
+        invalidate_claude_provider_model_cache()
+    }
+
     async fn list_models(
         &self,
         handle: &EngineHandle,
     ) -> Result<Vec<EngineModelInfo>, EngineError> {
         let sidecar = self.ensure_sidecar(handle).await?;
         Ok(sidecar.discovered_models())
+    }
+
+    async fn probe_models_for_provider(
+        &self,
+        spec: &EngineStartSpec,
+    ) -> Result<Option<Vec<EngineModelInfo>>, EngineError> {
+        let sidecar = ClaudeSidecarClient::spawn(spec).await?;
+        let probe_res = sidecar.list_models_full().await;
+        let _ = sidecar.shutdown().await;
+        let models = probe_res?;
+        if models.is_empty() {
+            Ok(Some(default_claude_models()))
+        } else {
+            Ok(Some(models))
+        }
     }
 
     fn rate_limits(&self, handle: &EngineHandle) -> Option<EngineRateLimits> {
@@ -1394,5 +1557,105 @@ mod tests {
             .expect("glm-5 concrete");
         assert!(glm.is_default);
         assert!(models.iter().any(|m| m.id == "glm-fable"));
+    }
+
+    #[tokio::test]
+    async fn claude_sidecar_skips_init_probe_and_updates_provider_cache_on_models_events() {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let (client_read, client_write) = tokio::io::split(client_io);
+        let (server_read, mut server_write) = tokio::io::split(server_io);
+
+        let mut spec = test_spec(None);
+        spec.provider_instance_id = Some(format!("test-claude-cache-{}", Uuid::new_v4()));
+        let cache_key = claude_provider_cache_key(&spec);
+        let sidecar = ClaudeSidecarClient::connect_over_io_with_stderr_and_cache_key(
+            client_read,
+            client_write,
+            None,
+            None,
+            Arc::new(StderrTail::new()),
+            true,
+            Some(cache_key.clone()),
+        );
+
+        let emit_live_update = Arc::new(tokio::sync::Notify::new());
+        let emit_live_update_peer = Arc::clone(&emit_live_update);
+
+        let mock_sidecar = tokio::spawn(async move {
+            let mut lines = BufReader::new(server_read).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let req: Value = serde_json::from_str(&line).expect("valid jsonrpc");
+                let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+                let id = req.get("id").cloned();
+                match method {
+                    "initialize" => {
+                        assert_eq!(req["params"]["skipModelProbe"], true);
+                        let res = json!({
+                            "protocolVersion": "1.0",
+                            "engineId": "claude-native",
+                            "officialAnthropicSession": true,
+                            "modelsProbeSkipped": true,
+                            "models": [{ "value": "custom-local-model", "displayName": "Custom Local" }],
+                        });
+                        send_reply(&mut server_write, &id, res).await;
+                    }
+                    "models/list" => {
+                        let res = json!({
+                            "models": [
+                                { "value": "claude-probed-5", "displayName": "Claude Probed 5" },
+                                { "value": "sonnet", "displayName": "Sonnet" }
+                            ],
+                        });
+                        send_reply(&mut server_write, &id, res).await;
+
+                        // Wait until the caller finishes recording the models/list reply,
+                        // then emit an async models/updated notification (as on live turns).
+                        emit_live_update_peer.notified().await;
+                        let notif = format!(
+                            "{}\n",
+                            json!({
+                                "jsonrpc": "2.0",
+                                "method": "models/updated",
+                                "params": {
+                                    "models": [
+                                        { "value": "claude-live-5-1", "displayName": "Claude Live 5.1" }
+                                    ]
+                                }
+                            })
+                        );
+                        server_write.write_all(notif.as_bytes()).await.unwrap();
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        sidecar.initialize(&spec).await.expect("init succeeds");
+        let init_models = sidecar.discovered_models();
+        assert_eq!(init_models[0].id, "custom-local-model");
+        assert!(init_models.iter().any(|m| m.id == "claude-sonnet-4-6"));
+        assert!(read_cached_claude_provider_models(&cache_key).is_none());
+
+        let probed = sidecar
+            .list_models_full()
+            .await
+            .expect("models/list succeeds");
+        assert_eq!(probed[0].id, "claude-probed-5");
+        assert_eq!(
+            read_cached_claude_provider_models(&cache_key).unwrap()[0].id,
+            "claude-probed-5"
+        );
+
+        emit_live_update.notify_one();
+        mock_sidecar.await.expect("mock sidecar finished");
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        let updated = sidecar.discovered_models();
+        assert_eq!(updated[0].id, "claude-live-5-1");
+        assert_eq!(
+            read_cached_claude_provider_models(&cache_key).unwrap()[0].id,
+            "claude-live-5-1"
+        );
     }
 }

@@ -14,9 +14,6 @@ function readFile(relativePath) {
 
 test('Workspace 主区域分隔线统一使用共享 divider 样式', () => {
   const ideLayout = readFile('src/components/layout/IDELayout.tsx');
-  const rightPanelSidebar = readFile(
-    'src/components/layout/RightPanelSidebar.tsx'
-  );
   const branchInfoHeader = readFile(
     'src/components/layout/BranchInfoHeader.tsx'
   );
@@ -35,7 +32,6 @@ test('Workspace 主区域分隔线统一使用共享 divider 样式', () => {
     ideLayout,
     /workspace-resize-handle relative z-20 w-px shrink-0/
   );
-  assert.match(rightPanelSidebar, /workspace-divider-left/);
   assert.match(branchInfoHeader, /workspace-divider-bottom/);
   assert.match(statusBar, /workspace-divider-top/);
 });

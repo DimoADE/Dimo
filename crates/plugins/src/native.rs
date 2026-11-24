@@ -198,10 +198,6 @@ impl FilesystemNativePluginAdapter {
         self
     }
 
-    pub fn inspect_source(&self, source: &Path) -> Result<NativePluginDescriptor, PluginError> {
-        self.descriptor(source)
-    }
-
     fn descriptor(&self, root: &Path) -> Result<NativePluginDescriptor, PluginError> {
         let manifest_path = root.join(self.manifest_path);
         let manifest_text = fs::read_to_string(&manifest_path).map_err(|error| {

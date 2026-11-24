@@ -160,23 +160,6 @@ impl InstallationOperationRepository {
         Ok(())
     }
 
-    pub async fn set_staging_path(
-        &self,
-        id: Uuid,
-        staging_path: &str,
-    ) -> Result<(), AgentManagementRepositoryError> {
-        sqlx::query(
-            r#"UPDATE agent_install_operation
-               SET staging_path = ?, updated_at = CURRENT_TIMESTAMP
-               WHERE id = ? AND status IN ('queued', 'running')"#,
-        )
-        .bind(staging_path)
-        .bind(id.to_string())
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
     pub async fn find(
         &self,
         id: Uuid,

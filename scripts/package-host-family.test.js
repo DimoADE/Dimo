@@ -10,10 +10,8 @@ test("packages server, companion, web UI, and official catalog without plugin pa
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "dimo-host-family-"));
   const server = path.join(root, "dimo-server");
   const mcp = path.join(root, "dimo-mcp");
-  const workflowMcp = path.join(root, "dimo-workflow-mcp");
   fs.writeFileSync(server, "server-bin");
   fs.writeFileSync(mcp, "mcp-bin");
-  fs.writeFileSync(workflowMcp, "workflow-mcp-bin");
   fs.mkdirSync(path.join(root, "web"));
   fs.writeFileSync(path.join(root, "web", "index.html"), "<html></html>");
   fs.writeFileSync(
@@ -69,7 +67,6 @@ test("packages server, companion, web UI, and official catalog without plugin pa
   const output = packageHostFamily({
     server,
     mcp,
-    workflowMcp,
     web: path.join(root, "web"),
     plugins: path.join(root, "plugins"),
     output: path.join(root, "out"),
@@ -77,10 +74,6 @@ test("packages server, companion, web UI, and official catalog without plugin pa
 
   assert.equal(fs.readFileSync(path.join(output, "dimo-server"), "utf8"), "server-bin");
   assert.equal(fs.readFileSync(path.join(output, "dimo-mcp"), "utf8"), "mcp-bin");
-  assert.equal(
-    fs.readFileSync(path.join(output, "dimo-workflow-mcp"), "utf8"),
-    "workflow-mcp-bin",
-  );
   assert.equal(
     fs.readFileSync(path.join(output, "web", "index.html"), "utf8"),
     "<html></html>",
@@ -119,7 +112,6 @@ test("packages server, companion, web UI, and official catalog without plugin pa
   const checksums = fs.readFileSync(path.join(output, "SHA256SUMS"), "utf8");
   assert.match(checksums, /  dimo-server\n/);
   assert.match(checksums, /  dimo-mcp\n/);
-  assert.match(checksums, /  dimo-workflow-mcp\n/);
   assert.match(checksums, /  web\/index\.html\n/);
   assert.match(checksums, /  scripts\/claude-native-driver\.mjs\n/);
   assert.match(checksums, /  scripts\/claude-native-events\.mjs\n/);

@@ -33,12 +33,6 @@ pub struct TaskImage {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize, TS)]
-pub struct CreateTaskImage {
-    pub task_id: Uuid,
-    pub image_id: Uuid,
-}
-
 impl Image {
     pub async fn create(pool: &SqlitePool, data: &CreateImage) -> Result<Self, sqlx::Error> {
         let id = Uuid::new_v4();
@@ -213,26 +207,5 @@ impl TaskImage {
             .execute(pool)
             .await?;
         Ok(())
-    }
-
-    /// Check if an image is associated with a specific task.
-    pub async fn is_associated(
-        pool: &SqlitePool,
-        task_id: Uuid,
-        image_id: Uuid,
-    ) -> Result<bool, sqlx::Error> {
-        let result = sqlx::query_scalar!(
-            r#"SELECT EXISTS(
-                SELECT 1
-                FROM task_images
-                WHERE task_id = $1 AND image_id = $2
-               ) AS "exists!: bool"
-            "#,
-            task_id,
-            image_id
-        )
-        .fetch_one(pool)
-        .await?;
-        Ok(result)
     }
 }

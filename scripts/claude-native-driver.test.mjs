@@ -1655,5 +1655,118 @@ test('session/set_mode updates config.permissionMode and forwards live setPermis
   }
 });
 
+test('initialize with skipModelProbe skips SDK query probe and gateway fetch while models/list performs full discovery', async () => {
+  let sdkQueryCalls = 0;
+  let fetchCalls = 0;
+
+  const mockSdk = {
+    __supportsQueryModelProbe: true,
+    query() {
+      sdkQueryCalls += 1;
+      const handle = (async function* () {
+        yield { type: 'result', session_id: 'probe-sess', result: 'ok' };
+      })();
+      handle.supportedModels = async () => [
+        { value: 'claude-opus-4-7', displayName: 'Claude Opus 4.7' },
+        { value: 'sonnet', displayName: 'Sonnet' },
+      ];
+      handle.close = () => {};
+      return handle;
+    },
+  };
+
+  const fetchImpl = async () => {
+    fetchCalls += 1;
+    return {
+      ok: true,
+      async json() {
+        return { data: [{ id: 'proxy-claude-model', display_name: 'Proxy Claude' }] };
+      },
+    };
+  };
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-skip-probe-'));
+  const harness = createHarness({
+    env: {
+      CLAUDE_CONFIG_DIR: tmpDir,
+      ANTHROPIC_BASE_URL: 'https://proxy.example.com/v1',
+      ANTHROPIC_API_KEY: 'sk-test-proxy',
+      ANTHROPIC_MODEL: 'custom-configured-model',
+    },
+    sdkLoader: async () => mockSdk,
+    fetchImpl,
+  });
+
+  try {
+    const initRes = await harness.request(1, 'initialize', {
+      skipModelProbe: true,
+    });
+    assert.equal(initRes.result.modelsProbeSkipped, true);
+    assert.equal(sdkQueryCalls, 0);
+    assert.equal(fetchCalls, 0);
+    assert.ok(
+      initRes.result.models.some((m) => m.value === 'custom-configured-model' && m.isDefault === true)
+    );
+
+    const listRes = await harness.request(2, 'models/list', {});
+    assert.equal(sdkQueryCalls, 1);
+    assert.equal(fetchCalls, 1);
+    const ids = listRes.result.models.map((m) => m.value);
+    assert.ok(ids.includes('proxy-claude-model'));
+    assert.ok(ids.includes('claude-opus-4-7'));
+    assert.ok(ids.includes('custom-configured-model'));
+  } finally {
+    await harness.close();
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('prompt/send asynchronously emits models/updated notification from live queryHandle.supportedModels()', async () => {
+  const mockSdk = {
+    query() {
+      const handle = (async function* () {
+        yield {
+          type: 'system',
+          subtype: 'init',
+          session_id: 'live-models-sess',
+          model: 'claude-sonnet-4-6',
+        };
+        yield {
+          type: 'result',
+          session_id: 'live-models-sess',
+          result: 'done',
+        };
+      })();
+      handle.supportedModels = async () => [
+        { value: 'claude-opus-4-7', displayName: 'Claude Opus 4.7' },
+        { value: 'claude-sonnet-4-6', displayName: 'Claude Sonnet 4.6' },
+      ];
+      return handle;
+    },
+  };
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-live-models-'));
+  const harness = createHarness({
+    env: { CLAUDE_CONFIG_DIR: tmpDir },
+    sdkLoader: async () => mockSdk,
+  });
+
+  try {
+    await harness.request(1, 'initialize', { skipModelProbe: true });
+    await harness.request(2, 'prompt/send', {
+      promptId: 'p-live-models',
+      text: 'Hi',
+      waitForCompletion: true,
+    });
+
+    const notification = await harness.waitFor((f) => f.method === 'models/updated');
+    const ids = notification.params.models.map((m) => m.value);
+    assert.deepEqual(ids, ['claude-opus-4-7', 'claude-sonnet-4-6']);
+  } finally {
+    await harness.close();
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
 
 

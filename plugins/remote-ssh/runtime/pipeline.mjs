@@ -465,7 +465,7 @@ export function createPipeline(deps) {
       'rm -rf "$family_root"',
       'mkdir -p "$(dirname "$family_root")"',
       'mv "$unpacked" "$family_root"',
-      'chmod +x "$family_root/dimo-server" "$family_root/dimo-mcp" "$family_root/dimo-workflow-mcp" 2>/dev/null || true',
+      'chmod +x "$family_root/dimo-server" "$family_root/dimo-mcp" 2>/dev/null || true',
       'mkdir -p "$HOME/.local/bin"',
       'printf \'#!/bin/sh\\nif [ $# -eq 0 ]; then exec "%s/dimo-server" serve; fi\\nexec "%s/dimo-server" "$@"\\n\' "$family_root" "$family_root" > "$HOME/.local/bin/dimo"',
       'chmod +x "$HOME/.local/bin/dimo"',

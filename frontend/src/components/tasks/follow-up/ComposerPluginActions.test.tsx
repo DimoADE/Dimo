@@ -15,15 +15,6 @@ import {
 vi.mock('@/lib/api', () => ({
   fileTreeApi: {},
   repoApi: {},
-  skillsApi: {
-    list: vi.fn().mockResolvedValue({
-      supported: false,
-      global_supported: false,
-      project_supported: false,
-      locations: [],
-      skills: [],
-    }),
-  },
 }));
 
 describe('composer plugin action invocation', () => {

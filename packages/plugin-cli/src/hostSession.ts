@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -94,10 +94,6 @@ export function loadHostSession(file = hostSessionPath()): HostSession | null {
   } catch {
     return null;
   }
-}
-
-export function clearHostSession(file = hostSessionPath()): void {
-  rmSync(file, { force: true });
 }
 
 export function mergeHostSession(

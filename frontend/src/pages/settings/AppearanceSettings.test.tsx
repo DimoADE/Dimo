@@ -22,9 +22,6 @@ const mocks = vi.hoisted(() => ({
   setUiZoom: vi.fn(),
   setMonoFont: vi.fn(),
   setUiLanguage: vi.fn(),
-  setLayoutArrangement: vi.fn(),
-  setKanbanArrangement: vi.fn(),
-  setCollaborationArrangement: vi.fn(),
   setKanbanSessionListView: vi.fn(),
   setKanbanBoardStyle: vi.fn(),
   setSettingsNavFloat: vi.fn(),
@@ -72,31 +69,6 @@ vi.mock('@/i18n', async (importOriginal) => ({
   setUiLanguage: mocks.setUiLanguage,
 }));
 
-vi.mock('@/lib/layoutArrangement', () => {
-  const workspace = {
-    left: 'dock',
-    center: 'workspace',
-    right: 'session',
-    bottom: 'terminal',
-  };
-  const kanban = { left: 'list', center: 'monitor', right: 'session' };
-  const collaboration = {
-    left: 'spaces',
-    center: 'thread',
-    right: 'preview',
-  };
-  return {
-    arrangementsEqual: (a: object, b: object) =>
-      JSON.stringify(a) === JSON.stringify(b),
-    useLayoutArrangement: () => workspace,
-    useKanbanArrangement: () => kanban,
-    useCollaborationArrangement: () => collaboration,
-    setLayoutArrangement: mocks.setLayoutArrangement,
-    setKanbanArrangement: mocks.setKanbanArrangement,
-    setCollaborationArrangement: mocks.setCollaborationArrangement,
-  };
-});
-
 vi.mock('@/lib/kanbanSessionListView', () => ({
   KANBAN_SESSION_LIST_VIEWS: ['status', 'workspace', 'mixed'],
   getKanbanSessionListView: () => 'status',
@@ -114,12 +86,6 @@ vi.mock('@/lib/settingsNavFloat', () => ({
   getSettingsNavFloat: () => false,
   setSettingsNavFloat: mocks.setSettingsNavFloat,
   useSettingsNavFloat: () => false,
-}));
-
-vi.mock('./LayoutArrangementSchematic', () => ({
-  WorkspaceLayoutSchematic: () => <div>workspace schematic</div>,
-  KanbanLayoutSchematic: () => <div>kanban schematic</div>,
-  CollaborationLayoutSchematic: () => <div>collaboration schematic</div>,
 }));
 
 describe('AppearanceSettings', () => {

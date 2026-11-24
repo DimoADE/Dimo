@@ -66,14 +66,6 @@ impl AgentManagementRuntimeState {
         *self.local_runtime_discovery_complete.lock().await = true;
     }
 
-    pub async fn refresh_local_runtime_discovery<Fut>(&self, work: Fut)
-    where
-        Fut: std::future::Future<Output = ()>,
-    {
-        work.await;
-        *self.local_runtime_discovery_complete.lock().await = true;
-    }
-
     pub async fn reset(&self) {
         *self.warmup_complete.lock().await = false;
         *self.local_runtime_discovery_complete.lock().await = false;

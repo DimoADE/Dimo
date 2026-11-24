@@ -68,22 +68,6 @@ pub enum WorkflowStepSpec {
 }
 
 impl WorkflowStepSpec {
-    pub const fn kind_name(&self) -> &'static str {
-        match self {
-            Self::Agent(_) => "agent",
-            Self::Approval(_) => "approval",
-            Self::Notify(_) => "notify",
-            Self::Session(_) => "session",
-            Self::Bot(_) => "bot",
-            Self::GroupStage(_) => "group_stage",
-            Self::UserGate(_) => "user_gate",
-            Self::ConditionBranch(_) => "condition_branch",
-            Self::BoundedLoop(_) => "bounded_loop",
-            Self::WaitForEvent(_) => "wait_for_event",
-            Self::OutboxAction(_) => "outbox_action",
-        }
-    }
-
     pub const fn output_schema(&self) -> Option<&serde_json::Value> {
         match self {
             Self::Agent(agent) => agent.output_schema.as_ref(),
@@ -228,7 +212,7 @@ impl Default for WorkflowPolicy {
     }
 }
 
-pub(crate) fn normalize_definition_in_place(definition: &mut WorkflowDefinition) {
+fn normalize_definition_in_place(definition: &mut WorkflowDefinition) {
     definition.name = definition.name.trim().to_string();
     definition.description = definition
         .description

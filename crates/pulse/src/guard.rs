@@ -173,12 +173,4 @@ impl ChainRateBreaker {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .len()
     }
-
-    pub fn reset_thread(&self, thread_key: &str) {
-        let mut guard = self
-            .buckets
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.remove(thread_key);
-    }
 }

@@ -1383,3 +1383,113 @@ async fn remembered_target_binding_mode_survives_cold_handoff_lookup() {
     let prefs = session_control_preferences(remembered.as_ref(), &global_codex_defaults);
     assert_eq!(prefs.mode.as_deref(), Some("plan"));
 }
+
+#[tokio::test]
+async fn offline_zero_turn_selection_persists_to_binding_and_plans_first_turn_replay() {
+    let pool = migrated_pool().await;
+    let antigravity = agents::AgentId::parse("antigravity").expect("antigravity");
+    let conv = ConversationRecord::create(
+        &pool,
+        Uuid::new_v4(),
+        CreateConversationRecord {
+            workspace_id: Uuid::new_v4(),
+            task_id: None,
+            title: Some("Lazy Antigravity"),
+            initial_prompt: None,
+            status: Some(SessionStatus::InProgress),
+            executor: Some("antigravity"),
+        },
+    )
+    .await
+    .expect("create conv");
+    db::models::session::Session::update_agent_metadata(&pool, conv.id, None, Some(&antigravity))
+        .await
+        .expect("set agent_id");
+
+    // Simulate offline mode + model/effort selection before any live agent process exists.
+    let overrides = vec![
+        agents::AgentSessionConfigOverride {
+            key: "model".to_string(),
+            value: "gemini-3-pro".to_string(),
+        },
+        agents::AgentSessionConfigOverride {
+            key: "thought_level".to_string(),
+            value: "high".to_string(),
+        },
+    ];
+    super::binding::persist_confirmed_session_controls_strict(
+        &pool,
+        conv.id,
+        Some("plan"),
+        &overrides,
+    )
+    .await
+    .expect("persist offline controls");
+
+    let bindings = ConversationAgentBindingRecord::list_for_conversation(&pool, conv.id)
+        .await
+        .expect("list bindings");
+    assert_eq!(bindings.len(), 1);
+    let binding = &bindings[0];
+    assert_eq!(binding.agent_id, antigravity);
+    assert_eq!(binding.current_mode.as_deref(), Some("plan"));
+
+    // On first turn bind, session_control_preferences + session_control_replay_plan
+    // recover all offline choices so they are applied to the freshly created session.
+    let prefs = session_control_preferences(Some(binding), &[]);
+    assert_eq!(prefs.mode.as_deref(), Some("plan"));
+    assert!(
+        prefs
+            .config
+            .iter()
+            .any(|item| item.key == "model" && item.value == "gemini-3-pro")
+    );
+    assert!(
+        prefs
+            .config
+            .iter()
+            .any(|item| item.key == "thought_level" && item.value == "high")
+    );
+
+    let fresh_session_controls = agents::AgentSessionControlsSnapshot {
+        modes: vec![
+            agents::AgentSessionMode {
+                id: "default".to_string(),
+                label: "Default".to_string(),
+                description: None,
+            },
+            agents::AgentSessionMode {
+                id: "plan".to_string(),
+                label: "Plan".to_string(),
+                description: None,
+            },
+        ],
+        current_mode: Some("default".to_string()),
+        config_options: vec![
+            agents::AgentSessionConfigOption {
+                key: "model".to_string(),
+                label: "Model".to_string(),
+                description: None,
+                category: Some("model".to_string()),
+                value: Some(serde_json::json!("gemini-2.5-flash")),
+                choices: vec![],
+                dependency: None,
+            },
+            agents::AgentSessionConfigOption {
+                key: "thought_level".to_string(),
+                label: "Effort".to_string(),
+                description: None,
+                category: Some("thought_level".to_string()),
+                value: Some(serde_json::json!("medium")),
+                choices: vec![],
+                dependency: None,
+            },
+        ],
+        capabilities: None,
+        ..Default::default()
+    };
+    let replay =
+        session_control_replay_plan(prefs.mode, prefs.config, &fresh_session_controls);
+    assert_eq!(replay.mode.as_deref(), Some("plan"));
+    assert_eq!(replay.config_overrides.len(), 2);
+}

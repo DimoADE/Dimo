@@ -1,13 +1,8 @@
 import { forwardRef } from 'react';
 import type { TaskWithAttemptStatus } from 'shared/types';
 import type { WorkspaceWithSession } from '@/types/attempt';
-import type {
-  AgentEventEnvelope,
-  AgentPermissionRequest,
-} from '@/features/agents/types';
-import { type PendingAgentPermission } from '@/components/agents/AgentPermissionPanel';
 // Conversations always render through the ACP-native timeline. This module keeps
-// the shared viewport/scroll/permission helpers (consumed by
+// the shared viewport/scroll helpers (consumed by
 // AgentTimelineConversation and unit tests) and re-exports the timeline as the
 // default `VirtualizedList`. The legacy execution-process renderer was removed.
 import AgentTimelineConversation from './AgentTimelineConversation';
@@ -602,55 +597,6 @@ export function isVirtualizerJumpActive(
   if (!virtualizer) return false;
   const pending = virtualizer as CancelableVirtualizerScroll;
   return pending.scrollState != null;
-}
-
-export function pendingAgentPermissionsFromEvents(
-  events: AgentEventEnvelope[]
-): PendingAgentPermission[] {
-  const pending = new Map<string, PendingAgentPermission>();
-
-  for (const envelope of events) {
-    if (envelope.event.kind === 'permission_requested') {
-      pending.set(envelope.event.request.id, {
-        connectionId: envelope.connection_id,
-        request: envelope.event.request,
-      });
-    }
-
-    if (envelope.event.kind === 'permission_responded') {
-      pending.delete(envelope.event.permission_id);
-    }
-  }
-
-  return [...pending.values()];
-}
-
-export function pendingAgentPermissionsForSession(
-  events: AgentEventEnvelope[],
-  permissions: Record<string, AgentPermissionRequest>,
-  sessionId: string | null,
-  fallbackConnectionId?: string | null
-): PendingAgentPermission[] {
-  const pending = new Map(
-    pendingAgentPermissionsFromEvents(events).map((permission) => [
-      permission.request.id,
-      permission,
-    ])
-  );
-
-  if (!sessionId || !fallbackConnectionId) {
-    return [...pending.values()];
-  }
-
-  for (const request of Object.values(permissions)) {
-    if (request.session_id !== sessionId || pending.has(request.id)) continue;
-    pending.set(request.id, {
-      connectionId: fallbackConnectionId,
-      request,
-    });
-  }
-
-  return [...pending.values()];
 }
 
 /**

@@ -333,26 +333,6 @@ impl SqlitePulseStore {
             .collect()
     }
 
-    pub async fn update_source_watermark(
-        &self,
-        id: &str,
-        cursor_watermark: Option<&str>,
-        healthy: bool,
-        status_message: Option<&str>,
-        now: &str,
-    ) -> Result<bool, sqlx::Error> {
-        let sql = "UPDATE pulse_sources SET cursor_watermark = ?, healthy = ?, status_message = ?, updated_at = ? WHERE id = ?";
-        let res = sqlx::query(sql)
-            .bind(cursor_watermark)
-            .bind(healthy)
-            .bind(status_message)
-            .bind(now)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(res.rows_affected() > 0)
-    }
-
     pub async fn update_source_health_and_cursor(
         &self,
         id: &str,
@@ -366,16 +346,6 @@ impl SqlitePulseStore {
             .bind(healthy)
             .bind(status_message)
             .bind(cursor_watermark)
-            .bind(now)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn increment_source_received(&self, id: &str, now: &str) -> Result<(), sqlx::Error> {
-        let sql = "UPDATE pulse_sources SET received_count_24h = received_count_24h + 1, updated_at = ? WHERE id = ?";
-        sqlx::query(sql)
             .bind(now)
             .bind(id)
             .execute(&self.pool)
@@ -537,13 +507,6 @@ impl SqlitePulseStore {
 
     pub async fn get_rule(&self, id: &str) -> Result<Option<PulseRuleView>, sqlx::Error> {
         self.fetch_rule_by("id", id).await
-    }
-
-    pub async fn get_rule_by_webhook_route(
-        &self,
-        route_id: &str,
-    ) -> Result<Option<PulseRuleView>, sqlx::Error> {
-        self.fetch_rule_by("webhook_route_id", route_id).await
     }
 
     async fn fetch_rule_by(
@@ -1209,23 +1172,6 @@ impl SqlitePulseStore {
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected() > 0)
-    }
-
-    pub async fn list_bot_mailbox(
-        &self,
-        member_id: &str,
-    ) -> Result<Vec<PulseBotMailboxItem>, sqlx::Error> {
-        let sql = format!(
-            "SELECT {MAILBOX_COLUMNS} FROM pulse_bot_mailbox
-             WHERE member_id = ? ORDER BY created_at ASC, rowid ASC"
-        );
-        sqlx::query_as::<_, BotMailboxRow>(&sql)
-            .bind(member_id)
-            .fetch_all(&self.pool)
-            .await?
-            .into_iter()
-            .map(parse_mailbox_row)
-            .collect()
     }
 
     // --- User Interactions (`pulse_user_interactions`) ---

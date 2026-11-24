@@ -560,7 +560,7 @@
       "implementation": "crates/plugins/src/host_capability_broker.rs:get_runtime_lock",
       "reaches_core": false,
       "status": "ready",
-      "notes": "Operation get exists and is used by plugins/open-connector, but runtime.lock.get is not in host-api.v1.json. J7: registered in host-api.v1.json; status raised to ready."
+      "notes": "Operation get resolves a locked managed runtime via runtime.lock.get. J7: registered in host-api.v1.json; status raised to ready."
     },
     {
       "name": "exec",
@@ -1860,7 +1860,7 @@
       "implementation": "crates/plugins/src/host_capability_broker.rs:get_runtime_lock",
       "reaches_core": false,
       "status": "ready",
-      "notes": "Handler: crates/plugins/src/host_capability_broker.rs:get_runtime_lock. Used by plugins/open-connector; registered by J7."
+      "notes": "Handler: crates/plugins/src/host_capability_broker.rs:get_runtime_lock. Registered by J7."
     },
     {
       "name": "exec.run",

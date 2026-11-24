@@ -136,6 +136,16 @@ struct ConversationStopAsyncTaskArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TruncateArgs {
+    #[serde(alias = "sessionId", alias = "session_id", alias = "conversation_id")]
+    conversation_id: String,
+    ordinal: i64,
+    #[serde(default, alias = "restore_files")]
+    restore_files: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ConversationForkArgs {
     #[serde(alias = "sessionId", alias = "session_id", alias = "conversation_id")]
     conversation_id: String,
@@ -429,15 +439,28 @@ impl ServerApplicationDomains {
         &self,
         args: Value,
     ) -> Result<Value, ApplicationError> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct TruncateArgs {
-            conversation_id: String,
-            ordinal: i64,
-        }
         let args: TruncateArgs = parse(args)?;
         let id = parse_uuid(&args.conversation_id)?;
-        conversations::ConversationSessionService::new(self.conversations.clone())
+        let service = conversations::ConversationSessionService::new(self.conversations.clone());
+        if args.restore_files {
+            let summary = service
+                .atomic_rewind_to_turn(id, args.ordinal, true, None)
+                .await
+                .map_err(|error| match error {
+                    conversations::ConversationServiceError::NotFound(msg) => {
+                        ApplicationError::not_found(msg)
+                    }
+                    conversations::ConversationServiceError::Conflict(msg) => {
+                        ApplicationError::conflict(msg)
+                    }
+                    conversations::ConversationServiceError::BadRequest(msg) => {
+                        ApplicationError::bad_request(msg)
+                    }
+                    other => internal_error(other),
+                })?;
+            return serialize(summary);
+        }
+        service
             .truncate_to_turn(id, args.ordinal)
             .await
             .map_err(|error| ApplicationError::bad_request(error.to_string()))?;
@@ -1093,31 +1116,14 @@ async fn load_conversation_session_controls(
         .or_else(|| parse_lenient_agent_id(persona_agent_id));
 
     if let Some(agent_id) = resolved_agent_id.as_ref() {
-        let mut catalog =
-            conversations::read_matching_capability_catalog_for_defaults_for_provider_instance(
-                pool,
-                agent_id,
-                summary_instance_request,
-            )
-            .await
-            .ok()
-            .flatten();
-        if catalog.is_none() && resolved_summary_instance.is_none() {
-            let fallback_json: Option<String> = sqlx::query_scalar(
-                r#"SELECT controls_json
-                   FROM agent_capability_catalog
-                   WHERE agent_type = ?
-                   ORDER BY retrieved_at DESC, generation DESC
-                   LIMIT 1"#,
-            )
-            .bind(agent_id.as_str())
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten();
-            catalog = fallback_json
-                .and_then(|raw| serde_json::from_str::<AgentSessionControlsSnapshot>(&raw).ok());
-        }
+        let catalog = conversations::resolve_instant_capability_catalog_for_provider_instance(
+            pool,
+            agent_id,
+            summary_instance_request,
+        )
+        .await
+        .ok()
+        .and_then(|resolved| resolved.snapshot);
         if let Some(catalog) = catalog {
             if session_modes.as_ref().is_none_or(|m| m.modes.is_empty())
                 && !catalog.modes.is_empty()
@@ -1444,6 +1450,43 @@ mod tests {
         .expect("fork args");
         assert_eq!(fork_args.target_agent_id.as_deref(), Some("codex"));
         assert_eq!(fork_args.at_turn_id.as_deref(), Some("turn-1"));
+    }
+
+    #[test]
+    fn truncate_args_default_and_accept_restore_files_aliases() {
+        let default_args: TruncateArgs = crate::domains::parse(serde_json::json!({
+            "request": {
+                "conversationId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "ordinal": 3
+            }
+        }))
+        .expect("default truncate args");
+        assert_eq!(
+            default_args.conversation_id,
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        );
+        assert_eq!(default_args.ordinal, 3);
+        assert!(!default_args.restore_files);
+
+        let camel_args: TruncateArgs = crate::domains::parse(serde_json::json!({
+            "request": {
+                "conversationId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                "ordinal": 4,
+                "restoreFiles": true
+            }
+        }))
+        .expect("camelCase restoreFiles");
+        assert_eq!(camel_args.ordinal, 4);
+        assert!(camel_args.restore_files);
+
+        let snake_args: TruncateArgs = crate::domains::parse(serde_json::json!({
+            "conversation_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "ordinal": 5,
+            "restore_files": true
+        }))
+        .expect("snake_case restore_files");
+        assert_eq!(snake_args.ordinal, 5);
+        assert!(snake_args.restore_files);
     }
 
     #[derive(serde::Deserialize)]

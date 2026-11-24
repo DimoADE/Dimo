@@ -2447,15 +2447,9 @@ export type BoundedLoopStepSpec = { targetStepIds: Array<string>, maxIterations:
 
 export type ConditionBranchStepSpec = { filter: GateFilterAst, thenStepIds: Array<string>, elseStepIds: Array<string>, };
 
-export type DirectReflexPresetConfig = { name: string, description: string | null, actor: DualPrimitiveActorSpec, outboxActionKind: OutboxActionKind, outboxTargetTemplate: string, policy: WorkflowPolicy, };
-
-export type DualPrimitiveActorSpec = { "kind": "session", agentId: string, promptTemplate: string, workspaceAccess: WorkspaceAccess, modelOverride: string | null, subscribeThread: boolean, } | { "kind": "bot", memberId: string, promptTemplate: string, conversationScope: BotConversationScope, mailboxPolicy: BotMailboxPolicy, };
-
 export type EventActor = { id: string, displayName: string | null, roles: Array<string>, isBot: boolean, isSelf: boolean, };
 
 export type EventEnvelope = { eventId: string, deliveryId: string, source: EventSourceMeta, eventType: string, occurredAt: string, actor: EventActor, threadKey: string | null, correlations: Array<string>, replyChannels: Array<ReplyChannelAddress>, trace: EventTrace, payload: JsonValue, };
-
-export type EventSagaPresetConfig = { name: string, description: string | null, initialActor: DualPrimitiveActorSpec, expectedEventTypes: Array<string>, threadKeyPointer: string | null, waitFilter: GateFilterAst | null, timeoutSeconds: number, followupActor: DualPrimitiveActorSpec, policy: WorkflowPolicy, };
 
 export type EventSourceKind = "feishu" | "jira" | "github" | "webhook_standard" | "webhook_custom" | "time_cron" | "time_once" | "time_interval" | "time_sla" | "sdk_custom" | "system_internal";
 
@@ -2475,8 +2469,6 @@ export type GroupMentionOrder = "parallel" | "sequential";
 
 export type GroupStageStepSpec = { spaceId: string, dispatchMode: GroupDispatchMode, messageTemplate: string, quorumCount: number | null, };
 
-export type HybridPipelinePresetConfig = { name: string, description: string | null, fixerAgentId: string, fixerPromptTemplate: string, reviewSpaceId: string, reviewerMemberId: string, reviewMessageTemplate: string, approvalTitleTemplate: string, approvalBodyTemplate: string, approvalSlaTimeoutSeconds: number | null, outboxActionKind: OutboxActionKind, outboxTargetTemplate: string, policy: WorkflowPolicy, };
-
 export type MandateOrigin = "explicit_human" | "trusted_internal" | "untrusted_external";
 
 export type OutboxActionKind = "reply_channel" | "webhook_post" | "emit_event";
@@ -2484,8 +2476,6 @@ export type OutboxActionKind = "reply_channel" | "webhook_post" | "emit_event";
 export type OutboxActionStepSpec = { actionKind: OutboxActionKind, targetTemplate: string, payloadTemplate: JsonValue, };
 
 export type PresetOrchestratorKind = "direct_reflex" | "superagent_router" | "hybrid_pipeline" | "event_saga" | "window_aggregator";
-
-export type PresetOrchestratorSpec = { "preset": "direct_reflex" } & DirectReflexPresetConfig | { "preset": "superagent_router" } & SuperagentRouterPresetConfig | { "preset": "hybrid_pipeline" } & HybridPipelinePresetConfig | { "preset": "event_saga" } & EventSagaPresetConfig | { "preset": "window_aggregator" } & WindowAggregatorPresetConfig;
 
 export type PulseDeckSnapshot = { engineActive: boolean, activeTicketCount: number, pendingUserInteractionCount: number, sources: Array<PulseSourceView>, rules: Array<PulseRuleView>, observedCandidates: Array<PulseObservedCandidateView>, subscriptions: Array<PulseSubscriptionView>, pendingInteractions: Array<PulseUserInteractionView>, busyRuleIds: Array<string>, recentOutbox: Array<PulseOutboxEntryView>, };
 
@@ -2523,10 +2513,6 @@ export type SessionStepSpec = { agentId: string, promptTemplate: string, workspa
 
 export type SessionTargetMode = "ephemeral_fresh" | "thread_keyed" | "existing_session";
 
-export type SpecialistSessionSpec = { id: string, agentId: string, promptTemplate: string, workspaceAccess: WorkspaceAccess, modelOverride: string | null, };
-
-export type SuperagentRouterPresetConfig = { name: string, description: string | null, routerBotMemberId: string, routerPromptTemplate: string, branchFilter: GateFilterAst, thenSpecialists: Array<SpecialistSessionSpec>, elseSpecialists: Array<SpecialistSessionSpec>, synthesizerBotMemberId: string, synthesizerPromptTemplate: string, policy: WorkflowPolicy, };
-
 export type UserGateStepSpec = { interactionKind: UserInteractionKind, titleTemplate: string, bodyTemplate: string, approvalOptions: Array<ApprovalOptionSpec>, formSchema: JsonValue | null, slaTimeoutSeconds: number | null, };
 
 export type UserInteractionKind = "notify" | "approval" | "ask_form" | "digest";
@@ -2536,12 +2522,6 @@ export type UserInteractionSeverity = "info" | "warning" | "urgent";
 export type WaitForEventStepSpec = { eventTypes: Array<string>, threadKeyPointer: string | null, filter: GateFilterAst | null, timeoutSeconds: number | null, };
 
 export type WaitingWorkflowStep = { runId: string, workspaceId: string, stepId: string, attempt: number, spec: WaitForEventStepSpec, correlationContext: JsonValue, timeoutAt: string | null, };
-
-export type WindowAggregatorPresetConfig = { name: string, description: string | null, summarizerBotMemberId: string, summarizerPromptTemplate: string, digestTitleTemplate: string, digestBodyTemplate: string, policy: WorkflowPolicy, };
-
-export type WorkflowGraphPatch = { ops: Array<WorkflowGraphPatchOp>, };
-
-export type WorkflowGraphPatchOp = { "op": "add_step", step: WorkflowStep, } | { "op": "update_step", step: WorkflowStep, } | { "op": "remove_step", stepId: string, } | { "op": "connect_steps", fromStepId: string, toStepId: string, } | { "op": "disconnect_steps", fromStepId: string, toStepId: string, } | { "op": "set_policy", policy: WorkflowPolicy, };
 
 export type PulseCallbackKind = "feishu_webhook" | "github_comment" | "webhook_post" | "reply_channel";
 

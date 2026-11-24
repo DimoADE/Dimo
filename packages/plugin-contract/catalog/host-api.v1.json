@@ -1267,7 +1267,7 @@
         "runtime_lock_failed",
         "runtime_not_locked"
       ],
-      "notes": "Handler: crates/plugins/src/host_capability_broker.rs:get_runtime_lock. Used by plugins/open-connector; registered by J7."
+      "notes": "Handler: crates/plugins/src/host_capability_broker.rs:get_runtime_lock. Registered by J7."
     },
     {
       "id": "conversation.draft.insert",

@@ -23,7 +23,6 @@ const HOST_JOURNEY_KINDS = [
     ...STRUCTURE_KINDS,
     ...CATALOG_KINDS,
 ];
-const CHROME_KIND_SET = new Set(CHROME_KINDS);
 /** Manifest `app.*` kinds vs Host catalog snake_case keys. */
 export const MANIFEST_KIND_TO_CATALOG = {
     "app.command": "command",
@@ -54,9 +53,6 @@ function liveHasKind(live, kind) {
     if (live.has(kind) || live.has(catalogKindFor(kind)))
         return true;
     return (LIVE_KIND_ALIASES[kind] ?? []).some((alias) => live.has(alias));
-}
-export function isChromeKind(kind) {
-    return CHROME_KIND_SET.has(kind);
 }
 function kindsFromIntegrations(integrations, allowed) {
     if (!Array.isArray(integrations))

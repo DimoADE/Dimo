@@ -118,20 +118,6 @@ pub enum AgentAuthenticationStatus {
     NotRequired,
 }
 
-/// Minimal wire identity used while the open management API is introduced.
-///
-/// Rich catalog, installation, capability, and diagnostic projections build on
-/// these independent facts rather than collapsing them into one legacy boolean.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct AgentManagementIdentity {
-    pub agent_id: AgentId,
-    pub source: AgentSource,
-    pub lifecycle: AgentLifecycleState,
-    pub authentication: AgentAuthenticationStatus,
-    pub enabled: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, rename_all = "snake_case")]
@@ -305,29 +291,6 @@ pub struct AgentOperationEvent {
     pub status: AgentOperationStatus,
     pub progress_percent: Option<u8>,
     pub message: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "snake_case")]
-#[ts(export, rename_all = "snake_case")]
-pub enum AgentManagementErrorCode {
-    NotFound,
-    InvalidState,
-    Busy,
-    RegistryUnavailable,
-    PlatformUnsupported,
-    ConfigConflict,
-    IntegrityFailure,
-    Internal,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct AgentManagementErrorView {
-    pub code: AgentManagementErrorCode,
-    pub message: String,
-    pub agent_id: Option<AgentId>,
-    pub preflight_item_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

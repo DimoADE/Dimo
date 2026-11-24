@@ -1,24 +1,7 @@
-import { useId, type ComponentType, type ReactNode } from 'react';
-import { ChevronRight } from 'lucide-react';
+import { type ComponentType, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { toast } from '@/components/ui/toast';
-import { cn } from '@/lib/utils';
-
-export function SettingsPageHeader({
-  title,
-  description,
-}: {
-  title: string;
-  description?: string;
-}) {
-  return (
-    <header className="settings-page-header">
-      <h2>{title}</h2>
-      {description ? <p>{description}</p> : null}
-    </header>
-  );
-}
 
 interface SettingsSectionProps {
   icon: ComponentType<{ className?: string }>;
@@ -88,61 +71,6 @@ export function SettingsSection({
         {action ? <div className="shrink-0">{action}</div> : null}
       </div>
       {content}
-    </section>
-  );
-}
-
-export function SettingsDisclosure({
-  icon: Icon,
-  title,
-  expanded,
-  onToggle,
-  leading,
-  detail,
-  children,
-}: {
-  icon?: ComponentType<{ className?: string }>;
-  title: string;
-  expanded: boolean;
-  onToggle: () => void;
-  leading?: ReactNode;
-  detail?: ReactNode;
-  children: ReactNode;
-}) {
-  const bodyId = useId();
-
-  return (
-    <section className="settings-section min-w-0">
-      <div className="settings-card overflow-hidden rounded-lg border">
-        <button
-          type="button"
-          className="settings-disclosure-trigger"
-          aria-expanded={expanded}
-          aria-controls={bodyId}
-          onClick={onToggle}
-        >
-          <span className="flex min-w-0 items-center gap-2">
-            {leading}
-            {Icon ? (
-              <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />
-            ) : null}
-            <span className="truncate text-sm font-semibold">{title}</span>
-            {detail}
-          </span>
-          <ChevronRight
-            className={cn(
-              'h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-150 ease-out',
-              expanded && 'rotate-90'
-            )}
-            aria-hidden="true"
-          />
-        </button>
-        {expanded ? (
-          <div id={bodyId} className="settings-disclosure-body">
-            {children}
-          </div>
-        ) : null}
-      </div>
     </section>
   );
 }

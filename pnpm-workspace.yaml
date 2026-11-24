@@ -3,14 +3,9 @@ packages:
   - electron
   - packages/*
   - plugins/*
-  # Duplicate @dimo/plugin-workflow-creator name plus unpublished vendored
-  # tarballs; keep it out of the workspace.
-  - '!packages/dimo-workflow-mcp'
 
 onlyBuiltDependencies:
-  - '@astryxdesign/cli'
   - '@astryxdesign/core'
-  - core-js
   - electron
   - esbuild
 

@@ -1,12 +1,11 @@
 //! Remote plugin marketplace catalog consumed by the Host.
 
-use std::{collections::HashSet, path::Path};
+use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{PluginContentDocument, PluginError, PluginPackage, PluginSourceKind};
 
-pub const DEFAULT_MARKETPLACE_ORIGIN: &str = utils::DEFAULT_SITE_ORIGIN;
 pub const COMMUNITY_PAGE_SIZE: u32 = 50;
 
 /// Retired package id → successor. Official marketplace must show one product.
@@ -80,15 +79,6 @@ pub struct CatalogPage {
     pub remote: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct CatalogVersion {
-    pub tag: String,
-    pub version: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub package_digest: Option<String>,
-}
-
 #[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogPluginDetail {
@@ -121,13 +111,6 @@ pub fn marketplace_listing_url(owner: &str, plugin_name: &str) -> String {
         marketplace_origin(),
         owner,
         plugin_name
-    )
-}
-
-pub fn listing_identity(listing: &CatalogListing) -> String {
-    format!(
-        "{}/{}/{}@{}",
-        listing.owner, listing.plugin_name, listing.tag, listing.version
     )
 }
 
@@ -471,81 +454,6 @@ pub fn fold_official_listings(
     collapse_replaced_official(listings)
 }
 
-pub fn merge_offline_official(
-    page: &mut CatalogPage,
-    roots: impl IntoIterator<Item = impl AsRef<Path>>,
-) {
-    let extra = roots.into_iter().filter_map(|root| {
-        PluginPackage::inspect(root.as_ref(), PluginSourceKind::Marketplace)
-            .ok()
-            .map(|package| listing_from_package(&package, true))
-    });
-    page.official = fold_official_listings(std::mem::take(&mut page.official), extra);
-    prepare_marketplace_page(page);
-}
-
-/// Listings parsed from an official index payload. Callers supply the bytes.
-pub fn listings_from_official_index(json: &[u8]) -> Vec<CatalogListing> {
-    let Ok(index) = serde_json::from_slice::<crate::MarketplaceIndex>(json) else {
-        return Vec::new();
-    };
-    index
-        .listings
-        .into_iter()
-        .filter_map(listing_from_index_record)
-        .collect()
-}
-
-fn listing_from_index_record(item: crate::MarketplaceListing) -> Option<CatalogListing> {
-    if is_authoring_sample_plugin_id(&item.plugin_id) {
-        return None;
-    }
-    let qualified = item.plugin_id.trim();
-    if qualified.is_empty() {
-        return None;
-    }
-    let owner = nonempty(&item.publisher).unwrap_or_else(|| "dimo".to_owned());
-    let plugin_name = marketplace_plugin_slug(&owner, qualified);
-    Some(CatalogListing {
-        owner: owner.clone(),
-        plugin_name: plugin_name.clone(),
-        tag: item.version.clone(),
-        version: item.version.clone(),
-        display_name: qualified.to_owned(),
-        summary: item.summary,
-        category: bundled_topic_category(qualified)
-            .or_else(|| bundled_topic_category(&plugin_name))
-            .unwrap_or("other")
-            .to_owned(),
-        source_kind: "official".to_owned(),
-        homepage: nonempty(&item.archive)
-            .or_else(|| Some(marketplace_listing_url(&owner, &plugin_name))),
-        repo: None,
-        package_digest: nonempty(&item.package_digest),
-        download_url: nonempty(&item.archive)
-            .filter(|url| !url.starts_with("builtin://") && !url.starts_with("offline://")),
-        sha256: None,
-        offline_plugin_id: Some(qualified.to_owned()),
-        has_worker: false,
-        has_app: false,
-        has_mcp: false,
-        opens: Vec::new(),
-        readme: None,
-        show_tree: None,
-        icon: item.icon,
-        stars: None,
-    })
-}
-
-pub fn merge_bundled_official_index(page: &mut CatalogPage, json: Option<&[u8]>) {
-    let Some(json) = json.filter(|bytes| !bytes.is_empty()) else {
-        return;
-    };
-    let extra = listings_from_official_index(json);
-    page.official = fold_official_listings(std::mem::take(&mut page.official), extra);
-    prepare_marketplace_page(page);
-}
-
 pub async fn fetch_catalog(query: Option<&str>) -> Result<CatalogPage, PluginError> {
     let origin = marketplace_origin();
     let client = marketplace_client(8)?;
@@ -588,25 +496,6 @@ pub async fn fetch_catalog(query: Option<&str>) -> Result<CatalogPage, PluginErr
     let mut page = page_from_published(published, query);
     crate::merge_host_official_catalog(&mut page);
     Ok(page)
-}
-
-pub async fn fetch_versions(
-    owner: &str,
-    plugin_name: &str,
-) -> Result<Vec<CatalogVersion>, PluginError> {
-    reject_authoring_sample(owner, plugin_name)?;
-    let origin = marketplace_origin();
-    let client = marketplace_client(8)?;
-    let url = format!("{origin}/api/marketplace/v1/listing/{owner}/{plugin_name}/versions");
-    if let Ok(versions) = fetch_json::<Vec<CatalogVersion>>(&client, &url).await {
-        return Ok(versions);
-    }
-    let listing = fetch_listing(owner, plugin_name).await?;
-    Ok(vec![CatalogVersion {
-        tag: listing.tag,
-        version: listing.version,
-        package_digest: listing.package_digest,
-    }])
 }
 
 pub async fn fetch_listing(owner: &str, plugin_name: &str) -> Result<CatalogListing, PluginError> {
@@ -763,31 +652,6 @@ pub fn source_allows_remote_update(kind: PluginSourceKind, origin: Option<&str>)
             | PluginSourceKind::CodexNative
             | PluginSourceKind::ClaudeCodeNative
     ) && origin_kind(origin).is_some()
-}
-
-pub fn origin_owner_name(origin: &str, fallback_id: &str) -> (String, String) {
-    if let Ok(url) = url::Url::parse(origin) {
-        let parts: Vec<_> = url
-            .path_segments()
-            .map(|segments| {
-                segments
-                    .filter(|item| !item.is_empty())
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        if parts.len() >= 2 {
-            let owner = parts[parts.len() - 2].clone();
-            let name = parts[parts.len() - 1].trim_end_matches(".git").to_owned();
-            if owner != "marketplace" {
-                return (owner, name);
-            }
-        }
-    }
-    if let Some((owner, name)) = fallback_id.split_once('.') {
-        return (owner.to_owned(), name.to_owned());
-    }
-    ("dimo".to_owned(), fallback_id.to_owned())
 }
 
 fn utf8_percent_encode(value: &str) -> String {
@@ -1062,16 +926,6 @@ fn absolutize_url(origin: &str, value: &str) -> String {
 }
 
 #[cfg(test)]
-fn newest_catalog_version(mut versions: Vec<CatalogVersion>) -> Option<CatalogVersion> {
-    versions.sort_by(|left, right| {
-        semver::Version::parse(right.version.trim_start_matches('v'))
-            .ok()
-            .cmp(&semver::Version::parse(left.version.trim_start_matches('v')).ok())
-    });
-    versions.into_iter().next()
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1080,28 +934,6 @@ mod tests {
         assert!(is_newer_version("1.0.0", "1.1.0"));
         assert!(!is_newer_version("1.2.0", "1.1.9"));
         assert!(is_newer_version("1.0.0", "v1.0.1"));
-        assert_eq!(
-            newest_catalog_version(vec![
-                CatalogVersion {
-                    tag: "v1.0.0".into(),
-                    version: "1.0.0".into(),
-                    package_digest: None,
-                },
-                CatalogVersion {
-                    tag: "v1.2.0".into(),
-                    version: "1.2.0".into(),
-                    package_digest: None,
-                },
-                CatalogVersion {
-                    tag: "v1.1.0".into(),
-                    version: "1.1.0".into(),
-                    package_digest: None,
-                },
-            ])
-            .unwrap()
-            .version,
-            "1.2.0"
-        );
     }
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

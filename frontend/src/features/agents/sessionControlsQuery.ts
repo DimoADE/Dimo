@@ -70,32 +70,17 @@ export function sessionControlsSchemaQueryKey(
 export async function loadAgentSessionControlsCatalog(
   agentType: string | null | undefined,
   providerInstanceId?: string | null
-): Promise<AgentSessionControlsSnapshot> {
+): Promise<AgentSessionControlsSnapshot | null> {
   const normalized = normalizeAgentType(agentType);
   if (!normalized) {
-    throw new Error('Agent session controls catalog is unavailable');
+    return null;
   }
   const instance = providerInstanceId?.trim();
   const scopedInstance =
     instance && instance.toLowerCase() !== 'local' ? instance : undefined;
-  const cached = scopedInstance
+  return scopedInstance
     ? await agentsApi.capabilityCatalog(normalized, scopedInstance)
     : await agentsApi.capabilityCatalog(normalized);
-  if (cached) return cached;
-
-  const refreshed = scopedInstance
-    ? await agentsApi.refreshCapabilityCatalog(normalized, scopedInstance)
-    : await agentsApi.refreshCapabilityCatalog(normalized);
-  if (!refreshed) {
-    throw new Error('Agent session controls discovery failed');
-  }
-  const discovered = scopedInstance
-    ? await agentsApi.capabilityCatalog(normalized, scopedInstance)
-    : await agentsApi.capabilityCatalog(normalized);
-  if (!discovered) {
-    throw new Error('Agent session controls catalog is unavailable');
-  }
-  return discovered;
 }
 
 /**

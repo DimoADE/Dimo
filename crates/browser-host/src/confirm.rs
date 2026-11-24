@@ -29,8 +29,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde::{Deserialize, Serialize};
-
 /// How long a dialog stands before the host answers "no" on the person's
 /// behalf.
 ///
@@ -42,33 +40,6 @@ pub const EVAL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How long a tab stays un-askable after a refusal.
 pub const EVAL_DECLINE_COOLDOWN: Duration = Duration::from_secs(15);
-
-pub const EVAL_REQUEST_EVENT: &str = "browser://eval-request";
-
-/// `browser://eval-request`: put this in front of the person and tell the host
-/// what they said.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EvalRequestPayload {
-    /// Names this one question. Echoed back by the answer.
-    pub request_id: String,
-    pub tab_id: String,
-    /// Only the window that owns the tab shows the dialog — the others are
-    /// looking at something else, and two copies of one question is two
-    /// chances to answer it differently.
-    pub owner_window: String,
-    /// The origin the grant is bound to, which is where the code will run.
-    pub origin: String,
-    /// The page's own title, for a person who has several tabs of one site.
-    pub title: String,
-    /// The snippet, verbatim and in full. Not summarised, not highlighted, not
-    /// "the interesting part": approving code means approving all of it, and
-    /// the host has already refused anything too long to read
-    /// (`eval::MAX_EVAL_CODE_CHARS`).
-    pub code: String,
-    /// Unix milliseconds at which this lapses into a refusal.
-    pub expires_at: i64,
-}
 
 /// Why a snippet was not put in front of anyone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

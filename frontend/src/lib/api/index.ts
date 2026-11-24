@@ -26,7 +26,7 @@ export { tasksApi } from './tasks';
 export { sessionsApi } from './sessions';
 
 // Artifacts
-export { artifactApi, createArtifactApi } from './artifacts';
+export { createArtifactApi } from './artifacts';
 export type { ArtifactPreviewLease, ArtifactRecordView } from './artifacts';
 
 // Attempts / Workspaces
@@ -35,12 +35,10 @@ export { attemptsApi } from './attempts';
 // Repos
 export { repoApi } from './repos';
 
-// Config, Settings, MCP, Profiles, Settings Window
+// Config, Settings, MCP, Settings Window
 export {
   configApi,
-  claudeSettingsApi,
   mcpMarketApi,
-  profilesApi,
   versionControlApi,
   worktreeSettingsApi,
   frontendPreferencesApi,
@@ -58,7 +56,6 @@ export {
 } from './settingsWindow';
 export { appWindowApi, openLocalAppWindow } from './appWindow';
 export type {
-  ClaudeSettings,
   PromptEnhancementModelsResponse,
   AppReleaseStatus,
   VersionControlCliSettings,
@@ -119,7 +116,7 @@ export type {
   UserSystemInfo,
 } from './config';
 
-// Misc: Execution Processes, File Tree, Desktop, File System, Tags, Images, Approvals, Scratch, Search, Skills
+// Misc: Execution Processes, File Tree, Desktop, File System, Tags, Images, Scratch, Search, Skills
 export {
   executionProcessesApi,
   fileTreeApi,
@@ -128,10 +125,8 @@ export {
   tagsApi,
   instructionsApi,
   imagesApi,
-  approvalsApi,
   scratchApi,
   searchApi,
-  skillsApi,
   skillsMarketApi,
 } from './misc';
 export type {
@@ -153,7 +148,6 @@ export type {
   AgentSkillItem,
   AgentSkillLocation,
   AgentSkillsListResult,
-  AgentSkillContent,
   LocalSkill,
   SkillMarketView,
   SkillMarketItem,

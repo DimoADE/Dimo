@@ -161,19 +161,19 @@ describe("clean-room App + Agent build", () => {
       integrations: Array<Record<string, unknown>>;
     };
     manifest.integrations.push({
-      id: "workflow-control",
+      id: "custom-tool",
       kind: "content.mcp",
-      resource: "contents/mcps/workflow-control.json",
+      resource: "contents/mcps/custom-tool.json",
     });
     await writeFile(manifestPath, JSON.stringify(manifest, null, 2));
     await mkdir(join(root, "contents/mcps"), { recursive: true });
     await mkdir(join(root, "runtime"), { recursive: true });
     await writeFile(
-      join(root, "contents/mcps/workflow-control.json"),
+      join(root, "contents/mcps/custom-tool.json"),
       JSON.stringify({
         managedRuntime: {
           source: "runtime/mcp.mjs",
-          entrypoint: "dist/mcp/workflow-control.mjs",
+          entrypoint: "dist/mcp/custom-tool.mjs",
           protocolRevision: "2026-07-28",
           defaultBinding: "all-compatible-agents",
         },
@@ -187,7 +187,7 @@ describe("clean-room App + Agent build", () => {
     await buildPlugin(root);
 
     const bundled = await readFile(
-      join(root, "dist/mcp/workflow-control.mjs"),
+      join(root, "dist/mcp/custom-tool.mjs"),
       "utf8",
     );
     expect(bundled).toContain("ready");

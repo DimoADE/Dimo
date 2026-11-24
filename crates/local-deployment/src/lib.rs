@@ -1,15 +1,10 @@
-use std::{
-    collections::{HashMap, hash_map::DefaultHasher},
-    hash::{Hash, Hasher},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use db::DBService;
 use deployment::{Deployment, DeploymentError};
 use git::GitService;
 use services::services::{
-    approvals::Approvals,
     config::{Config, load_config_from_file, publish_config_runtime, save_config_to_file},
     container::ContainerService,
     events::EventService,
@@ -34,7 +29,6 @@ pub mod pty;
 #[derive(Clone)]
 pub struct LocalDeployment {
     config: Arc<RwLock<Config>>,
-    user_id: String,
     db: DBService,
     container: LocalContainerService,
     git: GitService,
@@ -44,7 +38,6 @@ pub struct LocalDeployment {
     filesystem: FilesystemService,
     events: EventService,
     file_search: FileSearchService,
-    approvals: Approvals,
     pty: PtyService,
 }
 
@@ -112,7 +105,6 @@ impl LocalDeployment {
         WorktreeManager::set_workspace_dir_override(workspace_dir_override);
 
         let config = Arc::new(RwLock::new(raw_config));
-        let user_id = generate_user_id();
         let git = GitService::new();
         let project = ProjectService::new();
         let repo = RepoService::new();
@@ -149,7 +141,6 @@ impl LocalDeployment {
             });
         }
 
-        let approvals = Approvals::new(msg_stores.clone());
         let pty = PtyService::new();
         let container = LocalContainerService::new(
             db.clone(),
@@ -174,7 +165,6 @@ impl LocalDeployment {
 
         let deployment = Self {
             config,
-            user_id,
             db,
             container,
             git,
@@ -184,7 +174,6 @@ impl LocalDeployment {
             filesystem,
             events,
             file_search,
-            approvals,
             pty,
         };
 
@@ -194,10 +183,6 @@ impl LocalDeployment {
 
 #[async_trait]
 impl Deployment for LocalDeployment {
-    fn user_id(&self) -> &str {
-        &self.user_id
-    }
-
     fn config(&self) -> &Arc<RwLock<Config>> {
         &self.config
     }
@@ -237,68 +222,10 @@ impl Deployment for LocalDeployment {
     fn file_search(&self) -> &FileSearchService {
         &self.file_search
     }
-
-    fn approvals(&self) -> &Approvals {
-        &self.approvals
-    }
 }
 
 impl LocalDeployment {
     pub fn pty(&self) -> &PtyService {
         &self.pty
     }
-}
-
-/// Generates a consistent, anonymous user ID based on machine identity.
-fn generate_user_id() -> String {
-    static USER_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    if let Some(cached) = USER_ID.get() {
-        return cached.clone();
-    }
-    let id = generate_user_id_uncached();
-    let _ = USER_ID.set(id.clone());
-    id
-}
-
-fn generate_user_id_uncached() -> String {
-    let mut hasher = DefaultHasher::new();
-
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(output) = std::process::Command::new("ioreg")
-            .args(["-rd1", "-c", "IOPlatformExpertDevice"])
-            .output()
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if let Some(line) = stdout.lines().find(|l| l.contains("IOPlatformUUID")) {
-                line.hash(&mut hasher);
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(machine_id) = std::fs::read_to_string("/etc/machine-id") {
-            machine_id.trim().hash(&mut hasher);
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(guid) = utils::windows_machine_guid() {
-            // Preserve the historical PowerShell stdout format (`{guid}\r\n`) so
-            // existing Windows installations keep their exact `user_id` hash.
-            format!("{guid}\r\n").into_bytes().hash(&mut hasher);
-        }
-    }
-
-    if let Ok(user) = std::env::var("USER").or_else(|_| std::env::var("USERNAME")) {
-        user.hash(&mut hasher);
-    }
-
-    if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
-        home.hash(&mut hasher);
-    }
-
-    format!("user_{:016x}", hasher.finish())
 }

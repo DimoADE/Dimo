@@ -67,7 +67,7 @@
     {
       "kind": "app.status",
       "consumer": "frontend/src/components/plugins/PluginStatusItems.tsx",
-      "example_plugin": "dimo.open-connector",
+      "example_plugin": "dimo.code-completion",
       "status": "ready",
       "notes": "Also loaded by frontend/src/features/plugins/PluginRuntimeLoader.ts."
     },
@@ -95,7 +95,7 @@
     {
       "kind": "host.service",
       "consumer": "crates/plugins/src/package.rs",
-      "example_plugin": "dimo.open-connector",
+      "example_plugin": "none",
       "status": "ready",
       "notes": "One Worker process serves every host.service handler of a plugin."
     },
@@ -123,7 +123,7 @@
     {
       "kind": "app.tab",
       "consumer": "frontend/src/components/layout/Toolbar.tsx",
-      "example_plugin": "dimo.open-connector",
+      "example_plugin": "none",
       "status": "ready",
       "notes": ""
     },

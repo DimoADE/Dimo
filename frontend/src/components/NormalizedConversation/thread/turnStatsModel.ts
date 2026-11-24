@@ -1,7 +1,4 @@
-import type {
-  DisplayEntry,
-  PatchTypeWithKey,
-} from '@/hooks/conversationEntries';
+import type { PatchTypeWithKey } from '@/hooks/conversationEntries';
 import { tokenUsageInfoToSnapshot } from '@/hooks/conversationTokenUsage';
 
 export function asFiniteNumber(value: unknown): number | null {
@@ -159,20 +156,4 @@ export function buildTurnStatsByAssistantKey(
   }
 
   return statsByKey;
-}
-
-export function findLatestAssistantDisplayKey(
-  displayEntries: DisplayEntry[]
-): string | null {
-  for (let index = displayEntries.length - 1; index >= 0; index -= 1) {
-    const entry = displayEntries[index];
-    if (
-      entry?.type === 'NORMALIZED_ENTRY' &&
-      entry.content.entry_type.type === 'assistant_message'
-    ) {
-      return entry.patchKey;
-    }
-  }
-
-  return null;
 }

@@ -397,4 +397,32 @@ describe('conversationApi', () => {
       }
     );
   });
+
+  it('forwards truncateToTurn requests with optional restoreFiles flag', async () => {
+    call.mockResolvedValue(undefined);
+
+    await conversationApi.truncateToTurn({
+      conversationId: 'conversation-1',
+      ordinal: 2,
+    });
+    expect(call).toHaveBeenLastCalledWith('conversation_truncate_to_turn', {
+      request: {
+        conversationId: 'conversation-1',
+        ordinal: 2,
+      },
+    });
+
+    await conversationApi.truncateToTurn({
+      conversationId: 'conversation-1',
+      ordinal: 2,
+      restoreFiles: true,
+    });
+    expect(call).toHaveBeenLastCalledWith('conversation_truncate_to_turn', {
+      request: {
+        conversationId: 'conversation-1',
+        ordinal: 2,
+        restoreFiles: true,
+      },
+    });
+  });
 });

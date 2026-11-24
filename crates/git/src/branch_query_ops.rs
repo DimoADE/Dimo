@@ -5,7 +5,7 @@ use std::{
 
 use git2::{BranchType, Reference, Repository, Sort};
 
-use crate::{Commit, CommitGraph, CommitGraphNode, GitCli, GitService, GitServiceError, HeadInfo};
+use crate::{Commit, CommitGraph, CommitGraphNode, GitService, GitServiceError, HeadInfo};
 
 impl GitService {
     pub(crate) fn get_branch_status_inner(
@@ -306,45 +306,6 @@ impl GitService {
         let branch = Self::find_branch(&repo, branch_name)?;
         let oid = branch.get().peel_to_commit()?.id().to_string();
         Ok(oid)
-    }
-
-    pub fn get_fork_point(
-        &self,
-        worktree_path: &Path,
-        target_branch: &str,
-        task_branch: &str,
-    ) -> Result<String, GitServiceError> {
-        let git = GitCli::new();
-        Ok(git.merge_base(worktree_path, target_branch, task_branch)?)
-    }
-
-    /// Get the subject/summary line for a given commit OID.
-    pub fn get_commit_subject(
-        &self,
-        repo_path: &Path,
-        commit_sha: &str,
-    ) -> Result<String, GitServiceError> {
-        let repo = self.open_repo(repo_path)?;
-        let oid = git2::Oid::from_str(commit_sha)
-            .map_err(|_| GitServiceError::InvalidRepository("Invalid commit SHA".into()))?;
-        let commit = repo.find_commit(oid)?;
-        Ok(commit.summary().unwrap_or("(no subject)").to_string())
-    }
-
-    /// Compare two OIDs and return (ahead, behind) counts.
-    pub fn ahead_behind_commits_by_oid(
-        &self,
-        repo_path: &Path,
-        from_oid: &str,
-        to_oid: &str,
-    ) -> Result<(usize, usize), GitServiceError> {
-        let repo = self.open_repo(repo_path)?;
-        let from = git2::Oid::from_str(from_oid)
-            .map_err(|_| GitServiceError::InvalidRepository("Invalid from OID".into()))?;
-        let to = git2::Oid::from_str(to_oid)
-            .map_err(|_| GitServiceError::InvalidRepository("Invalid to OID".into()))?;
-        let (ahead, behind) = repo.graph_ahead_behind(from, to)?;
-        Ok((ahead, behind))
     }
 
     pub fn find_branch<'a>(

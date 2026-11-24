@@ -79,24 +79,6 @@ export function getCreatedSessionProfileMemoryUpdate({
   return { sessionId, profile: profile as ExecutorProfileId };
 }
 
-export function getSessionRenameInvalidation({
-  targetSessionId,
-  workspaceId,
-}: {
-  targetSessionId: string;
-  workspaceId: string | null | undefined;
-}): {
-  workspaceSessionsQueryKey: [string, string] | null;
-  sessionQueryKey: [string, string];
-} {
-  return {
-    workspaceSessionsQueryKey: workspaceId
-      ? ['workspaceSessions', workspaceId]
-      : null,
-    sessionQueryKey: ['session', targetSessionId],
-  };
-}
-
 export function truncateComposerSessionLabel(
   label: string,
   maxUnits = 8

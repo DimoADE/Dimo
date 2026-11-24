@@ -304,12 +304,6 @@ export const OFFICIAL_PLUGIN_COMPONENTS: Partial<
       title: 'Workflow Creator',
       content: 'Workflow Creator',
     },
-    {
-      path: 'contents/mcps/workflow-control.json',
-      kind: 'mcp',
-      title: 'Workflow control MCP',
-      content: 'Workflow control MCP',
-    },
   ],
   sessionEnhance: [
     {

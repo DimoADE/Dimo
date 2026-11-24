@@ -8,13 +8,12 @@ See [`ADR-0054`](../adr/0054-host-family-distribution-and-client-surfaces.md), [
 
 ## 1. Host Family Distribution & Quick Start
 
-The Server distribution ships a unified Host-family directory containing `dimo-server`, sibling `dimo-mcp` and `dimo-workflow-mcp`, production `web/` (`frontend/dist`), and `dimo-plugin.json`. Assemble locally with:
+The Server distribution ships a unified Host-family directory containing `dimo-server`, sibling `dimo-mcp`, production `web/` (`frontend/dist`), and `dimo-plugin.json`. Assemble locally with:
 
 ```bash
 node scripts/package-host-family.js \
   --server target/release/dimo-server \
   --mcp target/release/dimo-mcp \
-  --workflow-mcp target/release/dimo-workflow-mcp \
   --web frontend/dist \
   --plugins plugins \
   --output dist/host-family
@@ -81,7 +80,7 @@ Builds production `frontend/dist` and release `dimo-server`, boots against an is
 
 1. **Quiesce**: Stop every Desktop (`dimo`) and `dimo-server` process using `DIMO_DATA_DIR`.
 2. **Consistent Backup**: Snapshot `db.sqlite`, `db.sqlite-wal`, `db.sqlite-shm`, `host.token`, managed tool locks, and Artifact files together before replacing binaries.
-3. **Replace & Verify**: For automated upgrades, `server::apply_host_upgrade` verifies `SHA256SUMS`, snapshots the data directory, and swaps `dimo-server`, `dimo-mcp`, `dimo-workflow-mcp`, and `web/`.
+3. **Replace & Verify**: For automated upgrades, `server::apply_host_upgrade` verifies `SHA256SUMS`, snapshots the data directory, and swaps `dimo-server`, `dimo-mcp`, and `web/`.
 4. **Post-Start Check**: Boot a single Host, check `/health` and authenticated `/api/v1/capabilities`, and verify Automation startup reconciliation before connecting remote clients.
 5. **Rollback**: Stop the upgraded binary, restore the pre-upgrade data-directory snapshot alongside the previous Host-family release archive, and restart. Never run an older binary against a post-migration SQLite file without restoring the matching snapshot.
 

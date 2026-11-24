@@ -154,6 +154,19 @@ test("plugin parseArgs accepts Host bind flags", () => {
   const equals = parseArgs(["--host=http://127.0.0.1:9", "--token=abc"]);
   assert.equal(equals.flags.host, "http://127.0.0.1:9");
   assert.equal(equals.flags.token, "abc");
+  const separateHost = parseArgs(["--host", "https://host.example:17891", "--token", "xyz"]);
+  assert.equal(separateHost.flags.host, "https://host.example:17891");
+  assert.equal(separateHost.flags.token, "xyz");
+  assert.deepEqual(separateHost.positional, []);
+  const separateHttp = parseArgs(["--http", "http://127.0.0.1:17891"]);
+  assert.equal(separateHttp.flags.host, "http://127.0.0.1:17891");
+  assert.throws(() => parseArgs(["--http"]), /--http requires a value/);
+  const hostJourney = parseArgs(["--host", "./my-plugin"]);
+  assert.equal(hostJourney.flags.host, true);
+  assert.deepEqual(hostJourney.positional, ["./my-plugin"]);
+  const hostFlagOnly = parseArgs(["--host"]);
+  assert.equal(hostFlagOnly.flags.host, true);
+  assert.deepEqual(hostFlagOnly.positional, []);
 });
 
 test("plugin add parses --web, --profile, and --dev", () => {

@@ -25,7 +25,6 @@ test('path display helper strips Windows verbatim prefixes before rendering proj
   const scriptDialogSource = readFrontendFile(
     'src/components/dialogs/scripts/ScriptFixerDialog.tsx'
   );
-  const truncatePathSource = readFrontendFile('src/utils/TruncatePath.tsx');
 
   assert.match(helperSource, /export function stripWindowsExtendedPathPrefix/);
   assert.ok(helperSource.includes(".replace(/^\\\\\\\\\\?\\\\UNC\\\\/i, '\\\\\\\\')"));
@@ -33,7 +32,6 @@ test('path display helper strips Windows verbatim prefixes before rendering proj
   assert.match(projectDialogSource, /normalizeDisplayPath\(repo\.path\)/);
   assert.match(projectDialogSource, /const normalizedSelected = normalizeDisplayPath\(selected\);/);
   assert.match(scriptDialogSource, /normalizeDisplayPath\(repo\.path\)/);
-  assert.match(truncatePathSource, /const normalizedPath = normalizeDisplayPath\(path\);/);
 });
 
 test('workspace session hook preserves explicit new-session mode even when a workspace has no existing sessions yet', () => {

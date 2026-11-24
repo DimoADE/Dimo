@@ -25,14 +25,6 @@ export function workflowProgress(steps: WorkflowStepView[]) {
   };
 }
 
-export async function loadAllWorkflowEvents(
-  api: ReturnType<typeof createWorkflowApi>,
-  runId: string,
-  pageSize = 500
-): Promise<WorkflowEventRecord[]> {
-  return loadWorkflowEventsAfter(api, runId, 0n, pageSize);
-}
-
 export async function loadWorkflowEventsAfter(
   api: ReturnType<typeof createWorkflowApi>,
   runId: string,

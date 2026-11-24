@@ -294,22 +294,6 @@ impl Task {
         Ok(())
     }
 
-    /// Update the parent_workspace_id field for a task
-    pub async fn update_parent_workspace_id(
-        pool: &SqlitePool,
-        task_id: Uuid,
-        parent_workspace_id: Option<Uuid>,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query!(
-            "UPDATE tasks SET parent_workspace_id = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1",
-            task_id,
-            parent_workspace_id
-        )
-        .execute(pool)
-        .await?;
-        Ok(())
-    }
-
     /// Nullify parent_workspace_id for all tasks that reference the given workspace ID
     /// This breaks parent-child relationships before deleting a parent task
     pub async fn nullify_children_by_workspace_id<'e, E>(

@@ -269,11 +269,6 @@ impl InactivitySlaTracker {
         self.deadlines.len()
     }
 
-    pub fn get_deadline(&self, rule_id: &str, thread_key: &str) -> Option<&ArmedSlaDeadline> {
-        self.deadlines
-            .get(&(rule_id.to_string(), thread_key.to_string()))
-    }
-
     /// Disarms and removes all tracked SLA deadlines belonging to `rule_id`.
     pub fn disarm_rule(&mut self, rule_id: &str) {
         self.deadlines.retain(|(r, _), _| r != rule_id);

@@ -1,4 +1,3 @@
-import type { ReactNode } from 'react';
 import {
   ActionType,
   ToolStatus,
@@ -18,7 +17,6 @@ import {
   Search,
   Settings,
   Terminal,
-  TerminalSquare,
   User,
 } from 'lucide-react';
 import { createElement } from 'react';
@@ -97,44 +95,6 @@ export const AGGREGATABLE_ACTIONS = new Set([
   'command_run',
   'task_create',
 ]);
-
-export const AGGREGATION_LABELS: Record<
-  AggregationType,
-  { icon: ReactNode; label: string }
-> = {
-  file_read: {
-    icon: createElement(Eye, { className: 'h-3 w-3' }),
-    // Getter so i18n.t resolves at access time (reflects the current language),
-    // not at module load — the const shape stays a plain `{ icon, label }`.
-    get label() {
-      return i18n.t('app:entryUtils.fileRead');
-    },
-  },
-  search: {
-    icon: createElement(Search, { className: 'h-3 w-3' }),
-    get label() {
-      return i18n.t('app:entryUtils.search');
-    },
-  },
-  web_fetch: {
-    icon: createElement(Globe, { className: 'h-3 w-3' }),
-    get label() {
-      return i18n.t('app:entryUtils.webFetch');
-    },
-  },
-  command_run: {
-    icon: createElement(TerminalSquare, { className: 'h-3 w-3' }),
-    get label() {
-      return i18n.t('app:entryUtils.terminal');
-    },
-  },
-  task_create: {
-    icon: createElement(Bot, { className: 'h-3 w-3' }),
-    get label() {
-      return i18n.t('app:entryUtils.generatingAgent');
-    },
-  },
-};
 
 /***********************
  * Helper functions     *
@@ -1398,20 +1358,4 @@ export function buildDisplayEntries(
   return collapseAiMessagesByDefault
     ? collapseAssistantPreludeEntries(displayEntries)
     : displayEntries;
-}
-
-export function getAggregatedEntryDetail(data: PatchTypeWithKey): string {
-  if (data.type !== 'NORMALIZED_ENTRY') return '';
-  const entry = data.content;
-  if (entry.entry_type.type !== 'tool_use') return '';
-  const at = entry.entry_type.action_type;
-  if (at.action === 'file_read') return at.path;
-  if (at.action === 'search') return at.query;
-  if (at.action === 'web_fetch') return at.url;
-  if (at.action === 'command_run') {
-    const firstLine = at.command.split(/\r?\n/)[0]?.trim() ?? '';
-    return firstLine;
-  }
-  if (at.action === 'task_create') return at.description;
-  return '';
 }

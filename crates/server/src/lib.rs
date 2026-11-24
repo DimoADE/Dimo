@@ -2,7 +2,6 @@
 
 mod account_link;
 mod agent_install;
-mod artifact_sink;
 mod auth;
 mod automation_runtime;
 mod chat_inbound;
@@ -42,7 +41,6 @@ pub use agent_install::{
     AgentCatalogEntry, AgentCatalogGroup, install_agent_unattended, install_resolved_plan,
     plan_host_agent_install, plan_host_agent_install_with_overlay, run_agents_command,
 };
-pub use artifact_sink::ServerArtifactEventSink;
 pub use auth::{
     AuthClock, AuthStoreError, AuthenticatedCredential, CredentialKind, PairedDeviceRecord,
     ServerAuth, ServerCredentials, ServerToken, ServerTokenError, SqliteServerAuth,

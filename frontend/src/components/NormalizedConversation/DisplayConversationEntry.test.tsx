@@ -31,12 +31,6 @@ vi.mock('./UserMessage', () => ({
   default: ({ content }: { content: string }) => <div>{content}</div>,
 }));
 
-vi.mock('./PendingApprovalEntry', () => ({
-  default: ({ children }: { children: React.ReactNode }) => (
-    <div>{children}</div>
-  ),
-}));
-
 vi.mock('./ThinkingEntry', () => ({
   ThinkingEntry: ({ content }: { content: string }) => <div>{content}</div>,
 }));
@@ -60,7 +54,6 @@ vi.mock('./MessageCard', () => ({
       <div>{output}</div>
     </div>
   ),
-  CollapsibleEntry: ({ content }: { content: string }) => <div>{content}</div>,
   CompactNoticeEntry: ({ content }: { content: string }) => (
     <div>{content}</div>
   ),

@@ -1744,7 +1744,7 @@ export const CORE_FOUNDATION_PLUGIN_DESCRIPTORS: readonly CoreFoundationPluginDe
         },
         {
           id: 'sidebar-rail-host',
-          moduleName: 'RightPanelSidebar',
+          moduleName: 'WorkspaceActivityRail',
           kind: 'ui-surface',
           titleZh: '导航栏与右侧工具栏宿主',
           titleEn: 'Navigation Rail & Right Sidebar Host',

@@ -2,10 +2,9 @@ const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const HOST_SIDECAR_PACKAGES = ['dimo-mcp', 'dimo-workflow-mcp'];
+const HOST_SIDECAR_PACKAGES = ['dimo-mcp'];
 const HOST_SIDECAR_WATCH_DIRS = [
   'crates/dimo-mcp',
-  'crates/dimo-workflow-mcp',
   'crates/delegation-proto',
 ];
 
@@ -25,13 +24,6 @@ function applySidecarDevEnv(env = {}, { repo, platform = process.platform } = {}
   const next = { ...env };
   if (!next.DIMO_MCP_BIN) {
     next.DIMO_MCP_BIN = sidecarDebugBinary('dimo-mcp', {
-      repo,
-      env: next,
-      platform,
-    });
-  }
-  if (!next.DIMO_WORKFLOW_MCP_BIN) {
-    next.DIMO_WORKFLOW_MCP_BIN = sidecarDebugBinary('dimo-workflow-mcp', {
       repo,
       env: next,
       platform,
@@ -150,7 +142,7 @@ function rebuildHostSidecars({
   console.log('Rebuilding official product MCP sidecars...');
   const result = spawnSyncFn(
     cargo,
-    ['build', '-p', 'dimo-mcp', '-p', 'dimo-workflow-mcp'],
+    ['build', '-p', 'dimo-mcp'],
     {
       cwd: repo,
       env: cargoEnv,
@@ -160,7 +152,7 @@ function rebuildHostSidecars({
   );
   if (result.status !== 0) {
     console.warn(
-      'Warning: cargo build -p dimo-mcp -p dimo-workflow-mcp returned non-zero status.'
+      'Warning: cargo build -p dimo-mcp returned non-zero status.'
     );
     return false;
   }

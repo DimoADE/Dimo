@@ -433,10 +433,6 @@ function ruleActionLabel(action: HostRuleAction): string {
 // Direct Host RPC Helper & Live HostBrowserPanel DOM Synchronizer
 // ============================================================================
 
-type TauriInternals = {
-  invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
-};
-
 type ElectronBackendBridge = {
   baseUrl?: string;
   token?: string;
@@ -453,17 +449,6 @@ function setActiveBrowserWorkerInvoke(invoke?: PluginWorkerInvoke | null): void 
   if (typeof invoke === 'function') {
     activeBrowserWorkerInvoke = invoke;
   }
-}
-
-function getTauriInvoke():
-  | ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>)
-  | null {
-  const internals = (
-    globalThis as unknown as { __TAURI_INTERNALS__?: TauriInternals }
-  ).__TAURI_INTERNALS__;
-  return typeof internals?.invoke === 'function'
-    ? internals.invoke.bind(internals)
-    : null;
 }
 
 function getElectronBackend(): { baseUrl: string; token: string } | null {
@@ -491,58 +476,38 @@ async function invokeBrowserContributionDirect<T = unknown>(
   }
 
   const electronBackend = getElectronBackend();
-  if (electronBackend) {
-    const res = await fetch(
-      `${electronBackend.baseUrl}/api/v1/call/plugin_invoke_contribution`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${electronBackend.token}`,
-        },
-        body: JSON.stringify({
-          operation_id: globalThis.crypto.randomUUID(),
-          args: {
-            pluginId,
-            handler: 'browser.dispatch',
-            input: {
-              operation,
-              input,
-            },
-          },
-        }),
-      }
-    );
-    if (!res.ok) {
-      throw new Error(`Host browser invoke failed (${res.status})`);
-    }
-    const envelope = (await res.json()) as { data?: T } | T;
-    if (envelope && typeof envelope === 'object' && 'data' in envelope) {
-      return (envelope as { data: T }).data;
-    }
-    return envelope as T;
-  }
-
-  const tauriInvoke = getTauriInvoke();
-  if (!tauriInvoke) {
+  if (!electronBackend) {
     throw new Error('Host invoke bridge is unavailable');
   }
-  const response = (await tauriInvoke('application_call', {
-    command: 'plugin_invoke_contribution',
-    operationId: globalThis.crypto.randomUUID(),
-    args: {
-      pluginId,
-      handler: 'browser.dispatch',
-      input: {
-        operation,
-        input,
+  const res = await fetch(
+    `${electronBackend.baseUrl}/api/v1/call/plugin_invoke_contribution`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${electronBackend.token}`,
       },
-    },
-  })) as { data?: T } | T;
-  if (response && typeof response === 'object' && 'data' in response) {
-    return (response as { data: T }).data;
+      body: JSON.stringify({
+        operation_id: globalThis.crypto.randomUUID(),
+        args: {
+          pluginId,
+          handler: 'browser.dispatch',
+          input: {
+            operation,
+            input,
+          },
+        },
+      }),
+    }
+  );
+  if (!res.ok) {
+    throw new Error(`Host browser invoke failed (${res.status})`);
   }
-  return response as T;
+  const envelope = (await res.json()) as { data?: T } | T;
+  if (envelope && typeof envelope === 'object' && 'data' in envelope) {
+    return (envelope as { data: T }).data;
+  }
+  return envelope as T;
 }
 
 interface ReactFiberNode {
@@ -1899,21 +1864,15 @@ export default function BrowserSettingsRemoteView({
         unknown
       >;
       const run = async (): Promise<T> => {
-        if (getTauriInvoke()) {
-          try {
+        const invoke = environment?.invoke;
+        if (!invoke) {
+          if (getElectronBackend()) {
             return await invokeBrowserContributionDirect<T>(
               pluginId,
               operation,
               payload
             );
-          } catch (tauriErr) {
-            if (!environment?.invoke) {
-              throw tauriErr;
-            }
           }
-        }
-        const invoke = environment?.invoke;
-        if (!invoke) {
           throw new Error('插件桥接尚未就绪');
         }
         const res = await invoke('surface.createSession', {
@@ -1958,7 +1917,7 @@ export default function BrowserSettingsRemoteView({
   }, [statusMessage]);
 
   const refreshUserDataSummaries = useCallback(async () => {
-    if (!environment?.invoke && !getTauriInvoke()) return;
+    if (!environment?.invoke && !getElectronBackend()) return;
     try {
       const res = await dispatch<{
         summaries?: Record<string, ProfileUserDataSummary>;
@@ -1973,7 +1932,7 @@ export default function BrowserSettingsRemoteView({
 
   const refreshAll = useCallback(
     async (updateSettingsState = true) => {
-      if (!environment?.invoke && !getTauriInvoke()) {
+      if (!environment?.invoke && !getElectronBackend()) {
         setLoading(false);
         return;
       }

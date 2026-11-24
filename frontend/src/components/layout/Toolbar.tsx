@@ -28,10 +28,6 @@ import {
   PanelRight,
   PanelsTopLeft,
   RotateCcw,
-  GitBranch,
-  ArrowDown,
-  ArrowUp,
-  AlertTriangle,
   Infinity as InfinityIcon,
   LayoutDashboard,
   LayoutGrid,
@@ -89,7 +85,6 @@ import {
   useKanbanCanvasListVisible,
 } from '@/lib/kanbanCanvasListVisible';
 import { useRepoBranches } from '@/hooks/useRepoBranches';
-import { useWorkspaceBranchStatus } from '@/hooks/useWorkspaceBranchStatus';
 import {
   resolveDefaultProjectWorkspace,
   shouldBindDefaultGitWorkspace,
@@ -457,77 +452,6 @@ export function WorkspaceLayoutToggles() {
         <TooltipContent side="bottom">{autoArrangeLabel}</TooltipContent>
       </Tooltip>
     </div>
-  );
-}
-
-export function BranchStatusBadge({ workspaceId }: { workspaceId: string }) {
-  const { data: branchStatus } = useWorkspaceBranchStatus(workspaceId);
-
-  const statusSummary = useMemo(() => {
-    if (!branchStatus?.length) return null;
-    let totalAhead = 0;
-    let totalBehind = 0;
-    let hasConflicts = false;
-    let targetBranch = '';
-
-    for (const repo of branchStatus) {
-      totalAhead += repo.commits_ahead ?? 0;
-      totalBehind += repo.commits_behind ?? 0;
-      if (
-        repo.is_rebase_in_progress ||
-        (repo.conflicted_files?.length ?? 0) > 0
-      ) {
-        hasConflicts = true;
-      }
-      if (!targetBranch && repo.target_branch_name) {
-        targetBranch = repo.target_branch_name;
-      }
-    }
-
-    return { totalAhead, totalBehind, hasConflicts, targetBranch };
-  }, [branchStatus]);
-
-  if (!statusSummary) return null;
-
-  const { totalAhead, totalBehind, hasConflicts, targetBranch } = statusSummary;
-
-  const tooltipParts: string[] = [];
-  if (targetBranch) tooltipParts.push(`Target: ${targetBranch}`);
-  if (totalAhead > 0) tooltipParts.push(`${totalAhead} ahead`);
-  if (totalBehind > 0) tooltipParts.push(`${totalBehind} behind`);
-  if (hasConflicts) tooltipParts.push('Conflicts detected');
-  const tooltipText = tooltipParts.join(' | ') || 'Branch status';
-
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <div className="workspace-branch-status-badge raised-control flex h-7 items-center gap-1 rounded-lg px-2 text-xs">
-          <GitBranch className="h-3 w-3" />
-          {targetBranch && (
-            <span className="max-w-24 truncate">{targetBranch}</span>
-          )}
-          {hasConflicts ? (
-            <AlertTriangle className="h-3 w-3 text-destructive" />
-          ) : (
-            <>
-              {totalAhead > 0 && (
-                <span className="workspace-branch-ahead flex items-center gap-0.5">
-                  <ArrowUp className="h-2.5 w-2.5" />
-                  {totalAhead}
-                </span>
-              )}
-              {totalBehind > 0 && (
-                <span className="workspace-branch-behind flex items-center gap-0.5">
-                  <ArrowDown className="h-2.5 w-2.5" />
-                  {totalBehind}
-                </span>
-              )}
-            </>
-          )}
-        </div>
-      </TooltipTrigger>
-      <TooltipContent side="bottom">{tooltipText}</TooltipContent>
-    </Tooltip>
   );
 }
 

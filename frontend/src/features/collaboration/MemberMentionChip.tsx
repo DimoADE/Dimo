@@ -221,30 +221,3 @@ export function protectMemberMentions(
     .join('\n');
   return { text, mentions };
 }
-
-export function renderTextWithMemberMentions(
-  text: string,
-  ctx: CollaborationMemberMentionContextValue,
-  keyPrefix = 'mention'
-): React.ReactNode {
-  const segments = splitTextByMemberMentions(text, ctx.knownNicknames);
-  if (segments.length === 1 && segments[0]?.type === 'text') {
-    return text;
-  }
-  return segments.map((segment, index) => {
-    if (segment.type === 'text') {
-      return (
-        <React.Fragment key={`${keyPrefix}-t-${index}`}>
-          {segment.value}
-        </React.Fragment>
-      );
-    }
-    return (
-      <MemberMentionChip
-        key={`${keyPrefix}-m-${index}-${segment.nickname}`}
-        nickname={segment.nickname}
-        avatar={ctx.resolveMemberAvatar(segment.nickname)}
-      />
-    );
-  });
-}

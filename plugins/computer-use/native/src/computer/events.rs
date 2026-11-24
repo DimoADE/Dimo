@@ -49,10 +49,6 @@ struct StatePayload<'a> {
 /// Where computer use tells what changed.
 #[derive(Clone)]
 pub enum ComputerEvents {
-    /// The desktop app's own webviews — never the clients of its web
-    /// service (see the module note).
-    #[cfg(feature = "tauri-runtime")]
-    Desktop(tauri::AppHandle),
     /// dimo-server's web clients: the only panel there is in server mode.
     Web(Arc<WebEventBroadcaster>),
 }
@@ -60,11 +56,6 @@ pub enum ComputerEvents {
 impl ComputerEvents {
     fn send<T: Serialize>(&self, channel: &str, payload: &T) {
         match self {
-            #[cfg(feature = "tauri-runtime")]
-            Self::Desktop(app) => {
-                use tauri::Emitter;
-                let _ = app.emit(channel, payload);
-            }
             Self::Web(broadcaster) => {
                 let _ = broadcaster.send(channel, payload);
             }

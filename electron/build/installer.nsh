@@ -10,7 +10,7 @@ Var pid
   ; `dimo serve` daemons running elsewhere on the machine.
   ${if} "$INSTDIR" != ""
     System::Call 'Kernel32::SetEnvironmentVariable(t "DIMO_NSIS_INSTDIR", t "$INSTDIR")'
-    nsExec::ExecToLog `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$root = $$env:DIMO_NSIS_INSTDIR; if ($$root) { $$prefix = $$root.TrimEnd('\') + '\'; $$targets = @('dimo-server.exe', 'dimo-mcp.exe', 'dimo-workflow-mcp.exe'); Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue | Where-Object { $$_.Name -and ($$targets -contains $$_.Name.ToLowerInvariant()) -and $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$prefix, [System.StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue } }"`
+    nsExec::ExecToLog `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$root = $$env:DIMO_NSIS_INSTDIR; if ($$root) { $$prefix = $$root.TrimEnd('\') + '\'; $$targets = @('dimo-server.exe', 'dimo-mcp.exe'); Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue | Where-Object { $$_.Name -and ($$targets -contains $$_.Name.ToLowerInvariant()) -and $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$prefix, [System.StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue } }"`
     System::Call 'Kernel32::SetEnvironmentVariable(t "DIMO_NSIS_INSTDIR", i 0)'
   ${endIf}
 !macroend

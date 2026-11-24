@@ -21,8 +21,10 @@ pub(in crate::manager) mod replay;
 pub(in crate::manager) mod session;
 pub mod throttle;
 
+pub(crate) use acp_spawn::prepare_native_engine_launch_env;
 pub(in crate::manager) use env::*;
 pub(in crate::manager) use jsonl::*;
+pub(crate) use native_controls::can_fallback_launch_lock_to_acp;
 pub(in crate::manager) use probe::*;
 pub(in crate::manager) use process::*;
 pub use throttle::LeadingEdgeThrottle;

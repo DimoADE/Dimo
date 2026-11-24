@@ -78,7 +78,7 @@ export const agentsApi = {
   discoverLocalHistorySources: (): Promise<string[]> =>
     backendCall('agent_discover_local_history_sources'),
 
-  /** Last matching persisted catalog, including TTL-expired rows. Freshness is a separate read. */
+  /** Instant capability catalog (cached, fallback cached, or native static baseline). Never blocks on a live probe. */
   capabilityCatalog: (
     agentId: string,
     providerInstanceId?: string | null
@@ -87,6 +87,11 @@ export const agentsApi = {
       agentId,
       ...(providerInstanceId ? { providerInstanceId } : {}),
     }),
+
+  /** Batch instant capability catalog snapshot for all non-retired agents. */
+  capabilityCatalogsSnapshot: (): Promise<
+    Record<string, AgentSessionControlsSnapshot>
+  > => backendCall('agent_capability_catalogs_snapshot'),
 
   capabilityCatalogFresh: (
     agentId: string,

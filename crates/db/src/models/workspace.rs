@@ -92,29 +92,6 @@ impl std::ops::Deref for WorkspaceWithStatus {
     }
 }
 
-/// GitHub PR creation parameters
-pub struct CreatePrParams<'a> {
-    pub workspace_id: Uuid,
-    pub task_id: Uuid,
-    pub project_id: Uuid,
-    pub github_token: &'a str,
-    pub title: &'a str,
-    pub body: Option<&'a str>,
-    pub base_branch: Option<&'a str>,
-}
-
-#[derive(Debug, Deserialize, TS)]
-pub struct CreateFollowUpAttempt {
-    pub prompt: String,
-}
-
-/// Context data for resume operations (simplified)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AttemptResumeContext {
-    pub execution_history: String,
-    pub cumulative_diffs: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceContext {
     pub workspace: Workspace,
@@ -284,36 +261,6 @@ impl Workspace {
                ORDER BY w.updated_at DESC, w.created_at DESC"#,
         )
         .bind(project_id)
-        .fetch_all(pool)
-        .await
-        .map(Self::normalize_paths_vec)
-        .map_err(WorkspaceError::Database)
-    }
-
-    pub async fn fetch_seed_by_task_id(
-        pool: &SqlitePool,
-        task_id: Uuid,
-    ) -> Result<Vec<Self>, WorkspaceError> {
-        sqlx::query_as::<_, Workspace>(
-            r#"SELECT id,
-                      project_id,
-                      task_id,
-                      parent_workspace_id,
-                      container_ref,
-                      branch,
-                      use_worktree,
-                      agent_working_dir,
-                      setup_completed_at,
-                      created_at,
-                      updated_at,
-                      archived,
-                      pinned,
-                      name
-               FROM workspaces
-               WHERE task_id = ?
-               ORDER BY created_at DESC"#,
-        )
-        .bind(task_id)
         .fetch_all(pool)
         .await
         .map(Self::normalize_paths_vec)
@@ -684,28 +631,6 @@ impl Workspace {
             task_id: result.task_id,
             project_id: result.project_id,
         })
-    }
-
-    /// Find workspace by path, also trying the parent directory.
-    /// Used by VSCode extension which may open a repo subfolder (single-repo case)
-    /// rather than the workspace root directory (multi-repo case).
-    pub async fn resolve_container_ref_by_prefix(
-        pool: &SqlitePool,
-        path: &str,
-    ) -> Result<ContainerInfo, sqlx::Error> {
-        // First try exact match
-        if let Ok(info) = Self::resolve_container_ref(pool, path).await {
-            return Ok(info);
-        }
-
-        if let Some(parent) = std::path::Path::new(path).parent()
-            && let Some(parent_str) = parent.to_str()
-            && let Ok(info) = Self::resolve_container_ref(pool, parent_str).await
-        {
-            return Ok(info);
-        }
-
-        Err(sqlx::Error::RowNotFound)
     }
 
     pub async fn set_archived(

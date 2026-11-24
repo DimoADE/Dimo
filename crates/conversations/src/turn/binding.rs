@@ -224,6 +224,40 @@ impl ConversationSessionService {
                 | agents::AgentError::ConnectionNotFound(_)
                 | agents::AgentError::AcpSessionNotBound,
             ) => {
+                if overrides[0].key == "mode" {
+                    let mode_value = overrides[0].value.clone();
+                    let controls = self
+                        .persist_offline_session_controls_selection(
+                            conversation_id,
+                            Some(mode_value.as_str()),
+                            &[],
+                        )
+                        .await?;
+                    self.append_event(
+                        conversation_id,
+                        None,
+                        "runtime",
+                        agents::conversation::ConversationEvent::SessionModeUpdated {
+                            current: controls.current_mode.or(Some(mode_value)),
+                            modes: controls.modes,
+                        },
+                        None,
+                    )
+                    .await?;
+                    if !controls.config_options.is_empty() {
+                        self.append_event(
+                            conversation_id,
+                            None,
+                            "runtime",
+                            agents::conversation::ConversationEvent::SessionConfigOptionsUpdated {
+                                options: controls.config_options,
+                            },
+                            None,
+                        )
+                        .await?;
+                    }
+                    return Ok(());
+                }
                 let mut controls = self
                     .persist_offline_session_controls_selection(conversation_id, None, &overrides)
                     .await?;
@@ -349,37 +383,15 @@ impl ConversationSessionService {
         let launch_instance_id = target_instance
             .as_deref()
             .unwrap_or(db::models::provider_instance::LOCAL_PROVIDER_INSTANCE_ID);
-        let mut controls =
-            match crate::load_capability_catalog_for_session_defaults_for_provider_instance(
-                pool,
-                &self.ctx.agent_runtime,
-                agent_id,
-                Some(launch_instance_id),
-            )
-            .await
-            {
-                Ok(snapshot) => snapshot,
-                Err(_) if target_instance.is_none() => {
-                    let fallback_json: Option<String> = sqlx::query_scalar(
-                        r#"SELECT controls_json
-                           FROM agent_capability_catalog
-                           WHERE agent_type = ?
-                           ORDER BY retrieved_at DESC, generation DESC
-                           LIMIT 1"#,
-                    )
-                    .bind(agent_id.as_str())
-                    .fetch_optional(pool)
-                    .await
-                    .ok()
-                    .flatten();
-                    fallback_json
-                        .and_then(|raw| {
-                            serde_json::from_str::<AgentSessionControlsSnapshot>(&raw).ok()
-                        })
-                        .unwrap_or_default()
-                }
-                Err(_) => AgentSessionControlsSnapshot::default(),
-            };
+        let mut controls = crate::resolve_instant_capability_catalog_for_provider_instance(
+            pool,
+            agent_id,
+            Some(launch_instance_id),
+        )
+        .await
+        .ok()
+        .and_then(|resolved| resolved.snapshot)
+        .unwrap_or_default();
         if controls.modes.is_empty()
             && let Some(binding) = remembered
             && let Ok(modes) = serde_json::from_str(&binding.modes_json)

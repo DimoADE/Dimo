@@ -7,7 +7,7 @@
  *    grammars into a >9 MB monolith (`vendor-shiki.js`), defeating Shiki's
  *    per-language dynamic `import()` splitting.
  * 2. Heavy, lazily imported feature libraries (`@xyflow`, `gsap`, `mermaid`,
- *    `monaco-editor`, `@xterm`, `@codemirror`, `@git-diff-view`, `dockview`,
+ *    `monaco-editor`, `@xterm`, `@git-diff-view`, `dockview`,
  *    markdown AST processors) get dedicated chunks so they are not glued onto
  *    the initial startup `vendor` chunk.
  * 3. React, Radix, and lucide stay in `vendor-react`. A separate icons or
@@ -66,13 +66,6 @@ export function createManualChunks(id: string): string | undefined {
 
   if (normalizedId.includes('/node_modules/@xterm/')) {
     return 'vendor-terminal';
-  }
-
-  if (
-    normalizedId.includes('/node_modules/@codemirror/') ||
-    normalizedId.includes('/node_modules/@uiw/react-codemirror/')
-  ) {
-    return 'vendor-codemirror';
   }
 
   if (normalizedId.includes('/node_modules/@git-diff-view/')) {

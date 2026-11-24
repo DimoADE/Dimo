@@ -83,9 +83,6 @@ pub fn authentication_from_account_command(
 }
 
 const CONFIRM_TIMEOUT_SECS: u64 = 4;
-const CHATGPT_ME_URL: &str = "https://chatgpt.com/backend-api/me";
-const CURSOR_PERIOD_USAGE_URL: &str =
-    "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccountSessionConfirmation {
@@ -413,21 +410,6 @@ pub fn extract_codex_access_token(auth: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-pub async fn confirm_account_session(
-    agent_id: &AgentId,
-    local_account_present: bool,
-    local_auth_document: Option<&Value>,
-) -> AccountSessionConfirmation {
-    if !local_account_present {
-        return AccountSessionConfirmation::Rejected;
-    }
-    match agent_id.as_str() {
-        "codex" => confirm_codex_account(local_auth_document).await,
-        "cursor" => confirm_cursor_account().await,
-        _ => AccountSessionConfirmation::Inconclusive,
-    }
-}
-
 pub fn account_still_present(local: bool, confirmation: AccountSessionConfirmation) -> bool {
     match confirmation {
         AccountSessionConfirmation::Rejected => false,
@@ -447,76 +429,6 @@ fn account_session_body_is_rejected(body: &str) -> bool {
     ]
     .iter()
     .any(|marker| lower.contains(marker))
-}
-
-async fn confirm_codex_account(document: Option<&Value>) -> AccountSessionConfirmation {
-    let Some(token) = document.and_then(extract_codex_access_token) else {
-        return AccountSessionConfirmation::Rejected;
-    };
-    match confirm_bearer_get_response(CHATGPT_ME_URL, &token, None).await {
-        Some((status, body)) => account_session_from_codex_http(status, &body),
-        None => AccountSessionConfirmation::Inconclusive,
-    }
-}
-
-async fn confirm_cursor_account() -> AccountSessionConfirmation {
-    let Some(token) = cursor_auth::cursor_account_token().await else {
-        return AccountSessionConfirmation::Rejected;
-    };
-    confirm_bearer_post(CURSOR_PERIOD_USAGE_URL, &token, Some("cursor-agent"), "{}").await
-}
-
-async fn confirm_bearer_get_response(
-    url: &str,
-    token: &str,
-    user_agent: Option<&str>,
-) -> Option<(u16, String)> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(CONFIRM_TIMEOUT_SECS))
-        .build()
-        .ok()?;
-    let mut request = client
-        .get(url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Accept", "application/json");
-    if let Some(user_agent) = user_agent {
-        request = request.header("User-Agent", user_agent);
-    }
-    let response = request.send().await.ok()?;
-    let status = response.status().as_u16();
-    let body = response.text().await.unwrap_or_default();
-    Some((status, body))
-}
-
-async fn confirm_bearer_post(
-    url: &str,
-    token: &str,
-    user_agent: Option<&str>,
-    body: &str,
-) -> AccountSessionConfirmation {
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(Duration::from_secs(CONFIRM_TIMEOUT_SECS))
-        .build()
-    else {
-        return AccountSessionConfirmation::Inconclusive;
-    };
-    let mut request = client
-        .post(url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/json")
-        .body(body.to_string());
-    if let Some(user_agent) = user_agent {
-        request = request.header("User-Agent", user_agent);
-    }
-    match request.send().await {
-        Ok(response) => {
-            let status = response.status().as_u16();
-            let text = response.text().await.unwrap_or_default();
-            account_session_from_http(status, &text)
-        }
-        Err(_) => AccountSessionConfirmation::Inconclusive,
-    }
 }
 
 /// Whether the agent's official-account evidence is present on disk or in the

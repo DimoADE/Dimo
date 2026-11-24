@@ -123,50 +123,6 @@ impl Repo {
         rows.into_iter().map(Self::normalize_windows_path).collect()
     }
 
-    /// Get repos that still have the migration sentinel as their name.
-    /// Used by the startup backfill to fix repo names.
-    pub async fn list_needing_name_fix(pool: &SqlitePool) -> Result<Vec<Self>, sqlx::Error> {
-        let rows = sqlx::query_as!(
-            Repo,
-            r#"SELECT id as "id!: Uuid",
-                      path,
-                      name,
-                      display_name,
-                      setup_script,
-                      cleanup_script,
-                      archive_script,
-                      copy_files,
-                      parallel_setup_script as "parallel_setup_script!: bool",
-                      dev_server_script,
-                      default_target_branch,
-                      default_working_dir,
-                      created_at as "created_at!: DateTime<Utc>",
-                      updated_at as "updated_at!: DateTime<Utc>"
-               FROM repos
-               WHERE name = '__NEEDS_BACKFILL__'"#
-        )
-        .fetch_all(pool)
-        .await?;
-        Ok(Self::normalize_windows_paths(rows))
-    }
-
-    pub async fn update_name(
-        pool: &SqlitePool,
-        id: Uuid,
-        name: &str,
-        display_name: &str,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query!(
-            "UPDATE repos SET name = $1, display_name = $2, updated_at = datetime('now', 'subsec') WHERE id = $3",
-            name,
-            display_name,
-            id
-        )
-        .execute(pool)
-        .await?;
-        Ok(())
-    }
-
     pub async fn find_by_id(pool: &SqlitePool, id: Uuid) -> Result<Option<Self>, sqlx::Error> {
         let repo = sqlx::query_as!(
             Repo,

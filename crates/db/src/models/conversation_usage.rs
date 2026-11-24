@@ -155,17 +155,6 @@ impl ConversationUsageSnapshotRecord {
         Ok(())
     }
 
-    pub async fn delete_for_conversation(
-        conn: &mut SqliteConnection,
-        conversation_id: Uuid,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query("DELETE FROM conversation_usage_snapshots WHERE conversation_id = ?")
-            .bind(conversation_id)
-            .execute(&mut *conn)
-            .await?;
-        Ok(())
-    }
-
     /// Sessions that belong to a project (or every project when `project_id` is
     /// `None`), joined to workspaces and the usage snapshot. Attribution is the
     /// workspace relation, never a path match. `cutoff_time_ms <= 0` means no

@@ -80,30 +80,6 @@ export type CollapsedAssistantMessagesGroup = {
 
 export type DisplayEntry = BaseDisplayEntry | CollapsedAssistantMessagesGroup;
 
-export function isAggregatedGroup(
-  entry: DisplayEntry
-): entry is AggregatedPatchGroup {
-  return entry.type === 'AGGREGATED_GROUP';
-}
-
-export function isAggregatedFileEditGroup(
-  entry: DisplayEntry
-): entry is AggregatedFileEditGroup {
-  return entry.type === 'AGGREGATED_FILE_EDIT_GROUP';
-}
-
-export function isProcessChangeSummaryGroup(
-  entry: DisplayEntry
-): entry is ProcessChangeSummaryGroup {
-  return entry.type === 'PROCESS_CHANGE_SUMMARY';
-}
-
-export function isAggregatedThinkingGroup(
-  entry: DisplayEntry
-): entry is AggregatedThinkingGroup {
-  return entry.type === 'AGGREGATED_THINKING_GROUP';
-}
-
 export function isCollapsedAssistantMessagesGroup(
   entry: DisplayEntry
 ): entry is CollapsedAssistantMessagesGroup {

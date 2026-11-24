@@ -527,19 +527,6 @@ pub async fn bind_with_mode(
     projected_view(&mut store, store_path, &homes, agent_id).await
 }
 
-pub async fn forget_binding(
-    store_path: &Path,
-    agent_id: AgentId,
-) -> Result<(), super::NativeError> {
-    validate_agent(&agent_id)?;
-    let mut store = read_store(store_path).await?;
-    if store.bindings.remove(agent_id.as_str()).is_none() {
-        return Ok(());
-    }
-    store.projection_backups.remove(agent_id.as_str());
-    write_store(store_path, &store).await
-}
-
 pub async fn delete(
     store_path: &Path,
     home: &Path,

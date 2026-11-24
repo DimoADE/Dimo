@@ -48,6 +48,7 @@ import { getDesktopWindowLabel, useTauriClient } from '@/lib/desktopShell';
 import { useRemoteHostReleaseUpdateToast } from '@/hooks/useRemoteHostReleaseUpdateToast';
 import { usePluginContributionCatalogSync } from '@/hooks/usePluginHostContributions';
 import { useProviderBindConfirmations } from '@/hooks/useProviderBindConfirmations';
+import { useAgentCapabilityCatalogSync } from '@/features/agents/capabilityCatalogSync';
 import {
   SequenceIndicator,
   SequenceTrackerProvider,
@@ -374,6 +375,7 @@ function GlobalShortcutActionBridge() {
 function PluginContributionBridge() {
   usePluginContributionCatalogSync();
   useProviderBindConfirmations();
+  useAgentCapabilityCatalogSync();
   return (
     <Suspense fallback={null}>
       <AccountHostConfigSyncBridge />

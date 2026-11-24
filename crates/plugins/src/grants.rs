@@ -293,27 +293,6 @@ impl PermissionManifest {
         grants
     }
 
-    /// Checks whether a read path is allowed by `fs.read` or `fs.write` grants.
-    pub fn allows_fs_read(&self, path: &Path) -> bool {
-        if contains_parent_dir_component(path) {
-            return false;
-        }
-        self.fs_read
-            .iter()
-            .chain(self.fs_write.iter())
-            .any(|root| path_has_component_prefix(path, root))
-    }
-
-    /// Checks whether a write path is allowed by `fs.write` grants.
-    pub fn allows_fs_write(&self, path: &Path) -> bool {
-        if contains_parent_dir_component(path) {
-            return false;
-        }
-        self.fs_write
-            .iter()
-            .any(|root| path_has_component_prefix(path, root))
-    }
-
     /// Checks whether a URL is allowed for `net.fetch`.
     pub fn allows_net_fetch(&self, raw_url: &str) -> Result<bool, WorkerHostError> {
         let parsed = validate_network_url(raw_url, false)?;

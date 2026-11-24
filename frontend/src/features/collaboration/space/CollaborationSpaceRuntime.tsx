@@ -35,7 +35,7 @@ import {
 import { useCollaborationArrangement } from '@/lib/layoutArrangement';
 import { AgentIcon, getAgentName } from '@/components/agents/AgentIcon';
 import { useOptionalUserSystem } from '@/components/ConfigProvider';
-import type { ConversationMessageNavEntry } from '@/components/conversation-thread/messageNavEntries';
+import type { ConversationMessageNavEntry } from '@/components/NormalizedConversation/thread/messageNavEntries';
 import type { ProductContextMenuItem } from '@/components/context-menu/contextMenuTypes';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';

@@ -14,20 +14,6 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct ArtifactPreviewLeaseDto {
-    pub lease_id: Uuid,
-    pub artifact_id: Uuid,
-    pub provider_id: String,
-    pub loopback_port: u16,
-    pub capability_token: String,
-    pub expires_at_unix_ms: u64,
-    pub preview_url: String,
-    pub docx_fallback_supported: bool,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 #[ts(use_ts_enum)]

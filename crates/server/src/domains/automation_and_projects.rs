@@ -141,15 +141,67 @@ impl ServerApplicationDomains {
     ) -> Result<Value, ApplicationError> {
         let args: AgentIdArgs = parse(args)?;
         let agent_id = AgentId::parse(args.agent_id).map_err(internal_error)?;
-        serialize(
-            conversations::read_matching_capability_catalog_for_defaults_for_provider_instance(
-                &self.pool,
-                &agent_id,
-                args.provider_instance_id.as_deref(),
-            )
-            .await
-            .map_err(conversation_error)?,
+        let resolved = conversations::resolve_instant_capability_catalog_for_provider_instance(
+            &self.pool,
+            &agent_id,
+            args.provider_instance_id.as_deref(),
         )
+        .await
+        .map_err(conversation_error)?;
+        if resolved.needs_background_refresh
+            && resolved.refresh_policy == agents::CatalogRefreshPolicy::BackgroundNativeProbe
+        {
+            let pool = self.pool.clone();
+            let runtime = self.conversations.agent_runtime.clone();
+            let refresh_agent_id = agent_id.clone();
+            let provider_instance_id = args.provider_instance_id.clone();
+            tokio::spawn(async move {
+                if let Err(error) =
+                    conversations::refresh_open_capability_catalog_for_provider_instance(
+                        &pool,
+                        &runtime,
+                        &refresh_agent_id,
+                        provider_instance_id.as_deref(),
+                    )
+                    .await
+                {
+                    tracing::debug!(
+                        agent_id = %refresh_agent_id,
+                        %error,
+                        "background SWR capability catalog refresh did not complete"
+                    );
+                }
+            });
+        }
+        serialize(resolved.snapshot)
+    }
+
+    pub(super) async fn agent_capability_catalogs_snapshot(&self) -> Result<Value, ApplicationError> {
+        let views =
+            services::services::agent_management::AgentManagementApplicationService::new(
+                self.pool.clone(),
+            )
+            .list()
+            .await
+            .map_err(internal_error)?;
+        let mut snapshots = std::collections::BTreeMap::new();
+        for view in views {
+            if view.retired {
+                continue;
+            }
+            if let Ok(resolved) =
+                conversations::resolve_instant_capability_catalog_for_provider_instance(
+                    &self.pool,
+                    &view.agent_id,
+                    None,
+                )
+                .await
+                && let Some(snapshot) = resolved.snapshot
+            {
+                snapshots.insert(view.agent_id.as_str().to_string(), snapshot);
+            }
+        }
+        serialize(snapshots)
     }
 
     pub(super) async fn agent_capability_catalog_fresh(

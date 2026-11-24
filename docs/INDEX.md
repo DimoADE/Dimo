@@ -74,6 +74,7 @@ Read only the smallest set of files matching your task:
 | [`docs/specs/agent-driver-engine.md`](specs/agent-driver-engine.md) | Normative Agent Driver Engine v2.0 spec (dedicated engine adapters, ACP fallback, session lifecycle, error taxonomy). |
 | [`docs/specs/context-menu-surfaces.md`](specs/context-menu-surfaces.md) | Unified right-click context menu contract across Workbench surfaces. |
 | [`docs/specs/cross-agent-continuation.md`](specs/cross-agent-continuation.md) | Deterministic cross-agent handoff, binding generations, history segments, and replay semantics. |
+| [`docs/specs/instant-session-controls-and-lazy-bind.md`](specs/instant-session-controls-and-lazy-bind.md) | Zero-latency provider capability catalog (bundled baselines, SWR, EventBus push), lazy turn-start session bind, and native engine probe de-blocking. |
 | [`docs/specs/prepared-acp-session-controls.md`](specs/prepared-acp-session-controls.md) | Connect-time prepared ACP session controls (mode, model, config options) before first turn. |
 | [`docs/specs/pulse-automation-engine.md`](specs/pulse-automation-engine.md) | Pulse event bus, event catalog, timers, rules, outbox, and dual-primitive (Session + Bot) workflow engine spec. |
 
@@ -110,7 +111,6 @@ Read only the smallest set of files matching your task:
 | [`docs/release/`](release/) | Versioned release notes (`0.1.2.md` – `0.5.4.md`) used by release CI pipelines. |
 | [`npx-cli/README.md`](../npx-cli/README.md) | `dimoai` npm CLI package usage and distribution guide. |
 | [`packages/plugin-cli/README.md`](../packages/plugin-cli/README.md) | `@dimoai/plugin-cli` (`dimo-plugin`) author CLI README. |
-| [`packages/dimo-workflow-mcp/README.md`](../packages/dimo-workflow-mcp/README.md) | Standalone Workflow MCP server package README. |
 | [`packages/pulse-sdk/README.md`](../packages/pulse-sdk/README.md) | TypeScript SDK README for emitting/subscribing to Pulse automation events. |
 
 ---

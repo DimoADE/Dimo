@@ -12,12 +12,11 @@ import {
 import {
   APP_CONTENT_SECURITY_POLICY,
   PreviewAssetScope,
-  handleAppProtocolRequest,
-  handleAssetProtocolRequest,
+  handleAppProtocolRequestAsync,
+  handleAssetProtocolRequestAsync,
   isValidAbsolutePath,
   mimeTypeForPath,
   parseByteRange,
-  resolveAppDistFile,
   resolveAppDistFileAsync,
   stripWindowsVerbatimPrefix,
   toSafeWebStream,
@@ -143,8 +142,8 @@ describe('PreviewAssetScope & Windows path normalization', () => {
   });
 });
 
-describe('resolveAppDistFile & resolveAppDistFileAsync', () => {
-  it('serves dist files, falls back to index.html for extensionless and dotted SPA routes, and blocks missing static assets and traversal', () => {
+describe('resolveAppDistFileAsync', () => {
+  it('serves dist files, falls back to index.html for extensionless and dotted SPA routes, and blocks missing static assets and traversal', async () => {
     const distDir = makeTempDir('dimo-dist-');
     const assetsDir = path.join(distDir, 'assets');
     fs.mkdirSync(assetsDir, { recursive: true });
@@ -155,29 +154,29 @@ describe('resolveAppDistFile & resolveAppDistFileAsync', () => {
 
     const realDist = stripWindowsVerbatimPrefix(fs.realpathSync(distDir));
     const expectedIndex = path.join(realDist, 'index.html');
-    expect(resolveAppDistFile(distDir, 'dimo-app://localhost/')).toBe(expectedIndex);
-    expect(resolveAppDistFile(distDir, 'dimo-app://localhost/assets/main.js')).toBe(
+    expect(await resolveAppDistFileAsync(distDir, 'dimo-app://localhost/')).toBe(expectedIndex);
+    expect(await resolveAppDistFileAsync(distDir, 'dimo-app://localhost/assets/main.js')).toBe(
       path.join(realDist, 'assets', 'main.js')
     );
     // Extensionless SPA deep link falls back to index.html
-    expect(resolveAppDistFile(distDir, 'dimo-app://localhost/settings/general')).toBe(
+    expect(await resolveAppDistFileAsync(distDir, 'dimo-app://localhost/settings/general')).toBe(
       expectedIndex
     );
     // Dotted SPA routes (e.g. reverse-DNS plugin IDs) also fall back to index.html
-    expect(resolveAppDistFile(distDir, 'dimo-app://localhost/plugins/com.dimo.foo')).toBe(
+    expect(await resolveAppDistFileAsync(distDir, 'dimo-app://localhost/plugins/com.dimo.foo')).toBe(
       expectedIndex
     );
     expect(
-      resolveAppDistFile(distDir, 'dimo-app://localhost/settings/plugin/com.dimo.foo')
+      await resolveAppDistFileAsync(distDir, 'dimo-app://localhost/settings/plugin/com.dimo.foo')
     ).toBe(expectedIndex);
     // Explicit missing static asset extensions return null instead of HTML
-    expect(resolveAppDistFile(distDir, 'dimo-app://localhost/assets/missing.js')).toBeNull();
-    expect(resolveAppDistFile(distDir, 'dimo-app://localhost/assets/missing.css')).toBeNull();
-    expect(resolveAppDistFile(distDir, 'dimo-app://localhost/assets/missing.png')).toBeNull();
-    expect(resolveAppDistFile(distDir, 'dimo-app://localhost/assets/missing.json')).toBeNull();
+    expect(await resolveAppDistFileAsync(distDir, 'dimo-app://localhost/assets/missing.js')).toBeNull();
+    expect(await resolveAppDistFileAsync(distDir, 'dimo-app://localhost/assets/missing.css')).toBeNull();
+    expect(await resolveAppDistFileAsync(distDir, 'dimo-app://localhost/assets/missing.png')).toBeNull();
+    expect(await resolveAppDistFileAsync(distDir, 'dimo-app://localhost/assets/missing.json')).toBeNull();
     // Directory traversal outside dist root is blocked
-    expect(resolveAppDistFile(distDir, 'dimo-app://localhost/..%2F..%2Fetc/passwd')).toBeNull();
-    expect(resolveAppDistFile(distDir, 'dimo-app://other-host/index.html')).toBeNull();
+    expect(await resolveAppDistFileAsync(distDir, 'dimo-app://localhost/..%2F..%2Fetc/passwd')).toBeNull();
+    expect(await resolveAppDistFileAsync(distDir, 'dimo-app://other-host/index.html')).toBeNull();
   });
 
   it('caches fs.promises.realpath(distRoot) across repeated resolveAppDistFileAsync requests', async () => {
@@ -212,7 +211,7 @@ describe('dimo-app:// CSP & dimo-asset:// CORS/OPTIONS protocol handlers', () =>
     fs.writeFileSync(path.join(distDir, 'index.html'), '<!doctype html><html></html>');
     fs.writeFileSync(path.join(assetsDir, 'main.js'), 'export const ok = true;');
 
-    const rootRes = handleAppProtocolRequest(
+    const rootRes = await handleAppProtocolRequestAsync(
       distDir,
       new Request('dimo-app://localhost/')
     );
@@ -237,7 +236,7 @@ describe('dimo-app:// CSP & dimo-asset:// CORS/OPTIONS protocol handlers', () =>
     expect(await rootRes.text()).toContain('<!doctype html>');
 
     // Dotted SPA fallback also receives HTML + CSP
-    const spaRes = handleAppProtocolRequest(
+    const spaRes = await handleAppProtocolRequestAsync(
       distDir,
       new Request('dimo-app://localhost/plugins/com.dimo.foo')
     );
@@ -248,7 +247,7 @@ describe('dimo-app:// CSP & dimo-asset:// CORS/OPTIONS protocol handlers', () =>
     await spaRes.body?.cancel();
 
     // Static JS asset has no HTML CSP header
-    const jsRes = handleAppProtocolRequest(
+    const jsRes = await handleAppProtocolRequestAsync(
       distDir,
       new Request('dimo-app://localhost/assets/main.js')
     );
@@ -257,7 +256,7 @@ describe('dimo-app:// CSP & dimo-asset:// CORS/OPTIONS protocol handlers', () =>
     expect(await jsRes.text()).toBe('export const ok = true;');
 
     // Missing JS returns 404
-    const missingRes = handleAppProtocolRequest(
+    const missingRes = await handleAppProtocolRequestAsync(
       distDir,
       new Request('dimo-app://localhost/assets/missing.js')
     );
@@ -273,7 +272,7 @@ describe('dimo-app:// CSP & dimo-asset:// CORS/OPTIONS protocol handlers', () =>
     scope.allow({ directories: [root] });
     const assetUrl = convertFileSrcToAssetUrl(moduleFile);
 
-    const optionsRes = handleAssetProtocolRequest(
+    const optionsRes = await handleAssetProtocolRequestAsync(
       scope,
       new Request(assetUrl, { method: 'OPTIONS' })
     );
@@ -289,7 +288,7 @@ describe('dimo-app:// CSP & dimo-asset:// CORS/OPTIONS protocol handlers', () =>
       'Content-Length, Content-Range, Accept-Ranges'
     );
 
-    const getRes = handleAssetProtocolRequest(scope, new Request(assetUrl));
+    const getRes = await handleAssetProtocolRequestAsync(scope, new Request(assetUrl));
     expect(getRes.status).toBe(200);
     expect(getRes.headers.get('access-control-allow-origin')).toBe('*');
     expect(getRes.headers.get('access-control-expose-headers')).toBe(
@@ -297,7 +296,7 @@ describe('dimo-app:// CSP & dimo-asset:// CORS/OPTIONS protocol handlers', () =>
     );
     expect(await getRes.text()).toBe('export const answer = 42;\n');
 
-    const rangeRes = handleAssetProtocolRequest(
+    const rangeRes = await handleAssetProtocolRequestAsync(
       scope,
       new Request(assetUrl, { headers: { Range: 'bytes=0-5' } })
     );
@@ -308,7 +307,7 @@ describe('dimo-app:// CSP & dimo-asset:// CORS/OPTIONS protocol handlers', () =>
     );
     expect(await rangeRes.text()).toBe('export');
 
-    const headRes = handleAssetProtocolRequest(
+    const headRes = await handleAssetProtocolRequestAsync(
       scope,
       new Request(assetUrl, { method: 'HEAD' })
     );

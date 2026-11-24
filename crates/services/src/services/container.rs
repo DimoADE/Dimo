@@ -307,28 +307,6 @@ pub trait ContainerService: Send + Sync {
         Ok(())
     }
 
-    /// Check if a task has any running execution processes
-    async fn has_running_processes(&self, task_id: Uuid) -> Result<bool, ContainerError> {
-        let workspaces = Workspace::fetch_all(&self.db().pool, Some(task_id)).await?;
-
-        for workspace in workspaces {
-            let sessions = Session::find_by_workspace_id(&self.db().pool, workspace.id).await?;
-            for session in sessions {
-                if let Ok(processes) =
-                    ExecutionProcess::find_by_session_id(&self.db().pool, session.id, false).await
-                {
-                    for process in processes {
-                        if process.status == ExecutionProcessStatus::Running {
-                            return Ok(true);
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(false)
-    }
-
     /// A context is finalized when
     /// - Always when the execution process has failed or been killed
     /// - Never when the run reason is DevServer
@@ -455,84 +433,6 @@ pub trait ContainerService: Send + Sync {
                     .await;
             }
         }
-        Ok(())
-    }
-
-    /// Backfill before_head_commit for legacy execution processes.
-    /// Rules:
-    /// - If a process has after_head_commit and missing before_head_commit,
-    ///   then set before_head_commit to the previous process's after_head_commit.
-    /// - If there is no previous process, set before_head_commit to the base branch commit.
-    async fn backfill_before_head_commits(&self) -> Result<(), ContainerError> {
-        let pool = &self.db().pool;
-        let rows = ExecutionProcess::list_missing_before_context(pool).await?;
-        for row in rows {
-            // Skip if no after commit at all (shouldn't happen due to WHERE)
-            // Prefer previous process after-commit if present
-            let mut before = row.prev_after_head_commit.clone();
-
-            // Fallback to base branch commit OID
-            if before.is_none() {
-                let repo_path = std::path::Path::new(row.repo_path.as_deref().unwrap_or_default());
-                match self
-                    .git()
-                    .get_branch_oid(repo_path, row.target_branch.as_str())
-                {
-                    Ok(oid) => before = Some(oid),
-                    Err(e) => {
-                        tracing::warn!(
-                            "Backfill: Failed to resolve base branch OID for workspace {} (branch {}): {}",
-                            row.workspace_id,
-                            row.target_branch,
-                            e
-                        );
-                    }
-                }
-            }
-
-            if let Some(before_oid) = before
-                && let Err(e) = ExecutionProcessRepoState::update_before_head_commit(
-                    pool,
-                    row.id,
-                    row.repo_id,
-                    &before_oid,
-                )
-                .await
-            {
-                tracing::warn!(
-                    "Backfill: Failed to update before_head_commit for process {}: {}",
-                    row.id,
-                    e
-                );
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Backfill repo names that were migrated with a sentinel placeholder.
-    /// Also backfills dev_script_working_dir and agent_working_dir for single-repo projects.
-    async fn backfill_repo_names(&self) -> Result<(), ContainerError> {
-        let pool = &self.db().pool;
-        let repos = Repo::list_needing_name_fix(pool).await?;
-
-        if repos.is_empty() {
-            return Ok(());
-        }
-
-        tracing::info!("Backfilling {} repo names", repos.len());
-
-        for repo in repos {
-            let name = repo
-                .path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(&repo.id.to_string())
-                .to_string();
-
-            Repo::update_name(pool, repo.id, &name, &name).await?;
-        }
-
         Ok(())
     }
 
