@@ -979,4 +979,71 @@ describe('WebTransport', () => {
       retryable: true,
     });
   });
+
+  it('isolates slow conversation_ensure_session_controls and conversation_rebind_session calls so capabilities never starve', async () => {
+    const slowResolvers: Array<(value: unknown) => void> = [];
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith('/api/v1/capabilities')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            protocol_version: '1.0',
+            server_version: '0.5.4',
+            minimum_client_version: '0.5.0',
+            capabilities: ['application.call', 'plugin.read'],
+          }),
+        });
+      }
+      return new Promise((resolve) => {
+        slowResolvers.push(resolve);
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const transport = new WebTransport({
+      baseUrl: 'http://127.0.0.1:17891',
+      token: 'secret-1',
+    });
+
+    expect(transport.getCachedCapabilities()).toBeNull();
+
+    // Fire 6 hanging session bind / rebind calls simultaneously.
+    const slowPromises = [
+      transport.call('conversation_ensure_session_controls', { id: 'c1' }),
+      transport.call('conversation_ensure_session_controls', { id: 'c2' }),
+      transport.call('conversation_ensure_session_controls', { id: 'c3' }),
+      transport.call('conversation_ensure_session_controls', { id: 'c4' }),
+      transport.call('conversation_rebind_session', { id: 'c5' }),
+      transport.call('conversation_rebind_session', { id: 'c6' }),
+    ];
+    await Promise.resolve();
+
+    // Bulkhead caps active slow requests to MAX_CONCURRENT_PLUGIN_CALLS (2).
+    expect(slowResolvers).toHaveLength(MAX_CONCURRENT_PLUGIN_CALLS);
+
+    // /api/v1/capabilities bypasses the slow bulkhead and resolves immediately.
+    const caps = await transport.capabilities();
+    expect(caps.capabilities).toEqual(['application.call', 'plugin.read']);
+    expect(transport.getCachedCapabilities()).toEqual(caps);
+
+    // Reconfigure clears cached capabilities.
+    transport.reconfigure({
+      baseUrl: 'http://127.0.0.1:17892',
+      token: 'secret-2',
+    });
+    expect(transport.getCachedCapabilities()).toBeNull();
+
+    // Clean up queued calls cleanly on destroy (queued items 2..5 reject with transport_closed).
+    transport.destroy();
+    await Promise.all(
+      slowPromises.slice(MAX_CONCURRENT_PLUGIN_CALLS).map((p) =>
+        expect(p).rejects.toMatchObject({
+          name: 'WebTransportError',
+          code: 'transport_closed',
+          retryable: true,
+        })
+      )
+    );
+  });
 });

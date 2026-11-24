@@ -2,10 +2,13 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useConversationTimeline } from './useConversationTimeline';
 import {
+  MAX_CONCURRENT_SESSION_BINDS,
   beginConversationEngineHandoff,
   cancelConversationEngineHandoff,
   completeConversationEngineHandoff,
   resetConversationTimelineRegistryForTests,
+  retainConversationSurface,
+  retainConversationTimeline,
   streamFlushDelayMs,
 } from './conversationTimelineRegistry';
 import { TIMELINE_OLDER_PAGE_SIZE } from './timelinePaging';
@@ -2188,5 +2191,101 @@ describe('useConversationTimeline', () => {
       .flatMap((b) => (b.type === 'text' ? [b.text] : []))
       .join('');
     expect(text).toBe('overlaid fresh-delta');
+  });
+
+  it('caps concurrent ensureSessionControls binds to MAX_CONCURRENT_SESSION_BINDS and prioritizes visible surfaces', async () => {
+    detailMock.mockImplementation(async (conversationId: string) => ({
+      ...detail(),
+      summary: {
+        ...detail().summary,
+        id: conversationId,
+      },
+      timeline: {
+        ...detail().timeline,
+        conversation_id: conversationId,
+      },
+    }));
+
+    const pendingBinds = new Map<
+      string,
+      (value: {
+        session_id: string;
+        available_modes: unknown[];
+        current_mode_id: string | null;
+        config_options: unknown[];
+      }) => void
+    >();
+    const bindOrder: string[] = [];
+    ensureSessionControlsMock.mockImplementation((conversationId: string) => {
+      bindOrder.push(conversationId);
+      return new Promise((resolve) => {
+        pendingBinds.set(conversationId, resolve);
+      });
+    });
+
+    const releaseSurface4 = retainConversationSurface('conv-4-visible');
+    const release1 = retainConversationTimeline('conv-1');
+    const release2 = retainConversationTimeline('conv-2');
+    const release3 = retainConversationTimeline('conv-3-bg');
+    const release4 = retainConversationTimeline('conv-4-visible');
+
+    try {
+      await waitFor(() => {
+        expect(bindOrder).toHaveLength(MAX_CONCURRENT_SESSION_BINDS);
+      });
+      // Even after giving idle/timer scheduling time to fire for all 4 slots,
+      // at most MAX_CONCURRENT_SESSION_BINDS (2) calls are active concurrently.
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(bindOrder).toEqual(['conv-1', 'conv-2']);
+      expect(pendingBinds.size).toBe(MAX_CONCURRENT_SESSION_BINDS);
+
+      // Resolving conv-1 must promote the visible surface (conv-4-visible) ahead of conv-3-bg.
+      pendingBinds.get('conv-1')?.({
+        session_id: 'conv-1',
+        available_modes: [],
+        current_mode_id: null,
+        config_options: [],
+      });
+      pendingBinds.delete('conv-1');
+
+      await waitFor(() => {
+        expect(bindOrder).toEqual(['conv-1', 'conv-2', 'conv-4-visible']);
+      });
+
+      // Resolving conv-2 drains the remaining background bind (conv-3-bg).
+      pendingBinds.get('conv-2')?.({
+        session_id: 'conv-2',
+        available_modes: [],
+        current_mode_id: null,
+        config_options: [],
+      });
+      pendingBinds.delete('conv-2');
+
+      await waitFor(() => {
+        expect(bindOrder).toEqual([
+          'conv-1',
+          'conv-2',
+          'conv-4-visible',
+          'conv-3-bg',
+        ]);
+      });
+
+      // Resolve remaining binds cleanly
+      for (const [id, resolve] of pendingBinds.entries()) {
+        resolve({
+          session_id: id,
+          available_modes: [],
+          current_mode_id: null,
+          config_options: [],
+        });
+      }
+      pendingBinds.clear();
+    } finally {
+      release1();
+      release2();
+      release3();
+      release4();
+      releaseSurface4();
+    }
   });
 });

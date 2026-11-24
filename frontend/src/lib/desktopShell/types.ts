@@ -150,6 +150,48 @@ export interface ElectronBackendConnectionInfo {
   dataDir?: string;
 }
 
+export interface ElectronCachedServerCapabilities {
+  protocol_version: string;
+  server_version: string;
+  minimum_client_version: string;
+  capabilities: string[];
+  reachability?: Array<{ origin: string; kind: string }>;
+  host_id?: string | null;
+  name?: string | null;
+}
+
+export interface ElectronHostRpcRequest {
+  command: string;
+  args?: Record<string, unknown>;
+  operationId?: string;
+  requestId?: string;
+  timeoutMs?: number;
+}
+
+export type ElectronHostRpcResponse =
+  | {
+      ok: true;
+      status: number;
+      bodyText: string;
+    }
+  | {
+      ok: false;
+      status?: number;
+      code: string;
+      message: string;
+      retryable: boolean;
+      operationId?: string;
+      details?: unknown;
+    };
+
+export interface ElectronHostRpcBridge {
+  call(request: ElectronHostRpcRequest): Promise<ElectronHostRpcResponse>;
+  cancel?(requestId: string): void;
+  capabilities?(options?: {
+    forceRefresh?: boolean;
+  }): Promise<ElectronCachedServerCapabilities>;
+}
+
 export type ElectronSidecarStatus =
   | 'starting'
   | 'running'
@@ -165,6 +207,8 @@ export interface ElectronDesktopBridge {
   isDeveloperMode?: () => boolean;
   readonly backend?: ElectronBackendConnectionInfo;
   getBackend?: () => ElectronBackendConnectionInfo | undefined;
+  getCachedCapabilities?: () => ElectronCachedServerCapabilities | null;
+  readonly hostRpc?: ElectronHostRpcBridge;
   readonly sidecarStatus?: ElectronSidecarStatus;
   getSidecarStatus?: () => ElectronSidecarStatus;
   getAppVersion(): Promise<string>;

@@ -27,8 +27,11 @@ pub(crate) async fn db_optimize(
 pub(crate) async fn trigger_event_folding(
     domains: &ServerApplicationDomains,
 ) -> Result<Value, ApplicationError> {
-    let report = conversations::EventFolder::fold_all_settled(domains.db_service().writer())
-        .await
-        .map_err(internal_error)?;
+    let report = conversations::EventFolder::fold_all_settled_with_reader(
+        domains.db_service().reader(),
+        domains.db_service().writer(),
+    )
+    .await
+    .map_err(internal_error)?;
     serialize(report)
 }

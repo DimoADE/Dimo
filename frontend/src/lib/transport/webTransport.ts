@@ -13,9 +13,11 @@ export const WEB_SOCKET_KEEPALIVE_MS = 15_000;
 export const CONTROL_REQUEST_TIMEOUT_MS = 30_000;
 export const MAX_CONCURRENT_PLUGIN_CALLS = 2;
 
-const PLUGIN_ISOLATED_COMMANDS = new Set([
+const SLOW_ISOLATED_COMMANDS = new Set([
   'plugin_invoke_contribution',
   'plugin_command_invoke',
+  'conversation_ensure_session_controls',
+  'conversation_rebind_session',
 ]);
 
 export interface WebTransportOptions {
@@ -270,7 +272,7 @@ export class WebTransport implements BackendTransport {
     args?: Record<string, unknown>,
     options?: { operationId?: string }
   ): Promise<unknown> {
-    const isolated = PLUGIN_ISOLATED_COMMANDS.has(command);
+    const isolated = SLOW_ISOLATED_COMMANDS.has(command);
     if (isolated) {
       await this.acquirePluginCallSlot();
     }
@@ -292,6 +294,10 @@ export class WebTransport implements BackendTransport {
         this.releasePluginCallSlot();
       }
     }
+  }
+
+  getCachedCapabilities(): ServerCapabilities | null {
+    return this.capabilitiesCache ?? null;
   }
 
   async capabilities(): Promise<ServerCapabilities> {

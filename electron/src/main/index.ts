@@ -363,10 +363,19 @@ if (!gotLock) {
           chrome?.setDataDir(activeDataDir);
           browserRpc?.stop();
           browserRpc?.start();
-          windows?.broadcastEvent(SIDECAR_RESTARTED_EVENT, {
-            backend: connection,
-            attempt,
-          });
+          void sidecar
+            .fetchCapabilities({ forceRefresh: true, timeoutMs: 2_000 })
+            .catch(() => null)
+            .then((capabilities) => {
+              if (isQuitting) {
+                return;
+              }
+              windows?.broadcastEvent(SIDECAR_RESTARTED_EVENT, {
+                backend: connection,
+                capabilities,
+                attempt,
+              });
+            });
         },
         onRestartFailed: (error, attempt, exhausted) => {
           recordCrash(
@@ -511,8 +520,15 @@ if (!gotLock) {
             sidecar.getDataDir() ?? activeDataDir ?? resolveCurrentDefaultDataDir(repoRoot);
           chrome?.setDataDir(activeDataDir);
           browserRpc?.start();
+          const capabilities = await sidecar
+            .fetchCapabilities({ forceRefresh: true, timeoutMs: 2_000 })
+            .catch(() => null);
+          if (isQuitting) {
+            return;
+          }
           windows?.broadcastEvent(SIDECAR_READY_EVENT, {
             backend: connection,
+            capabilities,
           });
           // Hydrate persisted developer_mode asynchronously once sidecar is ready.
           const savedDeveloperMode = Boolean(

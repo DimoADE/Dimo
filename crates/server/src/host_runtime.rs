@@ -106,6 +106,7 @@ impl HostRuntime {
                     db_service.writer().clone(),
                 ));
                 std::mem::drop(conversations::spawn_periodic_event_folding_worker(
+                    db_service.reader().clone(),
                     db_service.writer().clone(),
                     Arc::new(tokio::sync::Notify::new()),
                 ));

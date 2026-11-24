@@ -97,6 +97,9 @@ export const configuredBackendTransport: BackendTransport = {
     }
     return transport.capabilities();
   },
+  getCachedCapabilities() {
+    return getBackendTransport().getCachedCapabilities?.() ?? null;
+  },
   listen(event, handler) {
     const transport = getBackendTransport();
     if (!transport.listen) {

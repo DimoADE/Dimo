@@ -16,7 +16,7 @@ use std::{
 
 use agents::conversation::{ConversationEvent, ConversationToolCallPatch};
 use db::{
-    WritePool,
+    ReadPool, WritePool,
     models::conversation_event::{
         ConversationEventRecord, MAX_STORED_EVENT_JSON_BYTES, cap_stored_event_payloads,
     },
@@ -172,7 +172,13 @@ impl EventFolder {
         conversation_id: Uuid,
         recent_turn_buffer: usize,
     ) -> Result<FoldReport, sqlx::Error> {
-        fold_conversation_on_pool(write_pool.as_pool(), conversation_id, recent_turn_buffer).await
+        fold_conversation_on_pools(
+            write_pool.as_pool(),
+            write_pool.as_pool(),
+            conversation_id,
+            recent_turn_buffer,
+        )
+        .await
     }
 
     /// Scan all conversations with settled turns outside [`RECENT_TURN_BUFFER`] and fold them one
@@ -187,28 +193,65 @@ impl EventFolder {
         write_pool: &WritePool,
         recent_turn_buffer: usize,
     ) -> Result<FoldReport, sqlx::Error> {
-        let pool = write_pool.as_pool();
-        let min_events_threshold = (recent_turn_buffer as i64).saturating_mul(3).max(2);
-        let candidate_ids: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT conversation_id \
-             FROM conversation_events \
-             GROUP BY conversation_id \
-             HAVING COUNT(*) >= ? \
-             ORDER BY MAX(sequence) ASC",
+        fold_all_settled_on_pools(
+            write_pool.as_pool(),
+            write_pool.as_pool(),
+            recent_turn_buffer,
         )
-        .bind(min_events_threshold)
-        .fetch_all(pool)
-        .await?;
-
-        let mut aggregate = FoldReport::default();
-        for conversation_id in candidate_ids {
-            let single =
-                fold_conversation_on_pool(pool, conversation_id, recent_turn_buffer).await?;
-            aggregate.accumulate(&single);
-            tokio::task::yield_now().await;
-        }
-        Ok(aggregate)
+        .await
     }
+
+    /// Scan candidate conversations and build fold plans on `read_pool`, acquiring `write_pool`
+    /// only for conversations that actually have settled runs to fold.
+    pub async fn fold_all_settled_with_reader(
+        read_pool: &ReadPool,
+        write_pool: &WritePool,
+    ) -> Result<FoldReport, sqlx::Error> {
+        Self::fold_all_settled_with_reader_and_buffer(read_pool, write_pool, RECENT_TURN_BUFFER)
+            .await
+    }
+
+    /// Configurable buffer variant of [`Self::fold_all_settled_with_reader`].
+    pub async fn fold_all_settled_with_reader_and_buffer(
+        read_pool: &ReadPool,
+        write_pool: &WritePool,
+        recent_turn_buffer: usize,
+    ) -> Result<FoldReport, sqlx::Error> {
+        fold_all_settled_on_pools(
+            read_pool.as_pool(),
+            write_pool.as_pool(),
+            recent_turn_buffer,
+        )
+        .await
+    }
+}
+
+async fn fold_all_settled_on_pools(
+    read_pool: &SqlitePool,
+    write_pool: &SqlitePool,
+    recent_turn_buffer: usize,
+) -> Result<FoldReport, sqlx::Error> {
+    let min_events_threshold = (recent_turn_buffer as i64).saturating_mul(3).max(2);
+    let candidate_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT conversation_id \
+         FROM conversation_events \
+         GROUP BY conversation_id \
+         HAVING COUNT(*) >= ? \
+         ORDER BY MAX(sequence) ASC",
+    )
+    .bind(min_events_threshold)
+    .fetch_all(read_pool)
+    .await?;
+
+    let mut aggregate = FoldReport::default();
+    for conversation_id in candidate_ids {
+        let single =
+            fold_conversation_on_pools(read_pool, write_pool, conversation_id, recent_turn_buffer)
+                .await?;
+        aggregate.accumulate(&single);
+        tokio::task::yield_now().await;
+    }
+    Ok(aggregate)
 }
 
 const COMPACTION_BATCH: i64 = 25;
@@ -220,13 +263,13 @@ const COMPACTION_CONTINUE_DELAY: Duration = Duration::from_secs(30);
 /// Spawn the low-priority worker that first caps oversized event payloads,
 /// then folds settled history (`interval = 6h`).
 ///
-/// Compaction starts after a short delay instead of the old five-minute wait,
-/// and it runs in small write batches so a multi-gigabyte log is not rewritten
-/// in one transaction. Folding waits until a wake finds nothing left to cap,
-/// because a fold reads every event in the conversation.
+/// Read scans execute on `read_pool` so clean databases never contend on the
+/// single `WritePool(1)` connection; `write_pool` is only acquired when rows
+/// actually require compaction or folding.
 ///
 /// Trigger `shutdown.notify_waiters()` (or drop the runtime) to stop the loop cleanly.
 pub fn spawn_periodic_event_folding_worker(
+    read_pool: ReadPool,
     write_pool: WritePool,
     shutdown: Arc<Notify>,
 ) -> tokio::task::JoinHandle<()> {
@@ -239,7 +282,8 @@ pub fn spawn_periodic_event_folding_worker(
         loop {
             let mut pending = false;
             for _ in 0..COMPACTION_BATCHES_PER_WAKE {
-                match ConversationEventRecord::compact_oversized_payloads(
+                match ConversationEventRecord::compact_oversized_payloads_with_reader(
+                    read_pool.as_pool(),
                     write_pool.as_pool(),
                     COMPACTION_BATCH,
                 )
@@ -274,7 +318,9 @@ pub fn spawn_periodic_event_folding_worker(
                 continue;
             }
 
-            if let Err(err) = EventFolder::fold_all_settled(&write_pool).await {
+            if let Err(err) =
+                EventFolder::fold_all_settled_with_reader(&read_pool, &write_pool).await
+            {
                 tracing::warn!(error = %err, "periodic event folding sweep failed");
             }
 
@@ -310,12 +356,13 @@ async fn conversation_has_oversized_bulky_events(
     Ok(exists != 0)
 }
 
-async fn fold_conversation_on_pool(
-    pool: &SqlitePool,
+async fn fold_conversation_on_pools(
+    read_pool: &SqlitePool,
+    write_pool: &SqlitePool,
     conversation_id: Uuid,
     recent_turn_buffer: usize,
 ) -> Result<FoldReport, sqlx::Error> {
-    if conversation_has_oversized_bulky_events(pool, conversation_id).await? {
+    if conversation_has_oversized_bulky_events(read_pool, conversation_id).await? {
         tracing::info!(
             %conversation_id,
             "skipping event fold until oversized payloads are compacted"
@@ -337,7 +384,7 @@ async fn fold_conversation_on_pool(
            ORDER BY sequence ASC"#,
     )
     .bind(conversation_id)
-    .fetch_all(pool)
+    .fetch_all(read_pool)
     .await?;
 
     let events_before = records.len();
@@ -357,7 +404,7 @@ async fn fold_conversation_on_pool(
          WHERE conversation_id = ? AND status IN ('pending', 'running', 'blocked')",
     )
     .bind(conversation_id)
-    .fetch_all(pool)
+    .fetch_all(read_pool)
     .await?
     .into_iter()
     .collect();
@@ -374,7 +421,7 @@ async fn fold_conversation_on_pool(
     }
     drop(records);
 
-    let mut conn = pool.acquire().await?;
+    let mut conn = write_pool.acquire().await?;
     sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
 
     let result = apply_planned_folds_in_tx(
@@ -408,8 +455,8 @@ async fn apply_planned_folds_in_tx(
     planned_in_flight_turns: &HashSet<Uuid>,
     planned_mutations: &[PlannedFoldMutation],
 ) -> Result<FoldReport, sqlx::Error> {
-    let tx_max_sequence: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(sequence), 0) FROM conversation_events WHERE conversation_id = ?",
+    let (tx_event_count, tx_max_sequence): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), COALESCE(MAX(sequence), 0) FROM conversation_events WHERE conversation_id = ?",
     )
     .bind(conversation_id)
     .fetch_one(&mut *conn)
@@ -425,7 +472,8 @@ async fn apply_planned_folds_in_tx(
     .collect();
 
     let (events_before, max_sequence_before, recomputed_mutations);
-    let mutations: &[PlannedFoldMutation] = if tx_max_sequence == planned_max_sequence
+    let mutations: &[PlannedFoldMutation] = if tx_event_count == planned_events_before as i64
+        && tx_max_sequence == planned_max_sequence
         && tx_in_flight_turns == *planned_in_flight_turns
     {
         events_before = planned_events_before;
@@ -1156,5 +1204,69 @@ mod tests {
             })
             .expect("assistant text");
         assert_eq!(assistant_text, "Hello world, event folding is lossless!");
+    }
+
+    #[tokio::test]
+    async fn fold_all_settled_with_reader_skips_write_pool_when_nothing_to_fold() {
+        let db = DBService::new_in_memory_for_tests()
+            .await
+            .expect("in-memory db");
+        let pool = db.writer().as_pool();
+        let conv_id = create_test_session(pool).await;
+
+        // Only 1 settled turn — well inside RECENT_TURN_BUFFER (50), so nothing should fold.
+        append_streaming_turn(pool, conv_id, &["a", "b", "c"], true).await;
+
+        // Hold the sole WritePool(1) connection open to prove the no-op scan never acquires it.
+        let held_writer = db
+            .writer()
+            .as_pool()
+            .acquire()
+            .await
+            .expect("checkout sole writer connection");
+
+        let report = tokio::time::timeout(
+            Duration::from_secs(2),
+            EventFolder::fold_all_settled_with_reader(db.reader(), db.writer()),
+        )
+        .await
+        .expect("clean folding scan must not wait on WritePool")
+        .expect("fold_all_settled_with_reader succeeds");
+        assert_eq!(report.fold_operations, 0);
+
+        drop(held_writer);
+
+        // With buffer = 0, the settled turn is now eligible and folds cleanly via ReadPool + WritePool.
+        let folded =
+            EventFolder::fold_all_settled_with_reader_and_buffer(db.reader(), db.writer(), 0)
+                .await
+                .expect("fold eligible settled turn");
+        assert_eq!(folded.fold_operations, 1);
+        assert_eq!(folded.events_after, 3);
+    }
+
+    #[tokio::test]
+    async fn concurrent_fold_does_not_double_apply_stale_plan() {
+        let db = DBService::new_in_memory_for_tests()
+            .await
+            .expect("in-memory db");
+        let pool = db.writer().as_pool();
+        let conv_id = create_test_session(pool).await;
+
+        // Turn 1 is outside recent_turn_buffer = 1; Turn 2 keeps MAX(sequence) unchanged.
+        append_streaming_turn(pool, conv_id, &["old-1", "old-2", "old-3"], true).await;
+        append_streaming_turn(pool, conv_id, &["new-1", "new-2"], true).await;
+
+        let (r1, r2) = tokio::join!(
+            EventFolder::fold_all_settled_with_reader_and_buffer(db.reader(), db.writer(), 1),
+            EventFolder::fold_all_settled_with_reader_and_buffer(db.reader(), db.writer(), 1),
+        );
+        let r1 = r1.expect("first concurrent fold succeeds");
+        let r2 = r2.expect("second concurrent fold succeeds");
+        assert_eq!(
+            r1.fold_operations + r2.fold_operations,
+            1,
+            "stale concurrent fold plan must recompute when event count changes"
+        );
     }
 }

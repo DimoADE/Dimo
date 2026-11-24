@@ -417,6 +417,10 @@ export class WindowManager {
     return this.getWindow(MAIN_WINDOW_LABEL);
   }
 
+  getRegisteredLabelForWebContents(webContents: WebContents): string | null {
+    return this.labelsByWebContents.get(webContents) ?? null;
+  }
+
   getLabelForWebContents(webContents: WebContents): string {
     return this.labelsByWebContents.get(webContents) ?? MAIN_WINDOW_LABEL;
   }

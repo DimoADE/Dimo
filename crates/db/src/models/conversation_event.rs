@@ -281,10 +281,33 @@ impl ConversationEventRecord {
         pool: &SqlitePool,
         limit: i64,
     ) -> Result<u64, sqlx::Error> {
+        Self::compact_oversized_payloads_with_reader(pool, pool, limit).await
+    }
+
+    /// Scan for oversized payloads on `read_pool`, compute capped payloads in
+    /// memory, and acquire `write_pool` only when rows actually need rewriting.
+    ///
+    /// This keeps periodic background scans from holding the single SQLite
+    /// `WritePool(1)` connection when the database is already clean.
+    pub async fn compact_oversized_payloads_with_reader(
+        read_pool: &SqlitePool,
+        write_pool: &SqlitePool,
+        limit: i64,
+    ) -> Result<u64, sqlx::Error> {
         let limit = limit.max(1);
-        let mut conn = pool.acquire().await?;
+        let rows = fetch_oversized_event_payloads(read_pool, limit).await?;
+        if rows.is_empty() {
+            return Ok(0);
+        }
+
+        let planned = plan_compacted_event_payloads(rows);
+        if planned.is_empty() {
+            return Ok(0);
+        }
+
+        let mut conn = write_pool.acquire().await?;
         sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
-        let result = compact_oversized_payloads_on_connection(&mut conn, limit).await;
+        let result = apply_compacted_event_payloads(&mut conn, &planned).await;
         match result {
             Ok(reclaimed) => {
                 sqlx::query("COMMIT").execute(&mut *conn).await?;
@@ -611,18 +634,29 @@ fn fallback_event_json(kind: &str, parsed: Option<&Value>, raw: &str) -> String 
 #[derive(FromRow)]
 struct OversizedEventPayload {
     id: Uuid,
+    source: String,
     event_kind: String,
     normalized_json: String,
     raw_json: Option<String>,
 }
 
-async fn compact_oversized_payloads_on_connection(
-    conn: &mut SqliteConnection,
+struct CompactedEventPayloadUpdate {
+    id: Uuid,
+    expected_source: String,
+    expected_normalized_bytes: i64,
+    expected_raw_bytes: i64,
+    normalized_json: String,
+    raw_json: Option<String>,
+    bytes_reclaimed: u64,
+}
+
+async fn fetch_oversized_event_payloads(
+    read_pool: &SqlitePool,
     limit: i64,
-) -> Result<u64, sqlx::Error> {
+) -> Result<Vec<OversizedEventPayload>, sqlx::Error> {
     let cap = MAX_STORED_EVENT_JSON_BYTES as i64;
-    let rows = sqlx::query_as::<_, OversizedEventPayload>(
-        r#"SELECT id, event_kind, normalized_json, raw_json
+    sqlx::query_as::<_, OversizedEventPayload>(
+        r#"SELECT id, source, event_kind, normalized_json, raw_json
            FROM conversation_events
            WHERE (
                event_kind IN ('tool_call_upsert', 'terminal_updated', 'raw_diagnostic_recorded')
@@ -640,15 +674,17 @@ async fn compact_oversized_payloads_on_connection(
     .bind(cap)
     .bind(cap)
     .bind(limit)
-    .fetch_all(&mut *conn)
-    .await?;
-    if rows.is_empty() {
-        return Ok(0);
-    }
+    .fetch_all(read_pool)
+    .await
+}
 
-    let mut rows_updated = 0u64;
-    let mut reclaimed = 0u64;
+fn plan_compacted_event_payloads(
+    rows: Vec<OversizedEventPayload>,
+) -> Vec<CompactedEventPayloadUpdate> {
+    let mut planned = Vec::with_capacity(rows.len());
     for row in rows {
+        let expected_normalized_bytes = row.normalized_json.len() as i64;
+        let expected_raw_bytes = row.raw_json.as_ref().map_or(-1, |raw| raw.len() as i64);
         let before = row.normalized_json.len() + row.raw_json.as_ref().map_or(0, String::len);
         let (normalized, raw) = cap_stored_event_payloads(
             &row.event_kind,
@@ -656,25 +692,57 @@ async fn compact_oversized_payloads_on_connection(
             row.raw_json.as_deref(),
         );
         let after = normalized.len() + raw.as_ref().map_or(0, |value| value.len());
-        sqlx::query(
-            "UPDATE conversation_events SET normalized_json = ?, raw_json = ? WHERE id = ?",
+        planned.push(CompactedEventPayloadUpdate {
+            id: row.id,
+            expected_source: row.source,
+            expected_normalized_bytes,
+            expected_raw_bytes,
+            normalized_json: normalized.into_owned(),
+            raw_json: raw.map(Cow::into_owned),
+            bytes_reclaimed: before.saturating_sub(after) as u64,
+        });
+    }
+    planned
+}
+
+async fn apply_compacted_event_payloads(
+    conn: &mut SqliteConnection,
+    planned: &[CompactedEventPayloadUpdate],
+) -> Result<u64, sqlx::Error> {
+    let mut rows_updated = 0u64;
+    let mut reclaimed = 0u64;
+    for row in planned {
+        let outcome = sqlx::query(
+            r#"UPDATE conversation_events
+               SET normalized_json = ?, raw_json = ?
+               WHERE id = ?
+                 AND source = ?
+                 AND length(CAST(normalized_json AS BLOB)) = ?
+                 AND IFNULL(length(CAST(raw_json AS BLOB)), -1) = ?"#,
         )
-        .bind(normalized.as_ref())
-        .bind(raw.as_deref())
+        .bind(&row.normalized_json)
+        .bind(row.raw_json.as_deref())
         .bind(row.id)
+        .bind(&row.expected_source)
+        .bind(row.expected_normalized_bytes)
+        .bind(row.expected_raw_bytes)
         .execute(&mut *conn)
         .await?;
-        rows_updated += 1;
-        reclaimed += before.saturating_sub(after) as u64;
+        if outcome.rows_affected() > 0 {
+            rows_updated += outcome.rows_affected();
+            reclaimed += row.bytes_reclaimed;
+        }
     }
-    if reclaimed == 0 {
+    if reclaimed == 0 && rows_updated > 0 {
         reclaimed = rows_updated;
     }
-    tracing::info!(
-        rows = rows_updated,
-        bytes_reclaimed = reclaimed,
-        "compacted oversized conversation event payloads"
-    );
+    if rows_updated > 0 {
+        tracing::info!(
+            rows = rows_updated,
+            bytes_reclaimed = reclaimed,
+            "compacted oversized conversation event payloads"
+        );
+    }
     Ok(reclaimed)
 }
 
@@ -1316,5 +1384,138 @@ mod tests {
                 .expect("second compact"),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn compact_oversized_payloads_with_reader_skips_write_pool_when_clean() {
+        let db = crate::DBService::new_in_memory_for_tests()
+            .await
+            .expect("in-memory db with separate reader/writer pools");
+        let conversation_id = Uuid::new_v4();
+        let small_json = r#"{"kind":"assistant_text_delta","text":"hello"}"#;
+        sqlx::query(
+            "INSERT INTO conversation_events (
+                id, conversation_id, sequence, source, event_kind, normalized_json
+             ) VALUES (?, ?, 1, 'acp', 'assistant_text_delta', ?)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(conversation_id)
+        .bind(small_json)
+        .execute(db.writer().as_pool())
+        .await
+        .expect("insert small row");
+
+        // Hold the sole WritePool(1) connection open to prove the clean scan never touches it.
+        let held_writer = db
+            .writer()
+            .as_pool()
+            .acquire()
+            .await
+            .expect("checkout sole writer connection");
+
+        let clean_reclaimed = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            ConversationEventRecord::compact_oversized_payloads_with_reader(
+                db.reader().as_pool(),
+                db.writer().as_pool(),
+                25,
+            ),
+        )
+        .await
+        .expect("clean compaction scan must not wait on WritePool")
+        .expect("clean compaction succeeds");
+        assert_eq!(clean_reclaimed, 0);
+
+        drop(held_writer);
+
+        // Now insert an oversized historical row and confirm read_pool + write_pool compacts it.
+        let oversized_id = Uuid::new_v4();
+        let output = "w".repeat(80_000);
+        let oversized = format!(
+            r#"{{"kind":"tool_call_upsert","tool_call":{{"tool_call_id":"legacy","status":"completed","raw_output":"{output}"}}}}"#
+        );
+        sqlx::query(
+            "INSERT INTO conversation_events (
+                id, conversation_id, sequence, source, event_kind, normalized_json, raw_json
+             ) VALUES (?, ?, 2, 'acp', 'tool_call_upsert', ?, ?)",
+        )
+        .bind(oversized_id)
+        .bind(conversation_id)
+        .bind(&oversized)
+        .bind(&oversized)
+        .execute(db.writer().as_pool())
+        .await
+        .expect("insert oversized row");
+
+        let reclaimed = ConversationEventRecord::compact_oversized_payloads_with_reader(
+            db.reader().as_pool(),
+            db.writer().as_pool(),
+            25,
+        )
+        .await
+        .expect("compact with reader");
+        assert!(reclaimed > 0);
+    }
+
+    #[tokio::test]
+    async fn apply_compacted_event_payloads_skips_concurrently_modified_row() {
+        let db = crate::DBService::new_in_memory_for_tests()
+            .await
+            .expect("in-memory db");
+        let conversation_id = Uuid::new_v4();
+        let row_id = Uuid::new_v4();
+        let original_normalized = r#"{"kind":"assistant_text_delta","text":"part1"}"#;
+        let oversized_raw = "r".repeat(MAX_STORED_EVENT_JSON_BYTES + 1024);
+
+        sqlx::query(
+            "INSERT INTO conversation_events (
+                id, conversation_id, sequence, source, event_kind, normalized_json, raw_json
+             ) VALUES (?, ?, 1, 'acp', 'assistant_text_delta', ?, ?)",
+        )
+        .bind(row_id)
+        .bind(conversation_id)
+        .bind(original_normalized)
+        .bind(&oversized_raw)
+        .execute(db.writer().as_pool())
+        .await
+        .expect("insert event with oversized raw_json");
+
+        // Phase 1: scan & plan on read_pool.
+        let rows = fetch_oversized_event_payloads(db.reader().as_pool(), 25)
+            .await
+            .expect("scan oversized rows");
+        let planned = plan_compacted_event_payloads(rows);
+        assert_eq!(planned.len(), 1);
+
+        // Concurrent writer (e.g. EventFolder) folds the row before compaction acquires WritePool.
+        let folded_normalized = r#"{"kind":"assistant_text_delta","text":"part1+part2+part3"}"#;
+        let folded_raw = r#"{"folded":true,"foldedType":"assistant_text","eventCount":3,"firstSequence":1,"lastSequence":3}"#;
+        sqlx::query(
+            "UPDATE conversation_events SET source = 'system', normalized_json = ?, raw_json = ? WHERE id = ?",
+        )
+        .bind(folded_normalized)
+        .bind(folded_raw)
+        .bind(row_id)
+        .execute(db.writer().as_pool())
+        .await
+        .expect("simulate concurrent fold");
+
+        // Phase 2: apply stale compaction plan — must not clobber the folded row.
+        let mut conn = db.writer().as_pool().acquire().await.expect("writer conn");
+        let reclaimed = apply_compacted_event_payloads(&mut conn, &planned)
+            .await
+            .expect("apply planned compaction");
+        assert_eq!(reclaimed, 0);
+
+        let stored = sqlx::query_as::<_, ConversationEventRecord>(&format!(
+            "SELECT {EVENT_COLUMNS} FROM conversation_events WHERE id = ?"
+        ))
+        .bind(row_id)
+        .fetch_one(db.reader().as_pool())
+        .await
+        .expect("read preserved folded row");
+        assert_eq!(stored.source, "system");
+        assert_eq!(stored.normalized_json, folded_normalized);
+        assert_eq!(stored.raw_json.as_deref(), Some(folded_raw));
     }
 }

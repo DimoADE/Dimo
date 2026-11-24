@@ -784,4 +784,181 @@ describe('getLocalDesktopTransport & electronRemoteDesktopBridge', () => {
     );
     transport.destroy();
   });
+
+  it('routes allowlisted local HOST_COMMANDS through window.dimoDesktop.hostRpc without touching Chromium fetch', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const shell = createMockShell();
+    const hostRpcCall = vi.fn(async (req: { command: string; args?: Record<string, unknown> }) => {
+      if (req.command === 'get_projects') {
+        return {
+          ok: true,
+          status: 200,
+          bodyText: JSON.stringify({
+            operation_id: 'op-ipc-1',
+            data: [{ id: 'proj-ipc', name: 'IPC Project' }],
+          }),
+        };
+      }
+      return {
+        ok: false,
+        status: 409,
+        code: 'conflict',
+        message: 'Workspace locked',
+        retryable: true,
+        operationId: 'op-ipc-err',
+        details: { reason: 'busy' },
+      };
+    });
+    const hostRpcCancel = vi.fn();
+    const hostRpcCapabilities = vi.fn(async () => ({
+      protocol_version: '1.0',
+      server_version: '0.5.4',
+      minimum_client_version: '0.5.0',
+      capabilities: ['application.call', 'desktop.electron', 'plugin.read'],
+    }));
+    const preloadedCaps: ServerCapabilities = {
+      protocol_version: '1.0',
+      server_version: '0.5.4',
+      minimum_client_version: '0.5.0',
+      capabilities: ['application.call', 'desktop.electron'],
+    };
+
+    (window as unknown as Record<string, unknown>).dimoDesktop = {
+      platform: 'win32',
+      getWindowLabel: () => 'settings',
+      getAppVersion: async () => '0.5.4',
+      backend: { baseUrl: 'http://127.0.0.1:41234', token: 'a'.repeat(64) },
+      getBackend: () => ({
+        baseUrl: 'http://127.0.0.1:41234',
+        token: 'a'.repeat(64),
+      }),
+      getCachedCapabilities: () => preloadedCaps,
+      hostRpc: {
+        call: hostRpcCall,
+        cancel: hostRpcCancel,
+        capabilities: hostRpcCapabilities,
+      },
+      invoke: shell.shell.invoke,
+      events: shell.shell.events,
+      window: {},
+      dialog: {},
+      fs: {},
+      path: {},
+      shell: {},
+      assets: { convertFileSrc: (p: string) => p },
+      updater: {},
+    };
+
+    const transport = new ElectronTransport({
+      backend: { baseUrl: 'http://127.0.0.1:41234', token: 'a'.repeat(64) },
+      shell: shell.shell,
+    });
+
+    // Synchronous cached capabilities read from preload bootstrap
+    expect(transport.getCachedCapabilities()).toEqual(preloadedCaps);
+
+    // Local HOST_COMMAND routes via IPC hostRpc, not browser fetch
+    await expect(
+      transport.call('get_projects', { includeArchived: false })
+    ).resolves.toEqual([{ id: 'proj-ipc', name: 'IPC Project' }]);
+    expect(hostRpcCall).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: 'get_projects',
+        args: { includeArchived: false },
+        requestId: expect.any(String),
+        operationId: expect.any(String),
+      })
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // Non-ok IPC proxy response maps cleanly to WebTransportError with structured details
+    await expect(transport.call('conversation_list', {})).rejects.toMatchObject({
+      name: 'WebTransportError',
+      code: 'conflict',
+      message: 'Workspace locked',
+      retryable: true,
+      operationId: 'op-ipc-err',
+      status: 409,
+      details: { reason: 'busy' },
+    });
+
+    // capabilities() returns preloaded sync cache with 0 IPC round-trips
+    const cachedCaps = await transport.capabilities();
+    expect(cachedCaps).toEqual(preloadedCaps);
+    expect(hostRpcCapabilities).toHaveBeenCalledTimes(0);
+
+    // Sidecar restart (reconfigure) invalidates cached capabilities; concurrent callers deduplicate to 1 IPC call
+    (
+      window as unknown as {
+        dimoDesktop: { getCachedCapabilities: () => ServerCapabilities | null };
+      }
+    ).dimoDesktop.getCachedCapabilities = () => null;
+    transport.reconfigure({
+      baseUrl: 'http://127.0.0.1:41235',
+      token: 'b'.repeat(64),
+    });
+    const [capsA, capsB] = await Promise.all([
+      transport.capabilities(),
+      transport.capabilities(),
+    ]);
+    expect(hostRpcCapabilities).toHaveBeenCalledTimes(1);
+    expect(capsA).toEqual(capsB);
+    expect(capsA.capabilities).toContain('plugin.read');
+    expect(transport.getCachedCapabilities()).toEqual(capsA);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    transport.destroy();
+  });
+
+  it('cancels all in-flight hostRpc proxy requests when ElectronTransport.destroy() is called', async () => {
+    const shell = createMockShell();
+    const cancelledRequestIds: string[] = [];
+    const seenRequestIds: string[] = [];
+
+    (window as unknown as Record<string, unknown>).dimoDesktop = {
+      platform: 'win32',
+      getWindowLabel: () => 'settings',
+      getAppVersion: async () => '0.5.4',
+      backend: { baseUrl: 'http://127.0.0.1:41234', token: 'a'.repeat(64) },
+      getBackend: () => ({
+        baseUrl: 'http://127.0.0.1:41234',
+        token: 'a'.repeat(64),
+      }),
+      getCachedCapabilities: () => null,
+      hostRpc: {
+        call: vi.fn((req: { requestId: string }) => {
+          seenRequestIds.push(req.requestId);
+          return new Promise(() => {});
+        }),
+        cancel: vi.fn((requestId: string) => {
+          cancelledRequestIds.push(requestId);
+        }),
+        capabilities: vi.fn(),
+      },
+      invoke: shell.shell.invoke,
+      events: shell.shell.events,
+      window: {},
+      dialog: {},
+      fs: {},
+      path: {},
+      shell: {},
+      assets: { convertFileSrc: (p: string) => p },
+      updater: {},
+    };
+
+    const transport = new ElectronTransport({
+      backend: { baseUrl: 'http://127.0.0.1:41234', token: 'a'.repeat(64) },
+      shell: shell.shell,
+    });
+
+    void transport.call('get_projects', {});
+    void transport.call('conversation_list', {});
+    await Promise.resolve();
+
+    expect(seenRequestIds).toHaveLength(2);
+    transport.destroy();
+    expect(cancelledRequestIds).toEqual(seenRequestIds);
+  });
 });

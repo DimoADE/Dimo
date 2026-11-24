@@ -5,9 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 
-import type {
-  ElectronBackendConnectionInfo,
-  SidecarRuntimeStatus,
+import {
+  isValidHostCommandName,
+  type CachedServerCapabilities,
+  type ElectronBackendConnectionInfo,
+  type HostRpcProxyResponse,
+  type SidecarRuntimeStatus,
 } from '../shared/ipcContract';
 
 export interface ServerReadyMessage {
@@ -61,6 +64,8 @@ const STDERR_RING_LIMIT = 40;
 const DEFAULT_MAX_RESTART_ATTEMPTS = 3;
 const DEFAULT_RESTART_WINDOW_MS = 60_000;
 const DEFAULT_RESTART_BASE_DELAY_MS = 1_000;
+const HOST_PROTOCOL_VERSION = '1.0';
+const HOST_CAPABILITIES_TIMEOUT_MS = 30_000;
 
 export function generateDesktopToken(): string {
   return crypto.randomBytes(32).toString('hex');
@@ -429,6 +434,8 @@ export class SidecarManager {
   private restartTimestamps: number[] = [];
   private lastStartOptions: SidecarStartOptions | null = null;
   private logger: Pick<Console, 'info' | 'warn' | 'error'> = console;
+  private cachedCapabilities: CachedServerCapabilities | null = null;
+  private capabilitiesInflight: Promise<CachedServerCapabilities> | null = null;
 
   getConnection(): ElectronBackendConnectionInfo {
     if (!this.connection) {
@@ -439,6 +446,15 @@ export class SidecarManager {
 
   getConnectionOrNull(): ElectronBackendConnectionInfo | null {
     return this.isRunning() ? this.connection : null;
+  }
+
+  getCachedCapabilities(): CachedServerCapabilities | null {
+    return this.isRunning() && this.connection ? this.cachedCapabilities : null;
+  }
+
+  private clearCapabilitiesCache(): void {
+    this.cachedCapabilities = null;
+    this.capabilitiesInflight = null;
   }
 
   async waitForReady(): Promise<ElectronBackendConnectionInfo> {
@@ -707,6 +723,7 @@ export class SidecarManager {
       };
     }
 
+    this.clearCapabilitiesCache();
     this.readyInfo = ready;
     this.connection = {
       baseUrl: `http://127.0.0.1:${ready.port}`,
@@ -725,6 +742,7 @@ export class SidecarManager {
     signal: NodeJS.Signals | null,
     stderrTail: string[]
   ): void {
+    this.clearCapabilitiesCache();
     const opts = this.lastStartOptions;
     const maxAttempts = opts?.maxRestartAttempts ?? DEFAULT_MAX_RESTART_ATTEMPTS;
     const windowMs = opts?.restartWindowMs ?? DEFAULT_RESTART_WINDOW_MS;
@@ -935,6 +953,285 @@ export class SidecarManager {
     return run();
   }
 
+  async fetchCapabilities(options?: {
+    forceRefresh?: boolean;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  }): Promise<CachedServerCapabilities> {
+    const conn = await this.waitForReady();
+    if (!options?.forceRefresh && this.cachedCapabilities && this.connection === conn) {
+      return this.cachedCapabilities;
+    }
+    if (!options?.forceRefresh && !options?.signal && this.capabilitiesInflight) {
+      return this.capabilitiesInflight;
+    }
+
+    const effectiveTimeoutMs =
+      typeof options?.timeoutMs === 'number' &&
+      Number.isFinite(options.timeoutMs) &&
+      options.timeoutMs > 0
+        ? options.timeoutMs
+        : HOST_CAPABILITIES_TIMEOUT_MS;
+
+    const run = async (): Promise<CachedServerCapabilities> => {
+      const controller = new AbortController();
+      let timedOut = false;
+      const externalSignal = options?.signal;
+      let onExternalAbort: (() => void) | undefined;
+      if (externalSignal) {
+        if (externalSignal.aborted) {
+          controller.abort(externalSignal.reason);
+        } else {
+          onExternalAbort = () => controller.abort(externalSignal.reason);
+          externalSignal.addEventListener('abort', onExternalAbort, {
+            once: true,
+          });
+        }
+      }
+      const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, effectiveTimeoutMs);
+      timer.unref?.();
+
+      try {
+        const response = await fetch(`${conn.baseUrl}/api/v1/capabilities`, {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${conn.token}`,
+            'Content-Type': 'application/json',
+            'X-Dimo-Protocol-Version': HOST_PROTOCOL_VERSION,
+          },
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new Error(
+            `Dimo Server capabilities request failed with HTTP ${response.status}`
+          );
+        }
+        const caps = (await response.json()) as CachedServerCapabilities;
+        if (this.connection === conn) {
+          this.cachedCapabilities = caps;
+        }
+        return caps;
+      } catch (error) {
+        if (timedOut) {
+          throw new Error(
+            `Dimo Server capabilities request timed out after ${effectiveTimeoutMs}ms`
+          );
+        }
+        throw error;
+      } finally {
+        clearTimeout(timer);
+        if (externalSignal && onExternalAbort) {
+          externalSignal.removeEventListener('abort', onExternalAbort);
+        }
+      }
+    };
+
+    if (options?.signal) {
+      return run();
+    }
+
+    const pending = run().finally(() => {
+      if (this.capabilitiesInflight === pending) {
+        this.capabilitiesInflight = null;
+      }
+    });
+    this.capabilitiesInflight = pending;
+    return pending;
+  }
+
+  async proxyHostCommand(request: {
+    command: string;
+    args?: Record<string, unknown>;
+    operationId?: string;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  }): Promise<HostRpcProxyResponse> {
+    if (!isValidHostCommandName(request.command)) {
+      return {
+        ok: false,
+        status: 400,
+        code: 'bad_request',
+        message: 'Invalid host command name',
+        retryable: false,
+      };
+    }
+
+    const externalSignal = request.signal;
+    if (externalSignal?.aborted) {
+      return {
+        ok: false,
+        code: 'request_aborted',
+        message: 'Dimo Server request was cancelled',
+        retryable: true,
+      };
+    }
+
+    let conn: ElectronBackendConnectionInfo;
+    try {
+      if (externalSignal) {
+        let onReadyAbort: (() => void) | undefined;
+        const abortWhileStarting = new Promise<never>((_resolve, reject) => {
+          onReadyAbort = () => reject(new Error('__host_rpc_aborted__'));
+          externalSignal.addEventListener('abort', onReadyAbort, {
+            once: true,
+          });
+        });
+        try {
+          conn = await Promise.race([this.waitForReady(), abortWhileStarting]);
+        } finally {
+          if (onReadyAbort) {
+            externalSignal.removeEventListener('abort', onReadyAbort);
+          }
+        }
+      } else {
+        conn = await this.waitForReady();
+      }
+    } catch (error) {
+      if (externalSignal?.aborted) {
+        return {
+          ok: false,
+          code: 'request_aborted',
+          message: 'Dimo Server request was cancelled',
+          retryable: true,
+        };
+      }
+      return {
+        ok: false,
+        code: 'sidecar_unavailable',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'dimo-server sidecar is unavailable',
+        retryable: true,
+      };
+    }
+
+    const controller = new AbortController();
+    let timedOut = false;
+    let abortedExternally = false;
+    let onExternalAbort: (() => void) | undefined;
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        abortedExternally = true;
+        controller.abort(externalSignal.reason);
+      } else {
+        onExternalAbort = () => {
+          abortedExternally = true;
+          controller.abort(externalSignal.reason);
+        };
+        externalSignal.addEventListener('abort', onExternalAbort, {
+          once: true,
+        });
+      }
+    }
+
+    const effectiveTimeoutMs =
+      typeof request.timeoutMs === 'number' &&
+      Number.isFinite(request.timeoutMs) &&
+      request.timeoutMs > 0
+        ? request.timeoutMs
+        : null;
+    const timer =
+      effectiveTimeoutMs !== null
+        ? setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+          }, effectiveTimeoutMs)
+        : undefined;
+    timer?.unref?.();
+
+    const operationId = request.operationId || crypto.randomUUID();
+    try {
+      const response = await fetch(
+        `${conn.baseUrl}/api/v1/call/${request.command}`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${conn.token}`,
+            'Content-Type': 'application/json',
+            'X-Dimo-Protocol-Version': HOST_PROTOCOL_VERSION,
+          },
+          body: JSON.stringify({
+            operation_id: operationId,
+            args: request.args ?? {},
+          }),
+          signal: controller.signal,
+        }
+      );
+
+      // Zero-parse pass-through on success so Electron Main never spends CPU
+      // JSON-parsing large conversation/file responses.
+      const bodyText = await response.text();
+      if (response.ok) {
+        return {
+          ok: true,
+          status: response.status,
+          bodyText,
+        };
+      }
+
+      let envelope: {
+        code?: string;
+        message?: string;
+        retryable?: boolean;
+        operation_id?: string;
+        details?: unknown;
+      } = {};
+      if (bodyText.length > 0) {
+        try {
+          envelope = JSON.parse(bodyText) as typeof envelope;
+        } catch {
+          // Preserve a stable error envelope if an intermediary returned HTML/text.
+        }
+      }
+
+      return {
+        ok: false,
+        status: response.status,
+        code: envelope.code ?? 'remote_http_error',
+        message:
+          envelope.message ?? `Dimo Server returned HTTP ${response.status}`,
+        retryable: Boolean(envelope.retryable ?? false),
+        operationId: envelope.operation_id,
+        details: envelope.details,
+      };
+    } catch (error) {
+      if (timedOut) {
+        return {
+          ok: false,
+          code: 'request_timeout',
+          message: `Dimo Server request timed out after ${effectiveTimeoutMs}ms`,
+          retryable: true,
+        };
+      }
+      if (abortedExternally) {
+        return {
+          ok: false,
+          code: 'request_aborted',
+          message: 'Dimo Server request was cancelled',
+          retryable: true,
+        };
+      }
+      return {
+        ok: false,
+        code: 'network_error',
+        message:
+          error instanceof Error ? error.message : String(error ?? 'Network error'),
+        retryable: true,
+      };
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+      if (externalSignal && onExternalAbort) {
+        externalSignal.removeEventListener('abort', onExternalAbort);
+      }
+    }
+  }
+
   async notifyWindowDestroyed(
     label: string,
     windowStillOpen = false
@@ -966,6 +1263,7 @@ export class SidecarManager {
     }
     this.shuttingDown = true;
     this.restarting = false;
+    this.clearCapabilitiesCache();
     this.cancelPendingRestart();
     this.shutdownPromise = this.performShutdown();
     return this.shutdownPromise;

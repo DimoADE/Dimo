@@ -43,7 +43,7 @@ import { AppTitleBar } from '@/components/settings/AppTitleBar';
 import { Button } from '@/components/ui/button';
 import { useAccountToken } from '@/features/model-router';
 import { usePreviousPath } from '@/hooks/usePreviousPath';
-import { useTauriClient } from '@/lib/desktopShell';
+import { useLocalDesktopHost, useTauriClient } from '@/lib/desktopShell';
 import { useSettingsNavFloat } from '@/lib/settingsNavFloat';
 import { preloadSettingsPath } from '@/lib/settingsPreload';
 import { cn } from '@/lib/utils';
@@ -291,6 +291,7 @@ export function SettingsLayout() {
   const { t, i18n } = useTranslation('settings');
   const { capabilities, supports } = useBackendCapabilities();
   const isTauri = useTauriClient();
+  const isLocalDesktop = useLocalDesktopHost();
   const isDimoSignedIn = Boolean(useAccountToken());
   const returnToMainPage = usePreviousPath();
   const settingsNavFloat = useSettingsNavFloat();
@@ -302,6 +303,15 @@ export function SettingsLayout() {
   const navScrollRef = useRef<HTMLDivElement>(null);
   const highlightId = searchParams.get('highlight');
   const searching = searchQuery.trim().length > 0;
+
+  const assumeDesktopBuiltinsWhileLoading =
+    capabilities === null && isLocalDesktop;
+
+  const effectiveSupports = useCallback(
+    (capability: string) =>
+      assumeDesktopBuiltinsWhileLoading || supports(capability),
+    [assumeDesktopBuiltinsWhileLoading, supports]
+  );
 
   const navGroups = useMemo(() => {
     const seenPaths = new Set<string>();
@@ -344,12 +354,13 @@ export function SettingsLayout() {
       .map((group) => ({
         ...group,
         items: group.items.filter((item) => {
-          if (item.anyOf) return item.anyOf.some((cap) => supports(cap));
-          return !item.capability || supports(item.capability);
+          if (item.anyOf)
+            return item.anyOf.some((cap) => effectiveSupports(cap));
+          return !item.capability || effectiveSupports(item.capability);
         }),
       }))
       .filter((group) => group.items.length > 0);
-  }, [pluginPages, sdkPages, supports]);
+  }, [effectiveSupports, pluginPages, sdkPages]);
 
   const navigateTo = useCallback(
     (path: string) => {
@@ -452,7 +463,7 @@ export function SettingsLayout() {
           <SettingsSearch
             query={searchQuery}
             onQueryChange={setSearchQuery}
-            supports={supports}
+            supports={effectiveSupports}
             isSignedIn={isDimoSignedIn}
             onSelect={jumpToSetting}
           />

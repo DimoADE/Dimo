@@ -628,3 +628,273 @@ describe('SidecarManager parallel startup readiness', () => {
     expect(manager.getStatus()).toBe('stopped');
   });
 });
+
+describe('SidecarManager Host RPC proxy & capabilities cache', () => {
+  const servers: Array<import('node:http').Server> = [];
+  const running: Array<{ manager: SidecarManager; kill: () => void }> = [];
+
+  afterEach(async () => {
+    while (running.length > 0) {
+      const entry = running.pop()!;
+      const shutdownPromise = entry.manager.shutdown();
+      entry.kill();
+      await shutdownPromise;
+    }
+    while (servers.length > 0) {
+      const server = servers.pop()!;
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  async function startFakeSidecarWithHttpServer(
+    handler: import('node:http').RequestListener
+  ) {
+    const http = await import('node:http');
+    const server = http.createServer(handler);
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') {
+      throw new Error('Failed to bind ephemeral loopback port');
+    }
+
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const fakeChild = Object.assign(new EventEmitter(), {
+      stdout,
+      stderr,
+      stdin: new PassThrough(),
+      pid: 77777,
+      exitCode: null as number | null,
+      killed: false,
+      kill: vi.fn(() => {
+        if (!fakeChild.killed) {
+          fakeChild.exitCode = 0;
+          fakeChild.killed = true;
+          fakeChild.emit('exit', 0, null);
+        }
+        return true;
+      }),
+    });
+
+    const manager = new SidecarManager();
+    running.push({ manager, kill: () => fakeChild.kill() });
+    const startPromise = manager.start({
+      binaryPath: process.execPath,
+      appVersion: '0.5.4',
+      readyTimeoutMs: 5_000,
+      spawnProcess: (() => fakeChild) as unknown as typeof spawn,
+    });
+    stdout.write(
+      `${JSON.stringify({
+        type: 'dimo-server-ready',
+        listen_addr: `127.0.0.1:${address.port}`,
+        port: address.port,
+        pid: 77777,
+        protocol_version: '1.0',
+      })}\n`
+    );
+    const connection = await startPromise;
+    return { manager, fakeChild, connection };
+  }
+
+  it('passes through raw JSON bodyText without parsing in Main and honors AbortSignal cancellation', async () => {
+    const receivedRequests: Array<{
+      url?: string;
+      auth?: string;
+      protocol?: string;
+      body: string;
+    }> = [];
+    let abortObserved = false;
+
+    const { manager, connection } = await startFakeSidecarWithHttpServer(
+      (req, res) => {
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk: Buffer) => chunks.push(chunk));
+        req.on('end', () => {
+          const body = Buffer.concat(chunks).toString('utf8');
+          receivedRequests.push({
+            url: req.url,
+            auth: req.headers.authorization,
+            protocol: String(req.headers['x-dimo-protocol-version'] ?? ''),
+            body,
+          });
+          if (req.url === '/api/v1/call/get_projects') {
+            // Deliberately non-normalized whitespace to prove zero-parse pass-through
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end('{  "operation_id":"op-1",  "data": [ 1 , 2 ] }');
+            return;
+          }
+          if (req.url === '/api/v1/call/conversation_list') {
+            res.writeHead(409, { 'Content-Type': 'application/json' });
+            res.end('{"code":"conflict","message":"busy","retryable":true}');
+            return;
+          }
+          if (req.url === '/api/v1/call/slow_op') {
+            req.on('close', () => {
+              abortObserved = true;
+            });
+            return;
+          }
+          res.writeHead(404).end();
+        });
+      }
+    );
+
+    const okRes = await manager.proxyHostCommand({
+      command: 'get_projects',
+      args: { limit: 10 },
+      operationId: 'op-1',
+    });
+    expect(okRes).toEqual({
+      ok: true,
+      status: 200,
+      bodyText: '{  "operation_id":"op-1",  "data": [ 1 , 2 ] }',
+    });
+    expect(receivedRequests[0]).toMatchObject({
+      url: '/api/v1/call/get_projects',
+      auth: `Bearer ${connection.token}`,
+      protocol: '1.0',
+    });
+    expect(JSON.parse(receivedRequests[0]!.body)).toEqual({
+      operation_id: 'op-1',
+      args: { limit: 10 },
+    });
+
+    const errRes = await manager.proxyHostCommand({
+      command: 'conversation_list',
+    });
+    expect(errRes).toMatchObject({
+      ok: false,
+      status: 409,
+      code: 'conflict',
+      message: 'busy',
+      retryable: true,
+    });
+
+    // Reject invalid command format before hitting network
+    const invalidRes = await manager.proxyHostCommand({
+      command: '../etc/passwd',
+    });
+    expect(invalidRes).toMatchObject({
+      ok: false,
+      status: 400,
+      code: 'bad_request',
+    });
+
+    // AbortSignal cancels in-flight fetch cleanly
+    const controller = new AbortController();
+    const slowPromise = manager.proxyHostCommand({
+      command: 'slow_op',
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 30);
+    const abortedRes = await slowPromise;
+    expect(abortedRes).toMatchObject({
+      ok: false,
+      code: 'request_aborted',
+      retryable: true,
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(abortObserved).toBe(true);
+  });
+
+  it('caches and deduplicates fetchCapabilities() and clears cache on shutdown', async () => {
+    let capsHits = 0;
+    const { manager, fakeChild } = await startFakeSidecarWithHttpServer(
+      (req, res) => {
+        if (req.url === '/api/v1/capabilities') {
+          capsHits += 1;
+          setTimeout(() => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(
+              JSON.stringify({
+                protocol_version: '1.0',
+                server_version: '0.5.4',
+                minimum_client_version: '0.5.0',
+                capabilities: ['application.call', 'desktop.electron'],
+              })
+            );
+          }, 25);
+          return;
+        }
+        res.writeHead(404).end();
+      }
+    );
+
+    expect(manager.getCachedCapabilities()).toBeNull();
+
+    // Concurrent calls share one in-flight request
+    const [first, second] = await Promise.all([
+      manager.fetchCapabilities(),
+      manager.fetchCapabilities(),
+    ]);
+    expect(capsHits).toBe(1);
+    expect(first).toEqual(second);
+    expect(manager.getCachedCapabilities()).toEqual(first);
+
+    // Subsequent call returns cached capabilities without hitting sidecar
+    const third = await manager.fetchCapabilities();
+    expect(capsHits).toBe(1);
+    expect(third).toEqual(first);
+
+    // forceRefresh re-fetches
+    await manager.fetchCapabilities({ forceRefresh: true });
+    expect(capsHits).toBe(2);
+
+    // Shutdown clears cached capabilities
+    const shutdownPromise = manager.shutdown();
+    fakeChild.kill();
+    await shutdownPromise;
+    expect(manager.getCachedCapabilities()).toBeNull();
+  });
+
+  it('aborts proxyHostCommand immediately when AbortSignal fires before sidecar becomes ready', async () => {
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const fakeChild = Object.assign(new EventEmitter(), {
+      stdout,
+      stderr,
+      stdin: new PassThrough(),
+      pid: 77778,
+      exitCode: null as number | null,
+      killed: false,
+      kill: vi.fn(() => {
+        if (!fakeChild.killed) {
+          fakeChild.exitCode = 0;
+          fakeChild.killed = true;
+          fakeChild.emit('exit', 0, null);
+        }
+        return true;
+      }),
+    });
+
+    const manager = new SidecarManager();
+    running.push({ manager, kill: () => fakeChild.kill() });
+    const startPromise = manager
+      .start({
+        binaryPath: process.execPath,
+        appVersion: '0.5.4',
+        readyTimeoutMs: 5_000,
+        spawnProcess: (() => fakeChild) as unknown as typeof spawn,
+      })
+      .catch(() => undefined);
+
+    const controller = new AbortController();
+    const pendingRpc = manager.proxyHostCommand({
+      command: 'get_projects',
+      signal: controller.signal,
+    });
+
+    setTimeout(() => controller.abort(), 20);
+    const res = await pendingRpc;
+    expect(res).toMatchObject({
+      ok: false,
+      code: 'request_aborted',
+      retryable: true,
+    });
+
+    fakeChild.kill();
+    await startPromise;
+  });
+});

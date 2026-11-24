@@ -1,5 +1,6 @@
-import { ipcMain, type IpcMainInvokeEvent } from 'electron';
+import { ipcMain, type IpcMainEvent, type IpcMainInvokeEvent } from 'electron';
 
+import { HOST_COMMANDS } from '../../../shared/hostCommands';
 import {
   DEVELOPER_MODE_CHANGED_EVENT,
   HOST_CLIENT_MUTATING_COMMANDS,
@@ -7,9 +8,13 @@ import {
   SERVER_DESKTOP_COMMANDS,
   hostAppWindowLabel,
   hostWindowLabel,
+  isLocalDesktopWindowLabel,
+  isValidHostCommandName,
   type BootstrapPayload,
   type DesktopToastPayload,
   type HostClientProfileView,
+  type HostRpcProxyRequest,
+  type HostRpcProxyResponse,
 } from '../shared/ipcContract';
 import type { ElectronBrowserController } from './browser/controller';
 import type { NativeTabsRpcClient } from './browser/nativeTabsRpc';
@@ -51,6 +56,56 @@ export interface IpcContext {
 }
 
 const HOST_CLIENT_CHANGED_EVENT = 'host-client-changed';
+const ALLOWED_HOST_COMMANDS = new Set<string>(HOST_COMMANDS);
+
+function normalizeOrigin(rawUrl: string | undefined | null): string | null {
+  if (!rawUrl || typeof rawUrl !== 'string') {
+    return null;
+  }
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.origin && parsed.origin !== 'null') {
+      return parsed.origin.toLowerCase();
+    }
+    if (parsed.protocol && parsed.host) {
+      return `${parsed.protocol}//${parsed.host}`.toLowerCase();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function isTrustedLocalHostSender(
+  event: Pick<IpcMainInvokeEvent, 'sender' | 'senderFrame'>,
+  windows: Pick<
+    WindowManager,
+    'getRegisteredLabelForWebContents' | 'getAllowedAppOrigin'
+  >
+): boolean {
+  const senderType =
+    typeof (event.sender as { getType?: () => string } | undefined)?.getType ===
+    'function'
+      ? (event.sender as { getType: () => string }).getType()
+      : null;
+  if (senderType === 'webview') {
+    return false;
+  }
+  const registeredLabel = windows.getRegisteredLabelForWebContents(event.sender);
+  if (!registeredLabel || !isLocalDesktopWindowLabel(registeredLabel)) {
+    return false;
+  }
+  const frame = event.senderFrame;
+  if (!frame || frame.parent !== null) {
+    return false;
+  }
+  const frameOrigin = normalizeOrigin(frame.url);
+  const allowedOrigin = normalizeOrigin(windows.getAllowedAppOrigin());
+  if (!frameOrigin || !allowedOrigin || frameOrigin !== allowedOrigin) {
+    return false;
+  }
+  return true;
+}
 
 function extractHostProfile(value: unknown): HostClientProfileView | null {
   if (typeof value !== 'object' || value === null || !('profile' in value)) {
@@ -124,13 +179,44 @@ export function registerIpcHandlers(context: IpcContext): void {
     onExitRequested,
   } = context;
 
+  const activeHostCalls = new Map<
+    string,
+    { webContentsId: number; controller: AbortController }
+  >();
+  const watchedHostCallSenders = new Set<number>();
+
+  const trackSenderDestroyed = (sender: IpcMainInvokeEvent['sender']): void => {
+    const senderId = sender.id;
+    if (watchedHostCallSenders.has(senderId)) {
+      return;
+    }
+    watchedHostCallSenders.add(senderId);
+    sender.once?.('destroyed', () => {
+      watchedHostCallSenders.delete(senderId);
+      for (const [key, entry] of Array.from(activeHostCalls.entries())) {
+        if (entry.webContentsId === senderId) {
+          activeHostCalls.delete(key);
+          entry.controller.abort();
+        }
+      }
+    });
+  };
+
   ipcMain.on(IPC_CHANNELS.BOOTSTRAP_SYNC, (event) => {
     const windowLabel = windows.getLabelForWebContents(event.sender);
+    const registeredLabel = windows.getRegisteredLabelForWebContents(
+      event.sender
+    );
+    const includeLocalCapabilities =
+      registeredLabel !== null && isLocalDesktopWindowLabel(registeredLabel);
     const payload: BootstrapPayload = {
       windowLabel,
       platform: process.platform,
       appVersion,
       backend: sidecar.getConnectionOrNull(),
+      capabilities: includeLocalCapabilities
+        ? sidecar.getCachedCapabilities()
+        : null,
       sidecarStatus: sidecar.getStatus(),
       gpuMode: getGpuMode?.() ?? 'hardware',
       developerMode: windows.isDeveloperModeEnabled(),
@@ -138,6 +224,105 @@ export function registerIpcHandlers(context: IpcContext): void {
     };
     event.returnValue = payload;
   });
+
+  ipcMain.handle(
+    IPC_CHANNELS.HOST_CALL,
+    async (
+      event: IpcMainInvokeEvent,
+      request: HostRpcProxyRequest
+    ): Promise<HostRpcProxyResponse> => {
+      if (!isTrustedLocalHostSender(event, windows)) {
+        return {
+          ok: false,
+          status: 403,
+          code: 'forbidden',
+          message: 'Host RPC proxy is restricted to trusted local windows',
+          retryable: false,
+        };
+      }
+
+      const command = request?.command;
+      if (
+        !isValidHostCommandName(command) ||
+        !ALLOWED_HOST_COMMANDS.has(command)
+      ) {
+        return {
+          ok: false,
+          status: 403,
+          code: 'forbidden',
+          message: `Disallowed host command: ${typeof command === 'string' ? command : '<invalid>'}`,
+          retryable: false,
+        };
+      }
+
+      trackSenderDestroyed(event.sender);
+      const controller = new AbortController();
+      const requestId =
+        typeof request.requestId === 'string' && request.requestId.length > 0
+          ? request.requestId
+          : null;
+      const trackingKey = requestId
+        ? `${event.sender.id}:${requestId}`
+        : `${event.sender.id}:auto:${Date.now()}:${Math.random()}`;
+      activeHostCalls.set(trackingKey, {
+        webContentsId: event.sender.id,
+        controller,
+      });
+
+      try {
+        return await sidecar.proxyHostCommand({
+          command,
+          args:
+            request.args && typeof request.args === 'object'
+              ? request.args
+              : undefined,
+          operationId:
+            typeof request.operationId === 'string'
+              ? request.operationId
+              : undefined,
+          timeoutMs:
+            typeof request.timeoutMs === 'number'
+              ? request.timeoutMs
+              : undefined,
+          signal: controller.signal,
+        });
+      } finally {
+        activeHostCalls.delete(trackingKey);
+      }
+    }
+  );
+
+  ipcMain.on(
+    IPC_CHANNELS.HOST_CALL_CANCEL,
+    (event: IpcMainEvent, requestId: unknown) => {
+      if (typeof requestId !== 'string' || requestId.length === 0) {
+        return;
+      }
+      const trackingKey = `${event.sender.id}:${requestId}`;
+      const active = activeHostCalls.get(trackingKey);
+      if (active) {
+        activeHostCalls.delete(trackingKey);
+        active.controller.abort();
+      }
+    }
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.HOST_CAPABILITIES,
+    async (
+      event: IpcMainInvokeEvent,
+      options?: { forceRefresh?: boolean }
+    ) => {
+      if (!isTrustedLocalHostSender(event, windows)) {
+        throw new Error(
+          'Host capabilities proxy is restricted to trusted local windows'
+        );
+      }
+      return sidecar.fetchCapabilities({
+        forceRefresh: Boolean(options?.forceRefresh),
+      });
+    }
+  );
 
   ipcMain.handle(IPC_CHANNELS.APP_VERSION, () => appVersion);
 

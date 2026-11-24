@@ -8,11 +8,15 @@ import {
   SIDECAR_READY_EVENT,
   SIDECAR_RESTARTED_EVENT,
   convertFileSrcToAssetUrl,
+  isLocalDesktopWindowLabel,
   type BootstrapPayload,
+  type CachedServerCapabilities,
   type DesktopGpuMode,
   type DesktopUpdateCheckResult,
   type DesktopUpdateDownloadEventPayload,
   type ElectronBackendConnectionInfo,
+  type HostRpcProxyRequest,
+  type HostRpcProxyResponse,
   type SidecarRuntimeStatus,
 } from '../shared/ipcContract';
 
@@ -64,17 +68,59 @@ function extractBackendConnectionInfo(
   });
 }
 
+function extractCachedCapabilities(
+  payload: unknown
+): CachedServerCapabilities | null {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+  const candidate =
+    'capabilities' in payload &&
+    payload.capabilities &&
+    typeof payload.capabilities === 'object' &&
+    !Array.isArray(payload.capabilities)
+      ? (payload as { capabilities?: unknown }).capabilities
+      : payload;
+  if (!candidate || typeof candidate !== 'object') {
+    return null;
+  }
+  const record = candidate as Partial<CachedServerCapabilities>;
+  if (
+    typeof record.protocol_version !== 'string' ||
+    typeof record.server_version !== 'string' ||
+    typeof record.minimum_client_version !== 'string' ||
+    !Array.isArray(record.capabilities)
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    ...record,
+    capabilities: Object.freeze(
+      record.capabilities.filter(
+        (item): item is string => typeof item === 'string'
+      )
+    ) as unknown as string[],
+  }) as CachedServerCapabilities;
+}
+
 const bootstrap = ipcRenderer.sendSync(
   IPC_CHANNELS.BOOTSTRAP_SYNC
 ) as BootstrapPayload;
 
+const isLocalDesktopWindow = isLocalDesktopWindowLabel(bootstrap.windowLabel);
+
 let currentBackend: ElectronBackendConnectionInfo | undefined =
   extractBackendConnectionInfo(bootstrap.backend);
+let currentCapabilities: CachedServerCapabilities | null = isLocalDesktopWindow
+  ? extractCachedCapabilities(bootstrap.capabilities)
+  : null;
 let currentSidecarStatus: SidecarRuntimeStatus =
   bootstrap.sidecarStatus ?? (currentBackend ? 'running' : 'stopped');
 
 const getBackend = (): ElectronBackendConnectionInfo | undefined =>
   currentBackend;
+const getCachedCapabilities = (): CachedServerCapabilities | null =>
+  currentCapabilities;
 const getSidecarStatus = (): SidecarRuntimeStatus => currentSidecarStatus;
 
 let currentGpuMode: DesktopGpuMode = bootstrap.gpuMode ?? 'hardware';
@@ -123,12 +169,21 @@ ipcRenderer.on(
         currentBackend = nextBackend;
         currentSidecarStatus = 'running';
       }
+      if (isLocalDesktopWindow) {
+        const nextCapabilities = extractCachedCapabilities(message.payload);
+        if (nextCapabilities) {
+          currentCapabilities = nextCapabilities;
+        } else if (message.event === SIDECAR_RESTARTED_EVENT) {
+          currentCapabilities = null;
+        }
+      }
     }
     if (message.event === SIDECAR_EXITED_EVENT) {
       const willRestart = Boolean(
         (message.payload as { willRestart?: unknown } | undefined)?.willRestart
       );
       currentSidecarStatus = willRestart ? 'restarting' : 'stopped';
+      currentCapabilities = null;
     }
     if (message.event === GPU_MODE_CHANGED_EVENT) {
       const mode = (message.payload as { mode?: unknown } | undefined)?.mode;
@@ -355,6 +410,7 @@ const dimoDesktopBridge = {
     return currentBackend;
   },
   getBackend,
+  getCachedCapabilities,
   get sidecarStatus(): SidecarRuntimeStatus {
     return currentSidecarStatus;
   },
@@ -553,6 +609,27 @@ const dimoDesktopBridge = {
         IPC_CHANNELS.DESKTOP_TOAST_SET_CONTENT_HEIGHT,
         Number(height)
       ),
+  },
+
+  hostRpc: {
+    call: (request: HostRpcProxyRequest): Promise<HostRpcProxyResponse> =>
+      ipcRenderer.invoke(IPC_CHANNELS.HOST_CALL, request),
+    cancel: (requestId: string): void => {
+      ipcRenderer.send(IPC_CHANNELS.HOST_CALL_CANCEL, requestId);
+    },
+    capabilities: async (options?: {
+      forceRefresh?: boolean;
+    }): Promise<CachedServerCapabilities> => {
+      const caps = (await ipcRenderer.invoke(
+        IPC_CHANNELS.HOST_CAPABILITIES,
+        options
+      )) as CachedServerCapabilities;
+      const normalized = extractCachedCapabilities(caps);
+      if (normalized) {
+        currentCapabilities = normalized;
+      }
+      return caps;
+    },
   },
 
   invoke: <T = unknown>(

@@ -18,12 +18,52 @@ export interface ElectronBackendConnectionInfo {
   dataDir?: string;
 }
 
+export interface CachedServerCapabilities {
+  protocol_version: string;
+  server_version: string;
+  minimum_client_version: string;
+  capabilities: string[];
+  reachability?: Array<{ origin: string; kind: string }>;
+  host_id?: string | null;
+  name?: string | null;
+}
+
+export interface HostRpcProxyRequest {
+  command: string;
+  args?: Record<string, unknown>;
+  operationId?: string;
+  requestId?: string;
+  timeoutMs?: number;
+}
+
+export type HostRpcProxyResponse =
+  | {
+      ok: true;
+      status: number;
+      bodyText: string;
+    }
+  | {
+      ok: false;
+      status?: number;
+      code: string;
+      message: string;
+      retryable: boolean;
+      operationId?: string;
+      details?: unknown;
+    };
+
+export function isValidHostCommandName(command: unknown): command is string {
+  return typeof command === 'string' && /^[a-z0-9_]+$/.test(command);
+}
+
 export interface SidecarReadyPayload {
   backend: ElectronBackendConnectionInfo;
+  capabilities?: CachedServerCapabilities | null;
 }
 
 export interface SidecarRestartedPayload {
   backend: ElectronBackendConnectionInfo;
+  capabilities?: CachedServerCapabilities | null;
   attempt?: number;
 }
 
@@ -32,6 +72,7 @@ export interface BootstrapPayload {
   platform: NodeJS.Platform;
   appVersion: string;
   backend: ElectronBackendConnectionInfo | null;
+  capabilities?: CachedServerCapabilities | null;
   sidecarStatus?: SidecarRuntimeStatus;
   gpuMode?: DesktopGpuMode;
   developerMode?: boolean;
@@ -70,6 +111,9 @@ export const IPC_CHANNELS = {
   UPDATER_DOWNLOAD_EVENT: 'dimo:updater:downloadEvent',
   UPDATER_RELAUNCH: 'dimo:updater:relaunch',
   SHELL_INVOKE: 'dimo:shell:invoke',
+  HOST_CALL: 'dimo:host:call',
+  HOST_CALL_CANCEL: 'dimo:host:callCancel',
+  HOST_CAPABILITIES: 'dimo:host:capabilities',
 } as const;
 
 export interface DesktopUpdateCheckResult {

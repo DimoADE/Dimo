@@ -8,7 +8,9 @@ import {
   getDesktopShell,
   hasElectronDesktopRuntime,
   type ElectronBackendConnectionInfo,
+  type ElectronHostRpcBridge,
 } from '@/lib/desktopShell';
+import { randomUUID } from '@/utils/randomUUID';
 
 import type {
   BackendTransport,
@@ -18,7 +20,7 @@ import type {
   ServerCapabilities,
   SubscriptionRequest,
 } from './backendTransport';
-import { WebTransport } from './webTransport';
+import { WebTransport, WebTransportError } from './webTransport';
 
 const HOST_COMMAND_SET = new Set<string>(HOST_COMMANDS);
 const DESKTOP_SHELL_COMMAND_SET = new Set<string>(DESKTOP_SHELL_COMMANDS);
@@ -123,6 +125,40 @@ function isServerHostEvent(event: string): boolean {
   );
 }
 
+function normalizeElectronCapabilities(
+  serverCaps: ServerCapabilities
+): ServerCapabilities {
+  const capabilities = serverCaps.capabilities.includes('desktop.electron')
+    ? serverCaps.capabilities
+    : [...serverCaps.capabilities, 'desktop.electron'];
+  return {
+    ...serverCaps,
+    capabilities,
+  };
+}
+
+function readCachedElectronCapabilities(): ServerCapabilities | null {
+  if (typeof window === 'undefined' || !window.dimoDesktop) {
+    return null;
+  }
+  const cached = window.dimoDesktop.getCachedCapabilities?.();
+  if (!cached || !Array.isArray(cached.capabilities)) {
+    return null;
+  }
+  return normalizeElectronCapabilities(cached as ServerCapabilities);
+}
+
+function readElectronHostRpc(): ElectronHostRpcBridge | undefined {
+  if (typeof window === 'undefined' || !window.dimoDesktop) {
+    return undefined;
+  }
+  const hostRpc = window.dimoDesktop.hostRpc;
+  if (!hostRpc || typeof hostRpc.call !== 'function') {
+    return undefined;
+  }
+  return hostRpc;
+}
+
 export interface ElectronTransportOptions {
   backend?: ElectronBackendConnectionInfo | null;
   webTransport?: WebTransport;
@@ -133,10 +169,12 @@ export interface ElectronTransportOptions {
 /**
  * Local desktop transport for the Electron shell.
  *
- * - `HOST_COMMANDS` and durable/patch/host-event subscriptions go directly to
- *   the co-spawned `dimo-server --desktop` process over loopback HTTP/WS via
- *   `WebTransport`. During parallel desktop startup before `sidecar-ready`
- *   fires, these calls seamlessly await sidecar readiness.
+ * - `HOST_COMMANDS` and `capabilities` go through Electron Main's whitelisted
+ *   IPC proxy (`window.dimoDesktop.hostRpc`) over Node.js's connection pool so
+ *   long-running commands can never exhaust Chromium's 6-connection HTTP/1.1
+ *   origin limit shared across main + settings windows.
+ * - Durable/patch/host-event WebSocket subscriptions go directly to the
+ *   co-spawned `dimo-server --desktop` process via `WebTransport`.
  * - `DESKTOP_SHELL_COMMANDS` go through `window.dimoDesktop.invoke`, which
  *   handles native GUI operations in Electron Main immediately and proxies
  *   migrated desktop business commands to `dimo-server /api/v1/desktop/invoke/*`.
@@ -144,10 +182,14 @@ export interface ElectronTransportOptions {
 export class ElectronTransport implements BackendTransport {
   readonly environment = 'desktop' as const;
   private web: WebTransport | null;
+  private readonly usesCustomWebTransport: boolean;
   private readonly shellOverride?: ReturnType<typeof getDesktopShell>;
   private readonly onReconfigure?: (
     backend: ElectronBackendConnectionInfo
   ) => void;
+  private capabilitiesCache: ServerCapabilities | null = null;
+  private capabilitiesPromise: Promise<ServerCapabilities> | null = null;
+  private readonly activeProxyRequestIds = new Set<string>();
   private destroyed = false;
   private readonly unlistenSidecarEvents: Array<() => void> = [];
   private readonly readyWaiters: Array<{
@@ -156,6 +198,7 @@ export class ElectronTransport implements BackendTransport {
   }> = [];
 
   constructor(options: ElectronTransportOptions = {}) {
+    this.usesCustomWebTransport = Boolean(options.webTransport);
     if (options.webTransport) {
       this.web = options.webTransport;
     } else if (isValidBackendConnectionInfo(options.backend)) {
@@ -288,6 +331,8 @@ export class ElectronTransport implements BackendTransport {
     if (this.destroyed) {
       return;
     }
+    this.capabilitiesCache = null;
+    this.capabilitiesPromise = null;
     if (!this.web) {
       this.applyBackend(backend);
       return;
@@ -324,6 +369,44 @@ export class ElectronTransport implements BackendTransport {
     options?: { operationId?: string }
   ): Promise<unknown> {
     if (this.isServerHostCommand(command)) {
+      const hostRpc = !this.usesCustomWebTransport
+        ? readElectronHostRpc()
+        : undefined;
+      if (hostRpc && HOST_COMMAND_SET.has(command)) {
+        if (this.destroyed) {
+          throw new WebTransportError(
+            'transport destroyed',
+            'transport_closed',
+            true
+          );
+        }
+        const requestId = randomUUID();
+        this.activeProxyRequestIds.add(requestId);
+        try {
+          const response = await hostRpc.call({
+            command,
+            args,
+            operationId: options?.operationId ?? randomUUID(),
+            requestId,
+          });
+          if (!response.ok) {
+            throw new WebTransportError(
+              response.message,
+              response.code,
+              response.retryable,
+              response.operationId,
+              response.status,
+              response.details
+            );
+          }
+          const envelope = JSON.parse(response.bodyText) as {
+            data: unknown;
+          };
+          return envelope.data;
+        } finally {
+          this.activeProxyRequestIds.delete(requestId);
+        }
+      }
       const web = await this.ensureWebTransport();
       return web.call(command, args, options);
     }
@@ -354,16 +437,68 @@ export class ElectronTransport implements BackendTransport {
     return result as T;
   }
 
+  getCachedCapabilities(): ServerCapabilities | null {
+    if (this.capabilitiesCache) {
+      return this.capabilitiesCache;
+    }
+    if (!this.usesCustomWebTransport) {
+      const cached = readCachedElectronCapabilities();
+      if (cached) {
+        this.capabilitiesCache = cached;
+        return cached;
+      }
+    }
+    const webCached = this.web?.getCachedCapabilities?.();
+    if (webCached) {
+      const normalized = normalizeElectronCapabilities(webCached);
+      this.capabilitiesCache = normalized;
+      return normalized;
+    }
+    return null;
+  }
+
   async capabilities(): Promise<ServerCapabilities> {
+    if (this.capabilitiesCache) {
+      return this.capabilitiesCache;
+    }
+    if (!this.usesCustomWebTransport) {
+      const preloaded = readCachedElectronCapabilities();
+      if (preloaded) {
+        this.capabilitiesCache = preloaded;
+        return preloaded;
+      }
+      if (this.capabilitiesPromise) {
+        return this.capabilitiesPromise;
+      }
+      const hostRpc = readElectronHostRpc();
+      if (typeof hostRpc?.capabilities === 'function') {
+        const pending = hostRpc
+          .capabilities()
+          .then((serverCaps) => {
+            const normalized = normalizeElectronCapabilities(
+              serverCaps as ServerCapabilities
+            );
+            if (this.capabilitiesPromise === pending) {
+              this.capabilitiesCache = normalized;
+              this.capabilitiesPromise = null;
+            }
+            return normalized;
+          })
+          .catch((error: unknown) => {
+            if (this.capabilitiesPromise === pending) {
+              this.capabilitiesPromise = null;
+            }
+            throw error;
+          });
+        this.capabilitiesPromise = pending;
+        return pending;
+      }
+    }
     const web = await this.ensureWebTransport();
     const serverCaps = await web.capabilities();
-    const capabilities = serverCaps.capabilities.includes('desktop.electron')
-      ? serverCaps.capabilities
-      : [...serverCaps.capabilities, 'desktop.electron'];
-    return {
-      ...serverCaps,
-      capabilities,
-    };
+    const normalized = normalizeElectronCapabilities(serverCaps);
+    this.capabilitiesCache = normalized;
+    return normalized;
   }
 
   createDevicePairing(
@@ -460,6 +595,17 @@ export class ElectronTransport implements BackendTransport {
       return;
     }
     this.destroyed = true;
+    this.capabilitiesCache = null;
+    this.capabilitiesPromise = null;
+    const hostRpc = !this.usesCustomWebTransport
+      ? readElectronHostRpc()
+      : undefined;
+    if (hostRpc?.cancel && this.activeProxyRequestIds.size > 0) {
+      for (const requestId of Array.from(this.activeProxyRequestIds)) {
+        hostRpc.cancel(requestId);
+      }
+    }
+    this.activeProxyRequestIds.clear();
     const listeners = this.unlistenSidecarEvents.splice(
       0,
       this.unlistenSidecarEvents.length

@@ -32,7 +32,11 @@ export type {
   DesktopUpdateDownloadEvent,
   DesktopUpdateHandle,
   ElectronBackendConnectionInfo,
+  ElectronCachedServerCapabilities,
   ElectronDesktopBridge,
+  ElectronHostRpcBridge,
+  ElectronHostRpcRequest,
+  ElectronHostRpcResponse,
 } from './types';
 
 export { hasElectronDesktopRuntime };

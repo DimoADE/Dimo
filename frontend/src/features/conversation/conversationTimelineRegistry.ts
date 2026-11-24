@@ -76,6 +76,7 @@ const STREAM_QUEUE_CAP = 256;
 const SMALL_SEQUENCE_GAP_MAX = 256n;
 const MAX_STALE_BIND_RETRIES = 2;
 const STALE_BIND_RETRY_DELAY_MS = 150;
+export const MAX_CONCURRENT_SESSION_BINDS = 2;
 
 type Controller = {
   stopped: boolean;
@@ -176,6 +177,9 @@ const listeners = new Set<() => void>();
 const listenersByConversation = new Map<string, Set<() => void>>();
 const slots = new Map<string, Slot>();
 const inflightBinds = new Map<string, InflightBind>();
+let activeBindRequests = 0;
+const pendingBindQueue: string[] = [];
+let registryEpoch = 0;
 const pendingEngineHandoffs = new Map<string, PendingEngineHandoff>();
 let nextEngineHandoffToken = 1;
 const viewCache = new Map<
@@ -576,6 +580,7 @@ export function syncConversationSelectedAgent(
         setSlotConnecting(slot, deferBind, { resetSince: deferBind });
         slot.bindGeneration = (slot.bindGeneration ?? 0) + 1;
         inflightBinds.delete(id);
+        removePendingBind(id);
       }
       viewCache.delete(id);
       notify(id);
@@ -642,6 +647,7 @@ export function syncConversationSelectedAgent(
       slot.keepalive?.();
       slot.keepalive = undefined;
       inflightBinds.delete(id);
+      removePendingBind(id);
       if (slot.controller && !slot.controller.stopped) {
         if (slot.controller.bindTimer != null) {
           window.clearTimeout(slot.controller.bindTimer);
@@ -827,9 +833,12 @@ export function retainConversationTimeline(conversationId: string): () => void {
 }
 
 export function resetConversationTimelineRegistryForTests(): void {
+  registryEpoch += 1;
   for (const slot of slots.values()) stopController(slot);
   slots.clear();
   inflightBinds.clear();
+  activeBindRequests = 0;
+  pendingBindQueue.length = 0;
   pendingEngineHandoffs.clear();
   nextEngineHandoffToken = 1;
   inactiveConversationLru.length = 0;
@@ -846,6 +855,7 @@ function releaseConversationTimeline(conversationId: string): void {
   if (!slot) return;
   slot.refs = Math.max(0, slot.refs - 1);
   if (slot.refs > 0) return;
+  removePendingBind(conversationId);
   stopController(slot);
   notify(conversationId);
   if (slot.surfaceRefs > 0) return;
@@ -963,6 +973,7 @@ function startController(conversationId: string, slot: Slot): void {
       if (pendingEngineHandoffs.has(conversationId)) {
         return;
       }
+      removePendingBind(conversationId);
       current.bindGeneration = (current.bindGeneration ?? 0) + 1;
       setSlotConnecting(current, false);
       current.staleBindRetries = 0;
@@ -1409,21 +1420,87 @@ function scheduleBind(
   controller.bindTimer = window.setTimeout(start, 0);
 }
 
+function removePendingBind(conversationId: string): void {
+  const index = pendingBindQueue.indexOf(conversationId);
+  if (index >= 0) {
+    pendingBindQueue.splice(index, 1);
+  }
+}
+
+function enqueuePendingBind(conversationId: string): void {
+  if (!pendingBindQueue.includes(conversationId)) {
+    pendingBindQueue.push(conversationId);
+  }
+}
+
+function drainPendingBindQueue(): void {
+  while (
+    activeBindRequests < MAX_CONCURRENT_SESSION_BINDS &&
+    pendingBindQueue.length > 0
+  ) {
+    let nextIndex = pendingBindQueue.findIndex(
+      (id) => (slots.get(id)?.surfaceRefs ?? 0) > 0
+    );
+    if (nextIndex < 0) {
+      nextIndex = 0;
+    }
+    const [nextConversationId] = pendingBindQueue.splice(nextIndex, 1);
+    if (!nextConversationId) continue;
+    const slot = slots.get(nextConversationId);
+    if (
+      !slot ||
+      slot.refs <= 0 ||
+      slot.bindReady ||
+      inflightBinds.has(nextConversationId)
+    ) {
+      continue;
+    }
+    if (!canBind(nextConversationId)) {
+      if (
+        !pendingEngineHandoffs.has(nextConversationId) &&
+        slot.connectionStatus !== 'connecting' &&
+        slot.connectionStatus !== 'recovering'
+      ) {
+        setSlotConnecting(slot, false);
+        notify(nextConversationId);
+      }
+      continue;
+    }
+    beginBind(nextConversationId);
+  }
+}
+
 function beginBind(conversationId: string): void {
   if (inflightBinds.has(conversationId)) return;
   const startingSlot = slots.get(conversationId);
-  if (!startingSlot) return;
+  if (!startingSlot || startingSlot.refs <= 0 || startingSlot.bindReady) return;
+  if (activeBindRequests >= MAX_CONCURRENT_SESSION_BINDS) {
+    enqueuePendingBind(conversationId);
+    setSlotConnecting(startingSlot, true);
+    notify(conversationId);
+    return;
+  }
+  removePendingBind(conversationId);
   setSlotConnecting(startingSlot, true);
   startingSlot.bindGeneration = (startingSlot.bindGeneration ?? 0) + 1;
   const bindGeneration = startingSlot.bindGeneration;
+  const bindRegistryEpoch = registryEpoch;
+  activeBindRequests += 1;
   const inflight: InflightBind = {
     promise: Promise.resolve(),
     slot: startingSlot,
     bindGeneration,
     startedAt: startingSlot.connectingSince ?? new Date().toISOString(),
   };
-  inflight.promise = conversationApi
-    .ensureSessionControls(conversationId, { reload: false })
+  let requestPromise: ReturnType<typeof conversationApi.ensureSessionControls>;
+  try {
+    requestPromise = conversationApi.ensureSessionControls(conversationId, {
+      reload: false,
+    });
+  } catch (error) {
+    requestPromise = Promise.reject(error);
+  }
+  inflight.promise = requestPromise
     .then((controls) => {
       const wasCurrentInflight = inflightBinds.get(conversationId) === inflight;
       if (wasCurrentInflight) {
@@ -1519,6 +1596,11 @@ function beginBind(conversationId: string): void {
       current.bindReady = false;
       notify(conversationId);
       report(conversationId, error);
+    })
+    .finally(() => {
+      if (bindRegistryEpoch !== registryEpoch) return;
+      activeBindRequests = Math.max(0, activeBindRequests - 1);
+      drainPendingBindQueue();
     });
   inflightBinds.set(conversationId, inflight);
   notify(conversationId);
@@ -1669,6 +1751,7 @@ async function reconnectAndReload(conversationId: string): Promise<void> {
   slot.keepalive?.();
   slot.keepalive = undefined;
   inflightBinds.delete(conversationId);
+  removePendingBind(conversationId);
   slot.bindGeneration = (slot.bindGeneration ?? 0) + 1;
   const bindGeneration = slot.bindGeneration;
   slot.bindReady = false;

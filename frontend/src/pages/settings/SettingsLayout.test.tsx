@@ -225,6 +225,41 @@ describe('SettingsLayout capability gating', () => {
     expect(screen.getByText('Product plugins')).toBeInTheDocument();
     expect(screen.queryByText('Agent content')).not.toBeInTheDocument();
   });
+
+  it('keeps built-in local desktop settings tabs visible while capabilities are still loading (no 3-item collapse)', () => {
+    const neverResolvingCaps = vi.fn(() => new Promise<never>(() => {}));
+    const transport: BackendTransport = {
+      environment: 'desktop',
+      call: vi.fn(),
+      getCachedCapabilities: () => null,
+      capabilities: neverResolvingCaps,
+    };
+    render(
+      <BackendTransportProvider transport={transport}>
+        <MemoryRouter initialEntries={['/settings/general']}>
+          <Routes>
+            <Route path="/settings" element={<SettingsLayout />}>
+              <Route path="general" element={<div>General content</div>} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </BackendTransportProvider>
+    );
+
+    // Local desktop sidebar must show built-in tabs on frame 0 even before capabilities() settles.
+    expect(
+      screen.getByRole('button', { name: /general|常规/i })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /^agents?$|^Agent$/i })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /plugins|插件/i })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /remote connection|远程连接/i })
+    ).toBeInTheDocument();
+  });
 });
 
 describe('SettingsLayout search', () => {

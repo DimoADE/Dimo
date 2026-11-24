@@ -375,6 +375,7 @@ export interface BackendTransport {
   ): Promise<T>;
   subscribe?(request: SubscriptionRequest): AsyncIterable<RemoteEvent>;
   capabilities?(): Promise<ServerCapabilities>;
+  getCachedCapabilities?(): ServerCapabilities | null;
   createDevicePairing?(
     request: CreateDevicePairingRequest
   ): Promise<DevicePairingChallenge>;
