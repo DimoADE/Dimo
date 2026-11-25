@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useQueryClient } from '@tanstack/react-query';
 import { sessionsApi } from '@/lib/api';
@@ -133,6 +133,22 @@ export function useFollowUpSend({
   const isSendingRef = useRef(false);
   const operationIdRef = useRef<string | null>(null);
   const lastSubmittedMessageRef = useRef<string | null>(null);
+  const operationTargetSessionIdRef = useRef<string | undefined>(undefined);
+  const activeSessionIdRef = useRef(sessionId);
+  activeSessionIdRef.current = sessionId;
+
+  useEffect(() => {
+    if (
+      operationTargetSessionIdRef.current !== undefined &&
+      sessionId === operationTargetSessionIdRef.current
+    ) {
+      return;
+    }
+    operationIdRef.current = null;
+    lastSubmittedMessageRef.current = null;
+    operationTargetSessionIdRef.current = undefined;
+    setFollowUpError(null);
+  }, [sessionId]);
 
   const sendFollowUp = useCallback(
     async (submittedMessage?: string) => {
@@ -158,6 +174,8 @@ export function useFollowUpSend({
       if (!prompt && images.length === 0 && fileRefs.length === 0) return;
 
       isSendingRef.current = true;
+      const initialSessionId = sessionId;
+      const shouldCreateNewSession = isNewSessionMode || !initialSessionId;
       const abandonedOperationId =
         lastSubmittedMessageRef.current !== acceptedMessage
           ? operationIdRef.current
@@ -168,13 +186,12 @@ export function useFollowUpSend({
       lastSubmittedMessageRef.current = acceptedMessage;
       operationIdRef.current ??= crypto.randomUUID();
       const operationId = operationIdRef.current;
+      let targetSessionId = initialSessionId;
+      let targetWorkspaceId = workspaceId;
+      operationTargetSessionIdRef.current = targetSessionId;
       onPendingOperationIdChange?.(operationId);
       let turnAccepted = false;
       try {
-        let targetSessionId = sessionId;
-        let targetWorkspaceId = workspaceId;
-        const shouldCreateNewSession = isNewSessionMode || !targetSessionId;
-
         if (shouldCreateNewSession && isSessionScopedSlashCommand(prompt)) {
           throw new Error(t('followUpSend.sessionScopedSlashCommandError'));
         }
@@ -201,7 +218,11 @@ export function useFollowUpSend({
 
           targetSessionId = session.id;
           targetWorkspaceId = session.workspace_id;
-          onSelectSession?.(session.id);
+          operationTargetSessionIdRef.current = session.id;
+          if (activeSessionIdRef.current === initialSessionId) {
+            activeSessionIdRef.current = session.id;
+            onSelectSession?.(session.id);
+          }
           onSessionCreated?.({
             sessionId: session.id,
             workspaceId: session.workspace_id,
@@ -287,7 +308,11 @@ export function useFollowUpSend({
             });
           }
           turnAccepted = true;
-          operationIdRef.current = null;
+          if (operationIdRef.current === operationId) {
+            operationIdRef.current = null;
+            lastSubmittedMessageRef.current = null;
+            operationTargetSessionIdRef.current = undefined;
+          }
         } catch (error) {
           publishOptimisticConversationTurn({
             type: 'remove',
@@ -303,8 +328,17 @@ export function useFollowUpSend({
           );
           if (acceptedInput) {
             turnAccepted = true;
-            operationIdRef.current = null;
-            await onAfterSendCleanup();
+            if (operationIdRef.current === operationId) {
+              operationIdRef.current = null;
+              lastSubmittedMessageRef.current = null;
+              operationTargetSessionIdRef.current = undefined;
+            }
+            if (activeSessionIdRef.current === targetSessionId) {
+              if (!isSlashCommand) {
+                clearComments();
+              }
+              await onAfterSendCleanup();
+            }
             return;
           }
           throw error;
@@ -312,18 +346,22 @@ export function useFollowUpSend({
         await queryClient.invalidateQueries({
           queryKey: ['workspaceSessions', targetWorkspaceId],
         });
-        if (!isSlashCommand) {
-          clearComments();
+        if (activeSessionIdRef.current === targetSessionId) {
+          if (!isSlashCommand) {
+            clearComments();
+          }
+          await onAfterSendCleanup();
         }
-        await onAfterSendCleanup();
       } catch (error: unknown) {
-        if (!turnAccepted) onSendFailure?.(acceptedMessage);
-        const err = error as { message?: string };
-        setFollowUpError(
-          t('followUpSend.startFailed', {
-            error: err.message ?? t('followUpSend.unknownError'),
-          })
-        );
+        if (activeSessionIdRef.current === targetSessionId) {
+          if (!turnAccepted) onSendFailure?.(acceptedMessage);
+          const err = error as { message?: string };
+          setFollowUpError(
+            t('followUpSend.startFailed', {
+              error: err.message ?? t('followUpSend.unknownError'),
+            })
+          );
+        }
       } finally {
         isSendingRef.current = false;
         setIsSendingFollowUp(false);

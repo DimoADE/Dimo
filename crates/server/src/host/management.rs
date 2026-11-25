@@ -485,7 +485,6 @@ pub async fn preflight(
     let profile = catalog.profile(&agent_id);
     let requires_separate_runtime = profile.is_some_and(|profile| {
         matches!(profile.topology, agents::ProfileTopology::AdapterBacked)
-            && !profile.adapter_bundles_runtime()
             && profile
                 .external_candidates
                 .iter()

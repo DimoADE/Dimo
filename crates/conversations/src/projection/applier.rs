@@ -863,6 +863,12 @@ impl ConversationStateApplier {
                         turn_id,
                     )
                     .await?;
+                    crate::workbench_status::release_unreviewed_in_flight_view_on_connection(
+                        conn,
+                        record.conversation_id,
+                        turn_id,
+                    )
+                    .await?;
                 }
             }
             ConversationEvent::TurnInterrupted { reason } => {

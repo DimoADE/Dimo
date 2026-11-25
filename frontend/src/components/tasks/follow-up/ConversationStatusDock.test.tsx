@@ -53,14 +53,14 @@ describe('ConversationStatusDock', () => {
     expect(dock.querySelector('.composer-status-surface')).toHaveClass(
       'rounded-[var(--radius-composer,0.75rem)]'
     );
-    expect(dock).toHaveTextContent('连接已断开');
+    expect(dock).toHaveTextContent('Agent 连接已断开');
     expect(dock).toHaveTextContent('因重启中断');
     expect(dock).toHaveTextContent('Agent 不支持会话恢复');
     expect(
       Array.from(dock.querySelectorAll('.astryx-badge')).map(
         (badge) => badge.textContent
       )
-    ).toEqual(['Error', 'Warn', 'Notice']);
+    ).toEqual(['错误', '警告', '提示']);
     expect(dock.querySelector('.composer-status-icon')).toBeNull();
 
     const interruptedHeader = screen
@@ -74,7 +74,7 @@ describe('ConversationStatusDock', () => {
     ).toBeInTheDocument();
     expect(
       within(interruptedHeader as HTMLElement).getByRole('button', {
-        name: '关闭提示 interrupted-turn-2',
+        name: '关闭提示：因重启中断',
       })
     ).toBeInTheDocument();
 
@@ -150,7 +150,7 @@ describe('ConversationStatusDock', () => {
       Array.from(dock.querySelectorAll('.astryx-badge')).map(
         (badge) => badge.textContent
       )
-    ).toEqual(['Warn']);
+    ).toEqual(['警告']);
     expect(
       screen.queryByText(/Disable unused skills or plugins/)
     ).not.toBeInTheDocument();
@@ -190,10 +190,10 @@ describe('ConversationStatusDock', () => {
     );
   });
 
-  it('keeps local, turn, and interruption details behind disclosure controls', () => {
+  it('shows plain-language summaries directly while keeping raw technical details behind disclosure controls', () => {
     render(
       <ConversationStatusDock
-        localError="prompt enhancement failed: request timed out"
+        localError="Runtime error: request timed out"
         notices={[
           {
             id: 'error-turn-1',
@@ -214,35 +214,32 @@ describe('ConversationStatusDock', () => {
     );
 
     expect(screen.getByText('操作失败')).toBeInTheDocument();
-    expect(screen.getByText('连接已断开')).toBeInTheDocument();
+    expect(screen.getByText('request timed out')).toBeInTheDocument();
+    expect(screen.getByText('Agent 连接已断开')).toBeInTheDocument();
     expect(screen.getByText('因重启中断')).toBeInTheDocument();
     expect(
-      screen.queryByText('prompt enhancement failed: request timed out')
+      screen.getByText('此回合在生成过程中因应用重启而中断，未能完成。')
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText('Runtime error: request timed out')
     ).not.toBeInTheDocument();
     expect(
       screen.queryByText('agent connection closed unexpectedly')
     ).not.toBeInTheDocument();
-    expect(
-      screen.queryByText('此回合在生成过程中因应用重启而中断，未能完成。')
-    ).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '查看详情：操作失败' }));
     fireEvent.click(
-      screen.getByRole('button', { name: '查看详情：连接已断开' })
-    );
-    fireEvent.click(
-      screen.getByRole('button', { name: '查看详情：因重启中断' })
+      screen.getByRole('button', { name: '查看详情：Agent 连接已断开' })
     );
 
     expect(
-      screen.getByText('prompt enhancement failed: request timed out')
+      screen.getByText('Runtime error: request timed out')
     ).toBeInTheDocument();
     expect(
-      screen.getByText('agent connection closed unexpectedly')
+      screen.getByText(/agent connection closed unexpectedly/)
     ).toBeInTheDocument();
-    expect(
-      screen.getByText('此回合在生成过程中因应用重启而中断，未能完成。')
-    ).toBeInTheDocument();
+    expect(screen.getByText(/错误代码：connection_closed/)).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: '复制详情' })).toHaveLength(2);
   });
 
   it('keeps a dismissed session notice hidden while allowing newer notices', () => {
@@ -407,13 +404,11 @@ describe('ConversationStatusDock', () => {
     fireEvent.click(screen.getByRole('button', { name: '关闭本地错误提示' }));
     expect(onDismissLocalError).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(
-      screen.getByRole('button', { name: '关闭提示 error-turn-1' })
-    );
-    expect(screen.queryByText('连接已断开')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '关闭提示' }));
+    expect(screen.queryByText('Agent 连接已断开')).not.toBeInTheDocument();
 
     fireEvent.click(
-      screen.getByRole('button', { name: '关闭提示 interrupted-turn-2' })
+      screen.getByRole('button', { name: '关闭提示：因重启中断' })
     );
     expect(screen.queryByText('因重启中断')).not.toBeInTheDocument();
   });
@@ -696,7 +691,7 @@ describe('ConversationStatusDock', () => {
     expect(dock).toHaveAttribute('data-expanded', 'true');
     const card = screen.getByTestId('agent-connection-status');
     expect(card).toHaveClass('composer-status-row');
-    expect(card).toHaveTextContent('会话加载异常，正在重连 3/10 次…');
+    expect(card).toHaveTextContent('连接中断，正在自动重连（3/10）');
 
     const cancelButton = screen.getByRole('button', { name: '取消请求' });
     fireEvent.click(cancelButton);

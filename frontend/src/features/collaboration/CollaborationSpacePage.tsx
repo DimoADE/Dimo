@@ -1,10 +1,17 @@
-import { memo, useEffect, useState, type CSSProperties } from 'react';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useState,
+  type CSSProperties,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { DockviewReact } from 'dockview-react';
 import { ChevronDown } from 'lucide-react';
 
 import { useCanvasPanelHeaderSlot } from '@/components/kanban/canvas/CanvasPanelHeaderSlotContext';
 import { WorkspaceTabAddMenu } from '@/components/layout/panels/WorkspaceTabAddMenu';
+import { useFloatingComposerInset } from '@/hooks/useFloatingComposerInset';
 import type { PulseRuleSpec } from '@/lib/api/pulse';
 import { cn } from '@/lib/utils';
 import i18n from '@/i18n';
@@ -260,6 +267,7 @@ const CollaborationGlobalSearchOverlay = memo(
 
 const LAYOUT_PICK_KEYS = [
   'error',
+  'followThreadBottomRef',
   'handlePreviewDockviewReady',
   'handlePreviewResizePointerDown',
   'hasMountedPreviewTabs',
@@ -273,6 +281,7 @@ const LAYOUT_PICK_KEYS = [
   'openFilePreview',
   'openWorkspacePanel',
   'orderedZones',
+  'pinThreadLogToBottom',
   'previewOrder',
   'previewPaneRef',
   'previewPaneWidth',
@@ -297,6 +306,7 @@ export function CollaborationSpaceLayout({
   const canvasHeaderSlot = useCanvasPanelHeaderSlot();
   const {
     error,
+    followThreadBottomRef,
     handlePreviewDockviewReady,
     handlePreviewResizePointerDown,
     hasMountedPreviewTabs,
@@ -310,6 +320,7 @@ export function CollaborationSpaceLayout({
     openFilePreview,
     openWorkspacePanel,
     orderedZones,
+    pinThreadLogToBottom,
     previewOrder,
     previewPaneRef,
     previewPaneWidth,
@@ -325,6 +336,18 @@ export function CollaborationSpaceLayout({
     virtualDefaultSpaceName,
     workspace,
   } = useCollaborationSpacePick(LAYOUT_PICK_KEYS);
+
+  const hasFloatingComposer = Boolean(hasThread && selected);
+  const handleFloatingComposerInsetChange = useCallback(() => {
+    if (followThreadBottomRef.current) {
+      pinThreadLogToBottom('auto');
+    }
+  }, [followThreadBottomRef, pinThreadLogToBottom]);
+  const { dockRef: composerDockRef, height: floatingComposerHeight } =
+    useFloatingComposerInset({
+      enabled: hasFloatingComposer,
+      onInsetChange: handleFloatingComposerInsetChange,
+    });
 
   const effectiveShowSpaces = hideSpacesPane ? false : showSpaces;
   const effectiveShowPreview = hideSpacesPane ? false : showPreview;
@@ -392,9 +415,15 @@ export function CollaborationSpaceLayout({
             {
               order: threadOrder,
               '--collaboration-list-avatar': `${listAvatarPx / 16}rem`,
+              ...(hasFloatingComposer
+                ? {
+                    '--conv-floating-composer-height': `${floatingComposerHeight}px`,
+                  }
+                : {}),
             } as CSSProperties
           }
           className="collaboration-thread"
+          data-floating-composer={hasFloatingComposer ? 'true' : undefined}
           data-header-member-bar={canvasHeaderSlot ? 'external' : undefined}
           aria-label={
             selected?.name ??
@@ -438,10 +467,18 @@ export function CollaborationSpaceLayout({
             <MessageStream />
           </div>
 
-          <CollaborationBackToBottomButton />
+          <div
+            ref={composerDockRef}
+            className="conversation-floating-composer-dock collaboration-floating-composer-dock pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col"
+            data-testid="collaboration-floating-composer-dock"
+          >
+            <CollaborationBackToBottomButton />
 
-          {error ? <p className="collaboration-error">{error}</p> : null}
-          <ComposerDock />
+            {error ? (
+              <p className="collaboration-error pointer-events-auto">{error}</p>
+            ) : null}
+            <ComposerDock />
+          </div>
           <CollaborationCreateOverlay />
         </section>
       ) : null}

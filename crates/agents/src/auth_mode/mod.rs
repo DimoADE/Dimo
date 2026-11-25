@@ -741,13 +741,7 @@ pub fn apply_built_in_launch_policy_for_program(
         let _ = crate::apply_antigravity_launch_env(env);
     }
     match agent_id.as_str() {
-        // codex-acp otherwise removes an ACP-injected companion when a global
-        // or project Codex config already defines a server with the same name.
         "codex" => {
-            env.insert(
-                "DISABLE_MCP_CONFIG_FILTERING".to_string(),
-                "true".to_string(),
-            );
             if codex_uses_chatgpt_subscription(env) {
                 env.remove("OPENAI_API_KEY");
                 env.remove("OPENAI_BASE_URL");

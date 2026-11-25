@@ -1335,3 +1335,142 @@ async fn notify_dependency_resolves_and_user_gate_renders_steps_output_template(
     .unwrap();
     assert_eq!(body, "Summary: Patched flaky test");
 }
+
+#[tokio::test]
+async fn review_accept_skip_and_retry_reset_run_status_and_restore_parallel_ready_siblings() {
+    let (core, store) = setup().await;
+    let agent = |id: &str, depends_on: &[&str]| WorkflowStep {
+        id: id.to_string(),
+        depends_on: depends_on.iter().map(|value| value.to_string()).collect(),
+        phase: None,
+        input_bindings: BTreeMap::new(),
+        spec: WorkflowStepSpec::Agent(AgentStepSpec {
+            agent_id: "codex".to_string(),
+            prompt: format!("run {id}"),
+            executor_profile_id: None,
+            mode_override: None,
+            config_overrides: BTreeMap::new(),
+            output_language: None,
+            output_description: None,
+            output_schema: None,
+            workspace_access: WorkspaceAccess::WriteIsolated,
+            side_effect_class: SideEffectClass::MutatingUnknown,
+            allow_one_repair: false,
+            allow_skip_on_review: true,
+            completion_policy: CompletionPolicy::Automatic,
+        }),
+    };
+    let version = core
+        .publish(PublishWorkflow {
+            definition_id: None,
+            definition: WorkflowDefinition {
+                format_version: 1,
+                name: "parallel-review-recovery".to_string(),
+                description: None,
+                input_schema: None,
+                steps: vec![
+                    agent("build", &[]),
+                    agent("test", &[]),
+                    agent("ship", &["build", "test"]),
+                ],
+                policy: WorkflowPolicy::default(),
+            },
+            source_path: None,
+            operation_id: Uuid::new_v4(),
+            principal: serde_json::json!({"id": "owner"}),
+        })
+        .await
+        .unwrap();
+
+    let start_run = || {
+        let (core, store, version_id) = (&core, &store, version.id);
+        async move {
+            let run = core
+                .start(StartWorkflow {
+                    definition_version_id: version_id,
+                    workspace_id: Uuid::new_v4(),
+                    input: serde_json::json!({}),
+                    policy_override: None,
+                    debug_step_id: None,
+                    operation_id: Uuid::new_v4(),
+                    principal: serde_json::json!({"id": "owner"}),
+                })
+                .await
+                .unwrap();
+            store.enable_dispatch(run.id).await.unwrap();
+            run
+        }
+    };
+    let claim_and_review = |run_id: Uuid, expected_step: &'static str, reason: &'static str| {
+        let store = &store;
+        async move {
+            let claim = store.claim_ready(1, chrono::Duration::seconds(30)).await.unwrap().unwrap();
+            assert_eq!((claim.run.id, claim.step.step_id.as_str()), (run_id, expected_step));
+            store.mark_started(run_id, expected_step, claim.claim_token, None, None).await.unwrap();
+            let review = store.needs_review_step(run_id, expected_step, reason).await.unwrap();
+            assert_eq!(review.status, "needs_review");
+        }
+    };
+    let decide = |run_id: Uuid, decision: WorkflowReviewDecision| {
+        let core = &core;
+        async move {
+            core.review(ReviewWorkflow {
+                run_id,
+                decision,
+                operation_id: Uuid::new_v4(),
+                principal: serde_json::json!({"id": "owner"}),
+            })
+            .await
+            .unwrap()
+        }
+    };
+
+    // 1. accept_review_step resets run status, restores orphaned parallel `test`, and settles run.
+    let run1 = start_run().await;
+    claim_and_review(run1.id, "build", "needs manual check").await;
+    let accept_build = WorkflowReviewDecision::Accept { step_id: "build".to_string(), output: None };
+    assert_eq!(decide(run1.id, accept_build).await.status, "running");
+
+    let test1 = store
+        .claim_ready(1, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("orphaned parallel sibling `test` must be claimable after accept_review_step");
+    assert_eq!((test1.run.id, test1.step.step_id.as_str()), (run1.id, "test"));
+    store.mark_started(run1.id, "test", test1.claim_token, None, None).await.unwrap();
+    core.complete_step(CompleteWorkflowStep {
+        run_id: run1.id,
+        step_id: "test".to_string(),
+        output: None,
+    })
+    .await
+    .unwrap();
+
+    claim_and_review(run1.id, "ship", "final step review").await;
+    let accept_ship = WorkflowReviewDecision::Accept { step_id: "ship".to_string(), output: None };
+    assert_eq!(decide(run1.id, accept_ship).await.status, "completed");
+
+    // 2. skip_review_step resets run status, restores orphaned parallel sibling, and settles run.
+    let run2 = start_run().await;
+    claim_and_review(run2.id, "build", "skip me").await;
+    let skip_build = WorkflowReviewDecision::Skip { step_id: "build".to_string() };
+    assert_eq!(decide(run2.id, skip_build).await.status, "running");
+    claim_and_review(run2.id, "test", "skip sibling too").await;
+    let skip_test = WorkflowReviewDecision::Skip { step_id: "test".to_string() };
+    assert_eq!(decide(run2.id, skip_test).await.status, "completed");
+
+    // 3. retry_review_step also restores orphaned parallel sibling `test`.
+    let run3 = start_run().await;
+    claim_and_review(run3.id, "build", "retry me").await;
+    let retry_build = WorkflowReviewDecision::Retry { step_id: "build".to_string() };
+    assert_eq!(decide(run3.id, retry_build).await.status, "running");
+    let c1 = store.claim_ready(2, chrono::Duration::seconds(30)).await.unwrap().unwrap();
+    let c2 = store
+        .claim_ready(2, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("second claim after retry must include parallel sibling");
+    let claimed_ids: std::collections::BTreeSet<_> =
+        [c1.step.step_id.as_str(), c2.step.step_id.as_str()].into_iter().collect();
+    assert_eq!(claimed_ids, std::collections::BTreeSet::from(["build", "test"]));
+}

@@ -14,26 +14,34 @@ impl PluginControlPlane {
             .await?
             .ok_or_else(|| PluginError::not_found(plugin_id))?;
         let _ = self.auto_satisfy_plugin_dependencies(&plugin.package).await;
-        self.require_plugin_dependencies(&plugin.package).await?;
-        let generation = self.registry.create_candidate(plugin_id).await?;
-        let grants = candidate_capability_grants(&plugin.package, &[], &[])?;
-        let contributions = descriptors_for_package(&plugin.package, generation);
-        if let Err(error) = self
-            .registry
-            .publish_candidate(
-                plugin_id,
-                generation,
-                &plugin.package,
-                &contributions,
-                &grants,
-            )
-            .await
         {
-            let _ = self
+            let _plugin_guard = self.activations.lock_plugin(plugin_id).await;
+            let plugin = self
                 .registry
-                .fail_candidate(generation, error.message())
-                .await;
-            return Err(error);
+                .plugin(plugin_id)
+                .await?
+                .ok_or_else(|| PluginError::not_found(plugin_id))?;
+            self.require_plugin_dependencies(&plugin.package).await?;
+            let generation = self.registry.create_candidate(plugin_id).await?;
+            let grants = candidate_capability_grants(&plugin.package, &[], &[])?;
+            let contributions = descriptors_for_package(&plugin.package, generation);
+            if let Err(error) = self
+                .registry
+                .publish_candidate(
+                    plugin_id,
+                    generation,
+                    &plugin.package,
+                    &contributions,
+                    &grants,
+                )
+                .await
+            {
+                let _ = self
+                    .registry
+                    .fail_candidate(generation, error.message())
+                    .await;
+                return Err(error);
+            }
         }
         self.refresh_live_projections().await
     }
@@ -65,13 +73,17 @@ impl PluginControlPlane {
     }
 
     /// Reverse of publishing a generation: stop host.service, dispose Worker,
-    /// then drop contribution descriptors. Enable intent is unchanged.
+    /// then drop contribution descriptors and retire any active or unpublished
+    /// candidate generations. Enable intent is unchanged.
     pub async fn withdraw_live_generation(&self, plugin_id: &str) -> Result<(), PluginError> {
-        if !self.plugin_is_live(plugin_id).await? {
-            self.host_services.stop(plugin_id);
-            let _ = self.activations.deactivate(plugin_id).await;
-            return Ok(());
-        }
+        let _plugin_guard = self.activations.lock_plugin(plugin_id).await;
+        self.withdraw_live_generation_locked(plugin_id).await
+    }
+
+    pub(super) async fn withdraw_live_generation_locked(
+        &self,
+        plugin_id: &str,
+    ) -> Result<(), PluginError> {
         self.host_services.stop(plugin_id);
         self.activations
             .deactivate(plugin_id)
@@ -102,7 +114,7 @@ impl PluginControlPlane {
         Ok(dependents)
     }
 
-    pub(super) async fn withdraw_with_dependents(
+    pub(super) async fn withdraw_dependents_only(
         &self,
         plugin_id: &str,
     ) -> Result<(), PluginError> {
@@ -117,9 +129,19 @@ impl PluginControlPlane {
             stack.extend(self.live_dependents(&id).await?);
         }
         for id in order.into_iter().rev() {
-            self.withdraw_live_generation(&id).await?;
+            if id != plugin_id {
+                self.withdraw_live_generation(&id).await?;
+            }
         }
         Ok(())
+    }
+
+    pub(super) async fn withdraw_with_dependents(
+        &self,
+        plugin_id: &str,
+    ) -> Result<(), PluginError> {
+        self.withdraw_dependents_only(plugin_id).await?;
+        self.withdraw_live_generation(plugin_id).await
     }
 
     pub(super) async fn remount_if_ready(&self, plugin_id: &str) -> Result<bool, PluginError> {
@@ -188,6 +210,7 @@ impl PluginControlPlane {
             Arc<dyn CapabilityBroker>,
         )>,
     ) -> Result<(), WorkerHostError> {
+        let _plugin_guard = self.activations.lock_plugin(plugin_id).await;
         let plugin = self
             .registry
             .plugin(plugin_id)
@@ -264,7 +287,19 @@ impl PluginControlPlane {
             return Err(WorkerHostError::external("plugin_registry_failed", error));
         }
         if let Some(candidate) = candidate {
-            let drain = self.activations.commit(candidate).await;
+            if !self
+                .verify_plugin_commit_eligible(plugin_id, generation)
+                .await
+            {
+                let _ = candidate
+                    .discard("plugin disabled or uninstalled before commit")
+                    .await;
+                return Err(WorkerHostError::external(
+                    "plugin_state_changed",
+                    "plugin was disabled or uninstalled before activation commit",
+                ));
+            }
+            let drain = self.activations.commit(candidate).await?;
             self.retire_after_drain(plugin_id.to_owned(), drain);
         }
         if let Some(lease) = self.activations.lease(plugin_id).await {
@@ -573,6 +608,10 @@ impl PluginControlPlane {
             self.reconcile_enabled().await?;
         } else {
             self.withdraw_with_dependents(plugin_id).await?;
+            let _plugin_guard = self.activations.lock_plugin(plugin_id).await;
+            self.host_services.stop(plugin_id);
+            let _ = self.activations.deactivate(plugin_id).await;
+            self.registry.retire_published_generation(plugin_id).await?;
             self.registry
                 .set_activation(plugin_id, PluginActivation::Disabled)
                 .await?;
@@ -591,6 +630,7 @@ impl PluginControlPlane {
         grants: &[CapabilityGrant],
         broker: Arc<dyn CapabilityBroker>,
     ) -> Result<WorkerActivation, WorkerHostError> {
+        let _plugin_guard = self.activations.lock_plugin(plugin_id).await;
         let package = self
             .registry
             .plugin(plugin_id)
@@ -683,58 +723,85 @@ impl PluginControlPlane {
                 .await;
         }
         let _ = self.auto_satisfy_plugin_dependencies(&package).await;
-        self.ensure_plugin_dependencies(&package).await?;
-        self.ensure_runtime_readiness(&plugin_id, &package).await?;
-        let generation = self
-            .registry
-            .prepare_package_candidate(&package)
-            .await
-            .map_err(|error| WorkerHostError::external("plugin_registry_failed", error))?;
-        let candidate = if package.entrypoints.worker.is_some() {
-            match self
-                .activations
-                .prepare_candidate_at(generation, node_executable, &package, grants, broker)
+        {
+            let _plugin_guard = self.activations.lock_plugin(&plugin_id).await;
+            let current = self
+                .registry
+                .plugin(&plugin_id)
+                .await
+                .map_err(|error| WorkerHostError::external("plugin_registry_failed", error))?
+                .ok_or_else(|| WorkerHostError::external("plugin_not_found", &plugin_id))?;
+            if package_publisher(&current.package) != package_publisher(&package) {
+                return Err(WorkerHostError::external(
+                    "plugin_id_conflict",
+                    "candidate publisher does not own the installed plugin identity",
+                ));
+            }
+            self.ensure_plugin_dependencies(&package).await?;
+            self.ensure_runtime_readiness(&plugin_id, &package).await?;
+            let generation = self
+                .registry
+                .prepare_package_candidate(&package)
+                .await
+                .map_err(|error| WorkerHostError::external("plugin_registry_failed", error))?;
+            let candidate = if package.entrypoints.worker.is_some() {
+                match self
+                    .activations
+                    .prepare_candidate_at(generation, node_executable, &package, grants, broker)
+                    .await
+                {
+                    Ok(candidate) => Some(candidate),
+                    Err(error) => {
+                        let _ = self
+                            .registry
+                            .fail_candidate(generation, &error.to_string())
+                            .await;
+                        return Err(error);
+                    }
+                }
+            } else {
+                Some(
+                    self.activations
+                        .prepare_lightweight_candidate_at(generation, &package, grants, broker)?,
+                )
+            };
+            let contributions = descriptors_for_package(&package, generation);
+            if let Err(error) = self
+                .registry
+                .publish_candidate(&plugin_id, generation, &package, &contributions, grants)
                 .await
             {
-                Ok(candidate) => Some(candidate),
-                Err(error) => {
-                    let _ = self
-                        .registry
-                        .fail_candidate(generation, &error.to_string())
-                        .await;
-                    return Err(error);
+                if let Some(candidate) = candidate {
+                    let _ = candidate.discard("candidate publication failed").await;
                 }
+                let _ = self
+                    .registry
+                    .fail_candidate(generation, error.message())
+                    .await;
+                return Err(WorkerHostError::external("plugin_registry_failed", error));
             }
-        } else {
-            Some(
-                self.activations
-                    .prepare_lightweight_candidate_at(generation, &package, grants, broker)?,
-            )
-        };
-        let contributions = descriptors_for_package(&package, generation);
-        if let Err(error) = self
-            .registry
-            .publish_candidate(&plugin_id, generation, &package, &contributions, grants)
-            .await
-        {
             if let Some(candidate) = candidate {
-                let _ = candidate.discard("candidate publication failed").await;
+                if !self
+                    .verify_plugin_commit_eligible(&plugin_id, generation)
+                    .await
+                {
+                    let _ = candidate
+                        .discard("plugin disabled or uninstalled before commit")
+                        .await;
+                    return Err(WorkerHostError::external(
+                        "plugin_state_changed",
+                        "plugin was disabled or uninstalled before activation commit",
+                    ));
+                }
+                let drain = self.activations.commit(candidate).await?;
+                self.retire_after_drain(plugin_id.clone(), drain);
             }
-            let _ = self
-                .registry
-                .fail_candidate(generation, error.message())
-                .await;
-            return Err(WorkerHostError::external("plugin_registry_failed", error));
-        }
-        if let Some(candidate) = candidate {
-            let drain = self.activations.commit(candidate).await;
-            self.retire_after_drain(plugin_id.clone(), drain);
-        }
-        if let Some(lease) = self.activations.lease(&plugin_id).await
-            && let Ok(Some(installed)) = self.registry.plugin(&plugin_id).await
-        {
-            self.host_services
-                .start(&plugin_id, lease, &installed.package);
+            if let Some(lease) = self.activations.lease(&plugin_id).await
+                && let Ok(Some(installed)) = self.registry.plugin(&plugin_id).await
+            {
+                self.host_services
+                    .start(&plugin_id, lease, &installed.package);
+            }
         }
         // Publication is the commit point. Projection refresh failures must not
         // turn a successful switch into a failed update or revoke its files.
@@ -789,5 +856,170 @@ impl PluginControlPlane {
         .map_err(|error| WorkerHostError::external("plugin_permission_consent_required", error))?;
         self.update_and_activate(node_executable, rollback.package, &grants, broker)
             .await
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_serialization_tests {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    use super::*;
+    use crate::{ConflictDecision, PluginSourceKind, SqlitePluginRegistry};
+
+    async fn sqlite_control_plane() -> (Arc<PluginControlPlane>, sqlx::SqlitePool) {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(":memory:")
+                    .foreign_keys(true),
+            )
+            .await
+            .expect("memory sqlite pool");
+        for sql in [
+            include_str!("../../../db/migrations/20260811010000_plugin_control_plane.sql"),
+            include_str!("../../../db/migrations/20260811011000_plugin_runtime_evidence.sql"),
+            include_str!("../../../db/migrations/20260814010000_plugin_platform_v4.sql"),
+        ] {
+            sqlx::raw_sql(sql)
+                .execute(&pool)
+                .await
+                .expect("plugin control schema");
+        }
+        let registry = Arc::new(SqlitePluginRegistry::new(pool.clone()));
+        let control_plane = Arc::new(PluginControlPlane::new(registry));
+        (control_plane, pool)
+    }
+
+    fn lightweight_pkg(id: &str) -> (tempfile::TempDir, PluginPackage) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("README.md"), "# Lifecycle Test").expect("write readme");
+        let pkg = PluginPackage::for_test(
+            id,
+            "Lifecycle Test",
+            "1.0.0",
+            PluginSourceKind::Snapshot,
+            dir.path(),
+        );
+        (dir, pkg)
+    }
+
+    #[tokio::test]
+    async fn withdraw_retires_unpublished_candidate_rows_and_prevents_stale_publish() {
+        let (control_plane, pool) = sqlite_control_plane().await;
+        let (_dir, pkg) = lightweight_pkg("dimo.candidate-retire");
+        control_plane
+            .import(pkg.clone(), ConflictDecision::Replace)
+            .await
+            .expect("import plugin");
+
+        // Create an unpublished candidate generation simulating an in-flight activation.
+        let stale_gen = control_plane
+            .registry
+            .create_candidate("dimo.candidate-retire")
+            .await
+            .expect("create candidate");
+
+        // Withdrawing the plugin must retire even unpublished 'candidate' rows.
+        control_plane
+            .withdraw_live_generation("dimo.candidate-retire")
+            .await
+            .expect("withdraw live generation");
+
+        let remaining_candidates: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM plugin_generations_v4
+             WHERE plugin_id = 'dimo.candidate-retire' AND state = 'candidate'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count candidate rows");
+        assert_eq!(
+            remaining_candidates, 0,
+            "retire_published_generation must clean up unpublished candidate rows"
+        );
+
+        // Attempting to publish the retired candidate must fail.
+        let contributions = descriptors_for_package(&pkg, stale_gen);
+        let publish_err = control_plane
+            .registry
+            .publish_candidate("dimo.candidate-retire", stale_gen, &pkg, &contributions, &[])
+            .await
+            .expect_err("retired candidate must not be publishable");
+        assert!(publish_err.message().contains("no longer publishable"));
+    }
+
+    #[tokio::test]
+    async fn lazy_activation_serialized_with_disable_does_not_commit_disabled_plugin() {
+        let (control_plane, _pool) = sqlite_control_plane().await;
+        let (_dir, pkg) = lightweight_pkg("dimo.lazy-vs-disable");
+        control_plane
+            .import(pkg, ConflictDecision::Replace)
+            .await
+            .expect("import plugin");
+        control_plane
+            .remember_worker_restore(Path::new("node"), Arc::new(crate::DenyCapabilityBroker))
+            .await;
+        control_plane
+            .set_enabled("dimo.lazy-vs-disable", true)
+            .await
+            .expect("enable plugin");
+
+        // Drop the in-memory host so the next activation_lease must lazily activate.
+        control_plane
+            .deactivate_worker("dimo.lazy-vs-disable")
+            .await
+            .expect("deactivate worker");
+        assert!(
+            control_plane
+                .activations
+                .lease("dimo.lazy-vs-disable")
+                .await
+                .is_none()
+        );
+
+        // Hold the per-plugin lock to simulate an in-flight disable/uninstall while
+        // activation_lease attempts to lazily activate the same plugin.
+        let guard = control_plane
+            .activations
+            .lock_plugin("dimo.lazy-vs-disable")
+            .await;
+        let cp_clone = Arc::clone(&control_plane);
+        let lazy_task =
+            tokio::spawn(async move { cp_clone.activation_lease("dimo.lazy-vs-disable").await });
+        tokio::task::yield_now().await;
+        assert!(
+            !lazy_task.is_finished(),
+            "activation_lease must wait on the shared per-plugin serialization lock"
+        );
+
+        // Transition plugin to disabled and retire generation before releasing lock.
+        control_plane
+            .registry
+            .retire_published_generation("dimo.lazy-vs-disable")
+            .await
+            .expect("retire generation");
+        control_plane
+            .registry
+            .set_activation("dimo.lazy-vs-disable", PluginActivation::Disabled)
+            .await
+            .expect("disable plugin");
+        drop(guard);
+
+        let lease = lazy_task.await.expect("lazy_task join");
+        assert!(
+            lease.is_none(),
+            "lazy activation must not commit a disabled plugin"
+        );
+        assert!(
+            control_plane
+                .activations
+                .lease("dimo.lazy-vs-disable")
+                .await
+                .is_none(),
+            "no active lease should exist for a disabled plugin"
+        );
     }
 }

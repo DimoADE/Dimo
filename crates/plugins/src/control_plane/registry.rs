@@ -348,7 +348,7 @@ impl SqlitePluginRegistry {
         if activation == PluginActivation::Disabled {
             sqlx::query(
                 "UPDATE plugin_generations_v4 SET state = 'retired'
-                 WHERE plugin_id = ? AND state IN ('active','active_degraded','draining')",
+                 WHERE plugin_id = ? AND state IN ('active','active_degraded','draining','candidate')",
             )
             .bind(plugin_id)
             .execute(&self.pool)

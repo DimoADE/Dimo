@@ -151,17 +151,22 @@ impl ConversationLivePipeline {
                 if missing.is_empty() {
                     None
                 } else {
-                    Some((entry.projector.complete_antigravity_reads(), missing))
+                    Some((
+                        entry.projector.complete_antigravity_reads(),
+                        entry.projector.denied_tool_calls().clone(),
+                        missing,
+                    ))
                 }
             })
         };
-        let Some((complete_antigravity_reads, missing)) = missing_info else {
+        let Some((complete_antigravity_reads, denied_tool_calls, missing)) = missing_info else {
             return;
         };
         match fetch_hydrated_turns_for_projector(
             &self.pool,
             conversation_id,
             complete_antigravity_reads,
+            &denied_tool_calls,
             &missing,
         )
         .await

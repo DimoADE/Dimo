@@ -38,6 +38,7 @@ import { useFileTreeStore } from '@/stores/useFileTreeStore';
 import type { PreviewPanelParams } from '@/types/panels';
 import {
   deriveRelativeFilePath,
+  findFallbackWorkspaceFilePath,
   isAbsoluteFilePath,
   resolveFilePathFromRoot,
 } from '@/utils/filePaths';
@@ -61,7 +62,8 @@ import { useAppContextMenu } from '@/components/context-menu';
 import { copyImageFromSrc, saveImageFromSrc } from '@/lib/previewMediaActions';
 import { toggleMarkdownTaskCheckbox } from '@/lib/conversation-rendering/markdownFrontmatterAndTasks';
 import { writeClipboardViaBridge } from '@/vscode/bridge';
-import { fileTreeApi } from '@/lib/api';
+import { fileTreeApi, projectsApi } from '@/lib/api';
+import { useOptionalProject } from '@/contexts/ProjectContext';
 import { desktopApi, fileToBase64 } from '@/lib/api/misc';
 import { fileTreeKeys } from '@/hooks/useFileTree';
 import { subscribePreviewTabRefresh } from '@/utils/previewTabRefresh';
@@ -313,10 +315,21 @@ function DockviewPreviewPanel(props: IDockviewPanelProps) {
   const originalContentOverride = params.originalContent ?? null;
   const location = params.location ?? null;
   const rootPath = useFileTreeStore((state) => state.rootPath);
-  const resolvedFilePath = useMemo(
+  const projectContext = useOptionalProject();
+  const projectId = projectContext?.projectId ?? null;
+  const initialResolvedFilePath = useMemo(
     () => (filePath ? resolveFilePathFromRoot(filePath, rootPath) : null),
     [filePath, rootPath]
   );
+  const [fallbackResolution, setFallbackResolution] = useState<{
+    sourcePath: string;
+    resolvedPath: string | null;
+  } | null>(null);
+  const resolvedFilePath =
+    (initialResolvedFilePath &&
+    fallbackResolution?.sourcePath === initialResolvedFilePath
+      ? fallbackResolution.resolvedPath
+      : null) ?? initialResolvedFilePath;
   useEffect(() => {
     void preloadMonacoEditor();
   }, []);
@@ -400,13 +413,31 @@ function DockviewPreviewPanel(props: IDockviewPanelProps) {
       return null;
     }
 
+    if (
+      initialResolvedFilePath &&
+      fallbackResolution?.sourcePath === initialResolvedFilePath &&
+      fallbackResolution.resolvedPath
+    ) {
+      return (
+        deriveRelativeFilePath(fallbackResolution.resolvedPath, rootPath) ??
+        fallbackResolution.resolvedPath
+      );
+    }
+
     return (
       displayPath ??
       deriveRelativeFilePath(filePath, rootPath) ??
       deriveRelativeFilePath(resolvedFilePath ?? filePath, rootPath) ??
       filePath
     );
-  }, [displayPath, filePath, resolvedFilePath, rootPath]);
+  }, [
+    displayPath,
+    fallbackResolution,
+    filePath,
+    initialResolvedFilePath,
+    resolvedFilePath,
+    rootPath,
+  ]);
 
   const previewForm = useMemo(() => {
     const form = filePath ? getFilePreviewForm(filePath) : null;
@@ -547,6 +578,69 @@ function DockviewPreviewPanel(props: IDockviewPanelProps) {
       : String(binaryAssetError);
   }, [binaryAssetError]);
 
+  const hasRecoverableLoadError =
+    (shouldFetchFileContent && Boolean(contentError) && !hasBinaryReadError) ||
+    (shouldFetchBinaryAsset &&
+      Boolean(binaryAssetError) &&
+      !isBinaryAssetTooLarge);
+  const shouldAttemptFallback = Boolean(
+    hasRecoverableLoadError &&
+      initialResolvedFilePath &&
+      projectId &&
+      rootPath &&
+      fallbackResolution?.sourcePath !== initialResolvedFilePath
+  );
+
+  useEffect(() => {
+    if (!shouldAttemptFallback || !initialResolvedFilePath || !projectId || !rootPath) {
+      return;
+    }
+
+    const basename =
+      initialResolvedFilePath.replace(/\\/g, '/').split('/').pop()?.trim() ?? '';
+    if (!basename) {
+      setFallbackResolution({
+        sourcePath: initialResolvedFilePath,
+        resolvedPath: null,
+      });
+      return;
+    }
+
+    let cancelled = false;
+    void projectsApi
+      .searchFiles(projectId, basename)
+      .then((searchResults) => {
+        if (cancelled) return;
+        const matchedPath = findFallbackWorkspaceFilePath({
+          failedPath: initialResolvedFilePath,
+          displayPath,
+          rootPath,
+          searchResults,
+        });
+        setFallbackResolution({
+          sourcePath: initialResolvedFilePath,
+          resolvedPath: matchedPath,
+        });
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setFallbackResolution({
+          sourcePath: initialResolvedFilePath,
+          resolvedPath: null,
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    displayPath,
+    initialResolvedFilePath,
+    projectId,
+    rootPath,
+    shouldAttemptFallback,
+  ]);
+
   const [refreshGeneration, setRefreshGeneration] = useState(0);
   useEffect(() => {
     return subscribePreviewTabRefresh((payload) => {
@@ -568,6 +662,7 @@ function DockviewPreviewPanel(props: IDockviewPanelProps) {
       }
       setDraft(null);
       setArtifactDirty(false);
+      setFallbackResolution(null);
       setRefreshGeneration((current) => current + 1);
       if (resolvedFilePath) {
         void queryClient.invalidateQueries({
@@ -1237,7 +1332,7 @@ function DockviewPreviewPanel(props: IDockviewPanelProps) {
             ) : null}
           </div>
         ) : effectivePreviewKind === 'image' ? (
-          isLoadingBinaryAsset ? (
+          isLoadingBinaryAsset || shouldAttemptFallback ? (
             <FilePreviewLoading
               fileName={resolvedDisplayPath ?? filePath}
               label={`Opening ${resolvedDisplayPath ?? filePath}`}
@@ -1258,7 +1353,7 @@ function DockviewPreviewPanel(props: IDockviewPanelProps) {
             />
           )
         ) : effectivePreviewKind === 'video' ? (
-          isLoadingBinaryAsset ? (
+          isLoadingBinaryAsset || shouldAttemptFallback ? (
             <FilePreviewLoading
               fileName={resolvedDisplayPath ?? filePath}
               label={`Opening ${resolvedDisplayPath ?? filePath}`}
@@ -1331,7 +1426,7 @@ function DockviewPreviewPanel(props: IDockviewPanelProps) {
             />
           )
         ) : effectivePreviewKind === 'pdf' ? (
-          isLoadingBinaryAsset ? (
+          isLoadingBinaryAsset || shouldAttemptFallback ? (
             <FilePreviewLoading
               fileName={resolvedDisplayPath ?? filePath}
               label={`Opening ${resolvedDisplayPath ?? filePath}`}
@@ -1363,7 +1458,7 @@ function DockviewPreviewPanel(props: IDockviewPanelProps) {
             assetRoot={htmlAssetRoot}
             displayPath={resolvedDisplayPath ?? filePath}
           />
-        ) : isLoading ? (
+        ) : isLoading || shouldAttemptFallback ? (
           <FilePreviewLoading
             fileName={resolvedDisplayPath ?? filePath}
             label={`Opening ${resolvedDisplayPath ?? filePath}`}

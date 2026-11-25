@@ -82,8 +82,9 @@ impl LocalContainerService {
 
         let workspace_dir = if let Some(container_ref) = &workspace.container_ref {
             PathBuf::from(container_ref)
-        } else if let Some(discovered_workspace_dir) =
-            self.discover_workspace_dir_from_existing_worktree(&repositories, &workspace.branch)
+        } else if let Some(discovered_workspace_dir) = self
+            .discover_workspace_dir_from_existing_worktree(&repositories, &workspace.branch)
+            .await
         {
             discovered_workspace_dir
         } else {

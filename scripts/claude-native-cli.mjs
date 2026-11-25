@@ -574,25 +574,26 @@ export function createClaudeCliSdkFallback({
         abortSignal?.removeEventListener('abort', onAbort);
       }
 
-      child.on('close', (code) => {
+      child.on('close', (code, signal) => {
         cleanupAbortListener();
         rl.close();
         for (const [, ctrl] of inFlightControlAborts) ctrl.abort();
         inFlightControlAborts.clear();
+        const exitSummary = signal
+          ? `signal ${signal}`
+          : `code ${code ?? 'unknown'}`;
         for (const [, waiter] of pendingControlResponses) {
-          waiter.reject(new Error(`Claude CLI exited with code ${code ?? 'unknown'}`));
+          waiter.reject(new Error(`Claude CLI exited with ${exitSummary}`));
         }
         pendingControlResponses.clear();
 
-        if (!closed && !resultReceived && code !== 0 && code !== null) {
+        if (!closed && !resultReceived) {
           const detail = stderrTail.trim();
-          queue.fail(
-            new Error(
-              detail
-                ? `Claude CLI exited with code ${code}: ${detail}`
-                : `Claude CLI exited with code ${code}`
-            )
-          );
+          const base =
+            code === 0 && !signal
+              ? 'Claude CLI exited with code 0 before emitting a result'
+              : `Claude CLI exited with ${exitSummary}`;
+          queue.fail(new Error(detail ? `${base}: ${detail}` : base));
           return;
         }
         queue.end();

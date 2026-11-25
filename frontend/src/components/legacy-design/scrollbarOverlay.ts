@@ -5,6 +5,7 @@ const HIDE_DELAY_MS = 700;
 
 const SKIP =
   '.monaco-editor, .monaco-scrollable-element, .dv-tabs-and-actions-container, .dv-scrollable, .composer-at-reference-tabs, [data-overlay-scrollbar="off"]';
+const SKIP_X = '[data-overlay-scrollbar-x="off"]';
 
 export function thumbGeometry(input: {
   clientSize: number;
@@ -51,6 +52,7 @@ export function findScroller(
   axis: 'x' | 'y'
 ): HTMLElement | null {
   if (!(target instanceof Element) || target.closest(SKIP)) return null;
+  if (axis === 'x' && target.closest(SKIP_X)) return null;
   let node: Element | null = target;
   while (node) {
     if (node instanceof HTMLElement && canScroll(node, axis)) return node;
@@ -211,40 +213,12 @@ function applyThumbPlacement(
   return true;
 }
 
-function findAnyScroller(target: EventTarget | null): HTMLElement | null {
-  if (!(target instanceof Element) || target.closest(SKIP)) return null;
-  let horizontalMatch: HTMLElement | null = null;
-  let node: Element | null = target;
-  while (node) {
-    if (node instanceof HTMLElement) {
-      const style = getComputedStyle(node);
-      const oy = style.overflowY;
-      if (
-        (oy === 'auto' || oy === 'scroll' || oy === 'overlay') &&
-        node.scrollHeight - node.clientHeight > 1
-      ) {
-        return node;
-      }
-      if (!horizontalMatch) {
-        const ox = style.overflowX;
-        if (
-          (ox === 'auto' || ox === 'scroll' || ox === 'overlay') &&
-          node.scrollWidth - node.clientWidth > 1
-        ) {
-          horizontalMatch = node;
-        }
-      }
-    }
-    node = node.parentElement;
-  }
-  return horizontalMatch;
-}
-
 export function attachOverlayScrollbars(
   root: Document,
   thumbs: { vertical: HTMLElement; horizontal: HTMLElement }
 ): () => void {
-  let active: HTMLElement | null = null;
+  let activeVertical: HTMLElement | null = null;
+  let activeHorizontal: HTMLElement | null = null;
   let pointerInside = false;
   let dragging: 'x' | 'y' | null = null;
   let hideTimer = 0;
@@ -264,16 +238,19 @@ export function attachOverlayScrollbars(
     height: '',
   };
 
+  const hideAxis = (axis: 'x' | 'y') => {
+    const thumb = axis === 'y' ? thumbs.vertical : thumbs.horizontal;
+    const cache = axis === 'y' ? verticalCache : horizontalCache;
+    if (cache.visible) {
+      thumb.classList.remove('is-visible');
+      cache.visible = false;
+    }
+  };
+
   const hideNow = () => {
     window.clearTimeout(hideTimer);
-    if (verticalCache.visible) {
-      thumbs.vertical.classList.remove('is-visible');
-      verticalCache.visible = false;
-    }
-    if (horizontalCache.visible) {
-      thumbs.horizontal.classList.remove('is-visible');
-      horizontalCache.visible = false;
-    }
+    hideAxis('y');
+    hideAxis('x');
   };
 
   const scheduleHide = () => {
@@ -285,29 +262,65 @@ export function attachOverlayScrollbars(
     }, HIDE_DELAY_MS);
   };
 
-  const release = () => {
+  const reconnectObservers = () => {
     observer.disconnect();
     resizeObserver.disconnect();
-    active = null;
-    pointerInside = false;
-    hideNow();
+    const targets = new Set<HTMLElement>();
+    if (activeVertical) targets.add(activeVertical);
+    if (activeHorizontal) targets.add(activeHorizontal);
+    for (const scroller of targets) {
+      observer.observe(scroller, {
+        childList: true,
+        subtree: true,
+      });
+      resizeObserver.observe(scroller);
+    }
   };
 
-  const place = (scroller: HTMLElement) => {
-    if (!isShownScroller(scroller)) {
-      release();
-      return;
+  const releaseAxis = (axis: 'x' | 'y') => {
+    if (axis === 'y') activeVertical = null;
+    else activeHorizontal = null;
+    hideAxis(axis);
+    if (!activeVertical && !activeHorizontal) {
+      pointerInside = false;
     }
+    reconnectObservers();
+  };
+
+  const place = () => {
+    if (activeVertical && !isShownScroller(activeVertical)) {
+      releaseAxis('y');
+    }
+    if (activeHorizontal && !isShownScroller(activeHorizontal)) {
+      releaseAxis('x');
+    }
+
     // Read all layout geometry before mutating either thumb style to avoid forced reflows.
-    const rect = scroller.getBoundingClientRect();
-    const clip = clippedBounds(scroller);
-    const verticalPlacement = computeThumbPlacement(scroller, rect, clip, 'y');
-    const horizontalPlacement = computeThumbPlacement(
-      scroller,
-      rect,
-      clip,
-      'x'
-    );
+    const sameScroller =
+      activeVertical !== null && activeVertical === activeHorizontal;
+    const sharedRect = sameScroller
+      ? activeVertical!.getBoundingClientRect()
+      : null;
+    const sharedClip = sameScroller ? clippedBounds(activeVertical!) : null;
+
+    const verticalPlacement: ThumbPlacement = activeVertical
+      ? computeThumbPlacement(
+          activeVertical,
+          sharedRect ?? activeVertical.getBoundingClientRect(),
+          sharedClip ?? clippedBounds(activeVertical),
+          'y'
+        )
+      : { visible: false };
+
+    const horizontalPlacement: ThumbPlacement = activeHorizontal
+      ? computeThumbPlacement(
+          activeHorizontal,
+          sharedRect ?? activeHorizontal.getBoundingClientRect(),
+          sharedClip ?? clippedBounds(activeHorizontal),
+          'x'
+        )
+      : { visible: false };
+
     const vertical = applyThumbPlacement(
       thumbs.vertical,
       verticalPlacement,
@@ -321,40 +334,38 @@ export function attachOverlayScrollbars(
     if (!vertical && !horizontal) scheduleHide();
   };
 
-  const schedulePlace = (scroller: HTMLElement) => {
+  const schedulePlace = () => {
     if (frame !== 0) return;
     frame = window.requestAnimationFrame(() => {
       frame = 0;
-      if (active === scroller) place(scroller);
+      if (activeVertical || activeHorizontal) place();
     });
   };
 
   const observer = new MutationObserver(() => {
-    if (active) schedulePlace(active);
+    if (activeVertical || activeHorizontal) schedulePlace();
   });
   const resizeObserver = new ResizeObserver(() => {
-    if (!active) return;
-    if (!isShownScroller(active)) {
-      release();
-      return;
-    }
-    schedulePlace(active);
+    if (!activeVertical && !activeHorizontal) return;
+    schedulePlace();
   });
 
-  const watch = (scroller: HTMLElement | null) => {
-    observer.disconnect();
-    resizeObserver.disconnect();
-    active = scroller;
-    if (!scroller) {
+  const watch = (
+    nextVertical: HTMLElement | null,
+    nextHorizontal: HTMLElement | null
+  ) => {
+    const changed =
+      nextVertical !== activeVertical || nextHorizontal !== activeHorizontal;
+    activeVertical = nextVertical;
+    activeHorizontal = nextHorizontal;
+    if (changed) {
+      reconnectObservers();
+    }
+    if (!activeVertical && !activeHorizontal) {
       hideNow();
       return;
     }
-    observer.observe(scroller, {
-      childList: true,
-      subtree: true,
-    });
-    resizeObserver.observe(scroller);
-    place(scroller);
+    place();
   };
 
   const syncFrom = (target: EventTarget | null, inside: boolean) => {
@@ -364,36 +375,50 @@ export function attachOverlayScrollbars(
     ) {
       return;
     }
-    const next = findAnyScroller(target);
-    pointerInside = inside && next !== null;
-    if (next !== active) watch(next);
-    else if (next) place(next);
-    if (!next) hideNow();
+    const nextVertical = findScroller(target, 'y');
+    const nextHorizontal = findScroller(target, 'x');
+    pointerInside =
+      inside && (nextVertical !== null || nextHorizontal !== null);
+    watch(nextVertical, nextHorizontal);
   };
 
   const onPointer = (event: Event) => {
     syncFrom(event.target, true);
   };
+
   const onScroll = (event: Event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement) || target.closest(SKIP)) {
-      if (active && target instanceof Element && target.contains(active)) {
-        place(active);
+      if (
+        target instanceof Element &&
+        ((activeVertical && target.contains(activeVertical)) ||
+          (activeHorizontal && target.contains(activeHorizontal)))
+      ) {
+        place();
       }
       return;
     }
-    if (!canScroll(target, 'y') && !canScroll(target, 'x')) {
-      if (active && target.contains(active)) {
-        place(active);
+
+    const scrollableY = canScroll(target, 'y');
+    const scrollableX = !target.closest(SKIP_X) && canScroll(target, 'x');
+    if (!scrollableY && !scrollableX) {
+      if (
+        (activeVertical && target.contains(activeVertical)) ||
+        (activeHorizontal && target.contains(activeHorizontal))
+      ) {
+        place();
       }
       return;
     }
-    if (target !== active) watch(target);
-    else place(target);
+
+    const nextVertical = scrollableY ? target : activeVertical;
+    const nextHorizontal = scrollableX ? target : activeHorizontal;
+    watch(nextVertical, nextHorizontal);
     if (!pointerInside) scheduleHide();
   };
+
   const onWindowResize = () => {
-    if (active) schedulePlace(active);
+    if (activeVertical || activeHorizontal) schedulePlace();
   };
 
   const bindDrag = (thumb: HTMLElement, axis: 'x' | 'y') => {
@@ -401,15 +426,19 @@ export function attachOverlayScrollbars(
     let startScroll = 0;
     let travel = 1;
     let overflow = 0;
+    const getActive = () => (axis === 'y' ? activeVertical : activeHorizontal);
     const onDown = (event: PointerEvent) => {
-      if (!active || event.button !== 0) return;
+      const scroller = getActive();
+      if (!scroller || event.button !== 0) return;
       dragging = axis;
       thumb.classList.add('is-dragging');
       startPointer = axis === 'y' ? event.clientY : event.clientX;
-      startScroll = axis === 'y' ? active.scrollTop : active.scrollLeft;
-      const client = axis === 'y' ? active.clientHeight : active.clientWidth;
-      const scroll = axis === 'y' ? active.scrollHeight : active.scrollWidth;
-      const clip = clippedBounds(active);
+      startScroll = axis === 'y' ? scroller.scrollTop : scroller.scrollLeft;
+      const client =
+        axis === 'y' ? scroller.clientHeight : scroller.clientWidth;
+      const scroll =
+        axis === 'y' ? scroller.scrollHeight : scroller.scrollWidth;
+      const clip = clippedBounds(scroller);
       const visibleTrack = Math.max(
         1,
         axis === 'y' ? clip.bottom - clip.top : clip.right - clip.left
@@ -417,16 +446,17 @@ export function attachOverlayScrollbars(
       const thumbSize = axis === 'y' ? thumb.offsetHeight : thumb.offsetWidth;
       travel = Math.max(1, visibleTrack - thumbSize);
       overflow = Math.max(1, scroll - client);
-      thumb.setPointerCapture(event.pointerId);
+      thumb.setPointerCapture?.(event.pointerId);
       event.preventDefault();
       event.stopPropagation();
     };
     const onMove = (event: PointerEvent) => {
-      if (dragging !== axis || !active) return;
+      const scroller = getActive();
+      if (dragging !== axis || !scroller) return;
       const pointer = axis === 'y' ? event.clientY : event.clientX;
       const delta = ((pointer - startPointer) / travel) * overflow;
-      if (axis === 'y') active.scrollTop = startScroll + delta;
-      else active.scrollLeft = startScroll + delta;
+      if (axis === 'y') scroller.scrollTop = startScroll + delta;
+      else scroller.scrollLeft = startScroll + delta;
       event.preventDefault();
     };
     const onUp = () => {
@@ -451,7 +481,12 @@ export function attachOverlayScrollbars(
   const unbindHorizontal = bindDrag(thumbs.horizontal, 'x');
   const onPointerDown = () => {
     window.requestAnimationFrame(() => {
-      if (active && !isShownScroller(active)) release();
+      if (activeVertical && !isShownScroller(activeVertical)) {
+        releaseAxis('y');
+      }
+      if (activeHorizontal && !isShownScroller(activeHorizontal)) {
+        releaseAxis('x');
+      }
     });
   };
   root.addEventListener('pointerover', onPointer, {

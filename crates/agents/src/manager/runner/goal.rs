@@ -244,37 +244,6 @@ impl AgentConnectionRunner {
         );
     }
 
-    pub(in crate::manager) async fn apply_prompt_suggestion(
-        &self,
-        session_id: Option<AgentSessionId>,
-        suggestion: Option<String>,
-    ) {
-        let Some(session_id) = session_id else {
-            return;
-        };
-        if !self.wants_prompt_suggestions(session_id).await {
-            return;
-        }
-        let changed = {
-            let mut controls = self.session_controls.write().await;
-            let state = controls.entry(session_id).or_default();
-            if state.prompt_suggestion == suggestion {
-                false
-            } else {
-                state.prompt_suggestion = suggestion.clone();
-                true
-            }
-        };
-        if !changed {
-            return;
-        }
-        self.emit(
-            Some(session_id),
-            None,
-            AgentEvent::PromptSuggestionUpdated { suggestion },
-        );
-    }
-
     pub(in crate::manager) fn emit_session_load_failed(
         &self,
         session_id: AgentSessionId,

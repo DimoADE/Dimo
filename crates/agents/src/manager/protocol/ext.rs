@@ -74,31 +74,27 @@ impl AcpClientBridge {
         let session_id = resolve_agent_session_id(bound_session_id, pending_session_id);
         let establishing = pending_session_id.is_some();
         if !establishing
-            && let Some(activity) = crate::vendor_request_activity::extension(
-                self.apply.agent_kind(),
+            && let Some(activity) = crate::vendor_request_activity::registry_extension(
+                &self.agent_id,
                 ext.method.as_ref(),
                 &params,
             )
-            .or_else(|| {
-                crate::vendor_request_activity::registry_extension(
-                    &self.agent_id,
-                    ext.method.as_ref(),
-                    &params,
-                )
-            })
             && let Some((active_session, prompt_id)) = *self.apply.active_prompt.lock().await
             && Some(active_session) == bound_session_id
         {
+            let activity_event = AgentEvent::RequestActivity {
+                prompt_id,
+                activity,
+            };
+            self.apply
+                .record_turn_probe_event(Some(active_session), &activity_event);
             send_manager_event(
                 &self.event_tx,
                 AgentConnectionManagerEvent {
                     connection_id: self.connection_id,
                     session_id: Some(active_session),
                     prompt_id: Some(prompt_id),
-                    event: AgentEvent::RequestActivity {
-                        prompt_id,
-                        activity,
-                    },
+                    event: activity_event,
                 },
             );
             return Ok(());
@@ -212,25 +208,6 @@ impl AcpClientBridge {
                 return Ok(());
             }
             _ => {}
-        }
-        if ext.method.as_ref() == AIR_SESSION_UPDATE_METHOD {
-            let update_payload = params.get("update").unwrap_or(&params);
-            let agent_kind = self.apply.agent_kind();
-            if let Some(delta) =
-                crate::async_tasks::parse_async_task_session_update(agent_kind, update_payload)
-            {
-                self.apply.apply_async_task_delta(session_id, delta).await;
-            } else if let Some(suggestion) =
-                crate::session_meta::prompt_suggestion_from_session_update(
-                    agent_kind,
-                    update_payload,
-                )
-            {
-                self.apply
-                    .apply_prompt_suggestion(session_id, suggestion)
-                    .await;
-            }
-            return Ok(());
         }
         if self.apply.agent_kind() == Some(AgentKind::Grok)
             && matches!(

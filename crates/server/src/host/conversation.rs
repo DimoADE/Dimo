@@ -561,6 +561,7 @@ impl ServerApplicationDomains {
         }
         let args: CloseArgs = parse(args)?;
         let id = parse_uuid(&args.conversation_id)?;
+        self.rate_limit_recovery.cancel_wait(id);
         conversations::ConversationSessionService::new(self.conversations.clone())
             .close_conversation(id, args.reason)
             .await

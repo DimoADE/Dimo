@@ -520,7 +520,7 @@ fn refusal_max_tokens_and_max_turn_requests_emit_structured_turn_failure_errors(
     let refusal_err = turn_failure_error_event(&refusal, &probe, &tail, mark)
         .expect("StopReason::Refusal must emit error");
     assert_eq!(refusal_err.code.as_deref(), Some("turn_failed_refusal"));
-    assert!(refusal_err.message.contains("StopReason::Refusal"));
+    assert!(!refusal_err.message.contains("StopReason::"));
 
     let max_tokens = acp::schema::v1::PromptResponse::new(acp::schema::v1::StopReason::MaxTokens);
     let max_tokens_err = turn_failure_error_event(&max_tokens, &probe, &tail, mark)
@@ -529,7 +529,7 @@ fn refusal_max_tokens_and_max_turn_requests_emit_structured_turn_failure_errors(
         max_tokens_err.code.as_deref(),
         Some("turn_failed_max_tokens")
     );
-    assert!(max_tokens_err.message.contains("StopReason::MaxTokens"));
+    assert!(!max_tokens_err.message.contains("StopReason::"));
 
     let max_requests =
         acp::schema::v1::PromptResponse::new(acp::schema::v1::StopReason::MaxTurnRequests);
@@ -539,23 +539,11 @@ fn refusal_max_tokens_and_max_turn_requests_emit_structured_turn_failure_errors(
         max_requests_err.code.as_deref(),
         Some("turn_failed_max_turn_requests")
     );
-    assert!(
-        max_requests_err
-            .message
-            .contains("StopReason::MaxTurnRequests")
-    );
+    assert!(!max_requests_err.message.contains("StopReason::"));
 }
 
 #[test]
-fn jetbrains_air_capabilities_and_session_failure_extraction_work() {
-    let caps = build_client_capabilities(&AgentId::parse("claude_code").unwrap());
-    let meta = caps.meta.expect("client capabilities must include _meta");
-    assert_eq!(
-        meta.get("jetbrains.air")
-            .and_then(|v| v.get("sessionFailure")),
-        Some(&serde_json::json!(true))
-    );
-
+fn jetbrains_air_session_failure_extraction_works() {
     let rpc_err = acp::Error::internal_error().data(serde_json::json!({
         "_meta": {
             "jetbrains.air": {
@@ -923,54 +911,7 @@ fn config_option_rejects_value_only_for_non_empty_selects() {
 }
 
 #[test]
-fn retired_context_lane_and_respelled_fable_picks_heal_only_when_exact_is_gone() {
-    let renamed = claude_model_selector("opus");
-    assert_eq!(
-        heal_retired_context_lane_pick(&renamed, "opus[1m]").as_deref(),
-        Some("opus")
-    );
-    assert_eq!(
-        heal_retired_context_lane_pick(&renamed, "opus[1M]").as_deref(),
-        Some("opus")
-    );
-    // When both `sonnet` and `sonnet[1m]` are offered, `sonnet[1m]` is NOT healed away.
-    assert_eq!(heal_retired_context_lane_pick(&renamed, "sonnet[1m]"), None);
-    // Plain pick is never promoted to `[1m]`.
-    assert_eq!(
-        heal_retired_context_lane_pick(&claude_model_selector("opus[1m]"), "opus"),
-        None
-    );
-
-    let gateway = gateway_model_selector_2_1_287();
-    assert_eq!(
-        heal_retired_model_pick(&gateway, "claude-fable-5-1").as_deref(),
-        Some("fable")
-    );
-    assert_eq!(
-        heal_retired_model_pick(&gateway, "claude-fable-5-1[1m]").as_deref(),
-        Some("fable")
-    );
-    assert_eq!(
-        heal_retired_model_pick(&gateway, "opus[1m]").as_deref(),
-        Some("opus")
-    );
-    // Once the catalog version moves on (e.g. saved 5.0 against 5.1 row), it must NOT heal.
-    assert_eq!(heal_retired_model_pick(&gateway, "claude-fable-5-0"), None);
-    assert!(
-        find_config_override_selection_for_agent(
-            std::slice::from_ref(&gateway),
-            Some(AgentKind::ClaudeCode),
-            "model",
-            &serde_json::json!("claude-fable-5-0"),
-            &[],
-        )
-        .is_none(),
-        "retired Fable version must be dropped rather than fuzzy-matched onto Fable 5.1"
-    );
-}
-
-#[test]
-fn withdrawn_bypass_mode_and_retired_picks_are_skipped_during_replay() {
+fn withdrawn_bypass_mode_and_unoffered_picks_are_skipped_during_replay() {
     assert!(session_modes_reject_id(
         &claude_modes(false),
         "bypassPermissions"
@@ -1008,12 +949,12 @@ fn withdrawn_bypass_mode_and_retired_picks_are_skipped_during_replay() {
         },
         AgentSessionConfigOverride {
             key: "model".to_string(),
-            value: "claude-fable-5-1[1m]".to_string(),
+            value: "fable".to_string(),
         },
     ];
 
     let (mode_to_apply, config_to_apply, preferred_map) = prepare_preferred_controls_for_replay(
-        Some(AgentKind::ClaudeCode),
+        Some(AgentKind::Grok),
         Some(&claude_modes(false)),
         &options,
         Some("bypassPermissions"),
@@ -1036,13 +977,30 @@ fn withdrawn_bypass_mode_and_retired_picks_are_skipped_during_replay() {
                 value: "high".to_string(),
             },
         ],
-        "model must be healed and ordered before dependent options"
+        "model must be ordered before dependent options"
     );
     assert_eq!(
         preferred_map.get("model").map(String::as_str),
         Some("fable")
     );
     assert!(!preferred_map.contains_key("mode"));
+
+    let retired_overrides = vec![AgentSessionConfigOverride {
+        key: "model".to_string(),
+        value: "retired-model".to_string(),
+    }];
+    let (_, filtered_retired, _) = prepare_preferred_controls_for_replay(
+        Some(AgentKind::Grok),
+        Some(&claude_modes(true)),
+        &options,
+        None,
+        &retired_overrides,
+        &[],
+    );
+    assert!(
+        filtered_retired.is_empty(),
+        "unoffered model picks must be dropped during replay"
+    );
 }
 
 pub(super) fn dummy_runner_for_agent(
@@ -1073,23 +1031,7 @@ pub(super) fn dummy_runner_for_agent(
 }
 
 #[test]
-fn sanitize_incoming_jsonrpc_line_rewrites_air_async_task_and_prompt_suggestion_updates() {
-    let spawned = sanitize_incoming_jsonrpc_line(
-        r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"async_task_spawned","taskId":"bg-1","name":"npm test","taskType":"shell","state":"running","canStop":true}}}"#.to_string(),
-    );
-    let parsed: serde_json::Value = serde_json::from_str(&spawned).unwrap();
-    assert_eq!(parsed["method"], AIR_SESSION_UPDATE_METHOD);
-    assert_eq!(
-        parsed["params"]["update"]["sessionUpdate"],
-        "async_task_spawned"
-    );
-
-    let suggestion = sanitize_incoming_jsonrpc_line(
-        r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"prompt_suggestion_update","_meta":{"promptSuggestions":{"version":1,"suggestions":[{"text":"Run tests"}]}}}}}"#.to_string(),
-    );
-    let parsed: serde_json::Value = serde_json::from_str(&suggestion).unwrap();
-    assert_eq!(parsed["method"], AIR_SESSION_UPDATE_METHOD);
-
+fn sanitize_incoming_jsonrpc_line_rewrites_grok_workflow_updates() {
     let workflow = sanitize_incoming_jsonrpc_line(
         r#"{"jsonrpc":"2.0","method":"session/workflow_updated","params":{"sessionId":"s1","workflowId":"wf-1","name":"Deploy","status":"running"}}"#.to_string(),
     );
@@ -1222,4 +1164,92 @@ async fn session_info_goal_synthesizes_timeline_markers_and_normalizes_status() 
         }
         other => panic!("expected ToolCall, got {other:?}"),
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn manager_event_channel_concurrent_send_recv_never_drifts_or_drops_after_drain() {
+    let (event_tx, mut event_rx) = manager_event_channel();
+    let connection_id = AgentConnectionId::new();
+    let session_id = AgentSessionId::new();
+    let prompt_id = AgentPromptId::new();
+
+    let make_chunk = move |idx: usize| AgentConnectionManagerEvent {
+        connection_id,
+        session_id: Some(session_id),
+        prompt_id: Some(prompt_id),
+        event: AgentEvent::MessageChunk {
+            content: AgentContentBlock::Text {
+                text: format!("chunk-{idx}"),
+            },
+        },
+    };
+
+    // Repeatedly interleave sends and receives near empty across threads far beyond
+    // MANAGER_EVENT_SOFT_CAP so the old manual depth counter would drift past the cap,
+    // while keeping in-flight items well below MANAGER_EVENT_SOFT_CAP so genuine shedding
+    // cannot occur.
+    let total = MANAGER_EVENT_SOFT_CAP * 4;
+    let consumed = Arc::new(AtomicUsize::new(0));
+    let producer_consumed = Arc::clone(&consumed);
+    let producer_tx = event_tx.clone();
+    let producer = tokio::spawn(async move {
+        for idx in 0..total {
+            while idx.saturating_sub(producer_consumed.load(Ordering::Acquire)) >= 8 {
+                tokio::task::yield_now().await;
+            }
+            producer_tx.emit(make_chunk(idx));
+        }
+    });
+
+    let mut received = 0usize;
+    while received < total {
+        let _ = tokio::time::timeout(Duration::from_secs(5), event_rx.recv())
+            .await
+            .expect("concurrent consumer should not stall")
+            .expect("channel should remain open");
+        received += 1;
+        consumed.store(received, Ordering::Release);
+    }
+    producer.await.unwrap();
+    assert_eq!(received, total);
+    assert_eq!(event_tx.dropped.load(Ordering::Relaxed), 0);
+
+    // Verify soft-cap shedding still applies when unread events genuinely pile up,
+    // non-sheddable terminal events still pass through, and draining restores delivery.
+    for idx in 0..MANAGER_EVENT_SOFT_CAP {
+        event_tx.emit(make_chunk(idx));
+    }
+    event_tx.emit(make_chunk(MANAGER_EVENT_SOFT_CAP));
+    assert_eq!(event_tx.dropped.load(Ordering::Relaxed), 1);
+
+    event_tx.emit(AgentConnectionManagerEvent {
+        connection_id,
+        session_id: Some(session_id),
+        prompt_id: Some(prompt_id),
+        event: AgentEvent::Error {
+            error: AgentErrorEvent {
+                message: "terminal".to_string(),
+                code: Some("test_terminal".to_string()),
+                raw: None,
+            },
+        },
+    });
+
+    let mut drained = 0usize;
+    let mut saw_terminal = false;
+    while let Ok(evt) = event_rx.try_recv() {
+        drained += 1;
+        if matches!(evt.event, AgentEvent::Error { .. }) {
+            saw_terminal = true;
+        }
+    }
+    assert_eq!(drained, MANAGER_EVENT_SOFT_CAP + 1);
+    assert!(saw_terminal, "non-sheddable terminal event must bypass soft cap");
+
+    // After draining, sheddable streaming chunks flow again without dropping.
+    event_tx.emit(make_chunk(99_999));
+    let after_drain = event_rx
+        .try_recv()
+        .expect("sheddable event must be delivered after channel drains");
+    assert!(matches!(after_drain.event, AgentEvent::MessageChunk { .. }));
 }

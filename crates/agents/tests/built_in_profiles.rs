@@ -917,24 +917,6 @@ fn built_in_profiles_are_declarative_and_bind_explicitly() {
             ("omp", None),
         ]
     );
-    assert!(
-        !catalog
-            .profile(&AgentId::parse("claude_code").unwrap())
-            .unwrap()
-            .adapter_bundles_runtime()
-    );
-    assert!(
-        !catalog
-            .profile(&AgentId::parse("codex").unwrap())
-            .unwrap()
-            .adapter_bundles_runtime()
-    );
-    assert!(
-        !catalog
-            .profile(&AgentId::parse("pi").unwrap())
-            .unwrap()
-            .adapter_bundles_runtime()
-    );
 }
 
 #[test]

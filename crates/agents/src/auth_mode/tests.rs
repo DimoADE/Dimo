@@ -81,7 +81,6 @@ fn codex_launch_injects_config_derived_initial_agent_mode() {
     )]);
     apply_built_in_launch_policy(&AgentId::parse("codex").unwrap(), &mut env, &mut Vec::new());
     assert_eq!(env["INITIAL_AGENT_MODE"], "read-only");
-    assert_eq!(env["DISABLE_MCP_CONFIG_FILTERING"], "true");
 
     env.insert(
         "INITIAL_AGENT_MODE".to_string(),
@@ -92,18 +91,7 @@ fn codex_launch_injects_config_derived_initial_agent_mode() {
 }
 
 #[test]
-fn codex_and_pi_force_required_acp_capability_environment() {
-    let mut codex = HashMap::from([(
-        "DISABLE_MCP_CONFIG_FILTERING".to_string(),
-        "false".to_string(),
-    )]);
-    apply_built_in_launch_policy(
-        &AgentId::parse("codex").unwrap(),
-        &mut codex,
-        &mut Vec::new(),
-    );
-    assert_eq!(codex["DISABLE_MCP_CONFIG_FILTERING"], "true");
-
+fn pi_and_omp_force_required_acp_capability_environment() {
     let temp = tempfile::tempdir().unwrap();
     let omp_home = temp.path();
     let mut omp = HashMap::from([

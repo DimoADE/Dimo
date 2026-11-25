@@ -789,7 +789,6 @@ async fn try_adopt_with_options(
         return Ok(None);
     };
     let requires_separate_runtime = matches!(profile.topology, ProfileTopology::AdapterBacked)
-        && !profile.adapter_bundles_runtime()
         && profile
             .external_candidates
             .iter()
@@ -800,9 +799,6 @@ async fn try_adopt_with_options(
         ProfileComponent::AcpAdapter,
         ProfileComponent::CombinedRuntime,
     ] {
-        if kind == ProfileComponent::AgentRuntime && profile.adapter_bundles_runtime() {
-            continue;
-        }
         let matching = profile
             .external_candidates
             .iter()

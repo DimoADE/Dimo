@@ -209,6 +209,7 @@ pub(crate) async fn get_or_load_write_projector_on_conn(
             turn_order,
             side_rows: snap_state.side_rows,
             side_row_turns: snap_state.side_row_turns,
+            denied_tool_calls: snap_state.denied_tool_calls,
             last_sequence: snap_state.last_sequence,
             complete_antigravity_reads,
             ..ProjectionFold::default()
@@ -301,6 +302,7 @@ async fn ensure_turn_loaded_on_conn(
         .await?;
         let mut temp_fold = ProjectionFold {
             complete_antigravity_reads: state.fold.complete_antigravity_reads,
+            denied_tool_calls: state.fold.denied_tool_calls.clone(),
             ..ProjectionFold::default()
         };
         for ev in &tail {
@@ -310,6 +312,10 @@ async fn ensure_turn_loaded_on_conn(
                 temp_fold.apply(ev)?;
             }
         }
+        state
+            .fold
+            .denied_tool_calls
+            .extend(temp_fold.denied_tool_calls);
         if let Some(reconstructed) = temp_fold.turns.remove(&turn_id) {
             if !state.fold.turn_order.contains(&turn_id) {
                 state.fold.turn_order.push(turn_id);
@@ -326,6 +332,7 @@ async fn ensure_turn_loaded_on_conn(
         .await?;
         let mut temp_fold = ProjectionFold {
             complete_antigravity_reads: state.fold.complete_antigravity_reads,
+            denied_tool_calls: state.fold.denied_tool_calls.clone(),
             ..ProjectionFold::default()
         };
         for ev in &tail {
@@ -333,6 +340,10 @@ async fn ensure_turn_loaded_on_conn(
                 temp_fold.apply(ev)?;
             }
         }
+        state
+            .fold
+            .denied_tool_calls
+            .extend(temp_fold.denied_tool_calls);
         if let Some(reconstructed) = temp_fold.turns.remove(&turn_id) {
             if !state.fold.turn_order.contains(&turn_id) {
                 state.fold.turn_order.push(turn_id);

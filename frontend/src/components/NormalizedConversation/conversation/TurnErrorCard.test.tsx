@@ -73,40 +73,69 @@ describe('TurnErrorCard', () => {
       />
     );
 
-    expect(screen.getByText('代理会话已过期')).toBeInTheDocument();
+    expect(screen.getByText('Agent 会话已过期')).toBeInTheDocument();
     const rebindButton = screen.getByRole('button', { name: /重新绑定会话/ });
     fireEvent.click(rebindButton);
     expect(onRebind).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(rebindButton).not.toBeDisabled());
   });
 
-  it('explains an idle-timeout (agent stopped responding) with reload', async () => {
+  it('explains an idle-timeout (agent stopped responding) with timeout seconds and reload', async () => {
     const onReload = vi.fn();
     render(
       <TurnErrorCard
-        error={err({ code: 'idle_timeout', message: 'whatever backend said' })}
+        error={err({
+          code: 'idle_timeout',
+          message: 'Agent prompt timed out after 300s without output',
+        })}
         onReload={onReload}
       />
     );
 
-    expect(screen.getByText('代理无响应')).toBeInTheDocument();
+    expect(screen.getByText('Agent 长时间无响应')).toBeInTheDocument();
+    expect(screen.getByText(/超过 300 秒未返回内容/)).toBeInTheDocument();
     const reloadButton = screen.getByRole('button', { name: /重新加载会话/ });
     fireEvent.click(reloadButton);
     expect(onReload).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(reloadButton).not.toBeDisabled());
   });
 
-  it('explains a closed connection with reload', () => {
+  it('explains a closed connection with localized summary and keeps raw message in details', () => {
     render(
       <TurnErrorCard
-        error={err({ code: 'connection_closed' })}
+        error={err({
+          code: 'connection_closed',
+          message: 'Agent connection closed before the turn completed.',
+        })}
         onReload={vi.fn()}
+        onRetry={vi.fn()}
+        placement="composer"
       />
     );
 
-    expect(screen.getByText('连接已断开')).toBeInTheDocument();
+    expect(screen.getByText('Agent 连接已断开')).toBeInTheDocument();
+    expect(
+      screen.getByText(/Agent 进程或连接在本回合完成前中断/)
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Agent connection closed before the turn completed\./)
+    ).not.toBeInTheDocument();
     expect(
       screen.getByRole('button', { name: /重新加载会话/ })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: '手动重试' })
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole('button', { name: '查看详情：Agent 连接已断开' })
+    );
+    expect(
+      screen.getByText(/Agent connection closed before the turn completed\./)
+    ).toBeInTheDocument();
+    expect(screen.getByText(/错误代码：connection_closed/)).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: '复制详情' })
     ).toBeInTheDocument();
   });
 
@@ -125,43 +154,64 @@ describe('TurnErrorCard', () => {
       />
     );
 
-    expect(screen.getByText('连接已断开')).toBeInTheDocument();
+    expect(screen.getByText('Agent 连接已断开')).toBeInTheDocument();
     expect(
       screen.getByRole('button', { name: /重新加载会话/ })
     ).toBeInTheDocument();
   });
 
-  it('surfaces an auth error without offering reload', () => {
+  it('surfaces an auth error with retry guidance and without reload or rebind', () => {
     render(
       <TurnErrorCard
         error={err({ code: 'auth_required', message: 'login first' })}
         onReload={vi.fn()}
+        onRebind={vi.fn()}
+        onRetry={vi.fn()}
       />
     );
 
-    expect(screen.getByText('需要重新认证')).toBeInTheDocument();
-    expect(screen.getByText('login first')).toBeInTheDocument();
+    expect(screen.getByText('需要登录或重新认证')).toBeInTheDocument();
+    expect(screen.getByText(/登录状态已失效或缺少凭据/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /重新加载/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /重新绑定/ })).toBeNull();
+    expect(
+      screen.getByRole('button', { name: '手动重试' })
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole('button', { name: '查看详情：需要登录或重新认证' })
+    );
+    expect(screen.getByText(/login first/)).toBeInTheDocument();
   });
 
-  it('shows the message and the raw code for an unmapped failure', () => {
+  it('strips internal prefixes in summary and keeps raw error code in details for unmapped failures', () => {
     render(
       <TurnErrorCard
-        error={err({ code: 'rpc_-32050', message: 'model unavailable' })}
+        error={err({
+          code: 'rpc_-32050',
+          message: 'Internal error: model unavailable',
+        })}
         onReload={vi.fn()}
       />
     );
 
-    expect(screen.getByText('会话出错')).toBeInTheDocument();
+    expect(screen.getByText('本回合执行失败')).toBeInTheDocument();
+    expect(screen.getByText('model unavailable')).toBeInTheDocument();
+    expect(screen.queryByText(/rpc_-32050/)).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole('button', { name: '查看详情：本回合执行失败' })
+    );
     expect(
-      screen.getByText('model unavailable（rpc_-32050）')
+      screen.getByText(/Internal error: model unavailable/)
     ).toBeInTheDocument();
+    expect(screen.getByText(/错误代码：rpc_-32050/)).toBeInTheDocument();
   });
 
   it('falls back to a generic error when there is no code', () => {
     render(<TurnErrorCard error={err({ message: 'something failed' })} />);
 
-    expect(screen.getByText('会话出错')).toBeInTheDocument();
+    expect(screen.getByText('本回合执行失败')).toBeInTheDocument();
     expect(screen.getByText('something failed')).toBeInTheDocument();
   });
 
@@ -194,32 +244,70 @@ describe('TurnErrorCard', () => {
     ).toBeInTheDocument();
   });
 
-  it('offers retry for a service error', () => {
+  it('offers retry and reload for a service error', () => {
     render(
       <TurnErrorCard
         error={err({ kind: 'service_error', code: 'internal_error' })}
         onReload={vi.fn()}
+        onRetry={vi.fn()}
       />
     );
 
-    expect(screen.getByText('服务故障')).toBeInTheDocument();
+    expect(screen.getByText('模型服务异常')).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: '手动重试' })
+    ).toBeInTheDocument();
     expect(
       screen.getByRole('button', { name: /重新加载会话/ })
     ).toBeInTheDocument();
   });
 
-  it('offers retry for a structured rate limit', () => {
+  it('offers retry without reload for a structured rate limit', () => {
     render(
       <TurnErrorCard
         error={err({ kind: 'rate_limited', code: 'rpc_-32000' })}
         onReload={vi.fn()}
+        onRetry={vi.fn()}
       />
     );
 
-    expect(screen.getByText('已触发限流')).toBeInTheDocument();
+    expect(screen.getByText('已触发请求限流')).toBeInTheDocument();
     expect(
-      screen.getByRole('button', { name: /重新加载会话/ })
+      screen.getByRole('button', { name: '手动重试' })
     ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /重新加载会话/ })).toBeNull();
+  });
+
+  it('offers retry without reload for prompt_conflict and billing quota errors', () => {
+    const { rerender } = render(
+      <TurnErrorCard
+        error={err({ kind: 'prompt_conflict', code: 'prompt_conflict' })}
+        onReload={vi.fn()}
+        onRebind={vi.fn()}
+        onRetry={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText('Agent 连接正忙')).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: '手动重试' })
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /重新加载/ })).toBeNull();
+
+    rerender(
+      <TurnErrorCard
+        error={err({ kind: 'unknown', code: 'insufficient_quota' })}
+        onReload={vi.fn()}
+        onRebind={vi.fn()}
+        onRetry={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText('额度不足或需检查账单')).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: '手动重试' })
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /重新绑定/ })).toBeNull();
   });
 
   it('does not classify rate-limit wording as rate_limited', () => {
@@ -234,11 +322,11 @@ describe('TurnErrorCard', () => {
       />
     );
 
-    expect(screen.getByText('会话出错')).toBeInTheDocument();
-    expect(screen.queryByText('已触发限流')).toBeNull();
+    expect(screen.getByText('本回合执行失败')).toBeInTheDocument();
+    expect(screen.queryByText('已触发请求限流')).toBeNull();
   });
 
-  it('puts composer recovery actions beside the title and replaces the icon with a badge', () => {
+  it('puts composer recovery actions beside the title and replaces the icon with a localized badge', () => {
     render(
       <TurnErrorCard
         error={err({ code: 'connection_closed' })}
@@ -248,11 +336,11 @@ describe('TurnErrorCard', () => {
       />
     );
 
-    const title = screen.getByText('连接已断开');
+    const title = screen.getByText('Agent 连接已断开');
     const header = title.closest('.composer-status-header');
 
     expect(header).not.toBeNull();
-    expect(within(header as HTMLElement).getByText('Error')).toHaveClass(
+    expect(within(header as HTMLElement).getByText('错误')).toHaveClass(
       'astryx-badge'
     );
     expect(

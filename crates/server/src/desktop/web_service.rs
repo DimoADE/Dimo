@@ -28,6 +28,8 @@ const SETTINGS_FILE_NAME: &str = "web-service-settings.json";
 const SETTINGS_SECTION: &str = "web_service";
 const DEFAULT_PORT: u16 = 17891;
 
+static WEB_SERVICE_LIFECYCLE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
 static WEB_SERVICE_RUNTIME: LazyLock<Mutex<Option<WebServiceRuntime>>> =
     LazyLock::new(|| Mutex::new(None));
 
@@ -346,6 +348,7 @@ pub async fn update_web_service_config(
     ctx: &DesktopWebServiceContext,
     config: WebServiceConfig,
 ) -> Result<WebServiceConfig, DesktopError> {
+    let _lifecycle = WEB_SERVICE_LIFECYCLE.lock().await;
     let previous = load_config().await?;
     let normalized = normalize_config(config)?;
     if let Some(raw) = normalized.token.as_deref() {
@@ -362,8 +365,8 @@ pub async fn update_web_service_config(
     let mut saved = save_config(&normalized).await?;
     let running = WEB_SERVICE_RUNTIME.lock().await.is_some();
     if running && (previous.allow_lan != saved.allow_lan || previous.port != saved.port) {
-        stop_web_server_with_config(saved.clone()).await;
-        match start_web_server(ctx).await {
+        stop_web_server_with_config_locked(saved.clone()).await;
+        match start_web_server_locked(ctx).await {
             Ok(status) => {
                 if status.running && status.port != saved.port {
                     saved.port = status.port;
@@ -371,7 +374,7 @@ pub async fn update_web_service_config(
             }
             Err(error) => {
                 let _ = save_config(&previous).await;
-                let _ = start_web_server(ctx).await;
+                let _ = start_web_server_locked(ctx).await;
                 return Err(error);
             }
         }
@@ -385,6 +388,13 @@ pub async fn get_web_server_status() -> Result<WebServerStatus, DesktopError> {
 }
 
 pub async fn start_web_server(
+    ctx: &DesktopWebServiceContext,
+) -> Result<WebServerStatus, DesktopError> {
+    let _lifecycle = WEB_SERVICE_LIFECYCLE.lock().await;
+    start_web_server_locked(ctx).await
+}
+
+async fn start_web_server_locked(
     ctx: &DesktopWebServiceContext,
 ) -> Result<WebServerStatus, DesktopError> {
     let mut config = load_config().await?;
@@ -413,7 +423,7 @@ pub async fn start_web_server(
         }
     }
     if WEB_SERVICE_RUNTIME.lock().await.is_some() {
-        stop_web_server_with_config(config.clone()).await;
+        stop_web_server_with_config_locked(config.clone()).await;
     }
     validate_port(config.port)?;
     let (listeners, local_addr) =
@@ -558,6 +568,7 @@ async fn start_web_server_with_router(
     service_router: Router,
     serves_web_ui: bool,
 ) -> Result<WebServerStatus, DesktopError> {
+    let _lifecycle = WEB_SERVICE_LIFECYCLE.lock().await;
     validate_port(config.port)?;
 
     {
@@ -611,29 +622,43 @@ async fn start_web_server_with_bound_listeners(
         }));
     }
 
-    let mut runtime = WEB_SERVICE_RUNTIME.lock().await;
-    *runtime = Some(WebServiceRuntime {
-        port: local_addr.port(),
-        address,
-        addresses,
-        listen_addresses,
-        allow_lan: config.allow_lan,
-        started_at,
-        handles,
-        serves_web_ui,
-    });
-    drop(runtime);
+    let displaced = {
+        let mut runtime = WEB_SERVICE_RUNTIME.lock().await;
+        runtime.replace(WebServiceRuntime {
+            port: local_addr.port(),
+            address,
+            addresses,
+            listen_addresses,
+            allow_lan: config.allow_lan,
+            started_at,
+            handles,
+            serves_web_ui,
+        })
+    };
+    if let Some(previous) = displaced {
+        for handle in previous.handles {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
     super::host_tunnel::sync_relay().await;
 
     Ok(status_from_runtime(config).await)
 }
 
 pub async fn stop_web_server() -> Result<WebServerStatus, DesktopError> {
+    let _lifecycle = WEB_SERVICE_LIFECYCLE.lock().await;
     let config = load_config().await?;
-    Ok(stop_web_server_with_config(config).await)
+    Ok(stop_web_server_with_config_locked(config).await)
 }
 
+#[cfg(test)]
 async fn stop_web_server_with_config(config: WebServiceConfig) -> WebServerStatus {
+    let _lifecycle = WEB_SERVICE_LIFECYCLE.lock().await;
+    stop_web_server_with_config_locked(config).await
+}
+
+async fn stop_web_server_with_config_locked(config: WebServiceConfig) -> WebServerStatus {
     let removed = {
         let mut runtime = WEB_SERVICE_RUNTIME.lock().await;
         runtime.take()
@@ -852,12 +877,13 @@ pub(crate) async fn listening_port() -> Option<u16> {
 pub async fn ensure_listening(
     ctx: &DesktopWebServiceContext,
 ) -> Result<WebServerStatus, DesktopError> {
+    let _lifecycle = WEB_SERVICE_LIFECYCLE.lock().await;
     if WEB_SERVICE_RUNTIME.lock().await.is_some() {
         let config = load_config().await?;
         super::host_tunnel::sync_relay().await;
         return Ok(status_from_runtime(config).await);
     }
-    start_web_server(ctx).await
+    start_web_server_locked(ctx).await
 }
 
 pub async fn ensure_web_service_autostart(
@@ -879,7 +905,7 @@ mod tests {
     use axum::Router;
 
     use super::{
-        WebServiceConfig, advertised_addresses, advertised_listen_addresses,
+        WEB_SERVICE_RUNTIME, WebServiceConfig, advertised_addresses, advertised_listen_addresses,
         reachability_from_addresses, start_web_server_with_router, stop_web_server_with_config,
     };
 
@@ -1022,6 +1048,68 @@ mod tests {
         assert_eq!(
             status.address.as_deref(),
             Some(format!("http://127.0.0.1:{}", status.port).as_str())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_start_web_server_does_not_leak_zombie_listeners() {
+        let _guard = TEST_RUNTIME_LOCK.lock().await;
+        let port = StdTcpListener::bind(("127.0.0.1", 0))
+            .expect("ephemeral test port")
+            .local_addr()
+            .expect("local addr")
+            .port();
+        let config = WebServiceConfig {
+            port,
+            token: None,
+            auto_start: false,
+            allow_lan: false,
+        };
+
+        let (first, second) = tokio::join!(
+            start_web_server_with_router(config.clone(), Router::new(), true),
+            start_web_server_with_router(config.clone(), Router::new(), true),
+        );
+        let first = first.expect("first concurrent start");
+        let second = second.expect("second concurrent start");
+        assert!(first.running);
+        assert!(second.running);
+        assert_eq!(
+            first.port, second.port,
+            "concurrent starts must serialize and share the single bound port"
+        );
+        let bound_port = first.port;
+        assert_eq!(
+            WEB_SERVICE_RUNTIME
+                .lock()
+                .await
+                .as_ref()
+                .map(|runtime| runtime.handles.len()),
+            Some(1),
+            "concurrent starts must leave exactly one listener handle"
+        );
+
+        let stopped = stop_web_server_with_config(config).await;
+        assert!(!stopped.running);
+        assert!(WEB_SERVICE_RUNTIME.lock().await.is_none());
+
+        // No zombie listener should still hold the bound port.
+        let mut last_err = None;
+        for _ in 0..20 {
+            match StdTcpListener::bind(("127.0.0.1", bound_port)) {
+                Ok(_listener) => {
+                    last_err = None;
+                    break;
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        }
+        assert!(
+            last_err.is_none(),
+            "bound port {bound_port} should be released after single stop: {last_err:?}"
         );
     }
 }

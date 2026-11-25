@@ -216,7 +216,7 @@ describe('ConversationTimeline runtime status placement & localization', () => {
     expect(dock).toHaveAttribute('data-expanded', 'true');
     expect(
       within(dock).getByTestId('agent-connection-status')
-    ).toHaveTextContent('会话加载异常，正在重连 3/10 次…');
+    ).toHaveTextContent('连接中断，正在自动重连（3/10）');
   });
 
   it('renders lightweight connecting/retry text in the stream after send and suppresses Driving placeholder', () => {
@@ -545,5 +545,105 @@ describe('ConversationTimeline runtime status placement & localization', () => {
         { key: 'reasoning_effort', value: 'high' },
       ],
     });
+  });
+
+  it('prompts rollback confirmation with previewUnavailable: true and skips truncation when dismissed after preview failure', async () => {
+    const { fireEvent, waitFor } = await import('@testing-library/react');
+    const { conversationApi } = await import(
+      '@/features/conversation/conversationApi'
+    );
+    const { ResendCheckpointDialog } = await import('@/components/dialogs');
+
+    const previewSpy = vi
+      .spyOn(conversationApi, 'previewCheckpointFileChanges')
+      .mockRejectedValue(new Error('preview timeout'));
+    const safetySpy = vi
+      .spyOn(conversationApi, 'checkRollbackSafety')
+      .mockResolvedValue({
+        status: 'safe',
+        engineSupportsRevert: true,
+        reason: '',
+      } as never);
+    const truncateSpy = vi
+      .spyOn(conversationApi, 'truncateToTurn')
+      .mockResolvedValue(undefined as never);
+    const dialogSpy = vi
+      .spyOn(ResendCheckpointDialog, 'show')
+      .mockResolvedValue('dismissed');
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      history.view = makeView(
+        [
+          {
+            key: 'u1',
+            phase: 'settled',
+            revision: 1n,
+            turn: {
+              id: 'turn-1:user',
+              role: 'user',
+              timestamp: '2026-11-15T00:00:00Z',
+              blocks: [{ type: 'text', text: 'Retry me' }],
+            },
+          },
+          {
+            key: 'a1',
+            phase: 'settled',
+            revision: 2n,
+            turn: {
+              id: 'turn-1:assistant',
+              role: 'assistant',
+              timestamp: '2026-11-15T00:00:01Z',
+              blocks: [{ type: 'text', text: 'Done' }],
+            },
+          },
+        ],
+        []
+      );
+
+      const attemptWithExecutor: WorkspaceWithSession = {
+        ...attempt,
+        session: {
+          ...attempt.session!,
+          executor: 'codex',
+        },
+      };
+
+      render(
+        <MemoryRouter
+          future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
+        >
+          <QueryClientProvider client={queryClient}>
+            <ConversationStatusProvider>
+              <ConversationTimeline attempt={attemptWithExecutor} task={null} />
+            </ConversationStatusProvider>
+          </QueryClientProvider>
+        </MemoryRouter>
+      );
+
+      const resendButtons = screen.getAllByRole('button').filter((button) => {
+        const label = button.getAttribute('aria-label') ?? '';
+        return /重发|resend/i.test(label);
+      });
+      expect(resendButtons.length).toBeGreaterThan(0);
+
+      fireEvent.click(resendButtons[0]!);
+
+      await waitFor(() => {
+        expect(dialogSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            files: [],
+            previewUnavailable: true,
+          })
+        );
+      });
+      expect(truncateSpy).not.toHaveBeenCalled();
+    } finally {
+      previewSpy.mockRestore();
+      safetySpy.mockRestore();
+      truncateSpy.mockRestore();
+      dialogSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
   });
 });

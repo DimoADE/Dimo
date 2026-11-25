@@ -1011,22 +1011,86 @@ pub(crate) fn normalize_codex_notification(
             reason: str_any(params, &["reason"]).unwrap_or_else(|| "interrupted".into()),
         }],
         "error" => {
+            let error_obj = params.get("error");
             let will_retry = params
                 .get("willRetry")
                 .and_then(Value::as_bool)
                 .or_else(|| {
-                    params
-                        .get("error")
+                    error_obj
                         .and_then(|e| e.get("willRetry"))
                         .and_then(Value::as_bool)
                 })
                 .unwrap_or(false);
             if will_retry {
-                vec![EngineEvent::HookEvent {
+                let reason = nested_or_str(params, "error", "message", "message");
+                let read_u64 = |keys: &[&str]| -> Option<u64> {
+                    for key in keys {
+                        if let Some(v) = params.get(*key).and_then(Value::as_u64) {
+                            return Some(v);
+                        }
+                        if let Some(v) = error_obj.and_then(|e| e.get(*key)).and_then(Value::as_u64)
+                        {
+                            return Some(v);
+                        }
+                    }
+                    None
+                };
+                let (hint_attempt, hint_max, hint_delay) = reason
+                    .as_deref()
+                    .map(crate::vendor_request_activity::parse_retry_hints_from_text)
+                    .unwrap_or((None, None, None));
+                let attempt = read_u64(&["attempt", "retryAttempt", "retry_attempt"])
+                    .and_then(|v| u32::try_from(v).ok())
+                    .or(hint_attempt);
+                let max_attempts =
+                    read_u64(&["maxAttempts", "max_attempts", "maxRetries", "max_retries"])
+                        .and_then(|v| u32::try_from(v).ok())
+                        .or(hint_max);
+                let delay_ms = read_u64(&[
+                    "retryDelayMs",
+                    "retry_delay_ms",
+                    "delayMs",
+                    "delay_ms",
+                    "retryAfterMs",
+                    "retry_after_ms",
+                ])
+                .or_else(|| {
+                    read_u64(&["retryAfterSec", "retry_after_secs", "retryAfterSeconds"])
+                        .map(|s| s.saturating_mul(1000))
+                })
+                .or(hint_delay);
+                let code = [
+                    "code",
+                    "httpStatusCode",
+                    "http_status_code",
+                    "status",
+                    "errorStatus",
+                    "error_status",
+                    "codexErrorInfo",
+                ]
+                .into_iter()
+                .find_map(|key| {
+                    params
+                        .get(key)
+                        .or_else(|| error_obj.and_then(|e| e.get(key)))
+                        .filter(|v| v.is_string() || v.is_number())
+                        .map(|v| {
+                            v.as_str()
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| v.to_string())
+                        })
+                        .filter(|s| !s.is_empty())
+                });
+                vec![EngineEvent::RequestRetrying {
                     prompt_id,
                     session_id,
-                    hook_name: "codex/retry".into(),
-                    payload: params.clone(),
+                    attempt,
+                    max_attempts,
+                    delay_ms,
+                    reason,
+                    code,
                 }]
             } else {
                 vec![EngineEvent::TurnError {

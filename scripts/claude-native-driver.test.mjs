@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,6 +13,7 @@ import {
   CACHE_TTL_5M_MS,
   PROBE_OK,
   PromptCacheTtlTracker,
+  createClaudeCliSdkFallback,
   isOfficialAnthropicSession,
   normalizeSdkEvent,
   startClaudeNativeDriverStdioServer,
@@ -1768,5 +1770,253 @@ test('prompt/send asynchronously emits models/updated notification from live que
   }
 });
 
+test('normalizeSdkEvent maps system.api_retry into structured request_retrying event', () => {
+  const events = normalizeSdkEvent(
+    {
+      type: 'system',
+      subtype: 'api_retry',
+      session_id: 'sess-retry-1',
+      attempt: 2,
+      max_retries: 5,
+      retry_delay_ms: 3500,
+      error_status: 429,
+      error: 'rate_limit_error',
+    },
+    { promptId: 'prompt-retry-1' }
+  );
 
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0], {
+    kind: 'request_retrying',
+    sessionId: 'sess-retry-1',
+    promptId: 'prompt-retry-1',
+    attempt: 2,
+    maxAttempts: 5,
+    delayMs: 3500,
+    reason: 'rate_limit_error',
+    code: '429',
+  });
+});
 
+test('CLI fallback exiting with code 0 or signal without a result frame fails with turn_error', async () => {
+  const scenarios = [
+    {
+      name: 'exit-code-0',
+      closeArgs: [0, null],
+      stderr: 'unexpected EOF',
+      expectPattern: /code 0.*unexpected EOF/i,
+    },
+    {
+      name: 'signal-sigkill',
+      closeArgs: [null, 'SIGKILL'],
+      stderr: 'Killed by OOM',
+      expectPattern: /signal SIGKILL.*Killed by OOM/i,
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const cliFallback = createClaudeCliSdkFallback('mock-claude');
+    const wrappedSdk = {
+      isCliFallback: true,
+      query({ prompt, options }) {
+        return cliFallback.query({
+          prompt,
+          options: {
+            ...options,
+            spawnClaudeCodeProcess() {
+              const child = new EventEmitter();
+              child.stdin = new PassThrough();
+              child.stdout = new PassThrough();
+              child.stderr = new PassThrough();
+              child.killed = false;
+              child.exitCode = null;
+              child.kill = () => {
+                child.killed = true;
+              };
+              setTimeout(() => {
+                child.stdout.write(
+                  `${JSON.stringify({ type: 'system', subtype: 'init', session_id: `sess-${scenario.name}` })}\n`
+                );
+                child.stderr.write(`${scenario.stderr}\n`);
+                child.stdout.end();
+                child.stderr.end();
+                child.exitCode = scenario.closeArgs[0];
+                child.emit('close', ...scenario.closeArgs);
+              }, 10);
+              return child;
+            },
+          },
+        });
+      },
+    };
+
+    const harness = createHarness({ sdkLoader: async () => wrappedSdk });
+    try {
+      await harness.request(1, 'initialize', { skipModelProbe: true });
+      const sendRes = await harness.request(2, 'prompt/send', {
+        promptId: `p-${scenario.name}`,
+        text: 'trigger premature cli exit',
+        waitForCompletion: true,
+      });
+      assert.equal(sendRes.result.accepted, true);
+
+      const errEvent = await harness.waitFor(
+        (f) =>
+          f.method === 'engine/event' &&
+          f.params?.kind === 'turn_error' &&
+          f.params?.promptId === `p-${scenario.name}`
+      );
+      assert.match(errEvent.params.message, scenario.expectPattern);
+    } finally {
+      await harness.close();
+    }
+  }
+});
+
+test('handlePromptSend emits fallback turn_error after clearing activeTurn when stream ends without a terminal event', async () => {
+  let callCount = 0;
+  const mockSdk = {
+    query() {
+      callCount += 1;
+      if (callCount === 1) {
+        return (async function* () {
+          yield {
+            type: 'stream_event',
+            session_id: 'sess-silent-end',
+            event: {
+              type: 'content_block_delta',
+              delta: { type: 'text_delta', text: 'partial before silent EOF' },
+            },
+          };
+          // Generator ends cleanly without yielding `result` or throwing.
+        })();
+      }
+      return (async function* () {
+        yield {
+          type: 'result',
+          subtype: 'success',
+          session_id: 'sess-silent-end',
+          result: 'recovered next turn',
+        };
+      })();
+    },
+  };
+
+  const harness = createHarness({ sdkLoader: async () => mockSdk });
+  try {
+    await harness.request(1, 'initialize', { skipModelProbe: true });
+    await harness.request(2, 'prompt/send', {
+      promptId: 'p-silent-1',
+      text: 'first turn',
+    });
+
+    const errEvent = await harness.waitFor(
+      (f) =>
+        f.method === 'engine/event' &&
+        f.params?.kind === 'turn_error' &&
+        f.params?.promptId === 'p-silent-1'
+    );
+    assert.match(errEvent.params.message, /without a terminal result event/i);
+
+    // activeTurn must already be cleared before turn_error was emitted, so an immediate next turn succeeds.
+    const nextRes = await harness.request(3, 'prompt/send', {
+      promptId: 'p-silent-2',
+      text: 'second turn',
+      waitForCompletion: true,
+    });
+    assert.equal(nextRes.result.accepted, true);
+    const doneEvent = await harness.waitFor(
+      (f) =>
+        f.method === 'engine/event' &&
+        f.params?.kind === 'turn_completed' &&
+        f.params?.promptId === 'p-silent-2'
+    );
+    assert.equal(doneEvent.params.result, 'recovered next turn');
+  } finally {
+    await harness.close();
+  }
+});
+
+test('turn_error clears activeTurn before emitting and does not duplicate when child exits non-zero', async () => {
+  let turnIndex = 0;
+  let releaseExit;
+  const exitGate = new Promise((resolve) => {
+    releaseExit = resolve;
+  });
+
+  const mockSdk = {
+    query() {
+      turnIndex += 1;
+      if (turnIndex === 1) {
+        return (async function* () {
+          yield {
+            type: 'result',
+            subtype: 'error_during_execution',
+            is_error: true,
+            session_id: 'sess-err-1',
+            result: 'Rate limit exceeded',
+          };
+          await exitGate;
+          throw new Error('Claude Code process exited with code 1');
+        })();
+      }
+      return (async function* () {
+        yield {
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          session_id: 'sess-err-1',
+          stop_reason: 'end_turn',
+          result: 'Queued turn succeeded',
+        };
+      })();
+    },
+  };
+
+  const harness = createHarness({ sdkLoader: async () => mockSdk });
+  try {
+    await harness.request(1, 'initialize', { skipModelProbe: true });
+    const first = await harness.request(2, 'prompt/send', {
+      promptId: 'p-err-1',
+      blocks: [{ type: 'text', text: 'First turn' }],
+    });
+    assert.equal(first.result.accepted, true);
+
+    // Yield to allow the SDK generator to emit the error result and pause before exiting.
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(
+      harness.frames.some((f) => f.method === 'engine/event' && f.params?.kind === 'turn_error'),
+      false,
+      'turn_error must remain buffered until the turn exits and clears activeTurn'
+    );
+
+    releaseExit();
+    const errFrame = await harness.waitFor(
+      (f) => f.method === 'engine/event' && f.params?.kind === 'turn_error'
+    );
+    assert.equal(errFrame.params.promptId, 'p-err-1');
+    assert.equal(errFrame.params.message, 'Rate limit exceeded');
+
+    // Immediately dispatch a queued second turn upon receiving turn_error.
+    const second = await harness.request(3, 'prompt/send', {
+      promptId: 'p-ok-2',
+      blocks: [{ type: 'text', text: 'Queued turn' }],
+    });
+    assert.equal(second.error, undefined);
+    assert.equal(second.result.accepted, true);
+
+    await harness.waitFor(
+      (f) =>
+        f.method === 'engine/event' &&
+        f.params?.kind === 'turn_completed' &&
+        f.params?.promptId === 'p-ok-2'
+    );
+
+    const turnErrors = harness.frames.filter(
+      (f) => f.method === 'engine/event' && f.params?.kind === 'turn_error'
+    );
+    assert.equal(turnErrors.length, 1, 'non-zero exit after error result must not duplicate turn_error');
+  } finally {
+    await harness.close();
+  }
+});

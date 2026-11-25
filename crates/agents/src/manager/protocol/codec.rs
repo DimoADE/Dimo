@@ -197,10 +197,9 @@ pub(in crate::manager) fn fix_usage_update_nulls(val: &mut serde_json::Value) ->
     changed
 }
 
-pub(in crate::manager) const AIR_SESSION_UPDATE_METHOD: &str = "_air/session_update";
 pub(in crate::manager) const GROK_WORKFLOW_UPDATED_METHOD: &str = "_x.ai/workflow_updated";
 
-pub(in crate::manager) fn rewrite_air_or_vendor_notification(val: &mut serde_json::Value) -> bool {
+pub(in crate::manager) fn rewrite_vendor_notification(val: &mut serde_json::Value) -> bool {
     let Some(obj) = val.as_object_mut() else {
         return false;
     };
@@ -218,34 +217,6 @@ pub(in crate::manager) fn rewrite_air_or_vendor_notification(val: &mut serde_jso
             );
             true
         }
-        "session/update" => {
-            let tag = obj
-                .get("params")
-                .and_then(|params| params.get("update"))
-                .and_then(|update| {
-                    update
-                        .get("sessionUpdate")
-                        .or_else(|| update.get("session_update"))
-                })
-                .and_then(serde_json::Value::as_str);
-            if matches!(
-                tag,
-                Some(
-                    "async_task_spawned"
-                        | "async_task_progress"
-                        | "async_task_state_update"
-                        | "prompt_suggestion_update"
-                )
-            ) {
-                obj.insert(
-                    "method".to_string(),
-                    serde_json::Value::String(AIR_SESSION_UPDATE_METHOD.to_string()),
-                );
-                true
-            } else {
-                false
-            }
-        }
         _ => false,
     }
 }
@@ -259,16 +230,14 @@ pub(in crate::manager) fn sanitize_incoming_jsonrpc_line(line: String) -> String
         return String::new();
     }
     let needs_usage_fix = line.contains("null") && line.contains("usage_update");
-    let needs_air_rewrite = line.contains("async_task_")
-        || line.contains("prompt_suggestion_update")
-        || line.contains("session/workflow_updated");
-    if !needs_usage_fix && !needs_air_rewrite {
+    let needs_vendor_rewrite = line.contains("session/workflow_updated");
+    if !needs_usage_fix && !needs_vendor_rewrite {
         return line;
     }
     let Ok(mut message) = serde_json::from_str::<serde_json::Value>(&line) else {
         return line;
     };
-    let mut changed = rewrite_air_or_vendor_notification(&mut message);
+    let mut changed = rewrite_vendor_notification(&mut message);
     if needs_usage_fix {
         changed |= fix_usage_update_nulls(&mut message);
         if let Some(params) = message.get_mut("params") {

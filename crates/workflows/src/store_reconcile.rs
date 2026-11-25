@@ -367,12 +367,12 @@ async fn apply_projection_event(
             .execute(&mut *conn)
             .await?;
             sqlx::query(
-                "UPDATE workflow_runs SET status = 'running' WHERE id = ?
-                 AND status IN ('waiting', 'needs_review')",
+                "UPDATE workflow_runs SET status = 'running' WHERE id = ? AND status = 'waiting'",
             )
             .bind(run_id)
             .execute(&mut *conn)
             .await?;
+            resume_run_from_review(conn, run_id, record.sequence).await?;
         }
         WorkflowEvent::StepClaimed {
             step_id,
@@ -773,6 +773,7 @@ async fn apply_projection_event(
         }
         WorkflowEvent::StepCompleted { step_id, attempt } => {
             set_rebuilt_step_terminal(conn, record, &step_id, attempt, "completed").await?;
+            resume_run_from_review(conn, run_id, record.sequence).await?;
             restore_running_if_not_waiting(conn, run_id).await?;
         }
         WorkflowEvent::StepFailed {
@@ -788,6 +789,8 @@ async fn apply_projection_event(
         }
         WorkflowEvent::StepSkipped { step_id, attempt } => {
             set_rebuilt_step_terminal(conn, record, &step_id, attempt, "skipped").await?;
+            resume_run_from_review(conn, run_id, record.sequence).await?;
+            restore_running_if_not_waiting(conn, run_id).await?;
         }
         WorkflowEvent::StepNeedsReview {
             step_id, attempt, ..
@@ -807,12 +810,7 @@ async fn apply_projection_event(
                 .execute(&mut *conn)
                 .await?;
         }
-        WorkflowEvent::ReviewDecided { .. } => {
-            sqlx::query("UPDATE workflow_runs SET status = 'running' WHERE id = ?")
-                .bind(run_id)
-                .execute(&mut *conn)
-                .await?;
-        }
+        WorkflowEvent::ReviewDecided { .. } => {}
         WorkflowEvent::ApprovalDecided {
             step_id,
             attempt,
@@ -944,6 +942,56 @@ pub(crate) async fn restore_running_if_not_waiting(
          WHERE id = ? AND status IN ('waiting', 'needs_review')",
     )
     .bind(status)
+    .bind(run_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn resume_run_from_review(
+    conn: &mut SqliteConnection,
+    run_id: Uuid,
+    ready_sequence: i64,
+) -> Result<(), WorkflowError> {
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM workflow_runs WHERE id = ?")
+            .bind(run_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if status.as_deref() != Some("needs_review") {
+        return Ok(());
+    }
+    restore_running_if_not_waiting(conn, run_id).await?;
+    let updated_status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM workflow_runs WHERE id = ?")
+            .bind(run_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if updated_status.as_deref() != Some("needs_review") {
+        restore_ready_steps_after_review(conn, run_id, ready_sequence).await?;
+    }
+    Ok(())
+}
+
+async fn restore_ready_steps_after_review(
+    conn: &mut SqliteConnection,
+    run_id: Uuid,
+    ready_sequence: i64,
+) -> Result<(), WorkflowError> {
+    sqlx::query(
+        "INSERT OR IGNORE INTO workflow_ready_steps (
+             run_id, step_id, attempt, ready_sequence, status
+         )
+         SELECT step.run_id, step.step_id, step.attempt, ?, 'ready'
+         FROM workflow_step_runs step
+         WHERE step.run_id = ?
+           AND step.status = 'ready'
+           AND step.attempt = (
+               SELECT MAX(latest.attempt) FROM workflow_step_runs latest
+               WHERE latest.run_id = step.run_id AND latest.step_id = step.step_id
+           )",
+    )
+    .bind(ready_sequence)
     .bind(run_id)
     .execute(&mut *conn)
     .await?;

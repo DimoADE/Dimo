@@ -11,6 +11,7 @@ import {
   hostAppWindowLabel,
   hostWindowLabel,
   isLocalDesktopWindowLabel,
+  isMainProcessOnlyEvent,
   isValidHostCommandName,
   type BootstrapPayload,
   type DesktopToastPayload,
@@ -209,7 +210,7 @@ export function registerIpcHandlers(context: IpcContext): void {
     const registeredLabel = windows.getRegisteredLabelForWebContents(
       event.sender
     );
-    const includeLocalCapabilities =
+    const includeLocalSidecar =
       registeredLabel !== null && isLocalDesktopWindowLabel(registeredLabel);
     const rawHostname = (() => {
       try {
@@ -223,8 +224,8 @@ export function registerIpcHandlers(context: IpcContext): void {
       platform: process.platform,
       ...(rawHostname ? { hostname: rawHostname } : {}),
       appVersion,
-      backend: sidecar.getConnectionOrNull(),
-      capabilities: includeLocalCapabilities
+      backend: includeLocalSidecar ? sidecar.getConnectionOrNull() : null,
+      capabilities: includeLocalSidecar
         ? sidecar.getCachedCapabilities()
         : null,
       sidecarStatus: sidecar.getStatus(),
@@ -468,9 +469,13 @@ export function registerIpcHandlers(context: IpcContext): void {
   ipcMain.handle(
     IPC_CHANNELS.EVENTS_EMIT,
     (_event, name: string, payload?: unknown) => {
-      if (typeof name === 'string' && name.length > 0) {
-        windows.broadcastEvent(name, payload);
+      if (typeof name !== 'string' || name.length === 0) {
+        return;
       }
+      if (isMainProcessOnlyEvent(name)) {
+        throw new Error(`Event "${name}" is restricted to the main process`);
+      }
+      windows.broadcastEvent(name, payload);
     }
   );
 
@@ -732,6 +737,9 @@ export function registerIpcHandlers(context: IpcContext): void {
         }
         case 'take_pending_desktop_toast_activation': {
           return deeplinks.takePendingSessionActivation();
+        }
+        case 'take_pending_open_files': {
+          return deeplinks.takePendingOpenFiles();
         }
         case 'show_desktop_toast': {
           const payload = extractToastPayload(args);

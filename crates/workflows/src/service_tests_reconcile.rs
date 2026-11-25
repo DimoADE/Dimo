@@ -1413,3 +1413,123 @@ async fn pages_a_ten_thousand_event_history_without_loading_the_full_log() {
         elapsed.as_millis()
     );
 }
+
+#[tokio::test]
+async fn rebuild_projection_waits_for_all_needs_review_steps_before_resuming_and_restoring_siblings()
+{
+    let (core, store) = setup().await;
+    let agent = |id: &str| WorkflowStep {
+        id: id.to_string(),
+        depends_on: Vec::new(),
+        phase: None,
+        input_bindings: BTreeMap::new(),
+        spec: WorkflowStepSpec::Agent(AgentStepSpec {
+            agent_id: "codex".to_string(),
+            prompt: format!("run {id}"),
+            executor_profile_id: None,
+            mode_override: None,
+            config_overrides: BTreeMap::new(),
+            output_language: None,
+            output_description: None,
+            output_schema: None,
+            workspace_access: WorkspaceAccess::WriteIsolated,
+            side_effect_class: SideEffectClass::MutatingUnknown,
+            allow_one_repair: false,
+            allow_skip_on_review: true,
+            completion_policy: CompletionPolicy::Automatic,
+        }),
+    };
+    let version = core
+        .publish(PublishWorkflow {
+            definition_id: None,
+            definition: WorkflowDefinition {
+                format_version: 1,
+                name: "multi-review-rebuild".to_string(),
+                description: None,
+                input_schema: None,
+                steps: vec![agent("alpha"), agent("beta"), agent("gamma")],
+                policy: WorkflowPolicy::default(),
+            },
+            source_path: None,
+            operation_id: Uuid::new_v4(),
+            principal: serde_json::json!({"id": "owner"}),
+        })
+        .await
+        .unwrap();
+    let run = core
+        .start(StartWorkflow {
+            definition_version_id: version.id,
+            workspace_id: Uuid::new_v4(),
+            input: serde_json::json!({}),
+            policy_override: None,
+            debug_step_id: None,
+            operation_id: Uuid::new_v4(),
+            principal: serde_json::json!({"id": "owner"}),
+        })
+        .await
+        .unwrap();
+    store.enable_dispatch(run.id).await.unwrap();
+
+    // Start alpha and beta concurrently while gamma stays ready, then simulate restart interruption.
+    for expected in ["alpha", "beta"] {
+        let claim = store
+            .claim_ready(2, chrono::Duration::seconds(30))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.step.step_id, expected);
+        store
+            .mark_started(run.id, expected, claim.claim_token, None, None)
+            .await
+            .unwrap();
+    }
+    assert_eq!(store.reconcile_interrupted().await.unwrap(), 1);
+    assert_eq!(store.run(run.id).await.unwrap().status, "needs_review");
+
+    // Resolving only alpha must keep run in needs_review both live and after projection rebuild.
+    let after_first = core
+        .review(ReviewWorkflow {
+            run_id: run.id,
+            decision: WorkflowReviewDecision::Accept {
+                step_id: "alpha".to_string(),
+                output: None,
+            },
+            operation_id: Uuid::new_v4(),
+            principal: serde_json::json!({"id": "owner"}),
+        })
+        .await
+        .unwrap();
+    assert_eq!(after_first.status, "needs_review");
+    store.rebuild_run_projection(run.id).await.unwrap();
+    assert_eq!(store.run(run.id).await.unwrap().status, "needs_review");
+    assert!(
+        store
+            .claim_ready(1, chrono::Duration::seconds(30))
+            .await
+            .unwrap()
+            .is_none(),
+        "sibling ready step must not be claimable while beta is still needs_review"
+    );
+
+    // Skipping beta clears the last needs_review step; rebuild must match live running + ready gamma.
+    let after_second = core
+        .review(ReviewWorkflow {
+            run_id: run.id,
+            decision: WorkflowReviewDecision::Skip {
+                step_id: "beta".to_string(),
+            },
+            operation_id: Uuid::new_v4(),
+            principal: serde_json::json!({"id": "owner"}),
+        })
+        .await
+        .unwrap();
+    assert_eq!(after_second.status, "running");
+    store.rebuild_run_projection(run.id).await.unwrap();
+    assert_eq!(store.run(run.id).await.unwrap().status, "running");
+    let claimed = store
+        .claim_ready(1, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("gamma must be restored to workflow_ready_steps after rebuild");
+    assert_eq!(claimed.step.step_id, "gamma");
+}

@@ -25,7 +25,7 @@ impl WorkflowStore {
              JOIN workflow_definition_versions wdv ON wdv.id = run.definition_version_id
              WHERE step.status = 'waiting_approval'
                AND json_extract(step.execution_evidence_json, '$.primitive') = 'wait_for_event'
-               AND run.status = 'waiting'
+               AND run.status IN ('running', 'waiting')
                AND run.control_state = 'active'
                AND step.attempt = (
                    SELECT MAX(latest.attempt)
@@ -106,6 +106,14 @@ impl WorkflowStore {
             }
 
             let run = find_run(&mut conn, run_id).await?;
+            if run.control_state != "active"
+                || !matches!(run.status.as_str(), "running" | "waiting")
+            {
+                return Err(WorkflowError::Conflict(format!(
+                    "workflow run `{run_id}` is not active/waiting (status `{}`, control_state `{}`)",
+                    run.status, run.control_state
+                )));
+            }
             let version = version_on_connection(&mut conn, run.definition_version_id).await?;
             let definition = version.definition()?;
             let definition_step = definition
@@ -245,7 +253,7 @@ impl WorkflowStore {
                  FROM workflow_step_runs step
                  JOIN workflow_runs run ON run.id = step.run_id
                  WHERE step.status = 'waiting_approval'
-                   AND run.status = 'waiting'
+                   AND run.status IN ('running', 'waiting')
                    AND run.control_state = 'active'
                    AND step.attempt = (
                        SELECT MAX(latest.attempt)
@@ -273,14 +281,19 @@ impl WorkflowStore {
         let now_iso = now.to_rfc3339();
         let mut expired_runs = Vec::with_capacity(candidates.len());
         for (run_id, step_id) in candidates {
-            let updated = self
+            let updated = match self
                 .fail_step(
                     run_id,
                     &step_id,
                     "wait_for_event_timeout",
                     &format!("suspended step `{step_id}` exceeded configured SLA timeout"),
                 )
-                .await?;
+                .await
+            {
+                Ok(run) => run,
+                Err(WorkflowError::Conflict(_)) => continue,
+                Err(err) => return Err(err),
+            };
             let has_table: Option<i64> = sqlx::query_scalar(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pulse_user_interactions' LIMIT 1",
             )

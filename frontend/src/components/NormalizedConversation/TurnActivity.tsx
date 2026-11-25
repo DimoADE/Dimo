@@ -364,6 +364,7 @@ function HostDelegationToolCall({
   event,
   pollResults,
   onOpenChild,
+  workspacePath,
   expansionKey,
   onExpandedChange,
 }: {
@@ -372,6 +373,7 @@ function HostDelegationToolCall({
   event: ConversationDelegationView | null;
   pollResults: readonly ToolResultBlock[];
   onOpenChild?: (childConversationId: string) => void;
+  workspacePath?: string | null;
   expansionKey: string;
   onExpandedChange: (expanded: boolean) => void;
 }) {
@@ -380,6 +382,7 @@ function HostDelegationToolCall({
     <DelegationCard
       delegation={delegation}
       onOpenChild={onOpenChild}
+      workspacePath={workspacePath}
       expansionKey={expansionKey}
       onExpandedChange={onExpandedChange}
     />
@@ -395,6 +398,7 @@ function SubagentToolCall({
   lifecycle,
   childrenTools = [],
   parentAgentId,
+  workspacePath,
   onExpandedChange,
 }: {
   expansionKey: string;
@@ -405,6 +409,7 @@ function SubagentToolCall({
   lifecycle: SubagentLifecycleEvent[];
   childrenTools?: SubagentChildTool[];
   parentAgentId?: string | null;
+  workspacePath?: string | null;
   onExpandedChange: (expanded: boolean) => void;
 }) {
   const [expanded, setExpanded] = useExpandable(expansionKey, true);
@@ -436,6 +441,7 @@ function SubagentToolCall({
             lifecycle={lifecycle}
             childrenTools={childrenTools}
             parentAgentId={parentAgentId}
+            workspacePath={workspacePath}
             expansionKey={`${expansionKey}:sections`}
             onExpandedChange={onExpandedChange}
           />
@@ -849,6 +855,7 @@ export function TurnActivity({
             event={matchHostDelegationView(use, delegations)}
             pollResults={pollResults}
             onOpenChild={onOpenChild}
+            workspacePath={workspacePath ?? attempt.container_ref}
             expansionKey={`delegation-details:${turnId}:${toolUseId || index}`}
             onExpandedChange={(expanded) => {
               if (expanded)
@@ -903,6 +910,7 @@ export function TurnActivity({
               lifecycle={lifecycle}
               childrenTools={children}
               parentAgentId={parentAgentId}
+              workspacePath={workspacePath ?? attempt.container_ref}
               onExpandedChange={(expanded) => {
                 if (expanded)
                   setExpanded(

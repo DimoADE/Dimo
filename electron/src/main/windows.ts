@@ -302,6 +302,52 @@ export class WindowManager {
     }
   }
 
+  /**
+   * On Windows, calling `show()` / `focus()` from a background or tray-hidden
+   * instance can be blocked by Win32's Foreground Lock, leaving the window
+   * behind other apps on the first shortcut click. Briefly toggling
+   * `alwaysOnTop` elevates the HWND to the top of the normal Z-order before
+   * focusing without leaving the window pinned above other apps.
+   */
+  private promoteWindowOnWindows(
+    win: BrowserWindow,
+    action: () => void,
+  ): void {
+    if (this.platform !== "win32") {
+      action();
+      return;
+    }
+    const wasAlwaysOnTop = win.isAlwaysOnTop?.() ?? false;
+    if (!wasAlwaysOnTop) {
+      win.setAlwaysOnTop?.(true);
+    }
+    try {
+      action();
+    } finally {
+      if (!wasAlwaysOnTop && !win.isDestroyed()) {
+        win.setAlwaysOnTop?.(false);
+      }
+    }
+  }
+
+  private bringWindowToFront(win: BrowserWindow): void {
+    if (win.isDestroyed()) {
+      return;
+    }
+    this.cancelPendingFullscreenHide(win);
+    if (win.isMinimized()) {
+      win.restore();
+    }
+    this.promoteWindowOnWindows(win, () => {
+      win.show();
+      if (win.isMinimized()) {
+        win.restore();
+      }
+      win.moveTop?.();
+      win.focus();
+    });
+  }
+
   showWindow(win: BrowserWindow): void {
     if (win.isDestroyed()) {
       return;
@@ -315,13 +361,19 @@ export class WindowManager {
       win.restore();
     }
     win.show();
+    if (win.isMinimized()) {
+      win.restore();
+    }
   }
 
   focusWindow(win: BrowserWindow): void {
     if (win.isDestroyed() || this.prewarmingWindows.has(win)) {
       return;
     }
-    win.focus();
+    this.promoteWindowOnWindows(win, () => {
+      win.moveTop?.();
+      win.focus();
+    });
   }
 
   /**
@@ -470,12 +522,7 @@ export class WindowManager {
 
   showMainWindow(): void {
     const main = this.getMainWindow() ?? this.createMainWindow();
-    this.cancelPendingFullscreenHide(main);
-    if (main.isMinimized()) {
-      main.restore();
-    }
-    main.show();
-    main.focus();
+    this.bringWindowToFront(main);
   }
 
   hideMainWindow(): void {
@@ -585,12 +632,7 @@ export class WindowManager {
   createMainWindow(): BrowserWindow {
     const existing = this.getMainWindow();
     if (existing) {
-      this.cancelPendingFullscreenHide(existing);
-      if (existing.isMinimized()) {
-        existing.restore();
-      }
-      existing.show();
-      existing.focus();
+      this.bringWindowToFront(existing);
       return existing;
     }
 
@@ -634,13 +676,8 @@ export class WindowManager {
     const title = hostWindowTitle(profile.name);
     const existing = this.getWindow(label);
     if (existing) {
-      this.cancelPendingFullscreenHide(existing);
       existing.setTitle(title);
-      if (existing.isMinimized()) {
-        existing.restore();
-      }
-      existing.show();
-      existing.focus();
+      this.bringWindowToFront(existing);
       return label;
     }
 
@@ -745,11 +782,7 @@ export class WindowManager {
       this.prewarmedReadyWindows.delete(existing);
       this.pendingSettingsRoutes.delete(existing);
       this.navigateSettingsWindow(existing, routePath);
-      if (existing.isMinimized()) {
-        existing.restore();
-      }
-      existing.show();
-      existing.focus();
+      this.bringWindowToFront(existing);
       return existing;
     }
 
@@ -772,15 +805,8 @@ export class WindowManager {
     if (!win) {
       return;
     }
-    this.cancelPendingFullscreenHide(win);
     this.clearHiddenIdleTimer(label);
-    if (win.isMinimized()) {
-      win.restore();
-    }
-    if (!win.isVisible()) {
-      win.show();
-    }
-    win.focus();
+    this.bringWindowToFront(win);
   }
 
   closeWindowsByLabels(labels: readonly string[]): void {
@@ -798,9 +824,35 @@ export class WindowManager {
     payload?: unknown,
     excludeWebContentsId?: number,
   ): void {
+    this.broadcastEventInternal(event, payload, {
+      excludeWebContentsId,
+      localOnly: false,
+    });
+  }
+
+  broadcastLocalEvent(
+    event: string,
+    payload?: unknown,
+    excludeWebContentsId?: number,
+  ): void {
+    this.broadcastEventInternal(event, payload, {
+      excludeWebContentsId,
+      localOnly: true,
+    });
+  }
+
+  private broadcastEventInternal(
+    event: string,
+    payload: unknown,
+    options: { excludeWebContentsId?: number; localOnly: boolean },
+  ): void {
+    const { excludeWebContentsId, localOnly } = options;
     const sentWebContentsIds = new Set<number>();
-    for (const win of this.windows.values()) {
+    for (const [label, win] of this.windows.entries()) {
       if (win.isDestroyed()) {
+        continue;
+      }
+      if (localOnly && !isLocalDesktopWindowLabel(label)) {
         continue;
       }
       const wc = win.webContents;
@@ -818,6 +870,12 @@ export class WindowManager {
       if (wc.isDestroyed?.()) {
         this.auxiliaryWebContents.delete(wc);
         continue;
+      }
+      if (localOnly) {
+        const label = this.labelsByWebContents.get(wc);
+        if (!label || !isLocalDesktopWindowLabel(label)) {
+          continue;
+        }
       }
       if (
         (excludeWebContentsId !== undefined &&
@@ -1081,8 +1139,7 @@ export class WindowManager {
   private scheduleRevealFallback(win: BrowserWindow): void {
     const timer = setTimeout(() => {
       if (!win.isDestroyed() && !win.isVisible()) {
-        win.show();
-        win.focus();
+        this.bringWindowToFront(win);
       }
     }, REVEAL_FALLBACK_MS);
     win.once("show", () => clearTimeout(timer));

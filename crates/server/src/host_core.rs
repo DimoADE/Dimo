@@ -22,6 +22,7 @@ use crate::{
 struct PluginAwareConversationExecution {
     inner: ConversationSessionExecutionPort,
     plugin_control_plane: Arc<PluginControlPlane>,
+    rate_limit_recovery: Arc<agents::rate_limit_recovery::UsageLimitRecovery>,
 }
 
 #[async_trait]
@@ -68,6 +69,15 @@ impl ConversationExecutionPort for PluginAwareConversationExecution {
 
     async fn cancel_turn(&self, request: CancelConversationTurn) -> Result<(), ApplicationError> {
         self.inner.cancel_turn(request).await
+    }
+
+    async fn close_conversation(
+        &self,
+        conversation_id: uuid::Uuid,
+        reason: Option<String>,
+    ) -> Result<(), ApplicationError> {
+        self.rate_limit_recovery.cancel_wait(conversation_id);
+        self.inner.close_conversation(conversation_id, reason).await
     }
 
     async fn steer(
@@ -307,7 +317,7 @@ pub(crate) fn host_application_core_with_outbox_policy(
         agent_management_runtime,
         delegation_broker,
         prompt_enhancement: Arc::new(tokio::sync::Mutex::new(None)),
-        rate_limit_recovery,
+        rate_limit_recovery: rate_limit_recovery.clone(),
         side_chats: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         allow_loopback_outbox,
     });
@@ -324,6 +334,7 @@ pub(crate) fn host_application_core_with_outbox_policy(
     let execution = Arc::new(PluginAwareConversationExecution {
         inner: ConversationSessionExecutionPort::with_companion(conversations.clone(), companion),
         plugin_control_plane,
+        rate_limit_recovery,
     });
     let workflows = Arc::new(WorkflowStoreExecutionPort::with_conversations(
         pool.clone(),
@@ -344,6 +355,19 @@ async fn dispatch_rate_limit_auto_resume(
     conversation_id: uuid::Uuid,
     continuation_prompt: String,
 ) {
+    let Ok(Some(conversation)) =
+        db::models::conversation::ConversationRecord::find_by_id(pool, conversation_id).await
+    else {
+        return;
+    };
+    if conversation.deleted_at.is_some()
+        || matches!(
+            conversation.status,
+            db::models::session::SessionStatus::Archived | db::models::session::SessionStatus::Done
+        )
+    {
+        return;
+    }
     let Ok(Some(session)) = db::models::session::Session::find_by_id(pool, conversation_id).await
     else {
         return;
@@ -408,8 +432,7 @@ async fn resolve_rate_limit_engine_id(
     {
         return binding.agent_id.into_string();
     }
-    if let Ok(Some(session)) =
-        db::models::session::Session::find_by_id(pool, conversation_id).await
+    if let Ok(Some(session)) = db::models::session::Session::find_by_id(pool, conversation_id).await
         && let Some(executor) = session.executor
         && !executor.trim().is_empty()
     {

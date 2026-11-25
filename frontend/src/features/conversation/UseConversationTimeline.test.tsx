@@ -26,6 +26,7 @@ const CONVERSATION_ID = 'conversation-1';
 const {
   detailMock,
   ensureSessionControlsMock,
+  rebindSessionMock,
   touchMock,
   eventsSinceMock,
   timelinePageMock,
@@ -52,6 +53,7 @@ const {
     agentEventListeners,
     detailMock: vi.fn(),
     ensureSessionControlsMock: vi.fn(),
+    rebindSessionMock: vi.fn(),
     touchMock: vi.fn(),
     eventsSinceMock: vi.fn(),
     timelinePageMock: vi.fn(),
@@ -83,6 +85,7 @@ vi.mock('./conversationApi', () => ({
   conversationApi: {
     detail: detailMock,
     ensureSessionControls: ensureSessionControlsMock,
+    rebindSession: rebindSessionMock,
     touch: touchMock,
     eventsSince: eventsSinceMock,
     timelinePage: timelinePageMock,
@@ -951,7 +954,7 @@ describe('useConversationTimeline', () => {
     });
   });
 
-  it.each(['connecting', 'recovering', 'failed', 'disconnected'])(
+  it.each(['connecting', 'recovering', 'failed'])(
     'closes the send gate immediately when the ACP connection is %s',
     async (status) => {
       detailMock.mockResolvedValue(detail());
@@ -973,28 +976,33 @@ describe('useConversationTimeline', () => {
     }
   );
 
-  it('keeps the session ready and silent when an idle connection transitions to closed', async () => {
-    detailMock.mockResolvedValue(detail());
-    const { result } = renderHook(() =>
-      useConversationTimeline(CONVERSATION_ID)
-    );
-    await waitFor(() => expect(result.current.loading).toBe(false));
-    await waitFor(() => expect(agentEventListeners.length).toBeGreaterThan(0));
+  it.each(['closed', 'disconnected'])(
+    'keeps the session ready and silent when an idle connection transitions to %s',
+    async (status) => {
+      detailMock.mockResolvedValue(detail());
+      const { result } = renderHook(() =>
+        useConversationTimeline(CONVERSATION_ID)
+      );
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      await waitFor(() =>
+        expect(agentEventListeners.length).toBeGreaterThan(0)
+      );
 
-    act(() => {
-      agentEventListeners[0]?.({
-        session_id: CONVERSATION_ID,
-        event: {
-          kind: 'connection_status_changed',
-          snapshot: { status: 'closed' },
-        },
+      act(() => {
+        agentEventListeners[0]?.({
+          session_id: CONVERSATION_ID,
+          event: {
+            kind: 'connection_status_changed',
+            snapshot: { status },
+          },
+        });
       });
-    });
 
-    expect(result.current.sessionBindReady).toBe(true);
-    expect(result.current.connecting).toBe(false);
-    expect(ensureSessionControlsMock).not.toHaveBeenCalled();
-  });
+      expect(result.current.sessionBindReady).toBe(true);
+      expect(result.current.connecting).toBe(false);
+      expect(ensureSessionControlsMock).not.toHaveBeenCalled();
+    }
+  );
 
   it('does not reopen the send gate when an older reconnect promise resolves after failure', async () => {
     detailMock.mockResolvedValue(detail());
@@ -2129,5 +2137,255 @@ describe('useConversationTimeline', () => {
       release3();
       release4();
     }
+  });
+
+  it('clears stale settled currentTurnId when starting a new optimistic turn', async () => {
+    detailMock.mockResolvedValue(detail());
+
+    const { result } = renderHook(() =>
+      useConversationTimeline(CONVERSATION_ID)
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await waitFor(() => expect(listeners).toHaveLength(1));
+
+    // Simulate live row_ops having tracked turn-1 and settled its assistant row.
+    act(() => {
+      listeners[0]?.(
+        batch(
+          [
+            { op: 'upsert', row: userRow('turn-1', 'first', 1n) },
+            { op: 'upsert', row: assistantRow('turn-1', 'done', 2n) },
+          ],
+          2n
+        )
+      );
+      flushFrames();
+    });
+    expect(result.current.currentTurnId).toBe('turn-1');
+
+    act(() => {
+      result.current.sendOptimisticTurn(
+        messageTurn('opt-2', 'user', [{ type: 'text', text: 'second' }])
+      );
+    });
+
+    expect(result.current.currentTurnId).toBeNull();
+  });
+
+  it('preserves bindReady on idle disconnected and settles connecting plus keepalive on same-connection ready', async () => {
+    detailMock.mockResolvedValue(detail());
+    touchMock.mockResolvedValue({ ok: true, idleTimeoutSecs: 300 });
+
+    const { result } = renderHook(() =>
+      useConversationTimeline(CONVERSATION_ID)
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await waitFor(() => expect(agentEventListeners.length).toBeGreaterThan(0));
+
+    act(() => {
+      for (const listener of agentEventListeners) {
+        listener({
+          session_id: CONVERSATION_ID,
+          connection_id: 'conn-1',
+          sequence: 1,
+          event: {
+            kind: 'connection_status_changed',
+            snapshot: { status: 'connecting' },
+          },
+        });
+      }
+    });
+    expect(result.current.connecting).toBe(true);
+    expect(result.current.sessionBindReady).toBe(false);
+
+    // Same connection transitions connecting -> ready.
+    act(() => {
+      for (const listener of agentEventListeners) {
+        listener({
+          session_id: CONVERSATION_ID,
+          connection_id: 'conn-1',
+          sequence: 2,
+          event: {
+            kind: 'connection_status_changed',
+            snapshot: { status: 'ready' },
+          },
+        });
+      }
+    });
+    expect(result.current.connecting).toBe(false);
+    expect(result.current.sessionBindReady).toBe(true);
+    await waitFor(() => expect(touchMock).toHaveBeenCalled());
+
+    // Idle sweep disconnects cleanly without marking the conversation unready.
+    act(() => {
+      for (const listener of agentEventListeners) {
+        listener({
+          session_id: CONVERSATION_ID,
+          connection_id: 'conn-1',
+          sequence: 3,
+          event: {
+            kind: 'connection_status_changed',
+            snapshot: { status: 'disconnected' },
+          },
+        });
+      }
+    });
+    expect(result.current.connecting).toBe(false);
+    expect(result.current.sessionBindReady).toBe(true);
+  });
+
+  it('restarts keepalive when revisiting a conversation whose detail already has a ready bound connection', async () => {
+    touchMock.mockResolvedValue({ ok: true, idleTimeoutSecs: 300 });
+    detailMock.mockResolvedValue({
+      ...detail(),
+      timeline: {
+        ...detail().timeline,
+        last_sequence: 2n,
+        rows: [
+          {
+            row_id: 'status:agent-connection',
+            sort_key: '00000000000000000002:status:agent-connection',
+            revision: 2n,
+            row: {
+              kind: 'session_notice',
+              notice: {
+                title: 'Agent ready',
+                message: null,
+                severity: 'info',
+                connection_status: {
+                  status: 'ready',
+                  bound: true,
+                  connection_id: 'conn-live',
+                  message: null,
+                  since: '2026-11-25T00:00:00Z',
+                },
+                request_status: null,
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    const { result } = renderHook(() =>
+      useConversationTimeline(CONVERSATION_ID)
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await waitFor(() => expect(touchMock).toHaveBeenCalled());
+  });
+
+  it('rebindAndReload calls rebindSession, hydrates returned controls, and restarts keepalive', async () => {
+    detailMock.mockResolvedValue(detail());
+    touchMock.mockResolvedValue({ ok: true, idleTimeoutSecs: 300 });
+    rebindSessionMock.mockReset();
+    rebindSessionMock.mockResolvedValue({
+      modes: [{ id: 'code', label: 'Code', description: null }],
+      current_mode: 'code',
+      config_options: [],
+    });
+
+    const { result } = renderHook(() =>
+      useConversationTimeline(CONVERSATION_ID)
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      await result.current.rebindAndReload();
+    });
+
+    expect(rebindSessionMock).toHaveBeenCalledWith(CONVERSATION_ID);
+    expect(result.current.sessionModes.current).toBe('code');
+    expect(result.current.sessionBindReady).toBe(true);
+    expect(result.current.connecting).toBe(false);
+    expect(touchMock).toHaveBeenCalled();
+  });
+
+  it('recovers from a large sequence gap on subsequent batches after an initial detail reload failure', async () => {
+    const initialDetail = {
+      ...detail(),
+      timeline: {
+        ...detail().timeline,
+        last_sequence: 1n,
+        rows: [userRow('turn-1', 'hello', 1n)],
+      },
+    };
+    const recoveredDetail = {
+      ...detail(),
+      timeline: {
+        ...detail().timeline,
+        last_sequence: 302n,
+        rows: [
+          userRow('turn-1', 'hello', 1n),
+          assistantRow('turn-1', 'recovered after large gap', 302n),
+        ],
+      },
+    };
+
+    detailMock
+      .mockResolvedValueOnce(initialDetail)
+      .mockRejectedValueOnce(new Error('transient detail load failure'))
+      .mockResolvedValueOnce(recoveredDetail);
+
+    const { result } = renderHook(() =>
+      useConversationTimeline(CONVERSATION_ID)
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(detailMock).toHaveBeenCalledTimes(1);
+
+    // Emit a large-gap batch (gap > SMALL_SEQUENCE_GAP_MAX = 256n)
+    act(() => {
+      for (const listener of listeners) {
+        listener({
+          ...batch(
+            [
+              {
+                op: 'upsert',
+                row: assistantRow('turn-1', 'gap 1', 301n),
+              },
+            ],
+            301n
+          ),
+          previous_sequence: 300n,
+        });
+      }
+      flushFrames();
+    });
+
+    await waitFor(() => expect(detailMock).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(result.current.error).toContain('transient detail load failure')
+    );
+
+    // A subsequent batch while the gap is still open must NOT be permanently locked out
+    act(() => {
+      for (const listener of listeners) {
+        listener({
+          ...batch(
+            [
+              {
+                op: 'upsert',
+                row: assistantRow('turn-1', 'gap 2', 302n),
+              },
+            ],
+            302n
+          ),
+          previous_sequence: 301n,
+        });
+      }
+      flushFrames();
+    });
+
+    await waitFor(() => expect(detailMock).toHaveBeenCalledTimes(3));
+    await waitFor(() => {
+      expect(result.current.error).toBeNull();
+      expect(result.current.lastSequence).toBe(302n);
+      expect(
+        result.current.timeline.some(
+          (item) =>
+            item.turn.blocks[0]?.type === 'text' &&
+            item.turn.blocks[0].text === 'recovered after large gap'
+        )
+      ).toBe(true);
+    });
   });
 });

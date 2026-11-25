@@ -828,7 +828,8 @@ pub fn evaluate_pulse_rule_dry_run(spec: &Value, envelope: &Value) -> Value {
         .get("trace")
         .and_then(|t| t.get("hopCount").or_else(|| t.get("hop_count")))
         .and_then(Value::as_u64)
-        .unwrap_or(0) as u32;
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+        .unwrap_or(0);
 
     if is_self || hop_count > MAX_HOP_COUNT {
         return json!({
@@ -1238,5 +1239,28 @@ where
             }
             visited
         }
+    }
+}
+
+#[cfg(test)]
+mod hop_overflow_tests {
+    use super::*;
+
+    #[test]
+    fn dry_run_blocks_u64_hop_count_that_would_truncate_to_zero() {
+        let spec = json!({
+            "name": "Match All",
+            "evalMode": "auto",
+            "filter": { "eventTypes": ["ci.failed"] },
+            "targets": [{ "kind": "group", "spaceId": "s1", "dispatchMode": "broadcast_log_only", "messageTemplate": "hi" }]
+        });
+        let envelope = json!({
+            "eventType": "ci.failed",
+            "actor": { "id": "u1", "isSelf": false },
+            "trace": { "hopCount": (1u64 << 32) }
+        });
+        let result = evaluate_pulse_rule_dry_run(&spec, &envelope);
+        assert_eq!(result["loopBlocked"], json!(true));
+        assert_eq!(result["matched"], json!(false));
     }
 }

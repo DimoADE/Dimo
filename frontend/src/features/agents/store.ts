@@ -183,16 +183,25 @@ export function reduceAgentEvent(
   };
 
   switch (envelope.event.kind) {
-    case 'connection_status_changed':
+    case 'connection_status_changed': {
+      const snapshot = envelope.event.snapshot;
       next.connections = capRecord(
         {
           ...state.connections,
-          [envelope.event.snapshot.id]: envelope.event.snapshot,
+          [snapshot.id]: snapshot,
         },
         MAX_RETAINED_WORKBENCH_ENTITIES,
         (conn) => conn.status === 'connecting' || conn.status === 'ready'
       );
+      if (snapshot.status === 'disconnected' || snapshot.status === 'failed') {
+        next.sessions = clearConnectionPrompts(
+          state.sessions,
+          snapshot.id,
+          snapshot.status
+        );
+      }
       return next;
+    }
     case 'session_created':
       next.sessions = capRecord(
         {
@@ -340,7 +349,13 @@ export function reduceAgentEvent(
         },
         MAX_RETAINED_WORKBENCH_SCOPES
       );
-      next.sessions = clearSessionPrompt(state.sessions, envelope.session_id);
+      next.sessions = envelope.session_id
+        ? clearSessionPrompt(state.sessions, envelope.session_id)
+        : clearConnectionPrompts(
+            state.sessions,
+            envelope.connection_id,
+            'failed'
+          );
       return next;
     }
     default:
@@ -389,6 +404,31 @@ function clearSessionPrompt(
       status: session.status === 'running' ? 'ready' : session.status,
     },
   };
+}
+
+function clearConnectionPrompts(
+  sessions: AgentWorkbenchState['sessions'],
+  connectionId: string,
+  connectionStatus: 'disconnected' | 'failed'
+): AgentWorkbenchState['sessions'] {
+  let changed = false;
+  const next: AgentWorkbenchState['sessions'] = { ...sessions };
+  for (const [sessionId, session] of Object.entries(sessions)) {
+    if (session.connection_id !== connectionId) continue;
+    const hadPrompt =
+      session.active_prompt_id != null ||
+      (session.queued_prompt_ids?.length ?? 0) > 0 ||
+      session.status === 'running';
+    if (!hadPrompt) continue;
+    changed = true;
+    next[sessionId] = {
+      ...session,
+      active_prompt_id: null,
+      queued_prompt_ids: [],
+      status: connectionStatus === 'failed' ? 'failed' : 'ready',
+    };
+  }
+  return changed ? next : sessions;
 }
 
 function scopeId(envelope: AgentEventEnvelope): string {

@@ -116,6 +116,43 @@ describe('resolveWorkspaceTabNavigation', () => {
       href: '/local-projects/project-1/workspaces/workspace-root',
     });
   });
+
+  it('ignores poisoned lastRoute and rightSession whose workspace is not in knownWorkspaceIds', () => {
+    const knownWorkspaceIds = new Set(['workspace-project-2']);
+
+    expect(
+      resolveWorkspaceTabNavigation({
+        projectId: 'project-2',
+        lastRoute:
+          '/local-projects/project-2/workspaces/workspace-project-1/sessions/session-1',
+        rightSession: {
+          workspaceId: 'workspace-project-1',
+          sessionId: 'session-1',
+        },
+        fallbackWorkspaceId: 'workspace-project-2',
+        knownWorkspaceIds,
+      })
+    ).toEqual({
+      workspaceId: 'workspace-project-2',
+      taskId: null,
+      href: '/local-projects/project-2/workspaces/workspace-project-2',
+    });
+  });
+
+  it('returns null when knownWorkspaceIds is empty and only foreign workspaces are referenced', () => {
+    expect(
+      resolveWorkspaceTabNavigation({
+        projectId: 'project-2',
+        lastRoute:
+          '/local-projects/project-2/workspaces/workspace-project-1',
+        rightSession: {
+          workspaceId: 'workspace-project-1',
+          sessionId: 'session-1',
+        },
+        knownWorkspaceIds: new Set<string>(),
+      })
+    ).toBeNull();
+  });
 });
 
 describe('preserveCreateSessionQuery', () => {

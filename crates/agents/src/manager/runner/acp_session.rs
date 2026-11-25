@@ -93,7 +93,7 @@ impl AgentConnectionRunner {
         // Signal readiness so `connect` can mark it Ready. A failure before
         // this point leaves the sender for `run` to forward the real error.
         // Ready ≠ bind: Prompt is still refused until session/new|resume.
-        *self.status.lock().await = AgentConnectionStatus::Ready;
+        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = AgentConnectionStatus::Ready;
         if let Some(tx) = ready_tx.lock().await.take() {
             let _ = tx.send(Ok(()));
         }
@@ -478,7 +478,9 @@ impl AgentConnectionRunner {
                     let _ = result_tx.send(result);
                 }
                 AgentConnectionCommand::RollbackTurns { result_tx, .. } => {
-                    let _ = result_tx.send(Ok(()));
+                    let _ = result_tx.send(Err(AgentError::Runtime(
+                        "ACP session does not support native turn rollback".to_string(),
+                    )));
                 }
                 AgentConnectionCommand::Disconnect => break,
             }

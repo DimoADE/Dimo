@@ -1186,61 +1186,6 @@ impl ServerAuth for SqliteServerAuth {
             });
         }
 
-        let existing_pending = if let Some((_, ref canonical_pk)) = parsed_pubkey {
-            sqlx::query(
-                "SELECT id, sas_code
-                 FROM server_device_connect_requests
-                 WHERE public_key_ed25519 = ? AND status = 'pending' AND expires_at_unix > ?
-                 ORDER BY created_at_unix DESC
-                 LIMIT 1",
-            )
-            .bind(canonical_pk)
-            .bind(now)
-            .fetch_optional(&self.pool)
-            .await?
-        } else {
-            sqlx::query(
-                "SELECT id, sas_code
-                 FROM server_device_connect_requests
-                 WHERE public_key_ed25519 IS NULL AND device_name = ? AND status = 'pending' AND expires_at_unix > ?
-                 ORDER BY created_at_unix DESC
-                 LIMIT 1",
-            )
-            .bind(device_name)
-            .bind(now)
-            .fetch_optional(&self.pool)
-            .await?
-        };
-
-        if let Some(existing) = existing_pending {
-            let id_str: String = existing.try_get("id")?;
-            let sas_code: String = existing.try_get("sas_code")?;
-            if let Ok(request_id) = id_str.parse::<PairingId>() {
-                sqlx::query(
-                    "UPDATE server_device_connect_requests
-                     SET device_name = ?, ip_address = COALESCE(?, ip_address), expires_at_unix = ?,
-    account_display_name = ?
-       WHERE id = ?",
-                )
-                .bind(device_name)
-                .bind(ip_address)
-                .bind(expires_at)
-                .bind(account_display_name)
-                .bind(&id_str)
-                .execute(&self.pool)
-                .await?;
-                return Ok(PollDeviceConnectResponse {
-                    request_id,
-                    host_id: host_id.to_owned(),
-                    host_name,
-                    sas_code,
-                    status: DeviceConnectRequestStatus::Pending,
-                    expires_at: unix_timestamp(expires_at),
-                    credential: None,
-                });
-            }
-        }
-
         let request_id = PairingId::new();
         let request_id_str = request_id.to_string();
         let host_bytes: [u8; 32] = Sha256::digest(host_id.as_bytes()).into();
@@ -1293,50 +1238,76 @@ impl ServerAuth for SqliteServerAuth {
     ) -> Result<PollDeviceConnectResponse, AuthStoreError> {
         let now = self.now();
         let id_str = request_id.to_string();
-        let Some(row) = sqlx::query(
-            "SELECT sas_code, status, issued_credential_json, expires_at_unix
-             FROM server_device_connect_requests
-             WHERE id = ?
-             LIMIT 1",
-        )
-        .bind(&id_str)
-        .fetch_optional(&self.pool)
-        .await?
-        else {
-            return Err(AuthStoreError::InvalidPairing);
-        };
 
-        let sas_code: String = row.try_get("sas_code")?;
-        let raw_status: String = row.try_get("status")?;
-        let expires_at_unix: i64 = row.try_get("expires_at_unix")?;
-        let issued_json: Option<String> = row.try_get("issued_credential_json")?;
+        let mut connection = self.pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await?;
 
-        let status = match raw_status.as_str() {
-            "approved" => DeviceConnectRequestStatus::Approved,
-            "rejected" => DeviceConnectRequestStatus::Rejected,
-            _ if expires_at_unix <= now => DeviceConnectRequestStatus::Expired,
-            _ => DeviceConnectRequestStatus::Pending,
-        };
+        let tx_result: Result<
+            (String, DeviceConnectRequestStatus, i64, Option<DeviceCredential>),
+            AuthStoreError,
+        > = async {
+            let Some(row) = sqlx::query(
+                "SELECT sas_code, status, issued_credential_json, expires_at_unix
+                 FROM server_device_connect_requests
+                 WHERE id = ?
+                 LIMIT 1",
+            )
+            .bind(&id_str)
+            .fetch_optional(&mut *connection)
+            .await?
+            else {
+                return Err(AuthStoreError::InvalidPairing);
+            };
 
-        let credential = if status == DeviceConnectRequestStatus::Approved {
-            if let Some(json_str) = issued_json {
-                let parsed = serde_json::from_str::<DeviceCredential>(&json_str).ok();
-                if parsed.is_some() {
-                    sqlx::query(
+            let sas_code: String = row.try_get("sas_code")?;
+            let raw_status: String = row.try_get("status")?;
+            let expires_at_unix: i64 = row.try_get("expires_at_unix")?;
+            let issued_json: Option<String> = row.try_get("issued_credential_json")?;
+
+            let status = match raw_status.as_str() {
+                "approved" => DeviceConnectRequestStatus::Approved,
+                "rejected" => DeviceConnectRequestStatus::Rejected,
+                _ if expires_at_unix <= now => DeviceConnectRequestStatus::Expired,
+                _ => DeviceConnectRequestStatus::Pending,
+            };
+
+            let credential = if status == DeviceConnectRequestStatus::Approved {
+                if let Some(json_str) = issued_json {
+                    let updated = sqlx::query(
                         "UPDATE server_device_connect_requests
                          SET issued_credential_json = NULL
-                         WHERE id = ?",
+                         WHERE id = ? AND status = 'approved' AND issued_credential_json IS NOT NULL",
                     )
                     .bind(&id_str)
-                    .execute(&self.pool)
+                    .execute(&mut *connection)
                     .await?;
+                    if updated.rows_affected() == 1 {
+                        serde_json::from_str::<DeviceCredential>(&json_str).ok()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
                 }
-                parsed
             } else {
                 None
+            };
+
+            Ok((sas_code, status, expires_at_unix, credential))
+        }
+        .await;
+
+        let (sas_code, status, expires_at_unix, credential) = match tx_result {
+            Ok(values) => {
+                sqlx::query("COMMIT").execute(&mut *connection).await?;
+                values
             }
-        } else {
-            None
+            Err(error) => {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *connection).await;
+                return Err(error);
+            }
         };
 
         Ok(PollDeviceConnectResponse {
@@ -2526,5 +2497,182 @@ mod host_console_pairing_tests {
             .await
             .expect("revoke blob");
         assert!(!auth.is_active(&blob_cred).await.expect("blob revoked"));
+    }
+
+    #[tokio::test]
+    async fn create_connect_request_never_reuses_pending_request_by_device_name_or_pubkey() {
+        let auth = auth().await;
+        let owner = AuthenticatedCredential::host_console_owner();
+
+        let victim_name_req = auth
+            .create_connect_request(
+                "host-1",
+                remote_protocol::CreateDeviceConnectRequest {
+                    device_name: "Alice iPhone".to_owned(),
+                    client_kind: Some("mobile".to_owned()),
+                    ..Default::default()
+                },
+                Some("10.0.0.10"),
+                Some("Alice"),
+                false,
+            )
+            .await
+            .expect("victim name request");
+
+        let attacker_name_req = auth
+            .create_connect_request(
+                "host-1",
+                remote_protocol::CreateDeviceConnectRequest {
+                    device_name: "Alice iPhone".to_owned(),
+                    client_kind: Some("mobile".to_owned()),
+                    ..Default::default()
+                },
+                Some("10.0.0.99"),
+                None,
+                false,
+            )
+            .await
+            .expect("attacker name request");
+
+        assert_ne!(
+            victim_name_req.request_id, attacker_name_req.request_id,
+            "unauthenticated caller guessing device_name must never hijack existing request_id"
+        );
+        assert_ne!(victim_name_req.sas_code, attacker_name_req.sas_code);
+
+        let shared_pubkey = BASE64.encode([42u8; 32]);
+        let victim_pk_req = auth
+            .create_connect_request(
+                "host-1",
+                remote_protocol::CreateDeviceConnectRequest {
+                    device_name: "Studio Mac".to_owned(),
+                    public_key_ed25519: Some(shared_pubkey.clone()),
+                    ..Default::default()
+                },
+                Some("10.0.0.11"),
+                None,
+                false,
+            )
+            .await
+            .expect("victim pubkey request");
+
+        let attacker_pk_req = auth
+            .create_connect_request(
+                "host-1",
+                remote_protocol::CreateDeviceConnectRequest {
+                    device_name: "Spoofed Mac".to_owned(),
+                    public_key_ed25519: Some(shared_pubkey),
+                    ..Default::default()
+                },
+                Some("10.0.0.88"),
+                None,
+                false,
+            )
+            .await
+            .expect("attacker pubkey request");
+
+        assert_ne!(
+            victim_pk_req.request_id, attacker_pk_req.request_id,
+            "unauthenticated caller replaying public_key_ed25519 must never hijack existing request_id"
+        );
+
+        let pending = auth.list_connect_requests(&owner).await.expect("list");
+        let victim_entry = pending
+            .iter()
+            .find(|item| item.request_id == victim_name_req.request_id)
+            .expect("victim request preserved");
+        assert_eq!(victim_entry.ip_address.as_deref(), Some("10.0.0.10"));
+        assert_eq!(victim_entry.account_display_name.as_deref(), Some("Alice"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn poll_connect_request_delivers_approved_credential_exactly_once_under_concurrency() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use remote_protocol::DeviceConnectRequestStatus;
+        use sqlx::sqlite::SqliteJournalMode;
+        use tokio::sync::Barrier;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let db_path = dir.path().join("auth-poll-concurrency.sqlite");
+        let options = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true)
+            .foreign_keys(false)
+            .journal_mode(SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(5));
+        let migrate_pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options.clone())
+            .await
+            .expect("migrate pool");
+        sqlx::migrate!("../db/migrations")
+            .run(&migrate_pool)
+            .await
+            .expect("migrations");
+        migrate_pool.close().await;
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(8)
+            .connect_with(options)
+            .await
+            .expect("multi-conn pool");
+        let auth = Arc::new(SqliteServerAuth::new(pool));
+        let owner = AuthenticatedCredential::host_console_owner();
+
+        let pending = auth
+            .create_connect_request(
+                "host-1",
+                remote_protocol::CreateDeviceConnectRequest {
+                    device_name: "Race Phone".to_owned(),
+                    client_kind: Some("mobile".to_owned()),
+                    ..Default::default()
+                },
+                None,
+                None,
+                false,
+            )
+            .await
+            .expect("create connect request");
+        auth.respond_connect_request(&owner, pending.request_id, true)
+            .await
+            .expect("approve connect request");
+
+        let workers = 12;
+        let barrier = Arc::new(Barrier::new(workers));
+        let mut handles = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            let auth = Arc::clone(&auth);
+            let barrier = Arc::clone(&barrier);
+            let request_id = pending.request_id;
+            handles.push(tokio::spawn(async move {
+                barrier.wait().await;
+                auth.poll_connect_request("host-1", request_id).await
+            }));
+        }
+
+        let mut credentials_received = Vec::new();
+        for handle in handles {
+            let response = handle
+                .await
+                .expect("task join")
+                .expect("poll should succeed");
+            assert_eq!(response.status, DeviceConnectRequestStatus::Approved);
+            if let Some(cred) = response.credential {
+                credentials_received.push(cred);
+            }
+        }
+        assert_eq!(
+            credentials_received.len(),
+            1,
+            "approved credential must be delivered atomically to at most one poller"
+        );
+        assert!(
+            auth.authenticate(&credentials_received[0].access_token)
+                .await
+                .expect("authenticate")
+                .is_some()
+        );
     }
 }

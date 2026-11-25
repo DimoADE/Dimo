@@ -7,7 +7,8 @@ use crate::{
     WorkflowError, WorkflowEvent, WorkflowPolicy, WorkflowRunView, WorkflowStore,
     store::{find_latest_step, find_run, is_terminal_run, version_on_connection},
     store_reconcile::{
-        append_event, enqueue_newly_ready, restore_running_if_not_waiting, settle_if_complete,
+        append_event, enqueue_newly_ready, restore_running_if_not_waiting, resume_run_from_review,
+        settle_if_complete,
     },
 };
 
@@ -519,13 +520,7 @@ impl WorkflowStore {
             .bind(ready.sequence)
             .execute(&mut *conn)
             .await?;
-            sqlx::query(
-                "UPDATE workflow_runs SET status = 'running',
-                        updated_at = datetime('now', 'subsec') WHERE id = ?",
-            )
-            .bind(run_id)
-            .execute(&mut *conn)
-            .await?;
+            resume_run_from_review(&mut conn, run_id, ready.sequence).await?;
             find_run(&mut conn, run_id).await
         }
         .await;
@@ -622,7 +617,7 @@ impl WorkflowStore {
             .bind(step.attempt)
             .execute(&mut *conn)
             .await?;
-            append_event(
+            let completed = append_event(
                 &mut conn,
                 run_id,
                 None,
@@ -632,6 +627,7 @@ impl WorkflowStore {
                 },
             )
             .await?;
+            resume_run_from_review(&mut conn, run_id, completed.sequence).await?;
             let version = version_on_connection(&mut conn, run.definition_version_id).await?;
             enqueue_newly_ready(&mut conn, run_id, &version.definition()?).await?;
             settle_if_complete(&mut conn, run_id).await?;
@@ -700,7 +696,7 @@ impl WorkflowStore {
             .bind(step.attempt)
             .execute(&mut *conn)
             .await?;
-            append_event(
+            let skipped = append_event(
                 &mut conn,
                 run_id,
                 None,
@@ -710,6 +706,7 @@ impl WorkflowStore {
                 },
             )
             .await?;
+            resume_run_from_review(&mut conn, run_id, skipped.sequence).await?;
             let version = version_on_connection(&mut conn, run.definition_version_id).await?;
             enqueue_newly_ready(&mut conn, run_id, &version.definition()?).await?;
             settle_if_complete(&mut conn, run_id).await?;

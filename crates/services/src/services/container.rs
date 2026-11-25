@@ -345,7 +345,10 @@ pub trait ContainerService: Send + Sync {
                 &repo.name,
                 workspace_root_is_git_checkout,
             );
-            if let Ok(head) = self.git().get_head_info(&repo_path)
+            let git = self.git().clone();
+            let repo_path_for_git = repo_path.clone();
+            if let Ok(Ok(head)) =
+                tokio::task::spawn_blocking(move || git.get_head_info(&repo_path_for_git)).await
                 && let Err(err) = ExecutionProcessRepoState::update_after_head_commit(
                     &self.db().pool,
                     ctx.execution_process.id,
@@ -587,15 +590,17 @@ pub trait ContainerService: Send + Sync {
                 .repo_path(repo)
                 .unwrap_or_else(|| workspace_dir.clone());
             if let Some(oid) = target_oid {
-                self.git().reconcile_worktree_to_commit(
-                    &worktree_path,
-                    &oid,
-                    container_workflow::reset_options(
-                        perform_git_reset,
-                        force_when_dirty,
-                        is_dirty,
-                    ),
+                let git = self.git().clone();
+                let options = container_workflow::reset_options(
+                    perform_git_reset,
+                    force_when_dirty,
+                    is_dirty,
                 );
+                tokio::task::spawn_blocking(move || {
+                    git.reconcile_worktree_to_commit(&worktree_path, &oid, options);
+                })
+                .await
+                .map_err(|e| ContainerError::Other(anyhow!(e)))?;
             }
         }
 
@@ -641,7 +646,11 @@ pub trait ContainerService: Send + Sync {
             let worktree_path = workspace
                 .repo_path(repo)
                 .unwrap_or_else(|| workspace_dir.clone());
-            if let Ok(head) = self.git().get_head_info(&worktree_path) {
+            let git = self.git().clone();
+            let worktree_for_head = worktree_path.clone();
+            if let Ok(Ok(head)) =
+                tokio::task::spawn_blocking(move || git.get_head_info(&worktree_for_head)).await
+            {
                 let captured = checkpoint_ref
                     .capture(&worktree_path, session_id, ordinal as i32)
                     .await
@@ -728,15 +737,23 @@ pub trait ContainerService: Send + Sync {
                 }
             }
             if !restored_via_hidden_ref {
-                self.git().reconcile_worktree_to_commit(
-                    &worktree_path,
-                    &checkpoint.before_head_commit,
-                    container_workflow::reset_options(
-                        perform_git_reset,
-                        force_when_dirty,
-                        is_dirty,
-                    ),
+                let git = self.git().clone();
+                let worktree_for_reset = worktree_path.clone();
+                let before_head_commit = checkpoint.before_head_commit.clone();
+                let options = container_workflow::reset_options(
+                    perform_git_reset,
+                    force_when_dirty,
+                    is_dirty,
                 );
+                tokio::task::spawn_blocking(move || {
+                    git.reconcile_worktree_to_commit(
+                        &worktree_for_reset,
+                        &before_head_commit,
+                        options,
+                    );
+                })
+                .await
+                .map_err(|e| ContainerError::Other(anyhow!(e)))?;
             }
             let _ = checkpoint_ref
                 .delete_refs_from_ordinal(&worktree_path, session_id, (ordinal + 1) as i32)
@@ -814,17 +831,30 @@ pub trait ContainerService: Send + Sync {
             let repo_path = workspace
                 .repo_path(repo)
                 .unwrap_or_else(|| workspace_root.clone());
-            let before_head_commit = match self.git().get_head_info(&repo_path) {
-                Ok(head) => Some(head.oid),
-                Err(e) => {
-                    tracing::warn!(
-                        repo_path = ?repo_path,
-                        error = %e,
-                        "failed to read HEAD before execution; diff base missing for this repo"
-                    );
-                    None
-                }
-            };
+            let git = self.git().clone();
+            let repo_path_for_git = repo_path.clone();
+            let before_head_commit =
+                match tokio::task::spawn_blocking(move || git.get_head_info(&repo_path_for_git))
+                    .await
+                {
+                    Ok(Ok(head)) => Some(head.oid),
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            repo_path = ?repo_path,
+                            error = %e,
+                            "failed to read HEAD before execution; diff base missing for this repo"
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            repo_path = ?repo_path,
+                            error = %e,
+                            "HEAD read task failed before execution; diff base missing for this repo"
+                        );
+                        None
+                    }
+                };
             repo_states.push(CreateExecutionProcessRepoState {
                 repo_id: repo.id,
                 before_head_commit,

@@ -1192,3 +1192,124 @@ async fn rejected_permission_correlates_to_denied_tool_status_in_both_orderings_
     );
     assert_eq!(errors.get("tool-timed-out").copied(), Some(true));
 }
+
+#[tokio::test]
+async fn terminal_turn_cancelled_and_failed_settle_pending_permission_rows() {
+    let pool = setup_pool().await;
+    let (conversation_id, turn_cancelled) = seed_turn(&pool).await;
+
+    append_event(
+        &pool,
+        conversation_id,
+        Some(turn_cancelled),
+        "acp",
+        ConversationEvent::PermissionRequested {
+            request: ConversationPermissionRequest {
+                permission_id: "perm-cancel".into(),
+                request: AgentPermissionRequest {
+                    id: AgentPermissionId::new(),
+                    session_id: AgentSessionId::new(),
+                    title: "Allow write?".into(),
+                    details: None,
+                    options: vec![AgentPermissionOption {
+                        id: "allow".into(),
+                        label: "Allow".into(),
+                        kind: AgentPermissionOptionKind::AllowOnce,
+                        description: None,
+                    }],
+                    revision: 1,
+                },
+            },
+        },
+        None,
+    )
+    .await;
+    append_event(
+        &pool,
+        conversation_id,
+        Some(turn_cancelled),
+        "runtime",
+        ConversationEvent::TurnCancelled {
+            reason: Some("user cancelled".into()),
+        },
+        None,
+    )
+    .await;
+
+    let turn_failed = Uuid::new_v4();
+    ConversationTurnRecord::create_pending(
+        &pool,
+        turn_failed,
+        CreateConversationTurn {
+            conversation_id,
+            prompt_id: None,
+            text_preview: Some("second"),
+            input_blocks_json: "[]",
+        },
+    )
+    .await
+    .expect("create second turn");
+    append_event(
+        &pool,
+        conversation_id,
+        Some(turn_failed),
+        "acp",
+        ConversationEvent::PermissionRequested {
+            request: ConversationPermissionRequest {
+                permission_id: "perm-fail".into(),
+                request: AgentPermissionRequest {
+                    id: AgentPermissionId::new(),
+                    session_id: AgentSessionId::new(),
+                    title: "Allow bash?".into(),
+                    details: None,
+                    options: vec![AgentPermissionOption {
+                        id: "allow".into(),
+                        label: "Allow".into(),
+                        kind: AgentPermissionOptionKind::AllowOnce,
+                        description: None,
+                    }],
+                    revision: 1,
+                },
+            },
+        },
+        None,
+    )
+    .await;
+    append_event(
+        &pool,
+        conversation_id,
+        Some(turn_failed),
+        "runtime",
+        ConversationEvent::TurnFailed {
+            error: agents::conversation::ConversationError::new(
+                "connection closed",
+                Some("connection_closed".into()),
+                None,
+            ),
+        },
+        None,
+    )
+    .await;
+
+    let timeline = ConversationProjector::project(&pool, conversation_id)
+        .await
+        .expect("project timeline");
+    let permission_statuses: std::collections::HashMap<String, String> = timeline
+        .rows
+        .iter()
+        .filter_map(|row| match &row.row {
+            ConversationTimelineRow::PermissionRequest { request } => {
+                Some((request.permission_id.clone(), request.status.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        permission_statuses.get("perm-cancel").map(String::as_str),
+        Some("responded")
+    );
+    assert_eq!(
+        permission_statuses.get("perm-fail").map(String::as_str),
+        Some("responded")
+    );
+}

@@ -9,6 +9,22 @@ export const GPU_MODE_CHANGED_EVENT = 'gpu-mode-changed';
 export const DEVELOPER_MODE_CHANGED_EVENT = 'developer-mode-changed';
 export const SYSTEM_POWER_RESUMED_EVENT = 'system-power-resumed';
 
+export const MAIN_PROCESS_ONLY_EVENTS = new Set<string>([
+  SIDECAR_READY_EVENT,
+  SIDECAR_EXITED_EVENT,
+  SIDECAR_RESTARTED_EVENT,
+  GPU_MODE_CHANGED_EVENT,
+  DEVELOPER_MODE_CHANGED_EVENT,
+  SYSTEM_POWER_RESUMED_EVENT,
+]);
+
+export function isMainProcessOnlyEvent(eventName: string): boolean {
+  return (
+    MAIN_PROCESS_ONLY_EVENTS.has(eventName) ||
+    eventName.startsWith('sidecar-')
+  );
+}
+
 export type SidecarRuntimeStatus = 'starting' | 'running' | 'restarting' | 'stopped';
 export type DesktopGpuMode = 'hardware' | 'software';
 

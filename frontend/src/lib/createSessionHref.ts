@@ -51,6 +51,7 @@ export function resolveWorkspaceTabNavigation({
   projectId,
   lastRoute,
   rightSession,
+  knownWorkspaceIds,
   fallbackWorkspaceId,
   fallbackTaskId,
 }: {
@@ -60,6 +61,7 @@ export function resolveWorkspaceTabNavigation({
     workspaceId: string;
     sessionId: string;
   } | null;
+  knownWorkspaceIds?: ReadonlySet<string> | null;
   fallbackWorkspaceId?: string | null;
   fallbackTaskId?: string | null;
 }): {
@@ -67,8 +69,15 @@ export function resolveWorkspaceTabNavigation({
   taskId: string | null;
   href: string;
 } | null {
+  const isKnownWorkspace = (workspaceId: string) =>
+    !knownWorkspaceIds || knownWorkspaceIds.has(workspaceId);
+
   const lastSession = lastRoute ? parseProjectSessionRoute(lastRoute) : null;
-  if (lastSession && lastSession.projectId === projectId) {
+  if (
+    lastSession &&
+    lastSession.projectId === projectId &&
+    isKnownWorkspace(lastSession.workspaceId)
+  ) {
     return {
       workspaceId: lastSession.workspaceId,
       taskId: null,
@@ -80,7 +89,7 @@ export function resolveWorkspaceTabNavigation({
     };
   }
 
-  if (rightSession) {
+  if (rightSession && isKnownWorkspace(rightSession.workspaceId)) {
     return {
       workspaceId: rightSession.workspaceId,
       taskId: null,
@@ -95,7 +104,11 @@ export function resolveWorkspaceTabNavigation({
   const lastWorkspace = lastRoute
     ? parseProjectWorkspaceRoute(lastRoute)
     : null;
-  if (lastWorkspace && lastWorkspace.projectId === projectId) {
+  if (
+    lastWorkspace &&
+    lastWorkspace.projectId === projectId &&
+    isKnownWorkspace(lastWorkspace.workspaceId)
+  ) {
     return {
       workspaceId: lastWorkspace.workspaceId,
       taskId: null,

@@ -779,6 +779,22 @@
   mask-image: none;
 }
 
+.collaboration-thread[data-floating-composer='true'] .collaboration-thread-log {
+  padding-bottom: calc(0.75rem + var(--conv-floating-composer-height, 0px));
+  scroll-padding-bottom: calc(
+    0.75rem + var(--conv-floating-composer-height, 0px)
+  );
+}
+
+.collaboration-thread[data-floating-composer='true'] .conv-message-nav-anchor {
+  bottom: var(--conv-floating-composer-height, 0px);
+}
+
+.collaboration-thread[data-floating-composer='true']
+  .collaboration-thread-permission-dock {
+  bottom: var(--conv-floating-composer-height, 0px);
+}
+
 .collaboration-thread-content {
   display: flex;
   flex: 0 0 auto;

@@ -292,6 +292,7 @@ impl TurnRouteFilter {
                 | EngineEvent::SubagentCompleted { session_id, .. }
                 | EngineEvent::HookEvent { session_id, .. }
                 | EngineEvent::PromptSteered { session_id, .. }
+                | EngineEvent::RequestRetrying { session_id, .. }
                 | EngineEvent::AutoCompactionChanged { session_id, .. }
                 | EngineEvent::TurnCompleted { session_id, .. }
                 | EngineEvent::TurnInterrupted { session_id, .. }
@@ -320,6 +321,7 @@ impl TurnRouteFilter {
                 | EngineEvent::SubagentCompleted { prompt_id: pid, .. }
                 | EngineEvent::HookEvent { prompt_id: pid, .. }
                 | EngineEvent::PromptSteered { prompt_id: pid, .. }
+                | EngineEvent::RequestRetrying { prompt_id: pid, .. }
                 | EngineEvent::TurnCompleted { prompt_id: pid, .. }
                 | EngineEvent::TurnInterrupted { prompt_id: pid, .. }
                 | EngineEvent::TurnError { prompt_id: pid, .. } => {

@@ -298,12 +298,6 @@ impl BuiltInProfile {
             .unwrap_or(&[])
     }
 
-    /// Whether the profile's ACP adapter ships a usable vendor CLI. Native
-    /// engine profiles run the official vendor CLI directly and return `false`.
-    pub fn adapter_bundles_runtime(&self) -> bool {
-        adapter_bundles_runtime(&self.agent_id)
-    }
-
     /// Whether Host may put `mcpServers` on `session/new`, `session/load`, and
     /// `session/resume`. OpenClaw rejects a non-empty list. Cline, Pi, and
     /// DeepSeek Harness accept the field but load their companion MCP servers
@@ -361,15 +355,6 @@ pub fn profile_delivers_session_mcp(agent_id: &AgentId) -> bool {
         .profile(agent_id)
         .map(BuiltInProfile::delivers_session_mcp)
         .unwrap_or(true)
-}
-
-/// Env keys that must not reach an ACP adapter which bundles its own vendor CLI.
-pub fn bundled_adapter_runtime_env_keys(_agent_id: &AgentId) -> &'static [&'static str] {
-    &[]
-}
-
-pub fn adapter_bundles_runtime(agent_id: &AgentId) -> bool {
-    !bundled_adapter_runtime_env_keys(agent_id).is_empty()
 }
 
 ///ACP Registry entry IDs that wrap built-in native-engine Agents and must never

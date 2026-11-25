@@ -16,6 +16,10 @@ import {
   setPreviewPanelDirty,
 } from '@/components/panels/previewPanelDirty';
 import {
+  enqueueDesktopOpenFiles,
+  resetDesktopOpenFilesForTest,
+} from '@/lib/desktopOpenFiles';
+import {
   PanelActionsContext,
   PanelActionsProvider,
   useOptionalPanelActionsContext,
@@ -1557,5 +1561,42 @@ describe('PanelActionsContext editor placement', () => {
 
     api.dispose();
     container.remove();
+  });
+
+  it('drains queued OS Open With files when Dockview attaches and switches from kanban to workspace', () => {
+    resetDesktopOpenFilesForTest();
+    useLayoutStore.getState().setActiveTab('kanban');
+    enqueueDesktopOpenFiles(['D:\\external\\config.yaml']);
+
+    let actions: PanelActions | undefined;
+    function Probe() {
+      actions = usePanelActionsContext();
+      return null;
+    }
+
+    renderWithQueryClient(
+      <PanelActionsProvider>
+        <Probe />
+      </PanelActionsProvider>
+    );
+
+    const dockviewApi = createDockviewApi();
+    act(() => actions?.setDockviewApi(dockviewApi));
+
+    expect(useLayoutStore.getState().activeTab).toBe('workspace');
+    expect(dockviewApi.panels).toHaveLength(1);
+    expect(dockviewApi.panels[0].params?.filePath).toBe(
+      'D:\\external\\config.yaml'
+    );
+
+    act(() => {
+      enqueueDesktopOpenFiles(['D:\\external\\Cargo.toml']);
+    });
+
+    expect(dockviewApi.panels).toHaveLength(2);
+    expect(dockviewApi.panels[1].params?.filePath).toBe(
+      'D:\\external\\Cargo.toml'
+    );
+    resetDesktopOpenFilesForTest();
   });
 });

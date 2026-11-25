@@ -1942,13 +1942,26 @@ async fn screenshot(service: &BrowserService, input: &Value) -> Result<Value, Br
         .map_err(|error| BrowserHostError::new("browser_invalid", error.to_string()))
 }
 
+fn spawn_eval_ask_timeout(
+    evals: crate::confirm::EvalConsent,
+    request_id: String,
+    rx: tokio::sync::oneshot::Receiver<bool>,
+    timeout: std::time::Duration,
+) {
+    tokio::spawn(async move {
+        if !matches!(tokio::time::timeout(timeout, rx).await, Ok(Ok(_))) {
+            evals.abandon(&request_id);
+        }
+    });
+}
+
 async fn eval_ask(
     service: &BrowserService,
     tab: &BrowserTab,
     code: &str,
 ) -> Result<Value, BrowserHostError> {
     let request_id = Uuid::new_v4().to_string();
-    let _rx = service
+    let rx = service
         .evals
         .arm(&tab.tab_id, request_id.clone())
         .map_err(|refused| {
@@ -1960,6 +1973,12 @@ async fn eval_ask(
                 "another snippet is waiting for approval",
             )
         })?;
+    spawn_eval_ask_timeout(
+        service.evals.clone(),
+        request_id.clone(),
+        rx,
+        crate::confirm::EVAL_CONFIRM_TIMEOUT,
+    );
     let expires_at = now_ms() + crate::confirm::EVAL_CONFIRM_TIMEOUT.as_millis() as i64;
     let plugin_id = service
         .occupant
@@ -2007,6 +2026,8 @@ async fn eval_run(
                     "another snippet is waiting for approval",
                 )
             })?;
+        let mut consent_guard =
+            crate::confirm::EvalConsentGuard::new(service.evals.clone(), request_id.clone());
         let expires_at = now_ms() + crate::confirm::EVAL_CONFIRM_TIMEOUT.as_millis() as i64;
         let plugin_id = service
             .occupant
@@ -2024,9 +2045,12 @@ async fn eval_run(
             "expiresAt": expires_at,
         }));
         let allow = match tokio::time::timeout(crate::confirm::EVAL_CONFIRM_TIMEOUT, rx).await {
-            Ok(Ok(value)) => value,
+            Ok(Ok(value)) => {
+                consent_guard.disarm();
+                value
+            }
             Ok(Err(_)) | Err(_) => {
-                service.evals.abandon(&request_id);
+                drop(consent_guard);
                 false
             }
         };
@@ -3358,6 +3382,99 @@ mod tests {
                 .iter()
                 .all(|event| event.get("kind").and_then(Value::as_str) != Some("tab.open")),
             "UI-initiated tab.create with openInUi=false must not emit tab.open: {emitted:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_ask_timeout_task_abandons_unanswered_slot() {
+        let evals = crate::confirm::EvalConsent::new();
+        let rx = evals.arm("tab-1", "req-timeout".into()).expect("arm tab-1");
+        spawn_eval_ask_timeout(
+            evals.clone(),
+            "req-timeout".into(),
+            rx,
+            std::time::Duration::from_millis(25),
+        );
+
+        assert_eq!(
+            evals.arm("tab-2", "req-busy".into()).err(),
+            Some(AskRefused::Busy)
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        assert_eq!(
+            evals.arm("tab-1", "req-cool".into()).err(),
+            Some(AskRefused::CoolingDown),
+            "timed-out tab must enter decline cooldown"
+        );
+        assert!(
+            evals.arm("tab-2", "req-after-timeout".into()).is_ok(),
+            "global EvalConsent slot must be freed after eval_ask TTL expires"
+        );
+    }
+
+    #[tokio::test]
+    async fn eval_run_cancellation_releases_pending_consent_slot() {
+        let native = Arc::new(RecordingNative {
+            bounds: Mutex::new(Vec::new()),
+            events: Mutex::new(Vec::new()),
+        });
+        let service = Arc::new(BrowserService::new(native.clone(), true));
+
+        let tab1_json = dispatch(
+            &service,
+            "dimo.browser",
+            "tab.create",
+            json!({ "url": "https://example.test/one", "openInUi": false }),
+        )
+        .await
+        .expect("create tab1");
+        let tab2_json = dispatch(
+            &service,
+            "dimo.browser",
+            "tab.create",
+            json!({ "url": "https://example.test/two", "openInUi": false }),
+        )
+        .await
+        .expect("create tab2");
+
+        let tab1_id = tab1_json["tabId"].as_str().unwrap().to_owned();
+        let tab2_id = tab2_json["tabId"].as_str().unwrap().to_owned();
+        let tab1 = service.tab(&tab1_id).expect("tab1 exists");
+
+        // Start eval_run awaiting user consent, then cancel/drop the task mid-flight.
+        let svc_clone = Arc::clone(&service);
+        let tab1_clone = tab1.clone();
+        let handle = tokio::spawn(async move {
+            let _ = eval_run(&svc_clone, &tab1_clone, "document.title", false).await;
+        });
+
+        // Wait until eval_run arms the pending slot and emits eval.request.
+        for _ in 0..50 {
+            let requested = native
+                .events
+                .lock()
+                .expect("events")
+                .iter()
+                .any(|event| event.get("kind").and_then(Value::as_str) == Some("eval.request"));
+            if requested {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            service.evals.arm(&tab2_id, "probe".into()).err(),
+            Some(AskRefused::Busy),
+            "slot must be held while eval_run is awaiting consent"
+        );
+
+        handle.abort();
+        let _ = handle.await;
+
+        assert!(
+            service.evals.arm(&tab2_id, "after-cancel".into()).is_ok(),
+            "dropping/cancelling eval_run must release the global EvalConsent slot via RAII Drop"
         );
     }
 }

@@ -25,6 +25,8 @@ pub(in crate::manager) struct NativeTurnState {
     pub(in crate::manager) last_streamed_message_id: Option<String>,
     pub(in crate::manager) streamed_assistant_buffer: String,
     pub(in crate::manager) accumulated_usage: Option<AgentUsage>,
+    pub(in crate::manager) in_retry: bool,
+    pub(in crate::manager) silence_waiting_emitted: bool,
 }
 
 fn is_insufficient_balance_or_quota(lower: &str) -> bool {
@@ -423,6 +425,30 @@ impl AgentConnectionRunner {
         char_accumulator: &mut usize,
         turn_state: &mut NativeTurnState,
     ) -> bool {
+        if matches!(
+            &event,
+            EngineEvent::AssistantTextDelta { text, .. } if !text.is_empty()
+        ) || matches!(
+            &event,
+            EngineEvent::AssistantMessage { text, .. } if !text.is_empty()
+        ) || matches!(
+            &event,
+            EngineEvent::ThinkingDelta { thinking, .. } if !thinking.is_empty()
+        ) || matches!(
+            &event,
+            EngineEvent::ToolCall { .. }
+                | EngineEvent::ToolResult { .. }
+                | EngineEvent::TerminalOutputDelta { .. }
+                | EngineEvent::PlanUpdated { .. }
+                | EngineEvent::SubagentSpawned { .. }
+                | EngineEvent::SubagentUpdated { .. }
+                | EngineEvent::SubagentCompleted { .. }
+                | EngineEvent::PermissionRequested { .. }
+                | EngineEvent::QuestionRequested { .. }
+        ) {
+            turn_state.in_retry = false;
+            turn_state.silence_waiting_emitted = false;
+        }
         match event {
             EngineEvent::SessionInitialized {
                 session_id: maybe_ext_id,
@@ -1052,6 +1078,53 @@ impl AgentConnectionRunner {
                             input_preview: None,
                             meta,
                             images: Vec::new(),
+                        },
+                    },
+                );
+                false
+            }
+            EngineEvent::RequestRetrying {
+                attempt,
+                max_attempts,
+                delay_ms,
+                reason,
+                code,
+                ..
+            } => {
+                turn_state.in_retry = true;
+                turn_state.silence_waiting_emitted = false;
+                let sanitized_reason = reason
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|text| {
+                        crate::conversation::cap_preview_bytes(
+                            crate::stderr_tail::sanitize_diagnostic(text),
+                        )
+                    });
+                let sanitized_code = code
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|text| {
+                        crate::conversation::cap_preview_bytes(
+                            crate::stderr_tail::sanitize_diagnostic(text),
+                        )
+                    });
+                self.emit(
+                    Some(session_id),
+                    Some(prompt_id),
+                    AgentEvent::RequestActivity {
+                        prompt_id,
+                        activity: crate::request_status::RequestActivity {
+                            phase: crate::request_status::RequestPhase::Retrying,
+                            retry: Some(crate::request_status::RequestRetry {
+                                attempt,
+                                max_attempts,
+                                delay_ms,
+                                reason: sanitized_reason,
+                                code: sanitized_code,
+                            }),
                         },
                     },
                 );

@@ -25,7 +25,7 @@
 
 use std::{
     collections::HashMap,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -53,6 +53,7 @@ pub enum AskRefused {
 struct Pending {
     request_id: String,
     tab_id: String,
+    expires_at: Instant,
     answer: tokio::sync::oneshot::Sender<bool>,
 }
 
@@ -63,14 +64,58 @@ struct Inner {
     cooling: HashMap<String, Instant>,
 }
 
+fn evict_expired(inner: &mut Inner, now: Instant) {
+    if inner
+        .pending
+        .as_ref()
+        .is_some_and(|pending| pending.expires_at <= now)
+        && let Some(expired) = inner.pending.take()
+    {
+        inner
+            .cooling
+            .insert(expired.tab_id, expired.expires_at + EVAL_DECLINE_COOLDOWN);
+    }
+    inner.cooling.retain(|_, until| *until > now);
+}
+
 /// The one pending question, and which tabs are in their quiet period.
 ///
 /// Managed state, like the tab registry: a process holds one, and the tool
 /// path and the command that carries the answer back both reach it from the
 /// `AppHandle`.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct EvalConsent {
-    inner: Mutex<Inner>,
+    inner: Arc<Mutex<Inner>>,
+}
+
+/// RAII guard that releases a pending `EvalConsent` slot via [`EvalConsent::abandon`]
+/// if the awaiting RPC future is cancelled or returns early before resolution.
+pub struct EvalConsentGuard {
+    consent: EvalConsent,
+    request_id: String,
+    armed: bool,
+}
+
+impl EvalConsentGuard {
+    pub fn new(consent: EvalConsent, request_id: String) -> Self {
+        Self {
+            consent,
+            request_id,
+            armed: true,
+        }
+    }
+
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for EvalConsentGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.consent.abandon(&self.request_id);
+        }
+    }
 }
 
 impl EvalConsent {
@@ -105,9 +150,9 @@ impl EvalConsent {
         now: Instant,
     ) -> Result<tokio::sync::oneshot::Receiver<bool>, AskRefused> {
         let mut inner = self.lock();
-        // Expired entries go as they are passed, rather than needing a sweep:
-        // the map only ever holds tabs someone asked about.
-        inner.cooling.retain(|_, until| *until > now);
+        // Expired pending slots and cooldowns clear as they are passed,
+        // preventing a stale pending request from wedging the global slot.
+        evict_expired(&mut inner, now);
         if inner.cooling.contains_key(tab_id) {
             return Err(AskRefused::CoolingDown);
         }
@@ -118,6 +163,7 @@ impl EvalConsent {
         inner.pending = Some(Pending {
             request_id,
             tab_id: tab_id.to_string(),
+            expires_at: now + EVAL_CONFIRM_TIMEOUT,
             answer: tx,
         });
         Ok(rx)
@@ -132,6 +178,7 @@ impl EvalConsent {
 
     pub fn decide_at(&self, request_id: &str, allow: bool, now: Instant) -> bool {
         let mut inner = self.lock();
+        evict_expired(&mut inner, now);
         let matches = inner
             .pending
             .as_ref()
@@ -274,5 +321,43 @@ mod tests {
         consent.abandon_at("r1", start);
         assert!(consent.decide_at("r2", true, start));
         assert_eq!(rx.await, Ok(true));
+    }
+
+    #[tokio::test]
+    async fn expired_pending_slot_auto_evicts_and_cannot_deadlock() {
+        let consent = EvalConsent::new();
+        let start = Instant::now();
+        let _rx = consent.arm_at("t1", "r1".into(), start).unwrap();
+        let after_ttl = start + EVAL_CONFIRM_TIMEOUT + Duration::from_millis(1);
+
+        // Answering after TTL is rejected because the slot already expired.
+        assert!(!consent.decide_at("r1", true, after_ttl));
+
+        // Original tab enters decline cooldown, while another tab can claim the freed slot.
+        assert_eq!(
+            consent.arm_at("t1", "r2".into(), after_ttl).err(),
+            Some(AskRefused::CoolingDown)
+        );
+        assert!(consent.arm_at("t2", "r3".into(), after_ttl).is_ok());
+    }
+
+    #[tokio::test]
+    async fn eval_consent_guard_releases_slot_on_drop_and_respects_disarm() {
+        let consent = EvalConsent::new();
+        {
+            let _rx = consent.arm("t1", "r1".into()).unwrap();
+            let _guard = EvalConsentGuard::new(consent.clone(), "r1".into());
+            assert_eq!(consent.arm("t2", "r2".into()).err(), Some(AskRefused::Busy));
+        }
+        // Dropping guard abandoned r1, so t2 can now claim the slot.
+        let _rx2 = consent.arm("t2", "r2".into()).expect("slot released on drop");
+        let mut disarmed_guard = EvalConsentGuard::new(consent.clone(), "r2".into());
+        disarmed_guard.disarm();
+        drop(disarmed_guard);
+        assert_eq!(
+            consent.arm("t3", "r3".into()).err(),
+            Some(AskRefused::Busy),
+            "disarmed guard must not abandon active request"
+        );
     }
 }

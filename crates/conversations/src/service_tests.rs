@@ -1488,8 +1488,338 @@ async fn offline_zero_turn_selection_persists_to_binding_and_plans_first_turn_re
         capabilities: None,
         ..Default::default()
     };
-    let replay =
-        session_control_replay_plan(prefs.mode, prefs.config, &fresh_session_controls);
+    let replay = session_control_replay_plan(prefs.mode, prefs.config, &fresh_session_controls);
     assert_eq!(replay.mode.as_deref(), Some("plan"));
     assert_eq!(replay.config_overrides.len(), 2);
+}
+
+#[tokio::test]
+async fn offline_controls_during_pending_cross_agent_handoff_preserve_source_binding() {
+    let pool = migrated_pool().await;
+    let claude = agents::AgentId::parse("claude_code").expect("claude_code");
+    let codex = agents::AgentId::parse("codex").expect("codex");
+    let conv = seed_conversation_with_active_turn(&pool).await;
+    sqlx::query("UPDATE conversation_turns SET status = 'completed' WHERE conversation_id = ?1")
+        .bind(conv.id)
+        .execute(&pool)
+        .await
+        .expect("mark seeded turn completed");
+
+    // Seed an older inactive Codex binding first, then an active Claude binding.
+    let old_codex_binding = ConversationAgentBindingRecord::create(
+        &pool,
+        Uuid::new_v4(),
+        db::models::conversation::CreateConversationAgentBinding {
+            conversation_id: conv.id,
+            agent_id: &codex,
+            working_dir: "/work",
+            acp_session_id: Some("codex-native-old"),
+            continuation_key: None,
+            acp_protocol_version: None,
+            runtime_version: None,
+            acp_version: None,
+            load_supported: false,
+            resume_supported: true,
+            close_supported: false,
+            terminal_supported: false,
+            additional_directories_supported: false,
+            prompt_capabilities_json: "{}",
+            session_capabilities_json: "{}",
+            client_capabilities_json: "{}",
+            mcp_servers_json: "[]",
+            modes_json: "[]",
+            config_options_json: "[]",
+            current_mode: Some("plan"),
+            config_selection_json: r#"{"model":"gpt-4.1"}"#,
+            status: db::models::conversation::BindingStatus::Ready,
+        },
+    )
+    .await
+    .expect("create codex binding");
+    let claude_binding = ConversationAgentBindingRecord::create(
+        &pool,
+        Uuid::new_v4(),
+        db::models::conversation::CreateConversationAgentBinding {
+            conversation_id: conv.id,
+            agent_id: &claude,
+            working_dir: "/work",
+            acp_session_id: Some("claude-native-1"),
+            continuation_key: None,
+            acp_protocol_version: None,
+            runtime_version: None,
+            acp_version: None,
+            load_supported: false,
+            resume_supported: true,
+            close_supported: false,
+            terminal_supported: false,
+            additional_directories_supported: false,
+            prompt_capabilities_json: "{}",
+            session_capabilities_json: "{}",
+            client_capabilities_json: "{}",
+            mcp_servers_json: "[]",
+            modes_json: "[]",
+            config_options_json: "[]",
+            current_mode: Some("default"),
+            config_selection_json: r#"{"model":"claude-sonnet-4-6"}"#,
+            status: db::models::conversation::BindingStatus::Ready,
+        },
+    )
+    .await
+    .expect("create claude binding");
+
+    // Ensure Claude is the active binding, then switch the composer's selected agent to Codex
+    // without sending a turn yet (pending cross-agent handoff).
+    sqlx::query("UPDATE sessions SET active_agent_binding_id = ?1 WHERE id = ?2")
+        .bind(claude_binding.id)
+        .bind(conv.id)
+        .execute(&pool)
+        .await
+        .expect("set active claude binding");
+    db::models::session::Session::update_agent_metadata(&pool, conv.id, None, Some(&codex))
+        .await
+        .expect("switch selected agent to codex");
+
+    // Changing Codex controls offline must NOT hijack active_agent_binding_id or
+    // overwrite Claude's binding; it should update Codex's defaults and any prior
+    // inactive Codex binding in place.
+    let overrides = vec![agents::AgentSessionConfigOverride {
+        key: "model".to_string(),
+        value: "gpt-5.4".to_string(),
+    }];
+    super::binding::persist_confirmed_session_controls_strict(
+        &pool,
+        conv.id,
+        Some("full-access"),
+        &overrides,
+    )
+    .await
+    .expect("persist offline codex controls during pending handoff");
+
+    let active_after = ConversationAgentBindingRecord::active_for_conversation(&pool, conv.id)
+        .await
+        .expect("read active binding")
+        .expect("active binding exists");
+    assert_eq!(
+        active_after.id, claude_binding.id,
+        "pending handoff must keep source Claude binding active until first turn commits"
+    );
+    assert_eq!(active_after.current_mode.as_deref(), Some("default"));
+    assert_eq!(
+        active_after.config_selection_json,
+        r#"{"model":"claude-sonnet-4-6"}"#
+    );
+
+    let all_bindings = ConversationAgentBindingRecord::list_for_conversation(&pool, conv.id)
+        .await
+        .expect("list bindings");
+    let codex_after = all_bindings
+        .iter()
+        .find(|b| b.id == old_codex_binding.id)
+        .expect("codex binding exists");
+    assert_eq!(codex_after.current_mode.as_deref(), Some("full-access"));
+    assert!(
+        codex_after.config_selection_json.contains("gpt-5.4"),
+        "prior inactive Codex binding should reflect newly chosen model"
+    );
+
+    let codex_defaults: std::collections::HashMap<String, serde_json::Value> =
+        SessionDefaultRepository::new(pool.clone())
+            .list_for_agent(&codex)
+            .await
+            .expect("list codex defaults")
+            .into_iter()
+            .filter_map(|record| {
+                serde_json::from_str(&record.value_json)
+                    .ok()
+                    .map(|value| (record.option_id, value))
+            })
+            .collect();
+    assert_eq!(
+        codex_defaults.get("mode").and_then(|v| v.as_str()),
+        Some("full-access")
+    );
+    assert_eq!(
+        codex_defaults.get("model").and_then(|v| v.as_str()),
+        Some("gpt-5.4")
+    );
+}
+
+#[tokio::test]
+async fn reconcile_orphaned_connecting_skips_live_conversations() {
+    let pool = migrated_pool().await;
+    let live_conv = seed_conversation_with_active_turn(&pool).await;
+    let orphaned_conv = seed_conversation_with_active_turn(&pool).await;
+
+    for cid in [live_conv.id, orphaned_conv.id] {
+        let normalized = serde_json::json!({
+            "kind": "agent_connection_status_changed",
+            "status": "connecting",
+            "bound": false
+        })
+        .to_string();
+        crate::ConversationEventAppender::append(
+            &pool,
+            AppendConversationEvent {
+                id: Uuid::new_v4(),
+                conversation_id: cid,
+                turn_id: None,
+                binding_id: None,
+                connection_id: Some("conn-check"),
+                prompt_id: None,
+                source: "runtime",
+                event_kind: "agent_connection_status_changed",
+                normalized_json: &normalized,
+                raw_json: None,
+                idempotency_key: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let live_id = live_conv.id;
+    let closed_count = super::recover::reconcile_orphaned_connecting_conversations_with_skip(
+        &pool,
+        None,
+        move |cid| async move { cid == live_id },
+    )
+    .await
+    .expect("reconcile with skip");
+    assert_eq!(
+        closed_count, 1,
+        "only the orphaned conversation should be closed"
+    );
+
+    let live_fold = crate::ConversationProjector::fold(&pool, live_conv.id)
+        .await
+        .expect("fold live");
+    assert!(live_fold.side_rows.iter().any(|row| matches!(
+        &row.row,
+        agents::conversation::ConversationTimelineRow::SessionNotice { notice }
+            if notice.connection_status.as_ref().is_some_and(|s| s.status == ConversationAgentConnectionStatus::Connecting)
+    )));
+
+    let orphaned_fold = crate::ConversationProjector::fold(&pool, orphaned_conv.id)
+        .await
+        .expect("fold orphaned");
+    assert!(orphaned_fold.side_rows.iter().any(|row| matches!(
+        &row.row,
+        agents::conversation::ConversationTimelineRow::SessionNotice { notice }
+            if notice.connection_status.as_ref().is_some_and(|s| s.status == ConversationAgentConnectionStatus::Closed && !s.bound)
+    )));
+}
+
+#[tokio::test]
+async fn reconcile_orphaned_connecting_excludes_closed_done_and_archived_without_full_replay() {
+    let pool = migrated_pool().await;
+    let active_orphaned = seed_conversation_with_active_turn(&pool).await;
+    let done_conv = seed_conversation_with_active_turn(&pool).await;
+    let archived_conv = seed_conversation_with_active_turn(&pool).await;
+    let already_closed = seed_conversation_with_active_turn(&pool).await;
+
+    let connecting_json = serde_json::json!({
+        "kind": "agent_connection_status_changed",
+        "status": "connecting",
+        "bound": false
+    })
+    .to_string();
+    let closed_json = serde_json::json!({
+        "kind": "agent_connection_status_changed",
+        "status": "closed",
+        "bound": false
+    })
+    .to_string();
+
+    for cid in [
+        active_orphaned.id,
+        done_conv.id,
+        archived_conv.id,
+        already_closed.id,
+    ] {
+        crate::ConversationEventAppender::append(
+            &pool,
+            AppendConversationEvent {
+                id: Uuid::new_v4(),
+                conversation_id: cid,
+                turn_id: None,
+                binding_id: None,
+                connection_id: Some("conn-b6"),
+                prompt_id: None,
+                source: "runtime",
+                event_kind: "agent_connection_status_changed",
+                normalized_json: &connecting_json,
+                raw_json: None,
+                idempotency_key: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    // Mark already_closed's connection as closed.
+    crate::ConversationEventAppender::append(
+        &pool,
+        AppendConversationEvent {
+            id: Uuid::new_v4(),
+            conversation_id: already_closed.id,
+            turn_id: None,
+            binding_id: None,
+            connection_id: Some("conn-b6"),
+            prompt_id: None,
+            source: "runtime",
+            event_kind: "agent_connection_status_changed",
+            normalized_json: &closed_json,
+            raw_json: None,
+            idempotency_key: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Mark done_conv and archived_conv as closed sessions even though their stale
+    // connecting timeline side row was left behind.
+    sqlx::query("UPDATE sessions SET status = 'done' WHERE id = ?")
+        .bind(done_conv.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sessions SET status = 'archived' WHERE id = ?")
+        .bind(archived_conv.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let checked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let checked_cb = std::sync::Arc::clone(&checked);
+    let closed_count = super::recover::reconcile_orphaned_connecting_conversations_with_skip(
+        &pool,
+        None,
+        move |cid| {
+            let checked_cb = std::sync::Arc::clone(&checked_cb);
+            async move {
+                checked_cb.lock().unwrap().push(cid);
+                false
+            }
+        },
+    )
+    .await
+    .expect("reconcile orphaned connecting");
+
+    assert_eq!(closed_count, 1);
+    assert_eq!(
+        *checked.lock().unwrap(),
+        vec![active_orphaned.id],
+        "only the active orphaned conversation should be selected as a recovery candidate"
+    );
+
+    // done_conv and archived_conv must remain untouched (still only 1 event each).
+    for cid in [done_conv.id, archived_conv.id] {
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM conversation_events WHERE conversation_id = ?")
+                .bind(cid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 1, "closed/archived session must not be reconciled");
+    }
 }

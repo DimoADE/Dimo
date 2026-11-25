@@ -149,7 +149,7 @@ const allowMultiInstance = process.env.DIMO_ALLOW_MULTI_INSTANCE === '1';
 const gotLock = allowMultiInstance ? true : app.requestSingleInstanceLock();
 
 if (!gotLock) {
-  app.quit();
+  app.exit(0);
 } else {
   const sidecar = new SidecarManager();
   const assetScope = new PreviewAssetScope();
@@ -212,10 +212,14 @@ if (!gotLock) {
 
   deeplinks.registerProtocolClient(app);
 
-  // Capture macOS `open-url` events even if they arrive before `app.whenReady()`.
+  // Capture macOS `open-url` and `open-file` events even if they arrive before `app.whenReady()`.
   app.on('open-url', (event, url) => {
     event.preventDefault();
     deeplinks.handleUrl(url);
+  });
+  app.on('open-file', (event, filePath) => {
+    event.preventDefault();
+    deeplinks.handleOpenFile(filePath);
   });
 
   const crashReporterOptions = {
@@ -249,6 +253,9 @@ if (!gotLock) {
     }
     isQuitting = true;
     clearSettingsPrewarmTimer();
+    if (!allowMultiInstance) {
+      app.releaseSingleInstanceLock();
+    }
     exitPrepPromise = (async () => {
       try {
         uninstallCrashHandlers();
@@ -287,8 +294,15 @@ if (!gotLock) {
     }
   };
 
-  app.on('second-instance', (_event, argv) => {
-    deeplinks.handleProcessArgs(argv, { isStartup: false });
+  app.on('second-instance', (_event, argv, workingDirectory) => {
+    if (isQuitting) {
+      return;
+    }
+    deeplinks.handleProcessArgs(argv, {
+      isStartup: false,
+      workingDirectory,
+      hasDefaultAppArg: Boolean(process.defaultApp),
+    });
   });
 
   app.on('before-quit', (event) => {
@@ -308,6 +322,9 @@ if (!gotLock) {
   });
 
   app.on('activate', () => {
+    if (isQuitting) {
+      return;
+    }
     if (windows && !windows.getMainWindow()) {
       windows.createMainWindow();
     } else {
@@ -370,7 +387,7 @@ if (!gotLock) {
               if (isQuitting) {
                 return;
               }
-              windows?.broadcastEvent(SIDECAR_RESTARTED_EVENT, {
+              windows?.broadcastLocalEvent(SIDECAR_RESTARTED_EVENT, {
                 backend: connection,
                 capabilities,
                 attempt,
@@ -509,7 +526,11 @@ if (!gotLock) {
           windows?.broadcastEvent(event, payload);
         },
       });
-      deeplinks.handleProcessArgs(process.argv, { isStartup: true });
+      deeplinks.handleProcessArgs(process.argv, {
+        isStartup: true,
+        workingDirectory: process.cwd(),
+        hasDefaultAppArg: Boolean(process.defaultApp),
+      });
 
       const sidecarReadyHandled = sidecarStartPromise
         .then(async (connection) => {
@@ -526,7 +547,7 @@ if (!gotLock) {
           if (isQuitting) {
             return;
           }
-          windows?.broadcastEvent(SIDECAR_READY_EVENT, {
+          windows?.broadcastLocalEvent(SIDECAR_READY_EVENT, {
             backend: connection,
             capabilities,
           });

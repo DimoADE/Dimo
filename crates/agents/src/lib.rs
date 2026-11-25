@@ -116,8 +116,7 @@ pub use api_types::{
 };
 pub use async_tasks::{
     ASYNC_TASK_STOP_METHOD, AsyncTaskDelta, AsyncTaskRecord, AsyncTaskUsage,
-    apply_async_task_delta, async_task_state_is_terminal, parse_async_task_session_update,
-    parse_grok_workflow_updated,
+    apply_async_task_delta, async_task_state_is_terminal, parse_grok_workflow_updated,
 };
 pub use auth_mode::{
     BuiltInAuthModePolicy, apply_built_in_auth_mode_policy, apply_built_in_launch_argument_policy,
@@ -245,10 +244,9 @@ pub use install_planner::{
 };
 pub use launch_gate::{
     LaunchComponentEvidence, LaunchGate, LaunchGateError, bind_runtime_executable_env,
-    component_dirs_precede_user_path, discover_acp_launch_lock_in_dirs,
-    discover_path_acp_launch_lock, launch_program_available, launch_program_is_legacy_acp_shim,
-    launch_program_is_vendor_cli, lifecycle_ready_for_path_acp, missing_launch_program_error,
-    prefer_path_launch_program, probe_launch_candidate_executable,
+    discover_acp_launch_lock_in_dirs, discover_path_acp_launch_lock, launch_program_available,
+    launch_program_is_legacy_acp_shim, launch_program_is_vendor_cli, lifecycle_ready_for_path_acp,
+    missing_launch_program_error, prefer_path_launch_program, probe_launch_candidate_executable,
     probe_output_indicates_broken_executable, runtime_executable_env_key,
     sanitize_runtime_executable_env, sanitize_runtime_executable_lock_env,
 };
@@ -321,12 +319,11 @@ pub use profiles::{
     ProfileBinaryEntry, ProfileComponent, ProfileDependency, ProfileExternalCandidate, ProfileIcon,
     ProfileInstallSource, ProfileManagementAction, ProfileManagementActionKind,
     ProfileManagementProgram, ProfileRegistryBinding, ProfileTopology, RegistryEntryIdentity,
-    acp_adapter_relation, acp_launch_args, acp_launch_args_for_program, adapter_bundles_runtime,
-    bundled_adapter_runtime_env_keys, candidate_command_matches, external_candidate_for_program,
-    native_engine_extra_dirs, normalize_acp_launch_args_for_program, profile_delivers_session_mcp,
-    resolve_native_engine_cli, resolve_vendor_cli, resolve_vendor_cli_in_extra_dirs,
-    suppressed_registry_built_in_agent_id, suppressed_registry_ids_for_built_ins,
-    version_args_for_program,
+    acp_adapter_relation, acp_launch_args, acp_launch_args_for_program, candidate_command_matches,
+    external_candidate_for_program, native_engine_extra_dirs,
+    normalize_acp_launch_args_for_program, profile_delivers_session_mcp, resolve_native_engine_cli,
+    resolve_vendor_cli, resolve_vendor_cli_in_extra_dirs, suppressed_registry_built_in_agent_id,
+    suppressed_registry_ids_for_built_ins, version_args_for_program,
 };
 pub use registry_client::{
     OfficialRegistryHttpFetcher, REGISTRY_CONNECT_TIMEOUT, REGISTRY_ICON_FETCH_BUDGET,

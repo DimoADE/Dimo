@@ -77,12 +77,12 @@ impl ServerApplicationDomains {
             DomainCommand::RepoInit => self.init_repo(args).await,
             DomainCommand::RepoCheckPath => {
                 let args: PathArgs = parse(args)?;
-                serialize(
-                    self.deployment
-                        .repo()
-                        .is_git_repo_path(&args.path)
-                        .map_err(|error| ApplicationError::bad_request(error.to_string()))?,
-                )
+                let repo = self.deployment.repo().clone();
+                let is_git = tokio::task::spawn_blocking(move || repo.is_git_repo_path(&args.path))
+                    .await
+                    .map_err(internal_error)?
+                    .map_err(|error| ApplicationError::bad_request(error.to_string()))?;
+                serialize(is_git)
             }
             DomainCommand::RepoClone => self.clone_repo(args).await,
             DomainCommand::RepoWorktrees => {
@@ -97,7 +97,7 @@ impl ServerApplicationDomains {
                         repo_id: args.repo_id,
                     })
                     .await?;
-                self.git_read(path, |git, path| {
+                self.git_read(path, move |git, path| {
                     git.get_branch_diffs(path, &args.branch, args.base_branch.as_deref())
                 })
                 .await
@@ -127,29 +127,30 @@ impl ServerApplicationDomains {
             }
             DomainCommand::RepoStageFile => {
                 let args: RepoFileArgs = parse(args)?;
-                self.git_write(
-                    self.resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
-                        .await?,
-                    |git, path| git.stage_file(path, &args.file_path),
-                )
-                .await
+                let path = self
+                    .resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
+                    .await?;
+                self.git_write(path, move |git, path| git.stage_file(path, &args.file_path))
+                    .await
             }
             DomainCommand::RepoUnstageFile => {
                 let args: RepoFileArgs = parse(args)?;
-                self.git_write(
-                    self.resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
-                        .await?,
-                    |git, path| git.unstage_file(path, &args.file_path),
-                )
+                let path = self
+                    .resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
+                    .await?;
+                self.git_write(path, move |git, path| {
+                    git.unstage_file(path, &args.file_path)
+                })
                 .await
             }
             DomainCommand::RepoRevertFile => {
                 let args: RepoFileArgs = parse(args)?;
-                self.git_write(
-                    self.resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
-                        .await?,
-                    |git, path| git.revert_file(path, &args.file_path),
-                )
+                let path = self
+                    .resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
+                    .await?;
+                self.git_write(path, move |git, path| {
+                    git.revert_file(path, &args.file_path)
+                })
                 .await
             }
             DomainCommand::RepoStageAll => {
@@ -172,11 +173,12 @@ impl ServerApplicationDomains {
             }
             DomainCommand::RepoCommit => {
                 let args: RepoCommitArgs = parse(args)?;
-                self.git_write(
-                    self.resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
-                        .await?,
-                    |git, path| git.commit_changes(path, &args.message),
-                )
+                let path = self
+                    .resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
+                    .await?;
+                self.git_write(path, move |git, path| {
+                    git.commit_changes(path, &args.message)
+                })
                 .await
             }
             DomainCommand::RepoGitLog => {
@@ -184,27 +186,29 @@ impl ServerApplicationDomains {
                 let path = self
                     .resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
                     .await?;
-                self.git_read(path, |git, path| {
+                self.git_read(path, move |git, path| {
                     git.get_log_status_with_options(path, args.branches.as_deref(), args.max_count)
                 })
                 .await
             }
             DomainCommand::RepoCheckoutBranch => {
                 let args: RepoBranchArgs = parse(args)?;
-                self.git_write(
-                    self.resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
-                        .await?,
-                    |git, path| git.checkout_branch(path, &args.branch),
-                )
+                let path = self
+                    .resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
+                    .await?;
+                self.git_write(path, move |git, path| {
+                    git.checkout_branch(path, &args.branch)
+                })
                 .await
             }
             DomainCommand::RepoCreateBranch => {
                 let args: RepoBranchArgs = parse(args)?;
-                self.git_write(
-                    self.resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
-                        .await?,
-                    |git, path| git.create_branch(path, &args.branch, args.from_ref.as_deref()),
-                )
+                let path = self
+                    .resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
+                    .await?;
+                self.git_write(path, move |git, path| {
+                    git.create_branch(path, &args.branch, args.from_ref.as_deref())
+                })
                 .await
             }
             DomainCommand::RepoDeleteBranch => {
@@ -212,9 +216,13 @@ impl ServerApplicationDomains {
                 let path = self
                     .resolve_repo_worktree_path(args.repo_id, args.worktree_path.as_deref())
                     .await?;
-                git::GitCli::new()
-                    .git(&path, ["branch", "-D", &args.branch])
-                    .map_err(internal_error)?;
+                let branch = args.branch;
+                tokio::task::spawn_blocking(move || {
+                    git::GitCli::new().git(&path, ["branch", "-D", &branch])
+                })
+                .await
+                .map_err(internal_error)?
+                .map_err(internal_error)?;
                 Ok(Value::Null)
             }
             DomainCommand::WorkspaceList => {
@@ -252,15 +260,14 @@ impl ServerApplicationDomains {
             }
             DomainCommand::WorkspaceStageFile => {
                 let args: WorkspaceFileArgs = parse(args)?;
-                self.git_write(
-                    self.worktree_path(WorkspaceRepoArgs {
+                let path = self
+                    .worktree_path(WorkspaceRepoArgs {
                         workspace_id: args.workspace_id,
                         repo_id: args.repo_id,
                     })
-                    .await?,
-                    |git, path| git.stage_file(path, &args.file_path),
-                )
-                .await
+                    .await?;
+                self.git_write(path, move |git, path| git.stage_file(path, &args.file_path))
+                    .await
             }
             DomainCommand::WorkspaceStageAll => {
                 self.git_write(
@@ -271,26 +278,28 @@ impl ServerApplicationDomains {
             }
             DomainCommand::WorkspaceUnstageFile => {
                 let args: WorkspaceFileArgs = parse(args)?;
-                self.git_write(
-                    self.worktree_path(WorkspaceRepoArgs {
+                let path = self
+                    .worktree_path(WorkspaceRepoArgs {
                         workspace_id: args.workspace_id,
                         repo_id: args.repo_id,
                     })
-                    .await?,
-                    |git, path| git.unstage_file(path, &args.file_path),
-                )
+                    .await?;
+                self.git_write(path, move |git, path| {
+                    git.unstage_file(path, &args.file_path)
+                })
                 .await
             }
             DomainCommand::WorkspaceRevertFile => {
                 let args: WorkspaceFileArgs = parse(args)?;
-                self.git_write(
-                    self.worktree_path(WorkspaceRepoArgs {
+                let path = self
+                    .worktree_path(WorkspaceRepoArgs {
                         workspace_id: args.workspace_id,
                         repo_id: args.repo_id,
                     })
-                    .await?,
-                    |git, path| git.revert_file(path, &args.file_path),
-                )
+                    .await?;
+                self.git_write(path, move |git, path| {
+                    git.revert_file(path, &args.file_path)
+                })
                 .await
             }
             DomainCommand::WorkspaceRevertAll => {
@@ -309,14 +318,15 @@ impl ServerApplicationDomains {
             }
             DomainCommand::WorkspaceCommit => {
                 let args: WorkspaceCommitArgs = parse(args)?;
-                self.git_write(
-                    self.worktree_path(WorkspaceRepoArgs {
+                let path = self
+                    .worktree_path(WorkspaceRepoArgs {
                         workspace_id: args.workspace_id,
                         repo_id: args.repo_id,
                     })
-                    .await?,
-                    |git, path| git.commit_changes(path, &args.message),
-                )
+                    .await?;
+                self.git_write(path, move |git, path| {
+                    git.commit_changes(path, &args.message)
+                })
                 .await
             }
             DomainCommand::WorkspaceGitLog => {
@@ -327,34 +337,33 @@ impl ServerApplicationDomains {
                         repo_id: args.repo_id,
                     })
                     .await?;
-                self.git_read(path, |git, path| {
+                self.git_read(path, move |git, path| {
                     git.get_log_status_with_options(path, args.branches.as_deref(), args.max_count)
                 })
                 .await
             }
             DomainCommand::WorkspaceCommitDetail => {
                 let args: WorkspaceCommitDetailArgs = parse(args)?;
-                self.git_read(
-                    self.worktree_path(WorkspaceRepoArgs {
+                let path = self
+                    .worktree_path(WorkspaceRepoArgs {
                         workspace_id: args.workspace_id,
                         repo_id: args.repo_id,
                     })
-                    .await?,
-                    |git, path| git.get_commit_detail(path, &args.sha),
-                )
-                .await
+                    .await?;
+                self.git_read(path, move |git, path| git.get_commit_detail(path, &args.sha))
+                    .await
             }
             DomainCommand::WorkspaceCheckoutBranch => {
                 let args: WorkspaceBranchArgs = parse(args)?;
-                self.git_write(
-                    self.worktree_path(WorkspaceRepoArgs {
+                let path = self
+                    .worktree_path(WorkspaceRepoArgs {
                         workspace_id: args.workspace_id,
                         repo_id: args.repo_id,
                     })
-                    .await?,
-                    |git, path| git.checkout_branch(path, &args.branch),
-                )
-                .await?;
+                    .await?;
+                let branch = args.branch.clone();
+                self.git_write(path, move |git, path| git.checkout_branch(path, &branch))
+                    .await?;
                 Workspace::update_branch_name(&self.pool, args.workspace_id, &args.branch)
                     .await
                     .map_err(internal_error)?;
@@ -362,14 +371,15 @@ impl ServerApplicationDomains {
             }
             DomainCommand::WorkspaceCreateBranch => {
                 let args: WorkspaceBranchArgs = parse(args)?;
-                self.git_write(
-                    self.worktree_path(WorkspaceRepoArgs {
+                let path = self
+                    .worktree_path(WorkspaceRepoArgs {
                         workspace_id: args.workspace_id,
                         repo_id: args.repo_id,
                     })
-                    .await?,
-                    |git, path| git.create_branch(path, &args.branch, args.from_ref.as_deref()),
-                )
+                    .await?;
+                self.git_write(path, move |git, path| {
+                    git.create_branch(path, &args.branch, args.from_ref.as_deref())
+                })
                 .await
             }
             DomainCommand::WorkspaceDeleteBranch => {
@@ -380,9 +390,13 @@ impl ServerApplicationDomains {
                         repo_id: args.repo_id,
                     })
                     .await?;
-                git::GitCli::new()
-                    .git(&path, ["branch", "-D", &args.branch])
-                    .map_err(internal_error)?;
+                let branch = args.branch;
+                tokio::task::spawn_blocking(move || {
+                    git::GitCli::new().git(&path, ["branch", "-D", &branch])
+                })
+                .await
+                .map_err(internal_error)?
+                .map_err(internal_error)?;
                 Ok(Value::Null)
             }
             DomainCommand::SessionList => {
@@ -511,7 +525,13 @@ impl ServerApplicationDomains {
                     ),
                     _ => None,
                 };
-                serialize(file_at_head_content(&args.file_path, revision.as_deref())?)
+                let file_path = args.file_path;
+                let content = tokio::task::spawn_blocking(move || {
+                    file_at_head_content(&file_path, revision.as_deref())
+                })
+                .await
+                .map_err(internal_error)??;
+                serialize(content)
             }
             DomainCommand::TerminalCreate => self.create_terminal(args).await,
             DomainCommand::TerminalWrite => self.write_terminal(args).await,
@@ -1488,20 +1508,8 @@ impl ServerApplicationDomains {
     async fn read_file_truncated(&self, args: Value) -> Result<Value, ApplicationError> {
         let args: ReadTruncatedArgs = parse(args)?;
         let path = self.existing_local_file(&args.path).await?;
-        let bytes = tokio::fs::read(&path).await.map_err(internal_error)?;
-        if bytes.contains(&0) {
-            return Err(ApplicationError::bad_request(
-                "Binary files cannot be opened as text",
-            ));
-        }
         let max = args.max_bytes.unwrap_or(512 * 1024) as usize;
-        let truncated = bytes.len() > max;
-        let slice = if truncated { &bytes[..max] } else { &bytes };
-        Ok(json!({
-            "content": String::from_utf8_lossy(slice),
-            "truncated": truncated,
-            "byteLength": bytes.len(),
-        }))
+        read_file_truncated_at_path(&path, max).await
     }
 
     async fn write_ssh_host_files(&self, args: Value) -> Result<Value, ApplicationError> {
@@ -1547,8 +1555,17 @@ impl ServerApplicationDomains {
         let args: PathArgs = parse(args)?;
         let source = self.sandbox_existing_path(&args.path).await?;
         let dest = unique_copy_path(&source)?;
-        if source.is_dir() {
-            copy_dir(&source, &dest)?;
+        let is_dir = tokio::fs::symlink_metadata(&source)
+            .await
+            .map_err(internal_error)?
+            .file_type()
+            .is_dir();
+        if is_dir {
+            let source_clone = source.clone();
+            let dest_clone = dest.clone();
+            tokio::task::spawn_blocking(move || copy_dir(&source_clone, &dest_clone))
+                .await
+                .map_err(internal_error)??;
         } else {
             tokio::fs::copy(&source, &dest)
                 .await
@@ -1569,7 +1586,12 @@ impl ServerApplicationDomains {
     async fn search_workspace_text(&self, args: Value) -> Result<Value, ApplicationError> {
         let args: TextSearchArgs = parse(args)?;
         let root = self.sandbox_existing_path(&args.root_path).await?;
-        serialize(search_workspace_text_at_path(&root, args.options)?)
+        let options = args.options;
+        let matches =
+            tokio::task::spawn_blocking(move || search_workspace_text_at_path(&root, options))
+                .await
+                .map_err(internal_error)??;
+        serialize(matches)
     }
 
     async fn create_terminal(&self, args: Value) -> Result<Value, ApplicationError> {
@@ -1774,21 +1796,25 @@ impl ServerApplicationDomains {
             .into_iter()
             .next()
             .ok_or_else(|| ApplicationError::bad_request("Project has no repositories"))?;
-        let desired_branch = self
-            .deployment
-            .git()
-            .checkout_project_root_branch(&primary.path, branch)
-            .map_err(|error| {
-                if git_checkout_error_is_local_changes(&error.to_string()) {
-                    ApplicationError::bad_request(
-                        "当前分支存在未提交更改，无法切换分支，请先提交或放弃更改。".to_string(),
-                    )
-                } else {
-                    ApplicationError::internal(format!(
-                        "Failed to prepare project root branch: {error}"
-                    ))
-                }
-            })?;
+        let git = self.deployment.git().clone();
+        let primary_path = primary.path.clone();
+        let branch_owned = branch.map(ToOwned::to_owned);
+        let desired_branch = tokio::task::spawn_blocking(move || {
+            git.checkout_project_root_branch(&primary_path, branch_owned.as_deref())
+        })
+        .await
+        .map_err(internal_error)?
+        .map_err(|error| {
+            if git_checkout_error_is_local_changes(&error.to_string()) {
+                ApplicationError::bad_request(
+                    "当前分支存在未提交更改，无法切换分支，请先提交或放弃更改。".to_string(),
+                )
+            } else {
+                ApplicationError::internal(format!(
+                    "Failed to prepare project root branch: {error}"
+                ))
+            }
+        })?;
         let workspace_repos = vec![CreateWorkspaceRepo {
             repo_id: primary.id,
             target_branch: desired_branch.clone(),
@@ -2006,23 +2032,29 @@ impl ServerApplicationDomains {
             .ok_or_else(|| ApplicationError::not_found(format!("session {session_id}")))
     }
 
-    pub(crate) async fn git_read<T: serde::Serialize>(
+    pub(crate) async fn git_read<T: serde::Serialize + Send + 'static>(
         &self,
         path: PathBuf,
-        op: impl FnOnce(&git::GitService, &Path) -> Result<T, git::GitServiceError>,
+        op: impl FnOnce(&git::GitService, &Path) -> Result<T, git::GitServiceError> + Send + 'static,
     ) -> Result<Value, ApplicationError> {
         let git = self.deployment.git().clone();
-        let value = tokio::task::block_in_place(|| op(&git, &path)).map_err(internal_error)?;
+        let value = tokio::task::spawn_blocking(move || op(&git, &path))
+            .await
+            .map_err(internal_error)?
+            .map_err(internal_error)?;
         serialize(value)
     }
 
     pub(crate) async fn git_write(
         &self,
         path: PathBuf,
-        op: impl FnOnce(&git::GitService, &Path) -> Result<(), git::GitServiceError>,
+        op: impl FnOnce(&git::GitService, &Path) -> Result<(), git::GitServiceError> + Send + 'static,
     ) -> Result<Value, ApplicationError> {
         let git = self.deployment.git().clone();
-        tokio::task::block_in_place(|| op(&git, &path)).map_err(internal_error)?;
+        tokio::task::spawn_blocking(move || op(&git, &path))
+            .await
+            .map_err(internal_error)?
+            .map_err(internal_error)?;
         Ok(Value::Null)
     }
 
@@ -2050,9 +2082,11 @@ impl ServerApplicationDomains {
         };
         let git = self.deployment.git().clone();
         let candidate_path = PathBuf::from(candidate);
-        let resolved = tokio::task::block_in_place(|| {
+        let resolved = tokio::task::spawn_blocking(move || {
             git.resolve_registered_worktree_path(&repo_path, &candidate_path)
         })
+        .await
+        .map_err(internal_error)?
         .map_err(internal_error)?;
         resolved.ok_or_else(|| {
             ApplicationError::forbidden(
@@ -2176,6 +2210,20 @@ impl ServerApplicationDomains {
             }
         }
         Ok(roots.into_iter().collect())
+    }
+
+    pub(crate) async fn is_within_write_sandbox(
+        &self,
+        path: &Path,
+    ) -> Result<bool, ApplicationError> {
+        let Ok(canonical) = tokio::fs::canonicalize(path).await else {
+            return Ok(false);
+        };
+        if conversations::collaboration::is_team_space_collection_file(&canonical) {
+            return Ok(true);
+        }
+        let roots = self.sandbox_roots().await?;
+        Ok(roots.iter().any(|root| canonical.starts_with(root)))
     }
 }
 
@@ -2453,9 +2501,13 @@ fn path_is_host_image_cache_file(requested: &Path, cache_root: &Path) -> bool {
 
 async fn existing_local_path_at(path: &str) -> Result<PathBuf, ApplicationError> {
     let sanitized = sanitize_absolute(path)?;
-    let canonical = tokio::fs::canonicalize(&sanitized)
-        .await
-        .map_err(|_| ApplicationError::not_found(format!("path {path}")))?;
+    let canonical = tokio::fs::canonicalize(&sanitized).await.map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            ApplicationError::not_found(format!("File not found: {path}"))
+        } else {
+            ApplicationError::not_found(format!("Unable to access path {path}: {err}"))
+        }
+    })?;
     Ok(utils::path::normalize_windows_extended_path_prefix(
         canonical,
     ))
@@ -2525,15 +2577,66 @@ fn unique_copy_path(source: &Path) -> Result<PathBuf, ApplicationError> {
     Err(ApplicationError::conflict("too many copies exist"))
 }
 
+async fn read_file_truncated_at_path(
+    path: &Path,
+    max_bytes: usize,
+) -> Result<Value, ApplicationError> {
+    use tokio::io::AsyncReadExt;
+
+    let metadata = tokio::fs::metadata(path).await.map_err(internal_error)?;
+    let total_len = metadata.len();
+    let file = tokio::fs::File::open(path).await.map_err(internal_error)?;
+    let limit = (max_bytes as u64).saturating_add(1);
+    let mut bytes = Vec::with_capacity(limit.min(total_len).min(1024 * 1024) as usize);
+    file.take(limit)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(internal_error)?;
+    let truncated = bytes.len() > max_bytes;
+    let slice = if truncated { &bytes[..max_bytes] } else { &bytes };
+    if slice.contains(&0) {
+        return Err(ApplicationError::bad_request(
+            "Binary files cannot be opened as text",
+        ));
+    }
+    Ok(json!({
+        "content": String::from_utf8_lossy(slice),
+        "truncated": truncated,
+        "byteLength": total_len.max(bytes.len() as u64),
+    }))
+}
+
+fn is_symlink_or_dir_junction(metadata: &std::fs::Metadata) -> bool {
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if file_type.is_dir() && (metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0) {
+            return true;
+        }
+    }
+    false
+}
+
 fn copy_dir(source: &Path, dest: &Path) -> Result<(), ApplicationError> {
     std::fs::create_dir_all(dest).map_err(internal_error)?;
     for entry in std::fs::read_dir(source).map_err(internal_error)? {
         let entry = entry.map_err(internal_error)?;
+        let entry_path = entry.path();
+        let metadata = std::fs::symlink_metadata(&entry_path).map_err(internal_error)?;
+        if is_symlink_or_dir_junction(&metadata) {
+            continue;
+        }
         let to = dest.join(entry.file_name());
-        if entry.path().is_dir() {
-            copy_dir(&entry.path(), &to)?;
-        } else {
-            std::fs::copy(entry.path(), to).map_err(internal_error)?;
+        let file_type = metadata.file_type();
+        if file_type.is_dir() {
+            copy_dir(&entry_path, &to)?;
+        } else if file_type.is_file() {
+            std::fs::copy(&entry_path, &to).map_err(internal_error)?;
         }
     }
     Ok(())
@@ -3308,6 +3411,16 @@ mod tests {
                 .is_err()
         );
 
+        // Missing file reports an explicit File not found message
+        let missing = dir.path().join("does-not-exist.md");
+        let missing_err = existing_local_path_at(&missing.to_string_lossy())
+            .await
+            .expect_err("missing local file should error");
+        assert!(
+            missing_err.to_string().contains("File not found:"),
+            "unexpected missing file error: {missing_err}"
+        );
+
         // Relative paths and parent traversal are rejected
         assert!(existing_local_path_at("relative/path").await.is_err());
         let traversal = format!("{}/../outside", dir.path().display());
@@ -3344,6 +3457,90 @@ mod tests {
         assert_eq!(
             root_payload.provider_instance_id.as_deref(),
             Some("team-codex")
+        );
+    }
+
+    #[tokio::test]
+    async fn read_file_truncated_streams_bounded_prefix_and_reports_total_length() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let large = dir.path().join("large.log");
+        let payload = "a".repeat(2 * 1024 * 1024);
+        std::fs::write(&large, &payload).expect("write large file");
+
+        let truncated = read_file_truncated_at_path(&large, 1024)
+            .await
+            .expect("truncated read");
+        assert_eq!(truncated["truncated"], json!(true));
+        assert_eq!(truncated["content"].as_str().map(str::len), Some(1024));
+        assert_eq!(truncated["byteLength"], json!(2 * 1024 * 1024));
+
+        let small = dir.path().join("small.txt");
+        std::fs::write(&small, "hello world").expect("write small file");
+        let full = read_file_truncated_at_path(&small, 1024)
+            .await
+            .expect("full read");
+        assert_eq!(full["truncated"], json!(false));
+        assert_eq!(full["content"], json!("hello world"));
+        assert_eq!(full["byteLength"], json!(11));
+
+        let binary = dir.path().join("bin.dat");
+        std::fs::write(&binary, b"abc\0def").expect("write binary");
+        assert!(read_file_truncated_at_path(&binary, 1024).await.is_err());
+    }
+
+    #[test]
+    fn copy_dir_skips_symlink_and_junction_cycles() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        let nested = src.join("nested");
+        let dest = dir.path().join("dest");
+        std::fs::create_dir_all(&nested).expect("create nested");
+        std::fs::write(src.join("root.txt"), "root").expect("write root");
+        std::fs::write(nested.join("inner.txt"), "inner").expect("write inner");
+
+        let loop_link = nested.join("loop");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&src, &loop_link).expect("create dir symlink loop");
+        }
+        #[cfg(windows)]
+        {
+            let status = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&loop_link)
+                .arg(&src)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("spawn mklink /J");
+            assert!(status.success(), "mklink /J must succeed");
+        }
+
+        let copy_result = copy_dir(&src, &dest);
+
+        // Remove junction/symlink before TempDir cleanup on Windows.
+        #[cfg(windows)]
+        {
+            let _ = std::fs::remove_dir(&loop_link);
+        }
+        #[cfg(unix)]
+        {
+            let _ = std::fs::remove_file(&loop_link);
+        }
+
+        copy_result.expect("copy_dir must not infinite-loop on symlink/junction cycle");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("root.txt")).expect("copied root"),
+            "root"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("nested").join("inner.txt")).expect("copied inner"),
+            "inner"
+        );
+        assert!(
+            !dest.join("nested").join("loop").exists(),
+            "symlink/junction cycle entry must not be recursively copied"
         );
     }
 }

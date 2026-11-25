@@ -372,6 +372,38 @@ export function normalizeSdkEvent(
     }
   }
 
+  if (message.type === 'system' && message.subtype === 'api_retry') {
+    const attempt = readFiniteNumber(message.attempt);
+    const maxAttempts = readFiniteNumber(
+      message.max_retries ?? message.maxRetries ?? message.max_attempts ?? message.maxAttempts
+    );
+    const delayMs = readFiniteNumber(
+      message.retry_delay_ms ?? message.retryDelayMs ?? message.delay_ms ?? message.delayMs
+    );
+    const errorStatus =
+      message.error_status ?? message.errorStatus ?? message.status ?? message.code;
+    const code =
+      typeof errorStatus === 'number' && Number.isFinite(errorStatus)
+        ? String(errorStatus)
+        : (readString(errorStatus) ?? null);
+    const reason =
+      readString(
+        typeof message.error === 'string'
+          ? message.error
+          : (message.error?.message ?? message.message ?? message.detail ?? message.reason)
+      ) ?? null;
+    events.push({
+      kind: 'request_retrying',
+      sessionId,
+      promptId,
+      attempt: attempt !== undefined && attempt >= 0 ? Math.floor(attempt) : null,
+      maxAttempts: maxAttempts !== undefined && maxAttempts >= 0 ? Math.floor(maxAttempts) : null,
+      delayMs: delayMs !== undefined && delayMs >= 0 ? Math.floor(delayMs) : null,
+      reason,
+      code,
+    });
+  }
+
   if (
     message.type === 'hook_event' ||
     (message.type === 'system' &&

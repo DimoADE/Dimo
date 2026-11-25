@@ -25,11 +25,13 @@ import { AstryxMarkdown } from '../AstryxMarkdown';
  */
 export function DelegationCard({
   delegation,
+  workspacePath = null,
   onOpenChild,
   expansionKey,
   onExpandedChange,
 }: {
   delegation: ConversationDelegationView;
+  workspacePath?: string | null;
   onOpenChild?: (childConversationId: string) => void;
   expansionKey?: string;
   onExpandedChange?: (expanded: boolean) => void;
@@ -183,7 +185,7 @@ export function DelegationCard({
         </div>
         {well ? (
           <DelegationDisclosurePanel tone={well.tone}>
-            <AstryxMarkdown value={well.text} />
+            <AstryxMarkdown value={well.text} workspacePath={workspacePath} />
           </DelegationDisclosurePanel>
         ) : null}
         {cancelError ? (

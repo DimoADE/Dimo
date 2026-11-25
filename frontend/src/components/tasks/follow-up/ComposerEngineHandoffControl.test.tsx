@@ -726,4 +726,67 @@ describe('ComposerEngineHandoffControl', () => {
     expect(ensureControlsSpy).not.toHaveBeenCalled();
     expect(touchSpy).not.toHaveBeenCalled();
   });
+
+  it('settles originating conversation handoff without mutating the newly active conversation on cross-thread switch', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    trackSpy(
+      vi
+        .spyOn(conversationApi, 'detail')
+        .mockImplementation(async (conversationId) =>
+          makeDetail(conversationId, 'claude_code', 'claude-sonnet-4-5')
+        )
+    );
+    trackSpy(
+      vi.spyOn(conversationApi, 'touch').mockResolvedValue({
+        ok: true,
+        idleTimeoutSecs: 0,
+      })
+    );
+
+    let resolveConfirm: () => void = () => {};
+    trackSpy(
+      vi.spyOn(conversationApi, 'confirmEngineHandoff').mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveConfirm = resolve;
+          })
+      )
+    );
+    const onApply = vi.fn();
+
+    const { rerender } = render(
+      <QueryClientProvider client={queryClient}>
+        <HandoffHarness
+          sessionId="conv-thread-a"
+          currentExecutor="CLAUDE_CODE"
+          onApply={onApply}
+        />
+      </QueryClientProvider>
+    );
+
+    fireEvent.click(screen.getByTestId('switch-to-codex'));
+    expect(getConversationHandoffPending('conv-thread-a')).toBe(true);
+    expect(onApply).toHaveBeenCalledTimes(1);
+
+    // Switch to another thread while conv-thread-a handoff is still in flight.
+    rerender(
+      <QueryClientProvider client={queryClient}>
+        <HandoffHarness
+          sessionId="conv-thread-b"
+          currentExecutor="CLAUDE_CODE"
+          onApply={onApply}
+        />
+      </QueryClientProvider>
+    );
+
+    resolveConfirm();
+
+    await waitFor(() => {
+      expect(getConversationHandoffPending('conv-thread-a')).toBe(false);
+    });
+    // Must not overwrite conv-thread-b's active composer executor profile.
+    expect(onApply).toHaveBeenCalledTimes(1);
+  });
 });

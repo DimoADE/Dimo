@@ -546,7 +546,28 @@ export function useTimelineContextSync({
           ),
       });
     }
-    if (latestSessionNoticeRow?.row_id !== autoPermissionNoticeRow?.row_id) {
+    const turnErrorCoversBindingLoadFailure = Boolean(
+      latestTurnError &&
+        latestTurnErrorRow &&
+        (latestTurnError.kind === 'resource_not_found' ||
+          latestTurnError.kind === 'session_resume_unsupported' ||
+          latestTurnError.kind === 'session_load_failed' ||
+          latestTurnError.kind === 'auth_required' ||
+          latestTurnError.code === 'resource_not_found' ||
+          latestTurnError.code === 'session_resume_unsupported' ||
+          latestTurnError.code === 'session_load_failed' ||
+          latestTurnError.code === 'auth_required')
+    );
+    const isDuplicateBindingLoadNotice =
+      turnErrorCoversBindingLoadFailure &&
+      latestSessionNoticeRow?.row_id ===
+        AGENT_BINDING_LOAD_FAILURE_NOTICE_ROW_ID &&
+      latestSessionNoticeRow.row.kind === 'session_notice' &&
+      !latestSessionNoticeRow.row.notice?.action;
+    if (
+      latestSessionNoticeRow?.row_id !== autoPermissionNoticeRow?.row_id &&
+      !isDuplicateBindingLoadNotice
+    ) {
       pushSessionNotice(latestSessionNoticeRow);
     }
     if (

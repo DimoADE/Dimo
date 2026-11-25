@@ -536,12 +536,16 @@ impl PluginControlPlane {
             .registry
             .record_audit(plugin_id, "uninstall", &evidence)
             .await;
-        self.withdraw_with_dependents(plugin_id).await?;
-        self.registry
-            .set_activation(plugin_id, PluginActivation::Disabled)
-            .await
-            .ok();
-        self.registry.delete_plugin(plugin_id).await?;
+        self.withdraw_dependents_only(plugin_id).await?;
+        {
+            let _plugin_guard = self.activations.lock_plugin(plugin_id).await;
+            self.withdraw_live_generation_locked(plugin_id).await?;
+            self.registry
+                .set_activation(plugin_id, PluginActivation::Disabled)
+                .await
+                .ok();
+            self.registry.delete_plugin(plugin_id).await?;
+        }
         self.refresh_live_projections().await
     }
 

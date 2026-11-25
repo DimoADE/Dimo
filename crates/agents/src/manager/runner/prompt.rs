@@ -58,16 +58,129 @@ impl AgentConnectionRunner {
         // transcript, so write the prompt before session overrides: a rejected
         // model (or any other override error) must not erase it.
         self.record_prompt(&acp_session_id, &recorded_blocks).await;
-        if let Err(error) = self
-            .apply_session_overrides(
+        let override_timeout =
+            session_prep_timeout_for_agent(&self.snapshot.agent_id, &self.snapshot.env);
+        let override_result = {
+            let override_fut = self.apply_session_overrides(
                 conn,
                 &acp_session_id,
                 session_id,
                 mode_override,
                 config_overrides,
-            )
-            .await
-        {
+            );
+            tokio::pin!(override_fut);
+            let override_deadline = tokio::time::sleep(override_timeout);
+            tokio::pin!(override_deadline);
+            loop {
+                tokio::select! {
+                    result = &mut override_fut => break Ok(result),
+                    _ = &mut override_deadline => {
+                        break Err(RunPromptOutcome::RetireConnection);
+                    }
+                    command = cmd_rx.recv() => {
+                        match command {
+                            Some(AgentConnectionCommand::Cancel {
+                                session_id: cancel_session,
+                                prompt_id: cancel_prompt,
+                                result_tx,
+                            }) if cancel_session == session_id && cancel_prompt == prompt_id => {
+                                self.cancel_pending_interactions(session_id).await;
+                                let _ = conn.send_notification(CancelNotification::new(SessionId::new(
+                                    acp_session_id.clone(),
+                                )));
+                                self.record_turn_end(&acp_session_id, session_id, "cancelled", 0, None)
+                                    .await;
+                                *self.active_prompt.lock().await = None;
+                                self.emit(
+                                    Some(session_id),
+                                    Some(prompt_id),
+                                    AgentEvent::PromptFinished {
+                                        finished: AgentPromptFinished {
+                                            prompt_id,
+                                            stop_reason: Some("cancelled".to_string()),
+                                            usage: None,
+                                        },
+                                    },
+                                );
+                                let _ = result_tx.send(true);
+                                return Ok(RunPromptOutcome::RetireConnection);
+                            }
+                            Some(AgentConnectionCommand::Disconnect) | None => {
+                                self.cancel_pending_interactions(session_id).await;
+                                self.record_turn_end(&acp_session_id, session_id, "cancelled", 0, None)
+                                    .await;
+                                *self.active_prompt.lock().await = None;
+                                self.emit(
+                                    Some(session_id),
+                                    Some(prompt_id),
+                                    AgentEvent::PromptFinished {
+                                        finished: AgentPromptFinished {
+                                            prompt_id,
+                                            stop_reason: Some("cancelled".to_string()),
+                                            usage: None,
+                                        },
+                                    },
+                                );
+                                return Ok(RunPromptOutcome::Closed);
+                            }
+                            Some(AgentConnectionCommand::Prompt {
+                                session_id: rejected_session,
+                                prompt_id: rejected_prompt,
+                                ..
+                            }) => {
+                                self.emit(
+                                    Some(rejected_session),
+                                    Some(rejected_prompt),
+                                    AgentEvent::Error {
+                                        error: AgentErrorEvent {
+                                            message: "The agent connection was busy with another conversation's turn. Send again.".to_string(),
+                                            code: Some("prompt_conflict".to_string()),
+                                            raw: Some(serde_json::json!({
+                                                "activePromptId": prompt_id.to_string(),
+                                                "activeSessionId": session_id.to_string(),
+                                            })),
+                                        },
+                                    },
+                                );
+                            }
+                            Some(other) => {
+                                self.handle_non_prompt_phase_command(
+                                    other,
+                                    session_id,
+                                    prompt_id,
+                                    "ignored_command_during_session_overrides",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        let override_result = match override_result {
+            Ok(result) => result,
+            Err(outcome) => {
+                let seconds = override_timeout.as_secs().max(1);
+                self.record_turn_end(&acp_session_id, session_id, "error", 0, None)
+                    .await;
+                self.emit(
+                    Some(session_id),
+                    Some(prompt_id),
+                    AgentEvent::SessionInvalidated {
+                        reason: "session_override_timeout".into(),
+                    },
+                );
+                self.fail_active_turn(
+                    session_id,
+                    prompt_id,
+                    AgentError::Runtime(format!(
+                        "ACP session overrides timed out after {seconds}s"
+                    )),
+                )
+                .await;
+                return Ok(outcome);
+            }
+        };
+        if let Err(error) = override_result {
             self.record_turn_end(&acp_session_id, session_id, "error", 0, None)
                 .await;
             let error_msg = error.to_string();
@@ -191,6 +304,7 @@ impl AgentConnectionRunner {
                             )
                             .await;
                             let had_turn_failure = turn_failure.is_some();
+                            let retire_after_graceful_close = graceful_adapter_close.is_some();
                             if let Some(error) = turn_failure {
                                 if error.code.as_deref() == Some("agent_connection_lost") {
                                     self.session_map.write().await.remove(&session_id);
@@ -289,19 +403,11 @@ impl AgentConnectionRunner {
                                             && !u.contains("api.anthropic.com")
                                             && !u.contains("api.openai.com")
                                     });
-                                let alias_targets = if self.snapshot.agent_id.as_str() == "claude_code" {
-                                    let mut merged_env = self.snapshot.launch_lock.env.clone();
-                                    merged_env.extend(self.snapshot.env.clone());
-                                    crate::end_turn_usage::collect_claude_model_aliases(&merged_env)
-                                } else {
-                                    std::collections::HashMap::new()
-                                };
                                 if let Some(mismatch) =
-                                    crate::end_turn_usage::check_launch_vs_served_model_with_aliases(
+                                    crate::end_turn_usage::check_launch_vs_served_model(
                                         requested_model.as_deref(),
                                         served_model.as_deref(),
                                         custom_base_url,
-                                        &alias_targets,
                                     )
                                 {
                                     self.emit(
@@ -326,6 +432,17 @@ impl AgentConnectionRunner {
                                     },
                                 },
                             );
+                            if retire_after_graceful_close {
+                                self.session_map.write().await.remove(&session_id);
+                                self.session_controls.write().await.remove(&session_id);
+                                self.emit_connection_status(
+                                    AgentConnectionStatus::Disconnected,
+                                    None,
+                                    Some(session_id),
+                                );
+                                *self.active_prompt.lock().await = None;
+                                return Ok(RunPromptOutcome::Closed);
+                            }
                         }
                         Err(error) => {
                             let err_usage = crate::usage_from_error_data(error.data.as_ref());
@@ -423,26 +540,36 @@ impl AgentConnectionRunner {
                     *self.active_prompt.lock().await = None;
                     return Ok(RunPromptOutcome::Settled);
                 }
-                // Idle watchdog. Silent turns end instead of sitting on
-                // "生成中". Permission, elicitation, and live terminals are
-                // exempt; inbound ACP traffic refreshes `last_activity`.
-                _ = async {
-                    if idle_timeout.is_some() {
-                        tokio::time::sleep(Duration::from_secs(2)).await;
-                    } else {
-                        std::future::pending::<()>().await;
-                    }
-                } => {
-                    let Some(idle_timeout) = idle_timeout else {
-                        continue;
-                    };
+                // Idle & silence-advisory watchdog. Emits `WaitingModel` once per
+                // 15s silence window so the UI clearly distinguishes stalled waits
+                // from active streaming, then ends truly silent turns on
+                // `idle_timeout`. Permission, elicitation, running tools, and live
+                // terminals are exempt.
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {
                     if turn_probe.has_running_tools() || prompt_idle_watchdog_blocked(
                         self.has_pending_permission_for(session_id).await,
                         self.has_pending_elicitation_for(session_id).await,
                         self.has_running_terminal_for(session_id).await,
                     ) {
+                        turn_probe.note_progress();
                         continue;
                     }
+                    if turn_probe.should_emit_waiting_model(SILENT_WAIT_ADVISORY_THRESHOLD) {
+                        turn_probe.mark_waiting_model_emitted();
+                        self.emit(
+                            Some(session_id),
+                            Some(prompt_id),
+                            AgentEvent::RequestActivity {
+                                prompt_id,
+                                activity: crate::request_status::RequestActivity::phase(
+                                    crate::request_status::RequestPhase::WaitingModel,
+                                ),
+                            },
+                        );
+                    }
+                    let Some(idle_timeout) = idle_timeout else {
+                        continue;
+                    };
                     let elapsed = self.last_activity.lock().await.elapsed();
                     if elapsed < idle_timeout {
                         continue;
@@ -575,15 +702,11 @@ impl AgentConnectionRunner {
                                                     );
                                                 }
                                                 Some(other) => {
-                                                    self.emit(
-                                                        Some(session_id),
-                                                        Some(prompt_id),
-                                                        AgentEvent::RawAcpDiagnostic {
-                                                            raw: serde_json::json!({
-                                                                "kind": "ignored_command_during_cancel_handshake",
-                                                                "command": format!("{other:?}"),
-                                                            }),
-                                                        },
+                                                    self.handle_non_prompt_phase_command(
+                                                        other,
+                                                        session_id,
+                                                        prompt_id,
+                                                        "ignored_command_during_cancel_handshake",
                                                     );
                                                 }
                                             }
@@ -773,67 +896,31 @@ impl AgentConnectionRunner {
                             // The user acted — treat as activity so the watchdog
                             // doesn't fire on the freshly-resumed turn.
                             *self.last_activity.lock().await = Instant::now();
+                            turn_probe.note_progress();
                             self.respond_pending_permission(&permission_id, response).await;
                         }
                         Some(AgentConnectionCommand::SetAutoApproveMode { mode }) => {
                             *self.last_activity.lock().await = Instant::now();
+                            turn_probe.note_progress();
                             self.set_connection_auto_approve_mode(mode).await;
                         }
                         Some(AgentConnectionCommand::RespondElicitation { elicitation_id, response }) => {
                             *self.last_activity.lock().await = Instant::now();
+                            turn_probe.note_progress();
                             self.respond_pending_elicitation(&elicitation_id, response).await;
                         }
-                        Some(AgentConnectionCommand::ForkSession { result_tx, .. }) => {
-                            // A fork can't be taken mid-turn: the session state is
-                            // actively mutating, so we'd branch a partial context.
-                            // Answer the waiting caller with an accurate error instead
-                            // of dropping result_tx (a dropped sender surfaces as the
-                            // misleading "connection closed before session fork").
-                            let _ = result_tx.send(Err(AgentError::Runtime(
-                                "cannot fork the session while a turn is in progress; wait for it to finish"
-                                    .into(),
-                            )));
-                        }
-                        Some(AgentConnectionCommand::ListSessions { result_tx, .. }) => {
-                            let _ = result_tx.send(Err(AgentError::Runtime(
-                                "cannot list sessions while a turn is in progress".into(),
-                            )));
-                        }
-                        Some(AgentConnectionCommand::DeleteSession { result_tx, .. }) => {
-                            let _ = result_tx.send(Err(AgentError::Runtime(
-                                "cannot delete a session while a turn is in progress".into(),
-                            )));
-                        }
-                        Some(AgentConnectionCommand::SetSessionMode { result_tx, .. })
-                        | Some(AgentConnectionCommand::SetSessionConfigOption { result_tx, .. }) => {
-                            // Applying these mid-turn would block this loop on a
-                            // request the agent may not answer until the turn ends.
-                            // Reject; the caller keeps the choice as a next-turn
-                            // override instead.
-                            let _ = result_tx.send(Err(AgentError::Runtime(
-                                "cannot change session settings while a turn is in progress; the choice will apply on the next turn"
-                                    .into(),
-                            )));
-                        }
-                        Some(AgentConnectionCommand::PrepareSession { result_tx, .. }) => {
-                            let _ = result_tx.send(Err(AgentError::Runtime(
-                                "cannot prepare a session while a turn is in progress".into(),
-                            )));
-                        }
-                        Some(AgentConnectionCommand::ResumeSession { result_tx, .. }) => {
-                            let _ = result_tx.send(Err(AgentError::Runtime(
-                                "cannot resume a session while a turn is in progress".into(),
-                            )));
-                        }
-                        Some(AgentConnectionCommand::DiscardSession { result_tx, .. }) => {
-                            let _ = result_tx.send(Err(AgentError::Runtime(
-                                "cannot discard a session while a turn is in progress".into(),
-                            )));
-                        }
-                        Some(AgentConnectionCommand::RollbackTurns { result_tx, .. }) => {
-                            let _ = result_tx.send(Err(AgentError::Runtime(
-                                "cannot rollback turns while a turn is in progress".into(),
-                            )));
+                        Some(
+                            cmd @ (AgentConnectionCommand::ForkSession { .. }
+                            | AgentConnectionCommand::ListSessions { .. }
+                            | AgentConnectionCommand::DeleteSession { .. }
+                            | AgentConnectionCommand::SetSessionMode { .. }
+                            | AgentConnectionCommand::SetSessionConfigOption { .. }
+                            | AgentConnectionCommand::PrepareSession { .. }
+                            | AgentConnectionCommand::ResumeSession { .. }
+                            | AgentConnectionCommand::DiscardSession { .. }
+                            | AgentConnectionCommand::RollbackTurns { .. }),
+                        ) => {
+                            let _ = Self::reject_busy_turn_command(cmd);
                         }
                         Some(AgentConnectionCommand::GoalControl {
                             session_id: control_session,
@@ -882,6 +969,145 @@ impl AgentConnectionRunner {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    fn reject_busy_turn_command(
+        command: AgentConnectionCommand,
+    ) -> Option<AgentConnectionCommand> {
+        match command {
+            AgentConnectionCommand::ForkSession { result_tx, .. } => {
+                // A fork can't be taken mid-turn: the session state is
+                // actively mutating, so we'd branch a partial context.
+                // Answer the waiting caller with an accurate error instead
+                // of dropping result_tx (a dropped sender surfaces as the
+                // misleading "connection closed before session fork").
+                let _ = result_tx.send(Err(AgentError::Runtime(
+                    "cannot fork the session while a turn is in progress; wait for it to finish"
+                        .into(),
+                )));
+                None
+            }
+            AgentConnectionCommand::ListSessions { result_tx, .. } => {
+                let _ = result_tx.send(Err(AgentError::Runtime(
+                    "cannot list sessions while a turn is in progress".into(),
+                )));
+                None
+            }
+            AgentConnectionCommand::DeleteSession { result_tx, .. } => {
+                let _ = result_tx.send(Err(AgentError::Runtime(
+                    "cannot delete a session while a turn is in progress".into(),
+                )));
+                None
+            }
+            AgentConnectionCommand::SetSessionMode { result_tx, .. }
+            | AgentConnectionCommand::SetSessionConfigOption { result_tx, .. } => {
+                // Applying these mid-turn would block this loop on a
+                // request the agent may not answer until the turn ends.
+                // Reject; the caller keeps the choice as a next-turn
+                // override instead.
+                let _ = result_tx.send(Err(AgentError::Runtime(
+                    "cannot change session settings while a turn is in progress; the choice will apply on the next turn"
+                        .into(),
+                )));
+                None
+            }
+            AgentConnectionCommand::PrepareSession { result_tx, .. } => {
+                let _ = result_tx.send(Err(AgentError::Runtime(
+                    "cannot prepare a session while a turn is in progress".into(),
+                )));
+                None
+            }
+            AgentConnectionCommand::ResumeSession { result_tx, .. } => {
+                let _ = result_tx.send(Err(AgentError::Runtime(
+                    "cannot resume a session while a turn is in progress".into(),
+                )));
+                None
+            }
+            AgentConnectionCommand::DiscardSession { result_tx, .. } => {
+                let _ = result_tx.send(Err(AgentError::Runtime(
+                    "cannot discard a session while a turn is in progress".into(),
+                )));
+                None
+            }
+            AgentConnectionCommand::RollbackTurns { result_tx, .. } => {
+                let _ = result_tx.send(Err(AgentError::Runtime(
+                    "cannot rollback turns while a turn is in progress".into(),
+                )));
+                None
+            }
+            other => Some(other),
+        }
+    }
+
+    pub(crate) fn handle_non_prompt_phase_command(
+        &self,
+        command: AgentConnectionCommand,
+        session_id: AgentSessionId,
+        prompt_id: AgentPromptId,
+        diagnostic_kind: &str,
+    ) {
+        match command {
+            cmd @ (AgentConnectionCommand::ForkSession { .. }
+            | AgentConnectionCommand::ListSessions { .. }
+            | AgentConnectionCommand::DeleteSession { .. }
+            | AgentConnectionCommand::SetSessionMode { .. }
+            | AgentConnectionCommand::SetSessionConfigOption { .. }
+            | AgentConnectionCommand::PrepareSession { .. }
+            | AgentConnectionCommand::ResumeSession { .. }
+            | AgentConnectionCommand::DiscardSession { .. }
+            | AgentConnectionCommand::RollbackTurns { .. }) => {
+                let _ = Self::reject_busy_turn_command(cmd);
+            }
+            AgentConnectionCommand::Steer { result_tx, .. } => {
+                let _ = result_tx.send(Err(AgentError::Runtime(
+                    "cannot steer while a turn is in progress".into(),
+                )));
+            }
+            AgentConnectionCommand::GoalControl { result_tx, .. } => {
+                let _ = result_tx.send(Err(AgentError::Runtime(
+                    "cannot control session goals while a turn is in progress".into(),
+                )));
+            }
+            AgentConnectionCommand::StopAsyncTask { result_tx, .. } => {
+                let _ = result_tx.send(Err(AgentError::Runtime(
+                    "cannot stop an async task while a turn is in progress".into(),
+                )));
+            }
+            AgentConnectionCommand::Cancel {
+                session_id: cancel_session,
+                prompt_id: cancel_prompt,
+                result_tx,
+            } => {
+                let _ = result_tx.send(true);
+                self.emit(
+                    Some(session_id),
+                    Some(prompt_id),
+                    AgentEvent::RawAcpDiagnostic {
+                        raw: serde_json::json!({
+                            "kind": "ignored_cancel_for_inactive_prompt",
+                            "cancel_session_id": cancel_session,
+                            "cancel_prompt_id": cancel_prompt,
+                        }),
+                    },
+                );
+            }
+            other @ (AgentConnectionCommand::Prompt { .. }
+            | AgentConnectionCommand::Disconnect
+            | AgentConnectionCommand::RespondPermission { .. }
+            | AgentConnectionCommand::SetAutoApproveMode { .. }
+            | AgentConnectionCommand::RespondElicitation { .. }) => {
+                self.emit(
+                    Some(session_id),
+                    Some(prompt_id),
+                    AgentEvent::RawAcpDiagnostic {
+                        raw: serde_json::json!({
+                            "kind": diagnostic_kind,
+                            "command": format!("{other:?}"),
+                        }),
+                    },
+                );
             }
         }
     }

@@ -35,16 +35,19 @@ struct PendingBatch {
 
 #[derive(Default)]
 struct ConversationCoalesceSlot {
+    generation: u64,
     next_allowed_at: Option<Instant>,
     pending: Option<PendingBatch>,
 }
 
 impl ConversationCoalesceSlot {
-    fn take_pending_for_flush(&mut self) -> Option<(ConversationRowOpBatch, bool)> {
+    fn take_pending_for_flush(&mut self, abort_timer: bool) -> Option<(ConversationRowOpBatch, bool)> {
         let mut pending = self.pending.take()?;
         pending.pending_updates = 0;
         pending.pending_bytes = 0;
-        if let Some(abort) = pending.timer_abort.take() {
+        if let Some(abort) = pending.timer_abort.take()
+            && abort_timer
+        {
             abort.abort();
         }
         Some((pending.batch, pending.emit_global))
@@ -56,7 +59,7 @@ pub struct LiveRowOpCoalescer {
     window: Duration,
     max_pending_updates: usize,
     max_pending_bytes: usize,
-    slots: Arc<Mutex<HashMap<Uuid, ConversationCoalesceSlot>>>,
+    slots: Arc<Mutex<HashMap<Uuid, Arc<Mutex<ConversationCoalesceSlot>>>>>,
 }
 
 impl LiveRowOpCoalescer {
@@ -92,6 +95,61 @@ impl LiveRowOpCoalescer {
         }
     }
 
+    fn slot_for(
+        &self,
+        conversation_id: Uuid,
+        prune_now: Option<Instant>,
+    ) -> Arc<Mutex<ConversationCoalesceSlot>> {
+        let mut slots = self
+            .slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(now) = prune_now
+            && slots.len() > 64
+        {
+            slots.retain(|id, slot_arc| {
+                if *id == conversation_id || Arc::strong_count(slot_arc) > 1 {
+                    return true;
+                }
+                match slot_arc.try_lock() {
+                    Ok(slot) => {
+                        slot.pending.is_some()
+                            || slot.next_allowed_at.is_some_and(|deadline| deadline > now)
+                    }
+                    Err(_) => true,
+                }
+            });
+        }
+        Arc::clone(
+            slots
+                .entry(conversation_id)
+                .or_insert_with(|| Arc::new(Mutex::new(ConversationCoalesceSlot::default()))),
+        )
+    }
+
+    /// Prune an idle slot only after the caller has released `slot_arc`'s lock so
+    /// lock ordering is strictly `self.slots` -> `slot_arc.try_lock()`.
+    fn maybe_remove_slot_if_idle(
+        &self,
+        conversation_id: Uuid,
+        slot_arc: &Arc<Mutex<ConversationCoalesceSlot>>,
+    ) {
+        let mut slots = self
+            .slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let should_remove = slots.get(&conversation_id).is_some_and(|existing| {
+            Arc::ptr_eq(existing, slot_arc)
+                && Arc::strong_count(existing) == 2
+                && existing
+                    .try_lock()
+                    .is_ok_and(|slot| slot.pending.is_none() && slot.next_allowed_at.is_none())
+        });
+        if should_remove {
+            slots.remove(&conversation_id);
+        }
+    }
+
     /// Submit a batch to the coalescer.
     ///
     /// - `immediate_barrier`: `true` for `reset: true`, terminal turn transitions, `Delete` ops,
@@ -107,159 +165,165 @@ impl LiveRowOpCoalescer {
         is_streaming: bool,
     ) {
         if batch.reset {
-            let reset_batch = {
-                let mut slots = self
-                    .slots
+            let slot_arc = self.slot_for(conversation_id, None);
+            {
+                let mut slot = slot_arc
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if let Some(mut slot) = slots.remove(&conversation_id) {
-                    let _ = slot.take_pending_for_flush();
-                }
-                batch
-            };
-            self.emit_now(conversation_id, &reset_batch, true);
+                let _ = slot.take_pending_for_flush(true);
+                slot.next_allowed_at = None;
+                slot.generation = slot.generation.wrapping_add(1);
+                self.emit_now(conversation_id, &batch, true);
+            }
+            self.maybe_remove_slot_if_idle(conversation_id, &slot_arc);
             return;
         }
 
         let immediate_barrier = immediate_barrier || batch.ops.iter().any(is_barrier_op);
         if immediate_barrier || !is_streaming {
-            let to_emit = {
-                let mut slots = self
-                    .slots
+            let slot_arc = self.slot_for(conversation_id, None);
+            {
+                let mut slot = slot_arc
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let slot = slots.entry(conversation_id).or_default();
                 if immediate_barrier {
                     slot.next_allowed_at = None;
                 }
-                let result = if let Some((mut pending_batch, pending_global)) =
-                    slot.take_pending_for_flush()
+                let (out_batch, out_global) = if let Some((mut pending_batch, pending_global)) =
+                    slot.take_pending_for_flush(true)
                 {
                     merge_into_batch(&mut pending_batch, batch);
                     (pending_batch, pending_global || emit_global)
                 } else {
                     (batch, emit_global)
                 };
-                if immediate_barrier {
-                    slots.remove(&conversation_id);
-                }
-                result
-            };
-            self.emit_now(conversation_id, &to_emit.0, to_emit.1);
+                slot.generation = slot.generation.wrapping_add(1);
+                self.emit_now(conversation_id, &out_batch, out_global);
+            }
+            if immediate_barrier {
+                self.maybe_remove_slot_if_idle(conversation_id, &slot_arc);
+            }
             return;
         }
 
         let now = Instant::now();
         let incoming_weight = batch.ops.len().max(1);
         let incoming_bytes = estimate_batch_ops_bytes(&batch.ops);
-        let immediate_emit = {
-            let mut slots = self
-                .slots
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if slots.len() > 64 {
-                slots.retain(|id, slot| {
-                    *id == conversation_id
-                        || slot.pending.is_some()
-                        || slot.next_allowed_at.is_some_and(|deadline| deadline > now)
+        let slot_arc = self.slot_for(conversation_id, Some(now));
+        let mut slot = slot_arc
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // Leading-edge emission when outside the 16ms window and nothing is buffered.
+        let window_open = slot.next_allowed_at.is_none_or(|deadline| now >= deadline);
+        if window_open && slot.pending.is_none() {
+            slot.next_allowed_at = Some(now + self.window);
+            slot.generation = slot.generation.wrapping_add(1);
+            self.emit_now(conversation_id, &batch, emit_global);
+            return;
+        }
+
+        let deadline = slot.next_allowed_at.unwrap_or(now + self.window);
+        if slot.next_allowed_at.is_none() {
+            slot.next_allowed_at = Some(deadline);
+        }
+
+        match slot.pending.as_mut() {
+            Some(pending) => {
+                merge_into_batch(&mut pending.batch, batch);
+                pending.emit_global |= emit_global;
+                pending.pending_updates = pending.pending_updates.saturating_add(incoming_weight);
+                pending.pending_bytes = pending.pending_bytes.saturating_add(incoming_bytes);
+            }
+            None => {
+                slot.pending = Some(PendingBatch {
+                    batch,
+                    emit_global,
+                    pending_updates: incoming_weight,
+                    pending_bytes: incoming_bytes,
+                    timer_abort: None,
                 });
             }
-            let slot = slots.entry(conversation_id).or_default();
+        }
 
-            // Leading-edge emission when outside the 16ms window and nothing is buffered.
-            let window_open = slot.next_allowed_at.is_none_or(|deadline| now >= deadline);
-            if window_open && slot.pending.is_none() {
-                slot.next_allowed_at = Some(now + self.window);
-                Some((batch, emit_global))
-            } else {
-                let deadline = slot.next_allowed_at.unwrap_or(now + self.window);
-                if slot.next_allowed_at.is_none() {
-                    slot.next_allowed_at = Some(deadline);
-                }
-
-                match slot.pending.as_mut() {
-                    Some(pending) => {
-                        merge_into_batch(&mut pending.batch, batch);
-                        pending.emit_global |= emit_global;
-                        pending.pending_updates =
-                            pending.pending_updates.saturating_add(incoming_weight);
-                        pending.pending_bytes =
-                            pending.pending_bytes.saturating_add(incoming_bytes);
-                    }
-                    None => {
-                        slot.pending = Some(PendingBatch {
-                            batch,
-                            emit_global,
-                            pending_updates: incoming_weight,
-                            pending_bytes: incoming_bytes,
-                            timer_abort: None,
-                        });
-                    }
-                }
-
-                let over_cap = slot.pending.as_ref().is_some_and(|p| {
-                    p.pending_updates >= self.max_pending_updates
-                        || p.pending_bytes >= self.max_pending_bytes
-                });
-                if over_cap {
-                    let flushed = slot.take_pending_for_flush().expect("pending exists");
-                    slot.next_allowed_at = Some(now + self.window);
-                    Some(flushed)
-                } else {
-                    if let Some(pending) = slot.pending.as_mut()
-                        && pending.timer_abort.is_none()
-                    {
-                        let abort = self.spawn_flush_timer(conversation_id, deadline);
-                        pending.timer_abort = Some(abort);
-                    }
-                    None
-                }
-            }
-        };
-
-        if let Some((out_batch, out_global)) = immediate_emit {
+        let over_cap = slot.pending.as_ref().is_some_and(|p| {
+            p.pending_updates >= self.max_pending_updates
+                || p.pending_bytes >= self.max_pending_bytes
+        });
+        if over_cap {
+            let (out_batch, out_global) = slot
+                .take_pending_for_flush(true)
+                .expect("pending exists");
+            slot.next_allowed_at = Some(now + self.window);
+            slot.generation = slot.generation.wrapping_add(1);
             self.emit_now(conversation_id, &out_batch, out_global);
+        } else {
+            let expected_generation = slot.generation;
+            if let Some(pending) = slot.pending.as_mut()
+                && pending.timer_abort.is_none()
+            {
+                let abort = self.spawn_flush_timer(
+                    conversation_id,
+                    Arc::clone(&slot_arc),
+                    expected_generation,
+                    deadline,
+                );
+                pending.timer_abort = Some(abort);
+            }
         }
     }
 
     /// Flush any buffered ops for `conversation_id` immediately (used before session detach/close).
     pub fn flush_conversation(&self, conversation_id: Uuid) {
-        let pending = {
-            let mut slots = self
+        let slot_arc = {
+            let slots = self
                 .slots
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            slots
-                .remove(&conversation_id)
-                .and_then(|mut slot| slot.take_pending_for_flush())
+            slots.get(&conversation_id).cloned()
         };
-        if let Some((batch, emit_global)) = pending {
-            self.emit_now(conversation_id, &batch, emit_global);
+        let Some(slot_arc) = slot_arc else {
+            return;
+        };
+        {
+            let mut slot = slot_arc
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            slot.next_allowed_at = None;
+            let pending = slot.take_pending_for_flush(true);
+            slot.generation = slot.generation.wrapping_add(1);
+            if let Some((batch, emit_global)) = pending {
+                self.emit_now(conversation_id, &batch, emit_global);
+            }
         }
+        self.maybe_remove_slot_if_idle(conversation_id, &slot_arc);
     }
 
-    fn spawn_flush_timer(&self, conversation_id: Uuid, deadline: Instant) -> AbortHandle {
-        let slots = Arc::clone(&self.slots);
+    fn spawn_flush_timer(
+        &self,
+        conversation_id: Uuid,
+        slot_arc: Arc<Mutex<ConversationCoalesceSlot>>,
+        expected_generation: u64,
+        deadline: Instant,
+    ) -> AbortHandle {
         let sink = Arc::clone(&self.sink);
         let window = self.window;
         tokio::spawn(async move {
             tokio::time::sleep_until(deadline).await;
-            let ready = {
-                let mut guard = slots
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let Some(slot) = guard.get_mut(&conversation_id) else {
-                    return;
-                };
-                let Some(flushed) = slot.take_pending_for_flush() else {
-                    return;
-                };
-                slot.next_allowed_at = Some(Instant::now() + window);
-                flushed
+            let mut slot = slot_arc
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if slot.generation != expected_generation {
+                return;
+            }
+            let Some((batch, emit_global)) = slot.take_pending_for_flush(false) else {
+                return;
             };
-            sink.emit_conversation_batch(conversation_id, &ready.0);
-            if ready.1 {
-                sink.emit_global_batch(&ready.0);
+            slot.generation = slot.generation.wrapping_add(1);
+            slot.next_allowed_at = Some(Instant::now() + window);
+            sink.emit_conversation_batch(conversation_id, &batch);
+            if emit_global {
+                sink.emit_global_batch(&batch);
             }
         })
         .abort_handle()
@@ -1023,5 +1087,163 @@ mod tests {
             2,
             "pending_bytes reset to 0 after flush so small follow-up stays buffered"
         );
+    }
+
+    struct BlockingOnSeqSink {
+        pause_on_seq: i64,
+        paused_tx: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
+        release_rx: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        emitted: Arc<Mutex<Vec<ConversationRowOpBatch>>>,
+    }
+
+    impl ConversationEventSink for BlockingOnSeqSink {
+        fn emit_conversation_batch(&self, _cid: Uuid, batch: &ConversationRowOpBatch) {
+            if batch.last_sequence == self.pause_on_seq
+                && !batch.reset
+                && let Some(tx) = self.paused_tx.lock().unwrap().take()
+            {
+                let _ = tx.send(());
+                if let Some(rx) = self.release_rx.lock().unwrap().take() {
+                    let _ = rx.recv_timeout(Duration::from_secs(2));
+                }
+            }
+            self.emitted.lock().unwrap().push(batch.clone());
+        }
+
+        fn emit_global_batch(&self, _batch: &ConversationRowOpBatch) {}
+
+        fn emit_workspaces_sessions_changed(
+            &self,
+            _payload: crate::live_pipeline::WorkspaceSessionsChanged,
+        ) {
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timer_flush_never_emits_after_reset_barrier_or_flush() {
+        for mode in ["reset", "immediate_barrier", "flush_conversation"] {
+            let cid = Uuid::new_v4();
+            let emitted = Arc::new(Mutex::new(Vec::new()));
+            let (paused_tx, paused_rx) = std::sync::mpsc::sync_channel(1);
+            let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+            let sink = Arc::new(BlockingOnSeqSink {
+                pause_on_seq: 2,
+                paused_tx: Mutex::new(Some(paused_tx)),
+                release_rx: Mutex::new(Some(release_rx)),
+                emitted: Arc::clone(&emitted),
+            });
+            let coalescer = Arc::new(LiveRowOpCoalescer::with_config(
+                sink,
+                Duration::from_millis(15),
+                16,
+            ));
+
+            // seq 1: leading edge
+            coalescer.submit(
+                cid,
+                empty_batch(
+                    cid,
+                    0,
+                    1,
+                    vec![ConversationRowOp::AppendText {
+                        row_id: "t1:assistant".into(),
+                        revision: 1,
+                        stream: TimelineTextStream::Text,
+                        delta: "lead".into(),
+                    }],
+                ),
+                false,
+                false,
+                true,
+            );
+            // seq 2: buffered, arms timer
+            coalescer.submit(
+                cid,
+                empty_batch(
+                    cid,
+                    1,
+                    2,
+                    vec![ConversationRowOp::AppendText {
+                        row_id: "t1:assistant".into(),
+                        revision: 2,
+                        stream: TimelineTextStream::Text,
+                        delta: "buffered".into(),
+                    }],
+                ),
+                false,
+                false,
+                true,
+            );
+
+            // Wait until the timer task has fired and entered emit_conversation_batch(seq=2).
+            paused_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("timer flush should start");
+
+            let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+            let c2 = Arc::clone(&coalescer);
+            let handle = std::thread::spawn(move || {
+                match mode {
+                    "reset" => {
+                        let mut reset = empty_batch(cid, 2, 1, vec![]);
+                        reset.reset = true;
+                        c2.submit(cid, reset, true, true, false);
+                    }
+                    "immediate_barrier" => {
+                        c2.submit(
+                            cid,
+                            empty_batch(
+                                cid,
+                                2,
+                                3,
+                                vec![ConversationRowOp::Delete {
+                                    row_id: "t1:assistant".into(),
+                                    revision: 3,
+                                }],
+                            ),
+                            true,
+                            true,
+                            false,
+                        );
+                    }
+                    "flush_conversation" => {
+                        c2.flush_conversation(cid);
+                    }
+                    _ => unreachable!(),
+                }
+                let _ = done_tx.send(());
+            });
+
+            // While the timer holds the per-conversation emit lock, the concurrent
+            // reset / barrier / flush must NOT overtake it and finish early.
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(40)).is_err(),
+                "{mode} must wait for in-flight timer emission instead of overtaking it"
+            );
+
+            // Let the timer finish emitting seq=2.
+            release_tx.send(()).expect("release timer");
+            handle.join().expect("join concurrent caller");
+
+            let batches = emitted.lock().unwrap().clone();
+            match mode {
+                "reset" => {
+                    assert_eq!(batches.len(), 3, "expected seq1, timer seq2, then reset");
+                    assert_eq!(batches[1].last_sequence, 2);
+                    assert!(!batches[1].reset);
+                    assert!(batches[2].reset, "reset must be the final batch");
+                }
+                "immediate_barrier" => {
+                    assert_eq!(batches.len(), 3, "expected seq1, timer seq2, then barrier seq3");
+                    assert_eq!(batches[1].last_sequence, 2);
+                    assert_eq!(batches[2].last_sequence, 3);
+                }
+                "flush_conversation" => {
+                    assert_eq!(batches.len(), 2, "flush_conversation waited for timer seq2");
+                    assert_eq!(batches[1].last_sequence, 2);
+                }
+                _ => unreachable!(),
+            }
+        }
     }
 }

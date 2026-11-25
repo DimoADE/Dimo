@@ -1366,3 +1366,214 @@ fn pinned_projector_survives_lru_eviction() {
         "after unpinning, cache should evict normally"
     );
 }
+
+#[tokio::test]
+async fn lightweight_snapshot_hydration_preserves_denied_tool_calls() {
+    use agents::{
+        AgentPermissionId, AgentPermissionOption, AgentPermissionOptionKind,
+        AgentPermissionRequest, AgentPermissionResponse, AgentSessionId,
+        conversation::{
+            ConversationPermissionRequest, ConversationPermissionResponse, TimelineRow,
+        },
+    };
+    use db::models::conversation_snapshot::ConversationProjectionSnapshotRecord;
+
+    let pool = setup_pool().await;
+    let (conversation_id, turn_id) = seed_turn(&pool).await;
+
+    append_event(
+        &pool,
+        conversation_id,
+        Some(turn_id),
+        "user",
+        ConversationEvent::UserTurnCreated {
+            blocks: vec![ConversationInputBlock::Text {
+                text: "run dangerous tool".into(),
+            }],
+            workflow_refs: Vec::new(),
+        },
+        None,
+    )
+    .await;
+    append_event(
+        &pool,
+        conversation_id,
+        Some(turn_id),
+        "acp",
+        ConversationEvent::ToolCallUpsert {
+            tool_call: ConversationToolCallPatch {
+                tool_call_id: "call-deny-1".into(),
+                title: Some("Bash".into()),
+                kind: Some("execute".into()),
+                status: Some("running".into()),
+                raw_input: Some(serde_json::json!({ "cmd": "rm -rf /tmp/x" })),
+                raw_output: None,
+                raw_output_append: None,
+                content: None,
+                locations: None,
+                metadata: None,
+                images: Vec::new(),
+            },
+        },
+        None,
+    )
+    .await;
+    append_event(
+        &pool,
+        conversation_id,
+        Some(turn_id),
+        "acp",
+        ConversationEvent::PermissionRequested {
+            request: ConversationPermissionRequest {
+                permission_id: "perm-deny-1".into(),
+                request: AgentPermissionRequest {
+                    id: AgentPermissionId::new(),
+                    session_id: AgentSessionId::new(),
+                    title: "Allow Bash?".into(),
+                    details: Some(serde_json::json!({ "toolCallId": "call-deny-1" })),
+                    options: vec![AgentPermissionOption {
+                        id: "reject".into(),
+                        label: "Reject".into(),
+                        kind: AgentPermissionOptionKind::RejectOnce,
+                        description: None,
+                    }],
+                    revision: 1,
+                },
+            },
+        },
+        None,
+    )
+    .await;
+    let perm_record = append_event(
+        &pool,
+        conversation_id,
+        Some(turn_id),
+        "user",
+        ConversationEvent::PermissionResponded {
+            permission_id: "perm-deny-1".into(),
+            response: ConversationPermissionResponse {
+                response: AgentPermissionResponse::selected("reject"),
+                auto: false,
+            },
+        },
+        None,
+    )
+    .await;
+
+    // Persist a lightweight (full_fold == false) snapshot at perm_record.sequence.
+    let full_at_perm = ConversationProjector::fold(&pool, conversation_id)
+        .await
+        .expect("fold at permission response");
+    assert!(full_at_perm.denied_tool_calls.contains("call-deny-1"));
+    let light_state = full_at_perm.to_lightweight_snapshot_state(&std::collections::BTreeMap::new());
+    assert!(!light_state.full_fold);
+    assert!(light_state.denied_tool_calls.contains("call-deny-1"));
+    let light_json = serde_json::to_string(&light_state).expect("serialize lightweight snapshot");
+    ConversationProjectionSnapshotRecord::upsert(
+        &pool,
+        conversation_id,
+        crate::projection::CONVERSATION_PROJECTION_VERSION as i64,
+        perm_record.sequence,
+        &light_json,
+        full_at_perm.timeline_rows().len() as i64,
+        None,
+    )
+    .await
+    .expect("upsert lightweight snapshot");
+
+    // Evict write-side projector cache so the next append hydrates from the lightweight snapshot.
+    super::evict_write_projector_for_tests(conversation_id);
+
+    // Also load a read-side IncrementalRowProjector from the same lightweight snapshot.
+    let mut read_projector =
+        IncrementalRowProjector::load(&pool, conversation_id, perm_record.sequence)
+            .await
+            .expect("load read projector from lightweight snapshot");
+    assert!(
+        read_projector.denied_tool_calls().contains("call-deny-1"),
+        "read-side lightweight hydration must preserve denied_tool_calls"
+    );
+
+    // Now the agent emits a follow-up ToolCallUpsert with status = "failed" for the denied tool.
+    let failed_record = append_event(
+        &pool,
+        conversation_id,
+        Some(turn_id),
+        "acp",
+        ConversationEvent::ToolCallUpsert {
+            tool_call: ConversationToolCallPatch {
+                tool_call_id: "call-deny-1".into(),
+                title: Some("Bash".into()),
+                kind: Some("execute".into()),
+                status: Some("failed".into()),
+                raw_input: None,
+                raw_output: Some(serde_json::json!({ "error": "rejected" })),
+                raw_output_append: None,
+                content: None,
+                locations: None,
+                metadata: None,
+                images: Vec::new(),
+            },
+        },
+        None,
+    )
+    .await;
+
+    let find_tool_status = |blocks: &[ContentBlock]| {
+        blocks.iter().find_map(|block| match block {
+            ContentBlock::ToolUse {
+                tool_use_id,
+                status,
+                ..
+            } if tool_use_id.as_deref() == Some("call-deny-1") => status.clone(),
+            _ => None,
+        })
+    };
+
+    // 1. Verify read-side IncrementalRowProjector emits status = "denied".
+    let read_ops = read_projector
+        .apply(&failed_record)
+        .expect("apply failed tool call on read projector");
+    let read_status = read_ops.iter().find_map(|op| match op {
+        ConversationRowOp::Upsert { row } if row.row_id == format!("{turn_id}:assistant") => {
+            if let ConversationTimelineRow::MessageTurn { turn, .. } = &row.row {
+                find_tool_status(&turn.blocks)
+            } else {
+                None
+            }
+        }
+        ConversationRowOp::PatchBlocks { row_id, blocks, .. }
+            if row_id == &format!("{turn_id}:assistant") =>
+        {
+            find_tool_status(blocks)
+        }
+        _ => None,
+    });
+    assert_eq!(
+        read_status.as_deref(),
+        Some("denied"),
+        "read-side projector hydrated from lightweight snapshot must keep tool call status as denied"
+    );
+
+    // 2. Verify write-side materialized conversation_timeline_rows also projected status = "denied".
+    let assistant_row_json: String = sqlx::query_scalar(
+        "SELECT row_json FROM conversation_timeline_rows
+         WHERE conversation_id = ? AND row_id = ? AND deleted_sequence IS NULL",
+    )
+    .bind(conversation_id)
+    .bind(format!("{turn_id}:assistant"))
+    .fetch_one(&pool)
+    .await
+    .expect("materialized assistant row");
+    let assistant_row: TimelineRow =
+        serde_json::from_str(&assistant_row_json).expect("decode assistant row");
+    let write_status = match &assistant_row.row {
+        ConversationTimelineRow::MessageTurn { turn, .. } => find_tool_status(&turn.blocks),
+        other => panic!("expected MessageTurn, got {other:?}"),
+    };
+    assert_eq!(
+        write_status.as_deref(),
+        Some("denied"),
+        "write-side cache hydrated from lightweight snapshot must keep tool call status as denied"
+    );
+}

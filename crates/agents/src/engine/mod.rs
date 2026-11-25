@@ -14,6 +14,7 @@ pub mod muse;
 pub mod muse_events;
 pub mod muse_protocol;
 pub mod registry;
+pub(crate) mod server_pool;
 pub mod stream_router;
 
 use std::{
@@ -912,6 +913,20 @@ pub enum EngineEvent {
     PromptSteered {
         prompt_id: Option<String>,
         session_id: Option<String>,
+    },
+    RequestRetrying {
+        prompt_id: Option<String>,
+        session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_attempts: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delay_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
     },
     RateLimitsUpdated {
         session_id: Option<String>,

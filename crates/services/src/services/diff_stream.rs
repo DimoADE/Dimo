@@ -1,11 +1,8 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     io,
     path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -200,12 +197,75 @@ pub struct DiffStreamArgs {
     pub path_prefix: Option<String>,
 }
 
+#[derive(Default)]
+struct DiffBudgetTracker {
+    per_path_bytes: HashMap<String, usize>,
+    total_bytes: usize,
+}
+
+impl DiffBudgetTracker {
+    fn reset(&mut self) {
+        self.per_path_bytes.clear();
+        self.total_bytes = 0;
+    }
+
+    fn remove_path(&mut self, path: &str) {
+        if let Some(previous) = self.per_path_bytes.remove(path) {
+            self.total_bytes = self.total_bytes.saturating_sub(previous);
+        }
+    }
+
+    fn apply_policy_with_limit(
+        &mut self,
+        path: &str,
+        diff: &mut Diff,
+        stats_only: bool,
+        max_bytes: usize,
+    ) {
+        let previous = self.per_path_bytes.get(path).copied().unwrap_or(0);
+        let base_total = self.total_bytes.saturating_sub(previous);
+
+        if stats_only {
+            omit_diff_contents(diff);
+            self.per_path_bytes.remove(path);
+            self.total_bytes = base_total;
+            return;
+        }
+
+        let mut size = 0usize;
+        if let Some(ref s) = diff.old_content {
+            size += s.len();
+        }
+        if let Some(ref s) = diff.new_content {
+            size += s.len();
+        }
+
+        if size == 0 {
+            self.per_path_bytes.remove(path);
+            self.total_bytes = base_total;
+            return;
+        }
+
+        if base_total.saturating_add(size) > max_bytes {
+            omit_diff_contents(diff);
+            self.per_path_bytes.remove(path);
+            self.total_bytes = base_total;
+        } else {
+            self.per_path_bytes.insert(path.to_string(), size);
+            self.total_bytes = base_total.saturating_add(size);
+        }
+    }
+
+    fn apply_policy(&mut self, path: &str, diff: &mut Diff, stats_only: bool) {
+        self.apply_policy_with_limit(path, diff, stats_only, MAX_CUMULATIVE_DIFF_BYTES);
+    }
+}
+
 struct DiffStreamManager {
     args: DiffStreamArgs,
     tx: mpsc::Sender<Result<LogMsg, io::Error>>,
-    cumulative: Arc<AtomicUsize>,
+    budget: Arc<Mutex<DiffBudgetTracker>>,
     known_paths: Arc<std::sync::RwLock<HashSet<String>>>,
-    full_sent: Arc<std::sync::RwLock<HashSet<String>>>,
     current_base_commit: Commit,
     current_target_branch: String,
 }
@@ -241,9 +301,8 @@ impl DiffStreamManager {
             current_target_branch: args.target_branch.clone(),
             args,
             tx,
-            cumulative: Arc::new(AtomicUsize::new(0)),
+            budget: Arc::new(Mutex::new(DiffBudgetTracker::default())),
             known_paths: Arc::new(std::sync::RwLock::new(HashSet::new())),
-            full_sent: Arc::new(std::sync::RwLock::new(HashSet::new())),
         }
     }
 
@@ -253,13 +312,21 @@ impl DiffStreamManager {
         // Send Ready message to indicate initial data has been sent
         let _ready_error = self.tx.send(Ok(LogMsg::Ready)).await;
 
+        let worktree_for_fs = self.args.worktree_path.clone();
         let (fs_debouncer, mut fs_rx, canonical_worktree) =
-            filesystem_watcher::async_watcher(self.args.worktree_path.clone())
+            tokio::task::spawn_blocking(move || filesystem_watcher::async_watcher(worktree_for_fs))
+                .await?
                 .map_err(|e| io::Error::other(e.to_string()))?;
         let _fs_guard = fs_debouncer;
 
+        let git_for_watcher = self.args.git_service.clone();
+        let worktree_for_git = self.args.worktree_path.clone();
         let (git_debouncer, mut git_rx) =
-            match setup_git_watcher(&self.args.git_service, &self.args.worktree_path) {
+            match tokio::task::spawn_blocking(move || {
+                setup_git_watcher(&git_for_watcher, &worktree_for_git)
+            })
+            .await?
+            {
                 Some((d, rx)) => (Some(d), Some(rx)),
                 None => (None, None),
             };
@@ -320,8 +387,7 @@ impl DiffStreamManager {
             }
         }
 
-        self.cumulative.store(0, Ordering::Relaxed);
-        self.full_sent.write().unwrap().clear();
+        self.budget.lock().unwrap().reset();
 
         let diffs = self.fetch_diffs().await?;
         self.send_diffs(diffs).await?;
@@ -334,7 +400,7 @@ impl DiffStreamManager {
         let worktree = self.args.worktree_path.clone();
         let base = self.current_base_commit.clone();
         let stats_only = self.args.stats_only;
-        let cumulative = self.cumulative.clone();
+        let budget = self.budget.clone();
 
         tokio::task::spawn_blocking(move || {
             let diffs = git.get_diffs(
@@ -346,8 +412,10 @@ impl DiffStreamManager {
             )?;
 
             let mut processed_diffs = Vec::with_capacity(diffs.len());
+            let mut tracker = budget.lock().unwrap();
             for mut diff in diffs {
-                apply_stream_omit_policy(&mut diff, &cumulative, stats_only);
+                let raw_path = GitService::diff_path(&diff);
+                tracker.apply_policy(&raw_path, &mut diff, stats_only);
                 processed_diffs.push(diff);
             }
             Ok(processed_diffs)
@@ -361,11 +429,6 @@ impl DiffStreamManager {
 
             {
                 let mut guard = self.known_paths.write().unwrap();
-                guard.insert(raw_path.clone());
-            }
-
-            if !diff.content_omitted {
-                let mut guard = self.full_sent.write().unwrap();
                 guard.insert(raw_path.clone());
             }
 
@@ -402,8 +465,7 @@ impl DiffStreamManager {
         let git = self.args.git_service.clone();
         let worktree = self.args.worktree_path.clone();
         let base = self.current_base_commit.clone();
-        let cumulative = self.cumulative.clone();
-        let full_sent = self.full_sent.clone();
+        let budget = self.budget.clone();
         let known_paths = self.known_paths.clone();
         let stats_only = self.args.stats_only;
         let prefix = self.args.path_prefix.clone();
@@ -415,8 +477,7 @@ impl DiffStreamManager {
                 &worktree,
                 &base,
                 &changed_paths,
-                &cumulative,
-                &full_sent,
+                &budget,
                 &known_paths,
                 stats_only,
                 prefix.as_deref(),
@@ -489,32 +550,6 @@ fn prefix_path(path: String, prefix: Option<&str>) -> String {
     }
 }
 
-pub fn apply_stream_omit_policy(diff: &mut Diff, sent_bytes: &Arc<AtomicUsize>, stats_only: bool) {
-    if stats_only {
-        omit_diff_contents(diff);
-        return;
-    }
-
-    let mut size = 0usize;
-    if let Some(ref s) = diff.old_content {
-        size += s.len();
-    }
-    if let Some(ref s) = diff.new_content {
-        size += s.len();
-    }
-
-    if size == 0 {
-        return;
-    }
-
-    let current = sent_bytes.load(Ordering::Relaxed);
-    if current.saturating_add(size) > MAX_CUMULATIVE_DIFF_BYTES {
-        omit_diff_contents(diff);
-    } else {
-        let _ = sent_bytes.fetch_add(size, Ordering::Relaxed);
-    }
-}
-
 fn omit_diff_contents(diff: &mut Diff) {
     if diff.additions.is_none()
         && diff.deletions.is_none()
@@ -556,8 +591,7 @@ fn process_file_changes(
     worktree_path: &Path,
     base_commit: &Commit,
     changed_paths: &[String],
-    cumulative_bytes: &Arc<AtomicUsize>,
-    full_sent_paths: &Arc<std::sync::RwLock<HashSet<String>>>,
+    budget: &Arc<Mutex<DiffBudgetTracker>>,
     known_paths: &Arc<std::sync::RwLock<HashSet<String>>>,
     stats_only: bool,
     path_prefix: Option<&str>,
@@ -584,16 +618,10 @@ fn process_file_changes(
             guard.insert(raw_file_path.clone());
         }
 
-        apply_stream_omit_policy(&mut diff, cumulative_bytes, stats_only);
-
-        if diff.content_omitted {
-            if full_sent_paths.read().unwrap().contains(&raw_file_path) {
-                continue;
-            }
-        } else {
-            let mut guard = full_sent_paths.write().unwrap();
-            guard.insert(raw_file_path.clone());
-        }
+        budget
+            .lock()
+            .unwrap()
+            .apply_policy(&raw_file_path, &mut diff, stats_only);
 
         let prefixed_entry_index = prefix_path(raw_file_path, path_prefix);
         if let Some(old) = diff.old_path {
@@ -614,6 +642,7 @@ fn process_file_changes(
             let prefixed_path = prefix_path(changed_path.clone(), path_prefix);
             let patch = ConversationPatch::remove_diff(escape_json_pointer_segment(&prefixed_path));
             msgs.push(LogMsg::JsonPatch(patch));
+            budget.lock().unwrap().remove_path(changed_path);
             {
                 let mut guard = known_paths.write().unwrap();
                 guard.remove(changed_path);
@@ -675,4 +704,129 @@ fn setup_git_watcher(
     }
 
     Some((debouncer, rx))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
+    use utils::diff::{Diff, DiffChangeKind};
+    use uuid::Uuid;
+
+    use super::{DiffBudgetTracker, MAX_CUMULATIVE_DIFF_BYTES, process_file_changes};
+
+    fn make_diff(path: &str, old: &str, new: &str) -> Diff {
+        Diff {
+            change: DiffChangeKind::Modified,
+            old_path: Some(path.to_string()),
+            new_path: Some(path.to_string()),
+            old_content: Some(old.to_string()),
+            new_content: Some(new.to_string()),
+            content_omitted: false,
+            additions: None,
+            deletions: None,
+            repo_id: None,
+        }
+    }
+
+    #[test]
+    fn repeated_edits_delta_update_budget_without_monotonically_exhausting_cap() {
+        let mut tracker = DiffBudgetTracker::default();
+        let limit = 100;
+
+        // 50 repeated edits of 60 bytes each = 3,000 cumulative bytes historically,
+        // but only 60 active bytes for the single path.
+        for i in 0..50 {
+            let mut diff = make_diff("src/lib.rs", &"a".repeat(30), &format!("{:030}", i));
+            tracker.apply_policy_with_limit("src/lib.rs", &mut diff, false, limit);
+            assert!(
+                !diff.content_omitted,
+                "edit {i} must not omit content when active path size fits in budget"
+            );
+            assert_eq!(tracker.total_bytes, 60);
+        }
+
+        // Removing the path frees its bytes completely.
+        tracker.remove_path("src/lib.rs");
+        assert_eq!(tracker.total_bytes, 0);
+
+        let mut other = make_diff("src/other.rs", &"b".repeat(45), &"c".repeat(45));
+        tracker.apply_policy_with_limit("src/other.rs", &mut other, false, limit);
+        assert!(!other.content_omitted);
+        assert_eq!(tracker.total_bytes, 90);
+
+        // Over-budget update omits content, computes line stats, and does not add to total_bytes.
+        let mut big = make_diff("src/big.rs", "old1\nold2\n", &"x\n".repeat(40));
+        tracker.apply_policy_with_limit("src/big.rs", &mut big, false, limit);
+        assert!(big.content_omitted);
+        assert!(big.old_content.is_none());
+        assert!(big.new_content.is_none());
+        assert_eq!(big.additions, Some(40));
+        assert_eq!(big.deletions, Some(2));
+        assert_eq!(tracker.total_bytes, 90);
+    }
+
+    #[test]
+    fn process_file_changes_emits_updated_stats_when_budget_exceeded_instead_of_freezing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let git = git::GitService::new();
+        git.initialize_repo_with_main_branch(dir.path())
+            .expect("init repo");
+        let file = dir.path().join("tracked.txt");
+        std::fs::write(&file, "line1\n").expect("write initial");
+        git.commit(dir.path(), "initial").expect("initial commit");
+        let base_oid = git.get_head_info(dir.path()).expect("head").oid;
+        let base_commit = git::Commit::new(git2::Oid::from_str(&base_oid).expect("valid oid"));
+
+        let budget = Arc::new(Mutex::new(DiffBudgetTracker::default()));
+        let known_paths = Arc::new(std::sync::RwLock::new(HashSet::new()));
+        let repo_id = Uuid::new_v4();
+
+        // First edit fits in budget and is sent in full.
+        std::fs::write(&file, "line1\nline2\n").expect("write edit 1");
+        let msgs1 = process_file_changes(
+            &git,
+            dir.path(),
+            &base_commit,
+            &["tracked.txt".to_string()],
+            &budget,
+            &known_paths,
+            false,
+            None,
+            repo_id,
+        )
+        .expect("process edit 1");
+        assert_eq!(msgs1.len(), 1);
+
+        // Saturate budget via another active path so tracked.txt's next edit is omitted.
+        {
+            let mut guard = budget.lock().unwrap();
+            guard
+                .per_path_bytes
+                .insert("huge.bin".to_string(), MAX_CUMULATIVE_DIFF_BYTES);
+            guard.total_bytes = MAX_CUMULATIVE_DIFF_BYTES;
+        }
+
+        // Second edit to tracked.txt exceeds budget: must still emit a patch with omitted
+        // content and updated line stats rather than skipping the update.
+        std::fs::write(&file, "line1\nline2\nline3\nline4\n").expect("write edit 2");
+        let msgs2 = process_file_changes(
+            &git,
+            dir.path(),
+            &base_commit,
+            &["tracked.txt".to_string()],
+            &budget,
+            &known_paths,
+            false,
+            None,
+            repo_id,
+        )
+        .expect("process edit 2");
+        assert_eq!(
+            msgs2.len(),
+            1,
+            "omitted update must still emit updated diff stats instead of freezing"
+        );
+    }
 }

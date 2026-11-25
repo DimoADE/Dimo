@@ -238,6 +238,24 @@ impl GitCli {
         Ok(oid.to_string())
     }
 
+    fn local_branch_exists(&self, repo_path: &Path, branch: &str) -> Result<bool, GitCliError> {
+        let ref_name = format!("refs/heads/{branch}");
+        match self.git(
+            repo_path,
+            [
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "--end-of-options",
+                &ref_name,
+            ],
+        ) {
+            Ok(_) => Ok(true),
+            Err(GitCliError::CommandFailed(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Run `git -C <repo> worktree add <path> <branch>` (optionally creating the branch with -b)
     pub fn worktree_add(
         &self,
@@ -248,18 +266,30 @@ impl GitCli {
     ) -> Result<(), GitCliError> {
         self.ensure_available()?;
         let branch = crate::validation::validate_branch_name(branch)?;
+        let branch_existed_before = if create_branch {
+            self.local_branch_exists(repo_path, branch)?
+        } else {
+            false
+        };
 
         let mut args: Vec<OsString> = vec!["worktree".into(), "add".into()];
         if create_branch {
             args.push("-b".into());
             args.push(OsString::from(branch));
+            args.push("--".into());
+            args.push(worktree_path.as_os_str().into());
+            args.push("HEAD".into());
+        } else {
+            args.push("--".into());
+            args.push(worktree_path.as_os_str().into());
+            args.push(OsString::from(branch));
         }
-        args.push("--".into());
-        args.push(worktree_path.as_os_str().into());
-        args.push(OsString::from(branch));
         if let Err(error) = self.git(repo_path, args) {
             self.cleanup_failed_worktree(repo_path, worktree_path);
-            if create_branch {
+            if create_branch
+                && !branch_existed_before
+                && !worktree_add_error_is_fatal_without_retry(&error)
+            {
                 let _ = self.delete_branch(repo_path, branch);
             }
             return Err(error);
@@ -288,6 +318,7 @@ impl GitCli {
         let branch = crate::validation::validate_branch_name(branch)?;
         let start_point = crate::validation::validate_ref_or_sha(start_point, "start point")?;
         let oid = self.resolve_commit(repo_path, start_point)?;
+        let branch_existed_before = self.local_branch_exists(repo_path, branch)?;
 
         let add_with_branch = self.git(
             repo_path,
@@ -304,7 +335,7 @@ impl GitCli {
 
         if let Err(error) = add_with_branch {
             self.cleanup_failed_worktree(repo_path, worktree_path);
-            if worktree_add_error_is_fatal_without_retry(&error) {
+            if branch_existed_before || worktree_add_error_is_fatal_without_retry(&error) {
                 return Err(error);
             }
             let _ = self.delete_branch(repo_path, branch);
@@ -926,8 +957,10 @@ impl GitCli {
     pub fn is_rebase_in_progress(&self, worktree_path: &Path) -> Result<bool, GitCliError> {
         let rebase_merge = self.git(worktree_path, ["rev-parse", "--git-path", "rebase-merge"])?;
         let rebase_apply = self.git(worktree_path, ["rev-parse", "--git-path", "rebase-apply"])?;
-        let rm_exists = std::path::Path::new(rebase_merge.trim()).exists();
-        let ra_exists = std::path::Path::new(rebase_apply.trim()).exists();
+        let rm_exists = !rebase_merge.trim().is_empty()
+            && resolve_git_path(worktree_path, &rebase_merge).exists();
+        let ra_exists = !rebase_apply.trim().is_empty()
+            && resolve_git_path(worktree_path, &rebase_apply).exists();
         Ok(rm_exists || ra_exists)
     }
 
@@ -1846,6 +1879,15 @@ impl GitCli {
     }
 }
 
+fn resolve_git_path(worktree_path: &Path, raw: &str) -> PathBuf {
+    let trimmed = Path::new(raw.trim());
+    if trimmed.is_absolute() {
+        trimmed.to_path_buf()
+    } else {
+        worktree_path.join(trimmed)
+    }
+}
+
 fn authenticated_https_url(clone_url: &str, token: Option<&str>) -> String {
     let Some(token) = token.map(str::trim).filter(|value| !value.is_empty()) else {
         return clone_url.to_string();
@@ -2068,6 +2110,85 @@ mod tests {
         );
         git.remove_remote(repo.path(), "origin")
             .expect("valid remote removal");
+    }
+
+    #[test]
+    fn is_rebase_in_progress_resolves_relative_git_path_against_worktree() {
+        let repo = init_temp_repo();
+        let git = GitCli::new();
+        assert!(
+            !git.is_rebase_in_progress(repo.path()).unwrap(),
+            "fresh repo should not report rebase in progress"
+        );
+
+        let rebase_merge = repo.path().join(".git").join("rebase-merge");
+        fs::create_dir_all(&rebase_merge).unwrap();
+        assert!(
+            git.is_rebase_in_progress(repo.path()).unwrap(),
+            "relative .git/rebase-merge must be resolved against worktree_path, not process CWD"
+        );
+        fs::remove_dir_all(&rebase_merge).unwrap();
+
+        let rebase_apply = repo.path().join(".git").join("rebase-apply");
+        fs::create_dir_all(&rebase_apply).unwrap();
+        assert!(
+            git.is_rebase_in_progress(repo.path()).unwrap(),
+            "relative .git/rebase-apply must be resolved against worktree_path, not process CWD"
+        );
+        fs::remove_dir_all(&rebase_apply).unwrap();
+
+        let abs = repo.path().join(".git").join("rebase-merge");
+        assert_eq!(
+            resolve_git_path(repo.path(), ".git/rebase-merge\n"),
+            repo.path().join(".git/rebase-merge")
+        );
+        assert_eq!(
+            resolve_git_path(repo.path(), &abs.to_string_lossy()),
+            abs
+        );
+    }
+
+    #[test]
+    fn worktree_add_create_branch_succeeds_and_preserves_existing_branch_on_failure() {
+        let repo = init_temp_repo();
+        let git = GitCli::new();
+
+        let wt_parent = tempfile::TempDir::new().unwrap();
+        let wt_new = wt_parent.path().join("wt-new");
+        git.worktree_add(repo.path(), &wt_new, "feature/new-branch", true)
+            .expect("worktree_add(create_branch = true) should create new branch from HEAD");
+        assert!(wt_new.join("README").is_file());
+        assert!(git.local_branch_exists(repo.path(), "feature/new-branch").unwrap());
+
+        // Attempting to create a worktree with create_branch=true for an already-existing
+        // branch must fail AND must NOT delete the pre-existing branch.
+        git.git(repo.path(), ["branch", "existing-keep"]).unwrap();
+        let existing_oid_before = git.resolve_commit(repo.path(), "existing-keep").unwrap();
+        let wt_dup = wt_parent.path().join("wt-dup");
+        assert!(
+            git.worktree_add(repo.path(), &wt_dup, "existing-keep", true)
+                .is_err(),
+            "worktree_add(create_branch = true) must fail when branch already exists"
+        );
+        assert!(
+            git.local_branch_exists(repo.path(), "existing-keep").unwrap(),
+            "failed worktree_add must never delete a pre-existing branch"
+        );
+        assert_eq!(
+            git.resolve_commit(repo.path(), "existing-keep").unwrap(),
+            existing_oid_before
+        );
+
+        // worktree_add_from_ref must also never delete a pre-existing branch on failure.
+        let wt_dup_ref = wt_parent.path().join("wt-dup-ref");
+        assert!(
+            git.worktree_add_from_ref(repo.path(), &wt_dup_ref, "existing-keep", "HEAD")
+                .is_err()
+        );
+        assert!(
+            git.local_branch_exists(repo.path(), "existing-keep").unwrap(),
+            "failed worktree_add_from_ref must never delete a pre-existing branch"
+        );
     }
 }
 

@@ -471,8 +471,9 @@ impl ServerApplicationDomains {
                     .primary_worktree(args.workspace_id, args.repo_id)
                     .await?;
                 let old_name = workspace.branch.clone();
-                self.git_write(path, |git, path| {
-                    git.rename_local_branch(path, &old_name, &args.new_name)
+                let new_name = args.new_name.clone();
+                self.git_write(path, move |git, path| {
+                    git.rename_local_branch(path, &old_name, &new_name)
                 })
                 .await?;
                 Workspace::update_branch_name(&self.pool, args.workspace_id, &args.new_name)
@@ -491,12 +492,16 @@ impl ServerApplicationDomains {
                     .await
                     .map_err(internal_error)?
                     .ok_or_else(|| ApplicationError::not_found("repository not found"))?;
-                if !self
-                    .deployment
-                    .git()
-                    .check_branch_exists(&repo.path, &args.target_branch)
-                    .map_err(internal_error)?
-                {
+                let git = self.deployment.git().clone();
+                let repo_path = repo.path.clone();
+                let target_branch = args.target_branch.clone();
+                let branch_exists = tokio::task::spawn_blocking(move || {
+                    git.check_branch_exists(&repo_path, &target_branch)
+                })
+                .await
+                .map_err(internal_error)?
+                .map_err(internal_error)?;
+                if !branch_exists {
                     return Err(ApplicationError::bad_request(format!(
                         "Branch '{}' does not exist in repository '{}'",
                         args.target_branch, repo.name
@@ -510,11 +515,16 @@ impl ServerApplicationDomains {
                 )
                 .await
                 .map_err(internal_error)?;
-                let status = self
-                    .deployment
-                    .git()
-                    .get_branch_status(&repo.path, &workspace.branch, &args.target_branch)
-                    .map_err(internal_error)?;
+                let git = self.deployment.git().clone();
+                let repo_path = repo.path.clone();
+                let workspace_branch = workspace.branch.clone();
+                let target_branch = args.target_branch.clone();
+                let status = tokio::task::spawn_blocking(move || {
+                    git.get_branch_status(&repo_path, &workspace_branch, &target_branch)
+                })
+                .await
+                .map_err(internal_error)?
+                .map_err(internal_error)?;
                 serialize(json!({
                     "repo_id": repo_id,
                     "new_target_branch": args.target_branch,
@@ -697,12 +707,11 @@ impl ServerApplicationDomains {
                         repo_id: args.repo_id,
                     })
                     .await?;
-                git::GitCli::new()
-                    .add_remote(
-                        &path,
-                        args.name.as_deref().unwrap_or("origin"),
-                        args.url.as_deref().unwrap_or_default(),
-                    )
+                let name = args.name.unwrap_or_else(|| "origin".to_string());
+                let url = args.url.unwrap_or_default();
+                tokio::task::spawn_blocking(move || git::GitCli::new().add_remote(&path, &name, &url))
+                    .await
+                    .map_err(internal_error)?
                     .map_err(internal_error)?;
                 Ok(Value::Null)
             }
@@ -713,8 +722,10 @@ impl ServerApplicationDomains {
                         repo_id: args.repo_id,
                     })
                     .await?;
-                git::GitCli::new()
-                    .remove_remote(&path, args.name.as_deref().unwrap_or("origin"))
+                let name = args.name.unwrap_or_else(|| "origin".to_string());
+                tokio::task::spawn_blocking(move || git::GitCli::new().remove_remote(&path, &name))
+                    .await
+                    .map_err(internal_error)?
                     .map_err(internal_error)?;
                 Ok(Value::Null)
             }
@@ -725,13 +736,14 @@ impl ServerApplicationDomains {
                         repo_id: args.repo_id,
                     })
                     .await?;
-                git::GitCli::new()
-                    .set_remote_url(
-                        &path,
-                        args.name.as_deref().unwrap_or("origin"),
-                        args.url.as_deref().unwrap_or_default(),
-                    )
-                    .map_err(internal_error)?;
+                let name = args.name.unwrap_or_else(|| "origin".to_string());
+                let url = args.url.unwrap_or_default();
+                tokio::task::spawn_blocking(move || {
+                    git::GitCli::new().set_remote_url(&path, &name, &url)
+                })
+                .await
+                .map_err(internal_error)?
+                .map_err(internal_error)?;
                 Ok(Value::Null)
             }
             DomainCommand::RepoCommitDetail => self.commit_read(args).await,
@@ -767,7 +779,14 @@ impl ServerApplicationDomains {
                         repo_id: args.repo_id,
                     })
                     .await?;
-                let remote = repo_remote(self.deployment.git(), &path, args.remote.as_deref())?;
+                let git = self.deployment.git().clone();
+                let remote_name = args.remote.clone();
+                let path_for_remote = path.clone();
+                let remote = tokio::task::spawn_blocking(move || {
+                    repo_remote(&git, &path_for_remote, remote_name.as_deref())
+                })
+                .await
+                .map_err(internal_error)??;
                 let state_filter = args.issue_state.unwrap_or_else(|| "open".to_string());
                 let remote_url = remote.url.clone();
                 let issues = tokio::task::spawn_blocking(move || {
@@ -790,7 +809,14 @@ impl ServerApplicationDomains {
                         repo_id: args.repo_id,
                     })
                     .await?;
-                let remote = repo_remote(self.deployment.git(), &path, args.remote.as_deref())?;
+                let git = self.deployment.git().clone();
+                let remote_name = args.remote.clone();
+                let path_for_remote = path.clone();
+                let remote = tokio::task::spawn_blocking(move || {
+                    repo_remote(&git, &path_for_remote, remote_name.as_deref())
+                })
+                .await
+                .map_err(internal_error)??;
                 let host = GitHostService::from_url(&remote.url).map_err(internal_error)?;
                 serialize(
                     host.list_open_prs(&path, &remote.url)
@@ -815,7 +841,10 @@ impl ServerApplicationDomains {
             }
             DomainCommand::WorkflowCanvasFocus => {
                 let args: WorkflowCanvasFocusArgs = parse(args)?;
-                serialize(write_workflow_canvas_focus(&args)?)
+                let body = tokio::task::spawn_blocking(move || write_workflow_canvas_focus(&args))
+                    .await
+                    .map_err(internal_error)??;
+                serialize(body)
             }
             DomainCommand::AgentListLiveTerminals => {
                 let terminals = agent_terminal_registry().list_live().await;
@@ -882,29 +911,7 @@ impl ServerApplicationDomains {
             DomainCommand::ReadBinaryAsset => {
                 let args: ReadBinaryAssetArgs = parse(args)?;
                 let path = self.existing_local_file(&args.path).await?;
-                let metadata = tokio::fs::metadata(&path).await.map_err(internal_error)?;
-                let size_bytes = metadata.len();
-                let mime_type = mime_type_for_path(&path);
-                if let Some(max_bytes) = args.max_bytes
-                    && size_bytes >= max_bytes
-                {
-                    return Ok(json!({
-                        "data_base64": "",
-                        "base64": "",
-                        "mime_type": mime_type,
-                        "size_bytes": size_bytes,
-                        "too_large": true,
-                    }));
-                }
-                let bytes = tokio::fs::read(&path).await.map_err(internal_error)?;
-                let encoded = BASE64.encode(bytes);
-                Ok(json!({
-                    "data_base64": encoded,
-                    "base64": encoded,
-                    "mime_type": mime_type,
-                    "size_bytes": size_bytes,
-                    "too_large": false,
-                }))
+                read_binary_asset_bounded(&path, args.max_bytes).await
             }
             DomainCommand::AutomationUpdateWorkflow => self.automation_update(args).await,
             DomainCommand::WorkspaceContinueConflicts => {
@@ -923,12 +930,15 @@ impl ServerApplicationDomains {
                 let path = self
                     .primary_worktree(args.workspace_id, Some(args.repo_id))
                     .await?;
-                serialize(
-                    self.deployment
-                        .git()
-                        .get_conflict_file_detail(&path, &args.file_path)
-                        .map_err(internal_error)?,
-                )
+                let git = self.deployment.git().clone();
+                let file_path = args.file_path;
+                let detail = tokio::task::spawn_blocking(move || {
+                    git.get_conflict_file_detail(&path, &file_path)
+                })
+                .await
+                .map_err(internal_error)?
+                .map_err(internal_error)?;
+                serialize(detail)
             }
             DomainCommand::WorkspaceWriteConflictResolution => {
                 #[derive(Deserialize)]
@@ -943,12 +953,16 @@ impl ServerApplicationDomains {
                 let path = self
                     .primary_worktree(args.workspace_id, Some(args.repo_id))
                     .await?;
-                serialize(
-                    self.deployment
-                        .git()
-                        .write_conflict_resolution(&path, &args.file_path, &args.content)
-                        .map_err(internal_error)?,
-                )
+                let git = self.deployment.git().clone();
+                let file_path = args.file_path;
+                let content = args.content;
+                let result = tokio::task::spawn_blocking(move || {
+                    git.write_conflict_resolution(&path, &file_path, &content)
+                })
+                .await
+                .map_err(internal_error)?
+                .map_err(internal_error)?;
+                serialize(result)
             }
             DomainCommand::WorkspaceRunSetupScript
             | DomainCommand::WorkspaceRunCleanupScript
@@ -1271,7 +1285,8 @@ impl ServerApplicationDomains {
             &Repo,
             &str,
         ) -> Result<(), git::GitServiceError>
-        + Send,
+        + Send
+        + 'static,
     ) -> Result<Value, ApplicationError> {
         let workspace_id = workspace_id_from_value(&args)?;
         let repo_id = args
@@ -1295,7 +1310,9 @@ impl ServerApplicationDomains {
             })
             .await?;
         let git = self.deployment.git().clone();
-        tokio::task::block_in_place(|| op(&git, &path, &workspace, &repo, &target))
+        tokio::task::spawn_blocking(move || op(&git, &path, &workspace, &repo, &target))
+            .await
+            .map_err(internal_error)?
             .map_err(internal_error)?;
         Ok(Value::Null)
     }
@@ -1420,12 +1437,16 @@ impl ServerApplicationDomains {
             .new_base_branch
             .clone()
             .unwrap_or_else(|| fallback.clone());
-        if !self
-            .deployment
-            .git()
-            .check_branch_exists(&repo.path, &new_base)
-            .map_err(internal_error)?
-        {
+        let git = self.deployment.git().clone();
+        let repo_path_for_check = repo.path.clone();
+        let new_base_for_check = new_base.clone();
+        let branch_exists = tokio::task::spawn_blocking(move || {
+            git.check_branch_exists(&repo_path_for_check, &new_base_for_check)
+        })
+        .await
+        .map_err(internal_error)?
+        .map_err(internal_error)?;
+        if !branch_exists {
             return Err(ApplicationError::bad_request(format!(
                 "Branch '{new_base}' does not exist in the repository"
             )));
@@ -1487,7 +1508,9 @@ impl ServerApplicationDomains {
     async fn repo_git_write(
         &self,
         args: Value,
-        op: impl FnOnce(&git::GitService, &std::path::Path) -> Result<(), git::GitServiceError> + Send,
+        op: impl FnOnce(&git::GitService, &std::path::Path) -> Result<(), git::GitServiceError>
+        + Send
+        + 'static,
     ) -> Result<Value, ApplicationError> {
         let args: RepoWorktreeArgs = parse(args)?;
         let path = self
@@ -1518,7 +1541,7 @@ impl ServerApplicationDomains {
 
     async fn commit_read(&self, args: Value) -> Result<Value, ApplicationError> {
         let (path, sha) = self.resolve_commit_target(args).await?;
-        self.git_read(path, |git, path| git.get_commit_detail(path, &sha))
+        self.git_read(path, move |git, path| git.get_commit_detail(path, &sha))
             .await
     }
 
@@ -1545,7 +1568,8 @@ impl ServerApplicationDomains {
         let path = self
             .primary_worktree(args.workspace_id, args.repo_id)
             .await?;
-        self.git_write(path, |git, path| op(git, path, args.index.unwrap_or(0)))
+        let index = args.index.unwrap_or(0);
+        self.git_write(path, move |git, path| op(git, path, index))
             .await
     }
 
@@ -1663,48 +1687,123 @@ async fn canonicalize_shared_workflows_dir() -> Result<Option<PathBuf>, Applicat
     Ok(Some(resolved))
 }
 
+async fn expand_workflow_source_path(
+    path: &str,
+    create_shared_dir: bool,
+) -> Result<PathBuf, ApplicationError> {
+    let expanded = if let Some(rel) = path.strip_prefix("~/") {
+        if !path.starts_with("~/.dimo/workflows/") {
+            return Err(ApplicationError::forbidden(
+                "Workflow paths under ~/ must reside inside ~/.dimo/workflows/",
+            ));
+        }
+        let rel_path = Path::new(rel);
+        if rel_path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(ApplicationError::bad_request(
+                "path traversal is not allowed",
+            ));
+        }
+        let home = dirs::home_dir().ok_or_else(|| {
+            ApplicationError::internal("Unable to resolve the user home directory")
+        })?;
+        let expanded = home.join(rel_path);
+        if create_shared_dir && let Some(parent) = expanded.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(internal_error)?;
+        }
+        expanded
+    } else {
+        crate::host_ops::sanitize_absolute(path)?
+    };
+    if !expanded
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".dimo-workflow.json"))
+    {
+        return Err(ApplicationError::bad_request(
+            "Workflow source must end with .dimo-workflow.json",
+        ));
+    }
+    Ok(expanded)
+}
+
+async fn read_binary_asset_bounded(
+    path: &Path,
+    max_bytes: Option<u64>,
+) -> Result<Value, ApplicationError> {
+    use tokio::io::AsyncReadExt;
+
+    let metadata = tokio::fs::metadata(path).await.map_err(internal_error)?;
+    let size_bytes = metadata.len();
+    let mime_type = mime_type_for_path(path);
+    if let Some(max_bytes) = max_bytes {
+        if size_bytes > max_bytes {
+            return Ok(json!({
+                "data_base64": "",
+                "base64": "",
+                "mime_type": mime_type,
+                "size_bytes": size_bytes,
+                "too_large": true,
+            }));
+        }
+        let file = tokio::fs::File::open(path).await.map_err(internal_error)?;
+        let limit = max_bytes.saturating_add(1);
+        let mut bytes = Vec::with_capacity(size_bytes.min(max_bytes) as usize);
+        file.take(limit)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(internal_error)?;
+        if bytes.len() as u64 > max_bytes {
+            return Ok(json!({
+                "data_base64": "",
+                "base64": "",
+                "mime_type": mime_type,
+                "size_bytes": size_bytes.max(bytes.len() as u64),
+                "too_large": true,
+            }));
+        }
+        let encoded = BASE64.encode(&bytes);
+        return Ok(json!({
+            "data_base64": encoded,
+            "base64": encoded,
+            "mime_type": mime_type,
+            "size_bytes": bytes.len() as u64,
+            "too_large": false,
+        }));
+    }
+    let bytes = tokio::fs::read(path).await.map_err(internal_error)?;
+    let encoded = BASE64.encode(&bytes);
+    Ok(json!({
+        "data_base64": encoded,
+        "base64": encoded,
+        "mime_type": mime_type,
+        "size_bytes": size_bytes,
+        "too_large": false,
+    }))
+}
+
 impl ServerApplicationDomains {
+    async fn resolve_workflow_source_read_path(
+        &self,
+        path: &str,
+    ) -> Result<PathBuf, ApplicationError> {
+        let expanded = expand_workflow_source_path(path, false).await?;
+        let expanded_str = expanded.to_str().ok_or_else(|| {
+            ApplicationError::bad_request("Workflow source path is not valid UTF-8")
+        })?;
+        self.existing_local_file(expanded_str).await
+    }
+
     async fn resolve_workflow_source_path(
         &self,
         path: &str,
         create_shared_dir: bool,
     ) -> Result<PathBuf, ApplicationError> {
-        let expanded = if let Some(rel) = path.strip_prefix("~/") {
-            if !path.starts_with("~/.dimo/workflows/") {
-                return Err(ApplicationError::forbidden(
-                    "Workflow paths under ~/ must reside inside ~/.dimo/workflows/",
-                ));
-            }
-            let rel_path = Path::new(rel);
-            if rel_path
-                .components()
-                .any(|component| matches!(component, std::path::Component::ParentDir))
-            {
-                return Err(ApplicationError::bad_request(
-                    "path traversal is not allowed",
-                ));
-            }
-            let home = dirs::home_dir().ok_or_else(|| {
-                ApplicationError::internal("Unable to resolve the user home directory")
-            })?;
-            let expanded = home.join(rel_path);
-            if create_shared_dir && let Some(parent) = expanded.parent() {
-                std::fs::create_dir_all(parent).map_err(internal_error)?;
-            }
-            expanded
-        } else {
-            crate::host_ops::sanitize_absolute(path)?
-        };
-        if !expanded
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(".dimo-workflow.json"))
-        {
-            return Err(ApplicationError::bad_request(
-                "Workflow source must end with .dimo-workflow.json",
-            ));
-        }
-
+        let expanded = expand_workflow_source_path(path, create_shared_dir).await?;
         let resolved = crate::host_ops::resolve_canonical_sandbox_candidate(&expanded).await?;
         let mut allowed_roots = self.sandbox_roots().await?;
         if let Some(shared_dir) = canonicalize_shared_workflows_dir().await? {
@@ -1722,8 +1821,9 @@ impl ServerApplicationDomains {
     }
 
     async fn read_workflow_source(&self, path: &str) -> Result<Value, ApplicationError> {
-        let path = self.resolve_workflow_source_path(path, false).await?;
-        let bytes = std::fs::read(&path)
+        let path = self.resolve_workflow_source_read_path(path).await?;
+        let bytes = tokio::fs::read(&path)
+            .await
             .map_err(|_| ApplicationError::not_found(format!("{}: not found", path.display())))?;
         if bytes.len() > WORKFLOW_SOURCE_MAX_BYTES {
             return Err(ApplicationError::bad_request(
@@ -1766,13 +1866,17 @@ impl ServerApplicationDomains {
         let parent = path.parent().ok_or_else(|| {
             ApplicationError::bad_request("Workflow source has no parent directory")
         })?;
-        if !parent.is_dir() {
+        let parent_is_dir = tokio::fs::metadata(parent)
+            .await
+            .map(|meta| meta.is_dir())
+            .unwrap_or(false);
+        if !parent_is_dir {
             return Err(ApplicationError::not_found(format!(
                 "Parent directory does not exist: {}",
                 parent.display()
             )));
         }
-        match (std::fs::read(&path), expected_revision) {
+        match (tokio::fs::read(&path).await, expected_revision) {
             (Ok(current), Some(expected)) if workflow_source_revision(&current) != expected => {
                 return Err(ApplicationError::conflict(
                     "Workflow source changed outside this editor; reload before saving",
@@ -1798,14 +1902,23 @@ impl ServerApplicationDomains {
                 .and_then(|name| name.to_str())
                 .unwrap_or("workflow")
         ));
-        std::fs::write(&temporary, content.as_bytes()).map_err(internal_error)?;
-        std::fs::rename(&temporary, &path).map_err(internal_error)?;
+        tokio::fs::write(&temporary, content.as_bytes())
+            .await
+            .map_err(internal_error)?;
+        tokio::fs::rename(&temporary, &path)
+            .await
+            .map_err(internal_error)?;
         if let Some(dir) = shared_workflows_dir() {
-            let normalized_dir = std::fs::canonicalize(&dir)
+            let normalized_dir = tokio::fs::canonicalize(&dir)
+                .await
                 .map(utils::path::normalize_windows_extended_path_prefix)
                 .unwrap_or(dir);
             if path.starts_with(&normalized_dir) {
-                enforce_single_unnamed_draft(&normalized_dir, &path, &written_name);
+                let path_for_cleanup = path.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    enforce_single_unnamed_draft(&normalized_dir, &path_for_cleanup, &written_name);
+                })
+                .await;
             }
         }
         Ok(json!({
@@ -2108,5 +2221,35 @@ mod tests {
         assert_eq!(value["success"], json!(true));
         assert_eq!(value["new_commits"], json!(2));
         assert_eq!(value["error"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn read_binary_asset_bounded_enforces_max_bytes_limit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("sample.png");
+        let payload = vec![0x89u8; 64];
+        std::fs::write(&file, &payload).expect("write payload");
+
+        let too_large = read_binary_asset_bounded(&file, Some(32))
+            .await
+            .expect("too_large response");
+        assert_eq!(too_large["too_large"], json!(true));
+        assert_eq!(too_large["size_bytes"], json!(64));
+        assert_eq!(too_large["data_base64"], json!(""));
+
+        let exact = read_binary_asset_bounded(&file, Some(64))
+            .await
+            .expect("exact limit response");
+        assert_eq!(exact["too_large"], json!(false));
+        assert_eq!(exact["size_bytes"], json!(64));
+        assert_eq!(exact["data_base64"], json!(BASE64.encode(&payload)));
+
+        let within = read_binary_asset_bounded(&file, Some(128))
+            .await
+            .expect("within limit response");
+        assert_eq!(within["too_large"], json!(false));
+        assert_eq!(within["size_bytes"], json!(64));
+        assert_eq!(within["mime_type"], json!("image/png"));
+        assert_eq!(within["data_base64"], json!(BASE64.encode(&payload)));
     }
 }

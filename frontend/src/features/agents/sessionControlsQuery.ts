@@ -6,7 +6,9 @@ import type {
 
 import { agentsApi } from './api';
 
-function normalizeAgentType(agentType: string | null | undefined): string {
+export function normalizeAgentType(
+  agentType: string | null | undefined
+): string {
   if (typeof agentType !== 'string') return '';
   const normalized = agentType.trim().toLowerCase();
   if (

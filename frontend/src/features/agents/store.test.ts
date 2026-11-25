@@ -532,4 +532,92 @@ describe('agent workbench store', () => {
       'e9',
     ]);
   });
+
+  it('clears active and queued prompts for sessions on disconnected or failed connections without touching other connections', () => {
+    const now = new Date().toISOString();
+    const initial = [
+      {
+        sequence: 1,
+        workspace_id: 'workspace',
+        connection_id: 'conn-1',
+        session_id: 'sess-1',
+        created_at: now,
+        event: {
+          kind: 'session_created' as const,
+          snapshot: {
+            id: 'sess-1',
+            connection_id: 'conn-1',
+            acp_session_id: 'acp-1',
+            status: 'running' as const,
+            active_prompt_id: 'prompt-1',
+            queued_prompt_ids: ['prompt-2'],
+            created_at: now,
+            updated_at: now,
+          },
+        },
+      },
+      {
+        sequence: 2,
+        workspace_id: 'workspace',
+        connection_id: 'conn-2',
+        session_id: 'sess-2',
+        created_at: now,
+        event: {
+          kind: 'session_created' as const,
+          snapshot: {
+            id: 'sess-2',
+            connection_id: 'conn-2',
+            acp_session_id: 'acp-2',
+            status: 'running' as const,
+            active_prompt_id: 'prompt-other',
+            queued_prompt_ids: [],
+            created_at: now,
+            updated_at: now,
+          },
+        },
+      },
+    ].reduce(reduceAgentEvent, emptyAgentWorkbenchState());
+
+    const disconnected = reduceAgentEvent(initial, {
+      sequence: 3,
+      workspace_id: 'workspace',
+      connection_id: 'conn-1',
+      created_at: now,
+      event: {
+        kind: 'connection_status_changed',
+        snapshot: {
+          id: 'conn-1',
+          agent_type: 'codex',
+          workspace_id: 'workspace',
+          status: 'disconnected',
+          working_dir: 'C:/work',
+          created_at: now,
+          updated_at: now,
+        },
+      },
+    });
+
+    expect(disconnected.sessions['sess-1']?.active_prompt_id).toBeNull();
+    expect(disconnected.sessions['sess-1']?.queued_prompt_ids).toEqual([]);
+    expect(disconnected.sessions['sess-1']?.status).toBe('ready');
+    expect(disconnected.sessions['sess-2']?.active_prompt_id).toBe(
+      'prompt-other'
+    );
+    expect(disconnected.sessions['sess-2']?.status).toBe('running');
+
+    const connError = reduceAgentEvent(disconnected, {
+      sequence: 4,
+      workspace_id: 'workspace',
+      connection_id: 'conn-2',
+      created_at: now,
+      event: {
+        kind: 'error',
+        error: { message: 'connection dropped' },
+      },
+    });
+
+    expect(connError.sessions['sess-2']?.active_prompt_id).toBeNull();
+    expect(connError.sessions['sess-2']?.queued_prompt_ids).toEqual([]);
+    expect(connError.sessions['sess-2']?.status).toBe('failed');
+  });
 });

@@ -394,4 +394,5 @@ fn is_placeholder_acp_session_id(acp_session_id: &str) -> bool {
         || acp_session_id.starts_with("pending-")
         || acp_session_id.starts_with("claude-native-")
         || acp_session_id.starts_with("codex-native-")
+        || acp_session_id.starts_with("muse-native-")
 }

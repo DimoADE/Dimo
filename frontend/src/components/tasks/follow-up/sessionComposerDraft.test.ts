@@ -786,4 +786,30 @@ describe('session composer draft helpers', () => {
       })
     ).toBeNull();
   });
+
+  it('preserves locally pasted images instead of overwriting composer state during late draft hydration', () => {
+    expect(
+      getDraftScratchHydrationDecision({
+        scratchId: 'session-1',
+        hydratedScratchId: undefined,
+        isScratchLoading: false,
+        scratchData: {
+          message: 'old draft',
+          images: ['.vibe-images/old.png'],
+          executor_config: { executor: 'codex' as const },
+          queued: false,
+          config_overrides: {},
+        },
+        localMessage: '',
+        hasLocalImages: true,
+      })
+    ).toEqual({
+      hydratedScratchId: 'session-1',
+      shouldHydrate: false,
+      message: '',
+      imagePaths: [],
+      modeOverride: null,
+      configOverrides: {},
+    });
+  });
 });

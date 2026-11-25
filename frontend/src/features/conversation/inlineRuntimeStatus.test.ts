@@ -518,4 +518,170 @@ describe('deriveInlineStreamRuntimeStatus', () => {
       'process exited'
     );
   });
+
+  it('treats idle-reaped or post-restart closed state as lazy connecting when a new turn starts', () => {
+    const withSubmittingRequest = deriveInlineStreamRuntimeStatus({
+      connecting: false,
+      sessionBindReady: false,
+      connection: readyConnection({
+        status: 'closed',
+        bound: false,
+        connection_id: 'old-conn',
+        message: null,
+        since: '2026-11-25T02:13:42Z',
+      }),
+      request: requestStatus('submitting', {
+        turn_id: 'turn-2',
+        prompt_id: null,
+        connection_id: null,
+        since: '2026-11-25T02:15:57Z',
+      }),
+      connectErrorNotice: null,
+      hasUserMessage: true,
+      isTurnInFlight: true,
+      hasStreamingAssistantRow: false,
+      currentTurnId: 'turn-2',
+    });
+
+    expect(withSubmittingRequest.placement).toBe('stream');
+    expect(withSubmittingRequest.status?.kind).toBe('connection');
+    expect(withSubmittingRequest.status?.notice.severity).toBe('info');
+    expect(withSubmittingRequest.status?.notice.connection_status?.status).toBe(
+      'connecting'
+    );
+    expect(withSubmittingRequest.status?.canCancel).toBe(true);
+    expect(withSubmittingRequest.status?.canReconnect).toBe(false);
+
+    const optimisticBeforeRequestRow = deriveInlineStreamRuntimeStatus({
+      connecting: false,
+      sessionBindReady: false,
+      connection: readyConnection({
+        status: 'closed',
+        bound: false,
+        connection_id: null,
+        message: null,
+        since: '2026-11-25T02:13:42Z',
+      }),
+      request: null,
+      connectErrorNotice: null,
+      hasUserMessage: true,
+      isTurnInFlight: true,
+      hasStreamingAssistantRow: false,
+    });
+
+    expect(optimisticBeforeRequestRow.placement).toBe('stream');
+    expect(optimisticBeforeRequestRow.status?.kind).toBe('connection');
+    expect(
+      optimisticBeforeRequestRow.status?.notice.connection_status?.status
+    ).toBe('connecting');
+    expect(optimisticBeforeRequestRow.status?.canReconnect).toBe(false);
+  });
+
+  it('does not treat a previous turn closed error timestamped before the new turn as a current-turn failure', () => {
+    const res = deriveInlineStreamRuntimeStatus({
+      connecting: false,
+      sessionBindReady: false,
+      connection: readyConnection({
+        status: 'closed',
+        bound: false,
+        connection_id: 'old-conn',
+        message: 'previous error',
+        since: '2026-11-25T01:00:00Z',
+      }),
+      request: requestStatus('submitting', {
+        turn_id: 'turn-2',
+        prompt_id: null,
+        connection_id: null,
+        since: '2026-11-25T02:15:57Z',
+      }),
+      connectErrorNotice: null,
+      hasUserMessage: true,
+      isTurnInFlight: true,
+      hasStreamingAssistantRow: false,
+      currentTurnId: 'turn-2',
+    });
+
+    expect(res.placement).toBe('stream');
+    expect(res.status?.kind).toBe('connection');
+    expect(res.status?.notice.connection_status?.status).toBe('connecting');
+    expect(res.status?.notice.connection_status?.message).toBeNull();
+    expect(res.status?.canReconnect).toBe(false);
+  });
+
+  it('treats historical closed status with a close message as cold-start connecting before the new prompt dispatches', () => {
+    const res = deriveInlineStreamRuntimeStatus({
+      connecting: false,
+      sessionBindReady: false,
+      connection: readyConnection({
+        status: 'closed',
+        bound: false,
+        connection_id: null,
+        message: 'Idle timeout closed the connection',
+        since: '2026-11-25T01:00:00Z',
+      }),
+      request: null,
+      connectErrorNotice: null,
+      hasUserMessage: true,
+      isTurnInFlight: true,
+      hasStreamingAssistantRow: false,
+      currentTurnId: undefined,
+    });
+
+    expect(res.placement).toBe('stream');
+    expect(res.status?.kind).toBe('connection');
+    expect(res.status?.notice.severity).toBe('info');
+    expect(res.status?.notice.connection_status?.status).toBe('connecting');
+    expect(res.status?.notice.connection_status?.message).toBeNull();
+    expect(res.status?.canReconnect).toBe(false);
+  });
+
+  it('surfaces mid-turn waiting_model inline after assistant content has started streaming, unless a tool or interaction is active', () => {
+    const stalled = deriveInlineStreamRuntimeStatus({
+      connecting: false,
+      connection: readyConnection(),
+      request: requestStatus('waiting_model'),
+      hasUserMessage: true,
+      isTurnInFlight: true,
+      hasStreamingAssistantRow: true,
+      hasStreamingAssistantContent: true,
+      hasRunningTool: false,
+      hasInteraction: false,
+    });
+
+    expect(stalled.placement).toBe('stream');
+    expect(stalled.status?.kind).toBe('request');
+    expect(stalled.status?.notice.request_status?.activity.phase).toBe(
+      'waiting_model'
+    );
+    expect(stalled.suppressAssistantStreamingStatus).toBe(true);
+    expect(stalled.suppressLiveTurnStatsStatus).toBe(true);
+
+    const runningTool = deriveInlineStreamRuntimeStatus({
+      connecting: false,
+      connection: readyConnection(),
+      request: requestStatus('waiting_model'),
+      hasUserMessage: true,
+      isTurnInFlight: true,
+      hasStreamingAssistantRow: true,
+      hasStreamingAssistantContent: true,
+      hasRunningTool: true,
+      hasInteraction: false,
+    });
+    expect(runningTool.status).toBeNull();
+    expect(runningTool.placement).toBeNull();
+
+    const waitingUser = deriveInlineStreamRuntimeStatus({
+      connecting: false,
+      connection: readyConnection(),
+      request: requestStatus('waiting_model'),
+      hasUserMessage: true,
+      isTurnInFlight: true,
+      hasStreamingAssistantRow: true,
+      hasStreamingAssistantContent: true,
+      hasRunningTool: false,
+      hasInteraction: true,
+    });
+    expect(waitingUser.status).toBeNull();
+    expect(waitingUser.placement).toBeNull();
+  });
 });

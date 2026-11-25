@@ -34,6 +34,7 @@ struct AppSurfaceSession {
 struct ArtifactEditorSession {
     path: PathBuf,
     name: String,
+    read_only: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,6 +81,8 @@ pub struct AppSurfaceOpenRequest {
     pub identity: AppSurfaceIdentity,
     #[serde(default)]
     pub artifact_path: Option<PathBuf>,
+    #[serde(skip)]
+    pub read_only: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -135,6 +138,7 @@ impl PluginAppSurfaceHost {
         let AppSurfaceOpenRequest {
             identity,
             artifact_path,
+            read_only,
         } = request;
         validate_token(&identity.token)?;
         let plugin = self
@@ -189,8 +193,13 @@ impl PluginAppSurfaceHost {
         }
         let artifact = match (slot, artifact_path) {
             ("artifact.editor", Some(path)) => Some(
-                self.open_artifact_editor(&identity.plugin_id, &identity.surface_id, path)
-                    .await?,
+                self.open_artifact_editor(
+                    &identity.plugin_id,
+                    &identity.surface_id,
+                    path,
+                    read_only,
+                )
+                .await?,
             ),
             ("artifact.editor", None) => {
                 return Err(bad_request("Artifact editor surface requires a file"));
@@ -305,6 +314,7 @@ impl PluginAppSurfaceHost {
         plugin_id: &str,
         surface_id: &str,
         path: PathBuf,
+        read_only: bool,
     ) -> Result<ArtifactEditorSession, AppSurfaceError> {
         let path = path
             .canonicalize()
@@ -339,7 +349,11 @@ impl PluginAppSurfaceHost {
             .and_then(|value| value.to_str())
             .ok_or_else(|| bad_request("Artifact editor file name is invalid"))?
             .to_owned();
-        Ok(ArtifactEditorSession { path, name })
+        Ok(ArtifactEditorSession {
+            path,
+            name,
+            read_only,
+        })
     }
 
     pub async fn invoke(&self, request: AppSurfaceInvocation) -> Result<Value, AppSurfaceError> {
@@ -470,7 +484,7 @@ fn surface_context(
             Ok::<_, AppSurfaceError>(json!({
                 "name": artifact.name,
                 "revision": artifact_revision(&bytes),
-                "readOnly": false,
+                "readOnly": artifact.read_only,
             }))
         })
         .transpose()?;
@@ -492,6 +506,9 @@ fn write_artifact_text(
     artifact: &ArtifactEditorSession,
     params: &Value,
 ) -> Result<Value, AppSurfaceError> {
+    if artifact.read_only {
+        return Err(bad_request("Artifact is open in read-only preview mode"));
+    }
     let params = params
         .as_object()
         .ok_or_else(|| bad_request("Artifact write parameters are invalid"))?;

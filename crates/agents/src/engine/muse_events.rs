@@ -19,6 +19,7 @@ use crate::engine::{
 
 #[derive(Debug, Clone)]
 struct TrackedItem {
+    session_id: Option<String>,
     kind: String,
     revision: i64,
     subagent_id: Option<String>,
@@ -44,6 +45,40 @@ pub struct MuseNotificationTracker {
     pub pending_user_inputs: HashMap<String, PendingMuseUserInput>,
     pub full_access_sessions: HashSet<String>,
     pub active_compact_sessions: HashSet<String>,
+}
+
+impl MuseNotificationTracker {
+    pub fn clear_items_for_session(&mut self, session_id: Option<&str>) {
+        match session_id {
+            Some(sid) => self
+                .items
+                .retain(|_, item| item.session_id.as_deref() != Some(sid)),
+            None => self.items.retain(|_, item| item.session_id.is_some()),
+        }
+    }
+
+    pub fn clear_session(&mut self, session_id: &str) {
+        self.clear_items_for_session(Some(session_id));
+        self.full_access_sessions.remove(session_id);
+        self.active_compact_sessions.remove(session_id);
+        self.pending_approvals
+            .retain(|_, pending| pending.session_id != session_id);
+        self.pending_user_inputs
+            .retain(|_, pending| pending.session_id != session_id);
+    }
+
+    pub fn clear_all(&mut self) {
+        self.items.clear();
+        self.pending_approvals.clear();
+        self.pending_user_inputs.clear();
+        self.full_access_sessions.clear();
+        self.active_compact_sessions.clear();
+    }
+
+    #[cfg(test)]
+    pub fn tracked_item_count(&self) -> usize {
+        self.items.len()
+    }
 }
 
 const SUPPRESSED_NATIVE_TOOLS: &[&str] = &["write_todos", "request_user_input", "workflow"];
@@ -137,13 +172,13 @@ pub fn normalize_muse_notification(
         }
         "turn/completed" => {
             let session_id = str_any(params, &["sessionId"]);
-            if let Some(sid) = session_id.as_deref()
-                && tracker
-                    .lock()
-                    .ok()
-                    .is_some_and(|state| state.active_compact_sessions.contains(sid))
-            {
-                return (events, auto_approves);
+            if let Ok(mut state) = tracker.lock() {
+                if let Some(sid) = session_id.as_deref()
+                    && state.active_compact_sessions.contains(sid)
+                {
+                    return (events, auto_approves);
+                }
+                state.clear_items_for_session(session_id.as_deref());
             }
             let turn_id = str_any(params, &["turnId"]);
             let terminal = str_any(params, &["terminal"]).unwrap_or_else(|| "completed".into());
@@ -186,6 +221,14 @@ pub fn normalize_muse_notification(
                         message,
                     });
                 }
+            }
+            return (events, auto_approves);
+        }
+        "session/closed" | "session/ended" | "session/deleted" => {
+            if let Some(sid) = str_any(params, &["sessionId"])
+                && let Ok(mut state) = tracker.lock()
+            {
+                state.clear_session(&sid);
             }
             return (events, auto_approves);
         }
@@ -309,7 +352,7 @@ pub fn normalize_muse_notification(
                             if !emitted_delta {
                                 events.push(EngineEvent::AssistantMessage {
                                     prompt_id: turn_id,
-                                    session_id,
+                                    session_id: session_id.clone(),
                                     message_id: Some(item_id.clone()),
                                     text: text.clone(),
                                 });
@@ -318,33 +361,37 @@ pub fn normalize_muse_notification(
                             {
                                 events.push(EngineEvent::AssistantTextDelta {
                                     prompt_id: turn_id,
-                                    session_id,
+                                    session_id: session_id.clone(),
                                     message_id: Some(item_id.clone()),
                                     text: suffix.to_string(),
                                 });
                             }
                         }
-                    } else if let Some(suffix) = text.strip_prefix(&prev_text)
-                        && !suffix.is_empty()
-                    {
-                        events.push(EngineEvent::AssistantTextDelta {
-                            prompt_id: turn_id,
-                            session_id,
-                            message_id: Some(item_id.clone()),
-                            text: suffix.to_string(),
-                        });
+                        state.items.remove(&item_id);
+                    } else {
+                        if let Some(suffix) = text.strip_prefix(&prev_text)
+                            && !suffix.is_empty()
+                        {
+                            events.push(EngineEvent::AssistantTextDelta {
+                                prompt_id: turn_id,
+                                session_id: session_id.clone(),
+                                message_id: Some(item_id.clone()),
+                                text: suffix.to_string(),
+                            });
+                        }
+                        state.items.insert(
+                            item_id,
+                            TrackedItem {
+                                session_id,
+                                kind,
+                                revision,
+                                subagent_id: None,
+                                emitted_start: true,
+                                emitted_delta: emitted_delta || !text.is_empty(),
+                                accumulated_text: text,
+                            },
+                        );
                     }
-                    state.items.insert(
-                        item_id,
-                        TrackedItem {
-                            kind,
-                            revision,
-                            subagent_id: None,
-                            emitted_start: true,
-                            emitted_delta: emitted_delta || !text.is_empty(),
-                            accumulated_text: text,
-                        },
-                    );
                 }
                 "reasoning" => {
                     let text = item
@@ -365,22 +412,27 @@ pub fn normalize_muse_notification(
                     {
                         events.push(EngineEvent::ThinkingDelta {
                             prompt_id: turn_id,
-                            session_id,
+                            session_id: session_id.clone(),
                             message_id: Some(item_id.clone()),
                             thinking: suffix.to_string(),
                         });
                     }
-                    state.items.insert(
-                        item_id,
-                        TrackedItem {
-                            kind,
-                            revision,
-                            subagent_id: None,
-                            emitted_start: true,
-                            emitted_delta: emitted_delta || !text.is_empty(),
-                            accumulated_text: text,
-                        },
-                    );
+                    if is_terminal {
+                        state.items.remove(&item_id);
+                    } else {
+                        state.items.insert(
+                            item_id,
+                            TrackedItem {
+                                session_id,
+                                kind,
+                                revision,
+                                subagent_id: None,
+                                emitted_start: true,
+                                emitted_delta: emitted_delta || !text.is_empty(),
+                                accumulated_text: text,
+                            },
+                        );
+                    }
                 }
                 "subagent" => {
                     let subagent_id = str_any(item, &["childSessionId", "subagentId"])
@@ -412,24 +464,29 @@ pub fn normalize_muse_notification(
                         };
                         events.push(EngineEvent::SubagentCompleted {
                             prompt_id: turn_id,
-                            session_id,
+                            session_id: session_id.clone(),
                             subagent_id: subagent_id.clone(),
                             parent_tool_use_id: None,
                             status: final_status.to_string(),
                             summary: (!summary.is_empty()).then_some(summary),
                         });
                     }
-                    state.items.insert(
-                        item_id,
-                        TrackedItem {
-                            kind,
-                            revision,
-                            subagent_id: Some(subagent_id),
-                            emitted_start: true,
-                            emitted_delta,
-                            accumulated_text: prev_text,
-                        },
-                    );
+                    if is_terminal {
+                        state.items.remove(&item_id);
+                    } else {
+                        state.items.insert(
+                            item_id,
+                            TrackedItem {
+                                session_id,
+                                kind,
+                                revision,
+                                subagent_id: Some(subagent_id),
+                                emitted_start: true,
+                                emitted_delta,
+                                accumulated_text: prev_text,
+                            },
+                        );
+                    }
                 }
                 "compaction" => {
                     events.push(EngineEvent::AutoCompactionChanged {
@@ -440,17 +497,25 @@ pub fn normalize_muse_notification(
                         && session_id
                             .as_deref()
                             .is_some_and(|sid| state.active_compact_sessions.remove(sid));
-                    state.items.insert(
-                        item_id,
-                        TrackedItem {
-                            kind,
-                            revision,
-                            subagent_id: None,
-                            emitted_start: true,
-                            emitted_delta,
-                            accumulated_text: prev_text,
-                        },
-                    );
+                    if is_terminal {
+                        state.items.remove(&item_id);
+                        if completed_compact_turn {
+                            state.clear_items_for_session(session_id.as_deref());
+                        }
+                    } else {
+                        state.items.insert(
+                            item_id,
+                            TrackedItem {
+                                session_id: session_id.clone(),
+                                kind,
+                                revision,
+                                subagent_id: None,
+                                emitted_start: true,
+                                emitted_delta,
+                                accumulated_text: prev_text,
+                            },
+                        );
+                    }
                     if completed_compact_turn {
                         let outcome = str_any(item, &["outcome"]);
                         if status == "completed"
@@ -506,24 +571,27 @@ pub fn normalize_muse_notification(
                         };
                         events.push(EngineEvent::ToolResult {
                             prompt_id: turn_id,
-                            session_id,
+                            session_id: session_id.clone(),
                             parent_tool_use_id: None,
                             tool_use_id: Some(item_id.clone()),
                             is_error,
                             content,
                         });
+                        state.items.remove(&item_id);
+                    } else {
+                        state.items.insert(
+                            item_id,
+                            TrackedItem {
+                                session_id,
+                                kind,
+                                revision,
+                                subagent_id: None,
+                                emitted_start: true,
+                                emitted_delta,
+                                accumulated_text: prev_text,
+                            },
+                        );
                     }
-                    state.items.insert(
-                        item_id,
-                        TrackedItem {
-                            kind,
-                            revision,
-                            subagent_id: None,
-                            emitted_start: true,
-                            emitted_delta,
-                            accumulated_text: prev_text,
-                        },
-                    );
                 }
             }
             return (events, auto_approves);
@@ -550,6 +618,7 @@ pub fn normalize_muse_notification(
                 .items
                 .entry(item_id.clone())
                 .or_insert_with(|| TrackedItem {
+                    session_id: session_id.clone(),
                     kind: fallback_kind,
                     revision: 0,
                     subagent_id: None,

@@ -90,8 +90,24 @@ impl ConversationSessionService {
         let result = async {
             let mut prepared = self.prepare_turn_prompt(&input, &origin).await?;
             smart_reminder = prepared.smart_reminder.take();
+            if !self
+                .turn_is_still_in_flight(input.conversation_id, turn_id)
+                .await?
+            {
+                return Err(ConversationServiceError::Conflict(
+                    "Turn was cancelled before the Agent handshake".to_string(),
+                ));
+            }
             self.prepare_turn_continuation(&input, turn_id, &mut prepared)
                 .await?;
+            if !self
+                .turn_is_still_in_flight(input.conversation_id, turn_id)
+                .await?
+            {
+                return Err(ConversationServiceError::Conflict(
+                    "Turn was cancelled before the Agent handshake".to_string(),
+                ));
+            }
             self.send_turn_to_agent(
                 &input,
                 &prepared.working_dir,

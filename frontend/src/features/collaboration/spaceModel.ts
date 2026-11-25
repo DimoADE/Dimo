@@ -378,33 +378,75 @@ export function uniqueBotsForGroupMemberPicker(input: {
   directMembers?: readonly SpaceMember[];
   unassignedMembers?: readonly SpaceMember[];
   membersBySpace?: Readonly<Record<string, readonly SpaceMember[] | undefined>>;
+  activeSpaceIds?: ReadonlySet<string>;
   excludeConversationIds?: ReadonlySet<string>;
 }): SpaceMember[] {
-  const seen = new Set<string>();
   const exclude = input.excludeConversationIds ?? new Set<string>();
-  const result: SpaceMember[] = [];
+  const canonical: Array<{ member: SpaceMember; excluded: boolean }> = [];
+
+  const isExcluded = (member: SpaceMember): boolean => {
+    const ids = [
+      member.conversation_id,
+      member.private_conversation_id,
+      member.member_id,
+      member.identity_member_id,
+    ];
+    return ids.some((raw) => {
+      const id = String(raw ?? '').trim();
+      return Boolean(id) && exclude.has(id);
+    });
+  };
+
+  const isSameBot = (
+    existing: SpaceMember,
+    candidate: SpaceMember
+  ): boolean => {
+    if (matchesSpaceMemberIdentity(existing, candidate)) return true;
+    const existingPrivate = String(
+      existing.private_conversation_id ?? ''
+    ).trim();
+    const candidatePrivate = String(
+      candidate.private_conversation_id ?? ''
+    ).trim();
+    const existingConv = String(existing.conversation_id ?? '').trim();
+    const candidateConv = String(candidate.conversation_id ?? '').trim();
+    if (
+      (existingPrivate &&
+        (existingPrivate === candidateConv ||
+          existingPrivate === candidatePrivate)) ||
+      (candidatePrivate && candidatePrivate === existingConv)
+    ) {
+      return true;
+    }
+    return false;
+  };
 
   const push = (member: SpaceMember | null | undefined) => {
     if (!member || member.kind === 'user') return;
     if (Number(member.visible_to_agents) === 0) return;
     const conversationId = String(member.conversation_id ?? '').trim();
     const memberId = String(member.member_id ?? '').trim();
-    const key = conversationId || memberId;
-    if (!key || seen.has(key)) return;
-    if (conversationId && exclude.has(conversationId)) return;
-    if (memberId && exclude.has(memberId)) return;
-    seen.add(key);
-    if (conversationId) seen.add(conversationId);
-    if (memberId) seen.add(memberId);
-    result.push(member);
+    if (!conversationId && !memberId) return;
+    const excluded = isExcluded(member);
+    const existingEntry = canonical.find((entry) =>
+      isSameBot(entry.member, member)
+    );
+    if (existingEntry) {
+      if (excluded) existingEntry.excluded = true;
+      return;
+    }
+    canonical.push({ member, excluded });
   };
 
   for (const member of input.directMembers ?? []) push(member);
   for (const member of input.unassignedMembers ?? []) push(member);
-  for (const members of Object.values(input.membersBySpace ?? {})) {
+  for (const [spaceId, members] of Object.entries(input.membersBySpace ?? {})) {
+    if (input.activeSpaceIds && !input.activeSpaceIds.has(spaceId)) continue;
     for (const member of members ?? []) push(member);
   }
-  return result;
+  return canonical
+    .filter((entry) => !entry.excluded)
+    .map((entry) => entry.member);
 }
 
 export const ENGLISH_MEMBER_NAMES = [
@@ -1674,7 +1716,14 @@ export function surfaceErrorCopy(cause: unknown): string {
         : record?.message != null
           ? String(record.message)
           : '';
-  if (code === 'not_found') return notFoundSurfaceCopy(message);
+  const normalizedMessage = message.trim().toLowerCase();
+  if (
+    code === 'not_found' ||
+    normalizedMessage === 'not_found' ||
+    normalizedMessage.includes('was not found')
+  ) {
+    return notFoundSurfaceCopy(message);
+  }
   const known = sendErrorCopy(code) || sendErrorCopy(message);
   if (known) return known;
   if (

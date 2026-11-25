@@ -301,12 +301,25 @@ impl ContentAddressedRuntimeHost {
                 ));
             }
         }
-        if !matches!(runtime.install, RuntimeInstall::Existing)
-            && !runtime.content_digest.starts_with("sha256:")
+        if !matches!(runtime.install, RuntimeInstall::Existing) {
+            let Some(digest_hex) = runtime.content_digest.strip_prefix("sha256:") else {
+                return Err(PluginError::runtime_not_ready(
+                    &runtime.id,
+                    "managed Runtime requires a sha256 content digest",
+                ));
+            };
+            if !safe_hex_digest_segment(digest_hex) {
+                return Err(PluginError::runtime_not_ready(
+                    &runtime.id,
+                    "managed Runtime content digest must contain only safe hex characters",
+                ));
+            }
+        } else if let Some((_, digest_segment)) = runtime.content_digest.split_once(':')
+            && !safe_hex_digest_segment(digest_segment)
         {
             return Err(PluginError::runtime_not_ready(
                 &runtime.id,
-                "managed Runtime requires a sha256 content digest",
+                "runtime content digest must contain only safe hex characters",
             ));
         }
         Ok(Self {
@@ -581,10 +594,18 @@ impl GlobalRuntimeHost for ContentAddressedRuntimeHost {
 
 fn safe_runtime_segment(value: &str) -> bool {
     !value.is_empty()
+        && value != "."
+        && value != ".."
         && value.len() <= 128
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn safe_hex_digest_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 impl<'a, H: GlobalRuntimeHost + ?Sized> GlobalRuntimeInstaller<'a, H> {
@@ -948,12 +969,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let first = ContentAddressedRuntimeHost::new(
             root.path().to_path_buf(),
-            &contribution("1.0.0", "one"),
+            &contribution("1.0.0", "11111111"),
         )
         .unwrap();
         let second = ContentAddressedRuntimeHost::new(
             root.path().to_path_buf(),
-            &contribution("2.0.0", "two"),
+            &contribution("2.0.0", "22222222"),
         )
         .unwrap();
 
@@ -999,7 +1020,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let host = ContentAddressedRuntimeHost::new(
             root.path().to_path_buf(),
-            &contribution("1.0.0", "same"),
+            &contribution("1.0.0", "aaaaaaaa"),
         )
         .unwrap();
         host.publish("shared", b"first").await.unwrap();
@@ -1014,12 +1035,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let first = ContentAddressedRuntimeHost::new(
             root.path().to_path_buf(),
-            &contribution("1.0.0", "same"),
+            &contribution("1.0.0", "aaaaaaaa"),
         )
         .unwrap();
         let second = ContentAddressedRuntimeHost::new(
             root.path().to_path_buf(),
-            &contribution("1.0.0", "same"),
+            &contribution("1.0.0", "aaaaaaaa"),
         )
         .unwrap();
 
@@ -1060,7 +1081,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let host = ContentAddressedRuntimeHost::new(
             root.path().to_path_buf(),
-            &contribution("1.0.0", "verified"),
+            &contribution("1.0.0", "abcdef01"),
         )
         .unwrap();
         let directory = host.artifact_directory();
@@ -1168,5 +1189,62 @@ mod tests {
             sha256.as_deref(),
             runtime.content_digest.strip_prefix("sha256:")
         );
+    }
+
+    #[test]
+    fn runtime_segments_reject_dot_and_dotdot_traversal() {
+        assert!(!safe_runtime_segment("."));
+        assert!(!safe_runtime_segment(".."));
+        assert!(safe_runtime_segment("1.0.0"));
+        assert!(safe_runtime_segment("node_22-x64"));
+
+        let root = tempfile::tempdir().unwrap();
+        for bad_segment in [".", ".."] {
+            let mut by_id = contribution("1.0.0", "deadbeef");
+            by_id.id = bad_segment.to_owned();
+            assert!(ContentAddressedRuntimeHost::new(root.path().to_path_buf(), &by_id).is_err());
+
+            let mut by_version = contribution(bad_segment, "deadbeef");
+            by_version.id = "shared-cli".to_owned();
+            assert!(
+                ContentAddressedRuntimeHost::new(root.path().to_path_buf(), &by_version).is_err()
+            );
+
+            let mut by_target = contribution("1.0.0", "deadbeef");
+            by_target.target = bad_segment.to_owned();
+            assert!(
+                ContentAddressedRuntimeHost::new(root.path().to_path_buf(), &by_target).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_content_digest_requires_hex_segment() {
+        let root = tempfile::tempdir().unwrap();
+        for bad_digest in [
+            "sha256:../evil",
+            "sha256:..",
+            "sha256:.",
+            "sha256:",
+            "sha256:not-hex!",
+            "sha256:zzzz",
+        ] {
+            let mut managed = contribution("1.0.0", "deadbeef");
+            managed.content_digest = bad_digest.to_owned();
+            assert!(
+                ContentAddressedRuntimeHost::new(root.path().to_path_buf(), &managed).is_err(),
+                "managed digest `{bad_digest}` must be rejected"
+            );
+
+            let mut existing = managed;
+            existing.install = RuntimeInstall::Existing;
+            assert!(
+                ContentAddressedRuntimeHost::new(root.path().to_path_buf(), &existing).is_err(),
+                "existing runtime digest `{bad_digest}` must be rejected"
+            );
+        }
+
+        let valid = contribution("1.0.0", "0123456789abcdefABCDEF");
+        assert!(ContentAddressedRuntimeHost::new(root.path().to_path_buf(), &valid).is_ok());
     }
 }

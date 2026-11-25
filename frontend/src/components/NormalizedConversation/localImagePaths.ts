@@ -1,7 +1,22 @@
+import { resolveFilePathFromRoot } from '@/utils/filePaths';
 import {
   isAbsoluteLocalPath,
   trimFilePathCandidate,
 } from './MarkdownResourceLink';
+
+function safeDecodeUriComponent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function stripFileUrlPrefix(value: string): string {
+  const withoutScheme = value.replace(/^file:\/\/(?:localhost)?/i, '');
+  // On Windows, `file:///E:/path/img.png` leaves a leading slash before the drive letter.
+  return withoutScheme.replace(/^\/+([a-zA-Z]:[\\/])/, '$1');
+}
 
 /** Remote / inline / blob images render as-is (no local file resolution). */
 export function isRenderableRemoteImage(src: string): boolean {
@@ -29,17 +44,32 @@ export function resolveLocalMarkdownImagePath(
   src: string,
   workspacePath?: string | null
 ): string | null {
-  if (!src) return null;
-  if (src.startsWith('file://')) {
-    return src.replace(/^file:\/\//i, '');
-  }
-  if (isAbsoluteLocalPath(src)) {
-    return src;
-  }
-  if (!workspacePath || src.includes('://') || src.startsWith('#')) {
+  const trimmed = src.trim();
+  if (!trimmed || trimmed.startsWith('#') || isRenderableRemoteImage(trimmed)) {
     return null;
   }
 
-  const normalizedRelative = src.replace(/^\.?[\\/]/, '');
-  return `${workspacePath.replace(/[\\/]+$/, '')}/${normalizedRelative}`;
+  const withoutQueryOrHash = trimmed.replace(/[?#].*$/, '');
+  if (!withoutQueryOrHash) return null;
+
+  if (/^file:\/\//i.test(withoutQueryOrHash)) {
+    const decoded = safeDecodeUriComponent(
+      stripFileUrlPrefix(withoutQueryOrHash)
+    );
+    return decoded ? resolveFilePathFromRoot(decoded, null) : null;
+  }
+
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(withoutQueryOrHash)) {
+    return null;
+  }
+
+  const decoded = safeDecodeUriComponent(withoutQueryOrHash);
+  if (isAbsoluteLocalPath(decoded)) {
+    return resolveFilePathFromRoot(decoded, null);
+  }
+  if (!workspacePath) {
+    return null;
+  }
+
+  return resolveFilePathFromRoot(decoded, workspacePath);
 }

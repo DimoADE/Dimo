@@ -367,7 +367,7 @@ impl AgentConnectionRunner {
             .await?;
             self.store_vendor_config_selection(session_id, &selection)
                 .await;
-            if agent_kind == Some(AgentKind::Omp) {
+            {
                 let mut controls = self.session_controls.write().await;
                 if let Some(stored) = controls.get_mut(&session_id)
                     && let Some(ref mut mode_state) = stored.modes
@@ -409,6 +409,12 @@ impl AgentConnectionRunner {
                             OMP_YOLO_MODE_ID,
                         );
                     }
+                }
+            }
+            if let Some(ref mut mode_state) = stored.modes {
+                let (_, current_mode) = session_modes_from_config_options(&stored.config_options);
+                if let Some(mode_id) = current_mode {
+                    mode_state.current_mode_id = acp::schema::v1::SessionModeId::new(mode_id);
                 }
             }
         }
@@ -533,9 +539,7 @@ impl AgentConnectionRunner {
     ) -> AgentResult<AgentSessionControlsSnapshot> {
         let acp_session_id = self.session_map.read().await.get(&session_id).cloned();
         let Some(acp_session_id) = acp_session_id else {
-            return Err(AgentError::Runtime(
-                "no live ACP session yet; the mode will apply when the next turn starts".into(),
-            ));
+            return Err(AgentError::AcpSessionNotBound);
         };
         self.drop_asserted_config(session_id, "mode").await;
         self.apply_mode_value(conn, &acp_session_id, session_id, mode_id)
@@ -560,9 +564,7 @@ impl AgentConnectionRunner {
     ) -> AgentResult<AgentSessionControlsSnapshot> {
         let acp_session_id = self.session_map.read().await.get(&session_id).cloned();
         let Some(acp_session_id) = acp_session_id else {
-            return Err(AgentError::Runtime(
-                "no live ACP session yet; the setting will apply when the next turn starts".into(),
-            ));
+            return Err(AgentError::AcpSessionNotBound);
         };
         self.drop_asserted_config(session_id, key).await;
         self.apply_config_value(conn, &acp_session_id, session_id, key, value)

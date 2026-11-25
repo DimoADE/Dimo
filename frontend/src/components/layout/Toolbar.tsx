@@ -532,7 +532,7 @@ export function WorkspaceTabSwitcher() {
   const [searchParams] = useSearchParams();
   const { projectId, project } = useProject();
   const { activeWorktreeId, setActiveWorktree } = useWorktree();
-  const { rightSession } = useKanbanSessionContext();
+  const { rightSession, isLayoutHydrated = true } = useKanbanSessionContext();
   const lastRoute = useWindowProjectsStore((state) =>
     projectId ? (state.lastRouteByProject[projectId] ?? null) : null
   );
@@ -541,8 +541,18 @@ export function WorkspaceTabSwitcher() {
     sessionId?: string;
   }>();
   const { data: repos } = useProjectRepos(projectId);
-  const { worktrees, isLoading: isLoadingWorktrees } =
-    useProjectWorktrees(projectId);
+  const {
+    worktrees,
+    isLoading: isLoadingWorktrees,
+    isSuccess: isWorktreesSuccess,
+  } = useProjectWorktrees(projectId);
+  const knownWorkspaceIds = useMemo(
+    () =>
+      isWorktreesSuccess
+        ? new Set(worktrees.map((item) => item.workspace.id))
+        : null,
+    [isWorktreesSuccess, worktrees]
+  );
   const primaryRepo = repos?.[0];
   const { data: primaryRepoBranches = [] } = useRepoBranches(primaryRepo?.id, {
     enabled: Boolean(primaryRepo?.id),
@@ -659,6 +669,8 @@ export function WorkspaceTabSwitcher() {
     [navigate, searchParams, setActiveWorktree]
   );
 
+  const defaultGitWorkspaceBindRef = useRef<string | null>(null);
+
   const bindDefaultGitWorkspace = useCallback(async () => {
     if (!projectId) {
       return;
@@ -668,6 +680,7 @@ export function WorkspaceTabSwitcher() {
       projectId,
       lastRoute,
       rightSession,
+      knownWorkspaceIds,
     });
     if (restored) {
       bindWorkspaceLanding(
@@ -695,10 +708,18 @@ export function WorkspaceTabSwitcher() {
       }
     }
 
+    if (
+      defaultGitWorkspaceBindRef.current !== null &&
+      defaultGitWorkspaceBindRef.current !== projectId
+    ) {
+      return;
+    }
+
     const landed = resolveWorkspaceTabNavigation({
       projectId,
       lastRoute,
       rightSession,
+      knownWorkspaceIds,
       fallbackWorkspaceId: targetWorkspace?.id ?? null,
       fallbackTaskId: targetWorkspace?.task_id ?? null,
     });
@@ -715,6 +736,7 @@ export function WorkspaceTabSwitcher() {
     activeWorktreeId,
     bindWorkspaceLanding,
     currentProjectBranch,
+    knownWorkspaceIds,
     lastRoute,
     navigate,
     projectId,
@@ -724,9 +746,9 @@ export function WorkspaceTabSwitcher() {
     setActiveWorktree,
   ]);
 
-  const defaultGitWorkspaceBindRef = useRef<string | null>(null);
   useEffect(() => {
     if (!projectId) {
+      defaultGitWorkspaceBindRef.current = null;
       return;
     }
     if (
@@ -736,6 +758,12 @@ export function WorkspaceTabSwitcher() {
         routeSessionId: sessionId,
       })
     ) {
+      if (defaultGitWorkspaceBindRef.current !== projectId) {
+        defaultGitWorkspaceBindRef.current = null;
+      }
+      return;
+    }
+    if (!isLayoutHydrated || isLoadingWorktrees) {
       return;
     }
     if (!useWindowProjectsStore.persist.hasHydrated()) {
@@ -747,14 +775,6 @@ export function WorkspaceTabSwitcher() {
         void bindDefaultGitWorkspace();
       });
     }
-    const restored = resolveWorkspaceTabNavigation({
-      projectId: projectId ?? '',
-      lastRoute,
-      rightSession,
-    });
-    if (!restored && isLoadingWorktrees) {
-      return;
-    }
     if (defaultGitWorkspaceBindRef.current === projectId) {
       return;
     }
@@ -763,10 +783,9 @@ export function WorkspaceTabSwitcher() {
   }, [
     bindDefaultGitWorkspace,
     effectiveActiveTab,
+    isLayoutHydrated,
     isLoadingWorktrees,
-    lastRoute,
     projectId,
-    rightSession,
     sessionId,
     workspaceId,
   ]);
@@ -800,6 +819,7 @@ export function WorkspaceTabSwitcher() {
         const immediateTarget = resolveWorkspaceTabNavigation({
           projectId,
           rightSession: effectiveActiveTab === 'kanban' ? rightSession : null,
+          knownWorkspaceIds,
           fallbackWorkspaceId: fallbackWorktree?.workspace.id ?? null,
           fallbackTaskId: fallbackWorktree?.workspace.task_id ?? null,
         });
@@ -832,6 +852,7 @@ export function WorkspaceTabSwitcher() {
     [
       bindDefaultGitWorkspace,
       effectiveActiveTab,
+      knownWorkspaceIds,
       navigate,
       projectId,
       rightSession,

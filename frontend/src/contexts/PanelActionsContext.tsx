@@ -98,6 +98,11 @@ import {
   sessionPanelId,
 } from '@/utils/dockviewGroupPolicy';
 import { builtinPanelTitle } from '@/lib/builtinPanelTitles';
+import {
+  drainDesktopOpenFiles,
+  requeueDesktopOpenFiles,
+  subscribeDesktopOpenFiles,
+} from '@/lib/desktopOpenFiles';
 import { getLayoutArrangement } from '@/lib/layoutArrangement';
 import { useFileTreeStore } from '@/stores/useFileTreeStore';
 import {
@@ -2997,6 +3002,38 @@ export function PanelActionsProvider({ children }: { children: ReactNode }) {
       });
     }
   }, [dockviewEpoch, pluginPanels]);
+
+  useEffect(() => {
+    const flushPendingOpenFiles = () => {
+      const canvasController = getCanvasWorkspaceController();
+      if (!apiRef.current && !canvasController) {
+        return;
+      }
+      const queued = drainDesktopOpenFiles();
+      if (queued.length === 0) {
+        return;
+      }
+      if (
+        !canvasController &&
+        useLayoutStore.getState().activeTab !== 'workspace'
+      ) {
+        useLayoutStore.getState().setActiveTab('workspace');
+      }
+      const retry: string[] = [];
+      for (const filePath of queued) {
+        const result = openFilePreview(filePath, { activate: true });
+        if (result === 'unavailable') {
+          retry.push(filePath);
+        }
+      }
+      if (retry.length > 0) {
+        requeueDesktopOpenFiles(retry);
+      }
+    };
+
+    flushPendingOpenFiles();
+    return subscribeDesktopOpenFiles(flushPendingOpenFiles);
+  }, [dockviewEpoch, openFilePreview]);
 
   const value = useMemo<PanelActions>(() => {
     return {

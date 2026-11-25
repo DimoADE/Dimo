@@ -376,6 +376,7 @@ async fn hydrate_turn_state_before(
     pool: &SqlitePool,
     conversation_id: Uuid,
     complete_antigravity_reads: bool,
+    denied_tool_calls: &std::collections::BTreeSet<String>,
     turn_id: Uuid,
     before_sequence: i64,
 ) -> Result<Option<ProjectedTurn>, sqlx::Error> {
@@ -406,6 +407,7 @@ async fn hydrate_turn_state_before(
 
     let mut temp_fold = ProjectionFold {
         complete_antigravity_reads,
+        denied_tool_calls: denied_tool_calls.clone(),
         ..ProjectionFold::default()
     };
     for ev in &events {
@@ -460,6 +462,7 @@ impl IncrementalRowProjector {
                 fold.turn_order = turn_order;
                 fold.side_rows = snap_state.side_rows;
                 fold.side_row_turns = snap_state.side_row_turns;
+                fold.denied_tool_calls = snap_state.denied_tool_calls;
                 fold.last_sequence = snap_state.last_sequence;
                 partial_turns = true;
                 if let Some(&latest_turn_id) = fold.turn_order.last() {
@@ -467,6 +470,7 @@ impl IncrementalRowProjector {
                         pool,
                         conversation_id,
                         complete_antigravity_reads,
+                        &fold.denied_tool_calls,
                         latest_turn_id,
                         fold.last_sequence.saturating_add(1),
                     )
@@ -495,6 +499,7 @@ impl IncrementalRowProjector {
                         pool,
                         conversation_id,
                         complete_antigravity_reads,
+                        &fold.denied_tool_calls,
                         turn_id,
                         seq,
                     )
@@ -527,6 +532,10 @@ impl IncrementalRowProjector {
 
     pub fn complete_antigravity_reads(&self) -> bool {
         self.fold.complete_antigravity_reads
+    }
+
+    pub fn denied_tool_calls(&self) -> &std::collections::BTreeSet<String> {
+        &self.fold.denied_tool_calls
     }
 
     pub fn missing_turns_for_records(
@@ -579,6 +588,7 @@ pub(crate) async fn fetch_hydrated_turns_for_projector(
     pool: &SqlitePool,
     conversation_id: Uuid,
     complete_antigravity_reads: bool,
+    denied_tool_calls: &std::collections::BTreeSet<String>,
     targets: &[(Uuid, i64)],
 ) -> Result<Vec<(Uuid, Option<ProjectedTurn>)>, sqlx::Error> {
     let mut out = Vec::with_capacity(targets.len());
@@ -587,6 +597,7 @@ pub(crate) async fn fetch_hydrated_turns_for_projector(
             pool,
             conversation_id,
             complete_antigravity_reads,
+            denied_tool_calls,
             turn_id,
             before_seq,
         )

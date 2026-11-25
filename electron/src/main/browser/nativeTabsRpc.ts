@@ -92,14 +92,7 @@ export class NativeTabsRpcClient {
     this.resolveAllReadyWaiters(false);
     this.resolveAllPendingPolicies(DEFAULT_POLICY_ALLOW);
     this.rpcQueue.length = 0;
-    if (this.socket) {
-      try {
-        this.socket.close();
-      } catch {
-        // Ignore close errors during teardown.
-      }
-      this.socket = null;
-    }
+    this.closeCurrentSocket();
   }
 
   isConnected(): boolean {
@@ -181,10 +174,24 @@ export class NativeTabsRpcClient {
     this.pendingPolicies.clear();
   }
 
+  private closeCurrentSocket(): void {
+    const existing = this.socket;
+    if (!existing) {
+      return;
+    }
+    this.socket = null;
+    try {
+      existing.close();
+    } catch {
+      // Ignore close errors during teardown or reconnect.
+    }
+  }
+
   private connect(): void {
     if (!this.running) {
       return;
     }
+    this.closeCurrentSocket();
     let baseUrl: string;
     let token: string;
     try {
@@ -225,20 +232,21 @@ export class NativeTabsRpcClient {
     });
 
     ws.addEventListener('message', (event) => {
+      if (this.socket !== ws) return;
       const text = typeof event.data === 'string' ? event.data : String(event.data ?? '');
       this.handleMessage(text, ws);
     });
 
     ws.addEventListener('close', () => {
-      if (this.socket === ws) {
-        this.socket = null;
-        this.rpcQueue.length = 0;
-      }
+      if (this.socket !== ws) return;
+      this.socket = null;
+      this.rpcQueue.length = 0;
       this.resolveAllPendingPolicies(DEFAULT_POLICY_ALLOW);
       this.scheduleReconnect();
     });
 
     ws.addEventListener('error', () => {
+      if (this.socket !== ws) return;
       // `close` event follows and triggers reconnect.
     });
   }

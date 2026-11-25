@@ -970,4 +970,198 @@ describe('SessionCanvasView', () => {
       cancelSpy.mockRestore();
     }
   });
+
+  it('does not hijack Backspace/Undo/Enter when hidden in KeepAliveSurface, targeting outside canvas, or inside interactive controls', async () => {
+    const { KeepAliveSurface } = await import(
+      '@/components/layout/KeepAliveSurface'
+    );
+    let api: SessionCanvasApi | null = null;
+    const { container, rerender } = renderCanvas(
+      <div>
+        <div data-testid="outside-page" tabIndex={0}>
+          Other Page
+        </div>
+        <KeepAliveSurface active>
+          <SessionCanvasView
+            projectId="p1"
+            sessions={[session('s1', new Date().toISOString())]}
+            sessionsReady
+            listWidth={280}
+            list={<div>list</div>}
+            onApiReady={(next) => {
+              api = next;
+            }}
+          />
+        </KeepAliveSurface>
+      </div>
+    );
+
+    act(() => {
+      api?.addSession('s1');
+    });
+
+    const savedBefore = JSON.parse(
+      window.localStorage.getItem('dimo:kanban-canvas:p1') ?? '{}'
+    ) as { nodes: Array<{ id: string; sessionId: string }> };
+    const nodeId = savedBefore.nodes.find((n) => n.sessionId === 's1')?.id;
+    expect(nodeId).toBeTruthy();
+
+    // Select the node via ReactFlow onNodesChange
+    act(() => {
+      latestOnNodesChange?.([{ type: 'select', id: nodeId, selected: true }]);
+    });
+
+    // 1. Target outside canvas surface must NOT be prevented or delete the node
+    const outside = screen.getByTestId('outside-page');
+    const outsideDelete = new KeyboardEvent('keydown', {
+      key: 'Backspace',
+      bubbles: true,
+      cancelable: true,
+    });
+    outside.dispatchEvent(outsideDelete);
+    expect(outsideDelete.defaultPrevented).toBe(false);
+
+    const outsideUndo = new KeyboardEvent('keydown', {
+      key: 'z',
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    outside.dispatchEvent(outsideUndo);
+    expect(outsideUndo.defaultPrevented).toBe(false);
+
+    // 2. Target inside an expanded panel window or button inside canvas must NOT be hijacked
+    const surface = container.querySelector('.canvas-surface') as HTMLElement;
+    const expandedPanel = document.createElement('div');
+    expandedPanel.className = 'canvas-session-window';
+    const panelInner = document.createElement('div');
+    expandedPanel.appendChild(panelInner);
+    surface.appendChild(expandedPanel);
+
+    const panelDelete = new KeyboardEvent('keydown', {
+      key: 'Backspace',
+      bubbles: true,
+      cancelable: true,
+    });
+    panelInner.dispatchEvent(panelDelete);
+    expect(panelDelete.defaultPrevented).toBe(false);
+
+    const panelUndo = new KeyboardEvent('keydown', {
+      key: 'z',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    panelInner.dispatchEvent(panelUndo);
+    expect(panelUndo.defaultPrevented).toBe(false);
+    expandedPanel.remove();
+
+    const buttonEl = document.createElement('button');
+    surface.appendChild(buttonEl);
+    const buttonEnter = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    buttonEl.dispatchEvent(buttonEnter);
+    expect(buttonEnter.defaultPrevented).toBe(false);
+    buttonEl.remove();
+
+    // 3. When hidden inside KeepAliveSurface (active={false}), even an event on surface must NOT fire
+    rerender(
+      <div>
+        <div data-testid="outside-page" tabIndex={0}>
+          Other Page
+        </div>
+        <KeepAliveSurface active={false}>
+          <SessionCanvasView
+            projectId="p1"
+            sessions={[session('s1', new Date().toISOString())]}
+            sessionsReady
+            listWidth={280}
+            list={<div>list</div>}
+            onApiReady={(next) => {
+              api = next;
+            }}
+          />
+        </KeepAliveSurface>
+      </div>
+    );
+
+    const hiddenDelete = new KeyboardEvent('keydown', {
+      key: 'Delete',
+      bubbles: true,
+      cancelable: true,
+    });
+    surface.dispatchEvent(hiddenDelete);
+    expect(hiddenDelete.defaultPrevented).toBe(false);
+
+    const stillSaved = JSON.parse(
+      window.localStorage.getItem('dimo:kanban-canvas:p1') ?? '{}'
+    ) as { nodes: Array<{ id: string }> };
+    expect(stillSaved.nodes.some((n) => n.id === nodeId)).toBe(true);
+
+    // 4. When visible and focused directly on canvas surface, Delete deletes selection & Undo restores it
+    rerender(
+      <div>
+        <div data-testid="outside-page" tabIndex={0}>
+          Other Page
+        </div>
+        <KeepAliveSurface active>
+          <SessionCanvasView
+            projectId="p1"
+            sessions={[session('s1', new Date().toISOString())]}
+            sessionsReady
+            listWidth={280}
+            list={<div>list</div>}
+            onApiReady={(next) => {
+              api = next;
+            }}
+          />
+        </KeepAliveSurface>
+      </div>
+    );
+
+    const activeDelete = new KeyboardEvent('keydown', {
+      key: 'Delete',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      surface.dispatchEvent(activeDelete);
+    });
+    expect(activeDelete.defaultPrevented).toBe(true);
+
+    const afterDelete = JSON.parse(
+      window.localStorage.getItem('dimo:kanban-canvas:p1') ?? '{}'
+    ) as { nodes: Array<{ id: string }> };
+    expect(afterDelete.nodes.some((n) => n.id === nodeId)).toBe(false);
+
+    // With empty selection, Delete must NOT call preventDefault
+    const noOpDelete = new KeyboardEvent('keydown', {
+      key: 'Delete',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      surface.dispatchEvent(noOpDelete);
+    });
+    expect(noOpDelete.defaultPrevented).toBe(false);
+
+    // Undo restores the deleted node and calls preventDefault
+    const activeUndo = new KeyboardEvent('keydown', {
+      key: 'z',
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      surface.dispatchEvent(activeUndo);
+    });
+    expect(activeUndo.defaultPrevented).toBe(true);
+    const afterUndo = JSON.parse(
+      window.localStorage.getItem('dimo:kanban-canvas:p1') ?? '{}'
+    ) as { nodes: Array<{ id: string }> };
+    expect(afterUndo.nodes.some((n) => n.id === nodeId)).toBe(true);
+  });
 });

@@ -136,12 +136,15 @@ pub struct PulseTemporalTickReport {
     pub expired_interactions: Vec<PulseUserInteractionView>,
 }
 
+pub const DEFAULT_SUBSCRIPTION_DEBOUNCE_MS: u32 = 1_000;
+
 pub struct PulseEngine {
     store: SqlitePulseStore,
     rate_breaker: ChainRateBreaker,
     sla_tracker: Mutex<InactivitySlaTracker>,
     debounce_tracker: Mutex<HashMap<(String, String), DateTime<Utc>>>,
     max_hop_count: u32,
+    subscription_debounce_ms: u32,
     engine_active: bool,
 }
 
@@ -153,6 +156,7 @@ impl PulseEngine {
             sla_tracker: Mutex::new(InactivitySlaTracker::new()),
             debounce_tracker: Mutex::new(HashMap::new()),
             max_hop_count: DEFAULT_MAX_HOP_COUNT,
+            subscription_debounce_ms: DEFAULT_SUBSCRIPTION_DEBOUNCE_MS,
             engine_active: true,
         }
     }
@@ -168,8 +172,14 @@ impl PulseEngine {
             sla_tracker: Mutex::new(InactivitySlaTracker::new()),
             debounce_tracker: Mutex::new(HashMap::new()),
             max_hop_count,
+            subscription_debounce_ms: DEFAULT_SUBSCRIPTION_DEBOUNCE_MS,
             engine_active: true,
         }
+    }
+
+    pub fn with_subscription_debounce_ms(mut self, debounce_ms: u32) -> Self {
+        self.subscription_debounce_ms = debounce_ms;
+        self
     }
 
     pub fn with_engine_active(mut self, active: bool) -> Self {
@@ -534,88 +544,26 @@ impl PulseEngine {
         let mut actions = Vec::new();
         let mut subscription_hits = Vec::new();
 
-        // Layer 3a: O(1) ThreadSubscription fan-out (bypassing Gate re-evaluation for subscribed threads).
-        if let Some(thread_key) = envelope.thread_key.as_deref() {
-            let subs = self
-                .store
-                .list_active_subscriptions_for_thread(thread_key)
-                .await?;
-            for sub in subs {
-                let follow_up_text = build_thread_followup_prompt(&envelope);
-                match sub.subscriber_kind.as_str() {
-                    "session" => {
-                        actions.push(PulseDispatchAction::SpawnOrSendSession {
-                            rule_id: None,
-                            subscription_id: Some(sub.id.clone()),
-                            mode: SessionTargetMode::ExistingSession,
-                            agent_id: "subscribed_session".to_string(),
-                            model_override: None,
-                            workspace_isolation: PulseWorkspaceIsolation::ProjectRoot,
-                            project_id: None,
-                            existing_session_id: Some(sub.subscriber_id.clone()),
-                            delivery_strategy: SessionDeliveryStrategy::Queue,
-                            subscribe_thread: false,
-                            thread_key: Some(thread_key.to_string()),
-                            prompt: follow_up_text,
-                        });
-                    }
-                    "bot" => {
-                        let mailbox_id = Uuid::new_v4().to_string();
-                        self.store
-                            .enqueue_bot_mailbox(&PulseBotMailboxItem {
-                                id: mailbox_id.clone(),
-                                member_id: sub.subscriber_id.clone(),
-                                conversation_scope: BotConversationScope::FixedPrimary,
-                                mailbox_policy: BotMailboxPolicy::FifoSerial,
-                                thread_key: Some(thread_key.to_string()),
-                                event_id: envelope.event_id.clone(),
-                                rule_id: None,
-                                prompt_text: follow_up_text.clone(),
-                                status: "queued".to_string(),
-                                created_at: now_iso.clone(),
-                                claimed_at: None,
-                            })
-                            .await?;
-                        actions.push(PulseDispatchAction::EnqueueBotMailbox {
-                            rule_id: None,
-                            subscription_id: Some(sub.id.clone()),
-                            mailbox_item_id: mailbox_id,
-                            member_id: sub.subscriber_id.clone(),
-                            conversation_scope: BotConversationScope::FixedPrimary,
-                            mailbox_policy: BotMailboxPolicy::FifoSerial,
-                            subscribe_thread: false,
-                            thread_key: Some(thread_key.to_string()),
-                            prompt: follow_up_text,
-                        });
-                    }
-                    "group" => {
-                        actions.push(PulseDispatchAction::DispatchGroupStage {
-                            rule_id: None,
-                            subscription_id: Some(sub.id.clone()),
-                            space_id: sub.subscriber_id.clone(),
-                            dispatch_mode: GroupDispatchMode::BroadcastLogOnly,
-                            thread_key: Some(thread_key.to_string()),
-                            message: follow_up_text,
-                        });
-                    }
-                    "workflow" => {
-                        let mut inputs = BTreeMap::new();
-                        inputs.insert("eventId".to_string(), envelope.event_id.clone());
-                        inputs.insert("threadKey".to_string(), thread_key.to_string());
-                        actions.push(PulseDispatchAction::StartOrResumeWorkflow {
-                            rule_id: None,
-                            subscription_id: Some(sub.id.clone()),
-                            workflow_id: sub.subscriber_id.clone(),
-                            pinned_version: 1,
-                            inputs,
-                            thread_key: Some(thread_key.to_string()),
-                        });
-                    }
-                    _ => {}
-                }
-                subscription_hits.push(sub);
-            }
-        }
+        // Layer 3a: O(1) ThreadSubscription lookup with per-subscription debounce protection.
+        let debounced_subs: Vec<PulseSubscriptionView> =
+            if let Some(thread_key) = envelope.thread_key.as_deref() {
+                self.store
+                    .list_active_subscriptions_for_thread(thread_key)
+                    .await?
+                    .into_iter()
+                    .filter(|sub| {
+                        let sub_key = format!("sub:{}", sub.id);
+                        self.check_and_record_debounce(
+                            &sub_key,
+                            Some(thread_key),
+                            self.subscription_debounce_ms,
+                            now,
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
 
         // Layer 3b: Deterministic GateFilterAst evaluation + Rate Breaker + Observe/Auto dispatch.
         let mut observed_candidates = Vec::new();
@@ -635,11 +583,13 @@ impl PulseEngine {
             })
             .collect();
 
-        // Check per-thread_key sliding-window rate breaker once per incoming event if any Auto rule matched.
-        let rate_tripped = if matched_rules
+        // Check per-thread_key sliding-window rate breaker once per incoming event whenever
+        // Layer 3a subscriptions or Layer 3b Auto rules would dispatch.
+        let has_sub_fanout = !debounced_subs.is_empty();
+        let has_auto_rule = matched_rules
             .iter()
-            .any(|r| r.spec.eval_mode == PulseEvalMode::Auto)
-        {
+            .any(|r| r.spec.eval_mode == PulseEvalMode::Auto);
+        let rate_tripped = if has_sub_fanout || has_auto_rule {
             let rate_key = envelope
                 .thread_key
                 .as_deref()
@@ -651,6 +601,101 @@ impl PulseEngine {
         } else {
             false
         };
+
+        let mut rejected_reason = None;
+        if let Some(thread_key) = envelope.thread_key.as_deref()
+            && has_sub_fanout
+        {
+            if rate_tripped {
+                let _ = self
+                    .store
+                    .increment_source_rejected(
+                        &envelope.source.instance_id,
+                        Some("thread subscription fan-out blocked by chain rate breaker"),
+                        &now_iso,
+                    )
+                    .await;
+                if matched_rules.is_empty() {
+                    rejected_reason = Some("rate_breaker_tripped".to_string());
+                }
+            } else {
+                for sub in debounced_subs {
+                    let follow_up_text = build_thread_followup_prompt(&envelope);
+                    match sub.subscriber_kind.as_str() {
+                        "session" => {
+                            actions.push(PulseDispatchAction::SpawnOrSendSession {
+                                rule_id: None,
+                                subscription_id: Some(sub.id.clone()),
+                                mode: SessionTargetMode::ExistingSession,
+                                agent_id: "subscribed_session".to_string(),
+                                model_override: None,
+                                workspace_isolation: PulseWorkspaceIsolation::ProjectRoot,
+                                project_id: None,
+                                existing_session_id: Some(sub.subscriber_id.clone()),
+                                delivery_strategy: SessionDeliveryStrategy::Queue,
+                                subscribe_thread: false,
+                                thread_key: Some(thread_key.to_string()),
+                                prompt: follow_up_text,
+                            });
+                        }
+                        "bot" => {
+                            let mailbox_id = Uuid::new_v4().to_string();
+                            self.store
+                                .enqueue_bot_mailbox(&PulseBotMailboxItem {
+                                    id: mailbox_id.clone(),
+                                    member_id: sub.subscriber_id.clone(),
+                                    conversation_scope: BotConversationScope::FixedPrimary,
+                                    mailbox_policy: BotMailboxPolicy::FifoSerial,
+                                    thread_key: Some(thread_key.to_string()),
+                                    event_id: envelope.event_id.clone(),
+                                    rule_id: None,
+                                    prompt_text: follow_up_text.clone(),
+                                    status: "queued".to_string(),
+                                    created_at: now_iso.clone(),
+                                    claimed_at: None,
+                                })
+                                .await?;
+                            actions.push(PulseDispatchAction::EnqueueBotMailbox {
+                                rule_id: None,
+                                subscription_id: Some(sub.id.clone()),
+                                mailbox_item_id: mailbox_id,
+                                member_id: sub.subscriber_id.clone(),
+                                conversation_scope: BotConversationScope::FixedPrimary,
+                                mailbox_policy: BotMailboxPolicy::FifoSerial,
+                                subscribe_thread: false,
+                                thread_key: Some(thread_key.to_string()),
+                                prompt: follow_up_text,
+                            });
+                        }
+                        "group" => {
+                            actions.push(PulseDispatchAction::DispatchGroupStage {
+                                rule_id: None,
+                                subscription_id: Some(sub.id.clone()),
+                                space_id: sub.subscriber_id.clone(),
+                                dispatch_mode: GroupDispatchMode::BroadcastLogOnly,
+                                thread_key: Some(thread_key.to_string()),
+                                message: follow_up_text,
+                            });
+                        }
+                        "workflow" => {
+                            let mut inputs = BTreeMap::new();
+                            inputs.insert("eventId".to_string(), envelope.event_id.clone());
+                            inputs.insert("threadKey".to_string(), thread_key.to_string());
+                            actions.push(PulseDispatchAction::StartOrResumeWorkflow {
+                                rule_id: None,
+                                subscription_id: Some(sub.id.clone()),
+                                workflow_id: sub.subscriber_id.clone(),
+                                pinned_version: 1,
+                                inputs,
+                                thread_key: Some(thread_key.to_string()),
+                            });
+                        }
+                        _ => {}
+                    }
+                    subscription_hits.push(sub);
+                }
+            }
+        }
 
         for rule in matched_rules {
             let mut effective_mode = rule.spec.eval_mode;
@@ -732,7 +777,7 @@ impl PulseEngine {
 
         Ok(PulseIngestOutcome {
             duplicate_delivery: false,
-            rejected_reason: None,
+            rejected_reason,
             claimed_exclusively,
             downgraded_rule_ids,
             observed_candidates,
@@ -1296,5 +1341,158 @@ fn build_thread_followup_prompt(envelope: &EventEnvelope) -> String {
             "[Thread Follow-up] `{}` by `{actor}`: {body_hint}",
             envelope.event_type
         )
+    }
+}
+
+#[cfg(test)]
+mod subscription_guard_tests {
+    use std::str::FromStr;
+
+    use chrono::TimeZone;
+    use db::models::pulse::ensure_pulse_schema;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    use super::*;
+
+    async fn test_pool() -> SqlitePool {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .expect("sqlite memory options")
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("connect sqlite memory pool");
+        ensure_pulse_schema(&pool)
+            .await
+            .expect("apply pulse schema");
+        pool
+    }
+
+    fn thread_event(delivery_id: &str, thread_key: &str) -> EventEnvelope {
+        EventEnvelope {
+            event_id: format!("evt-{delivery_id}"),
+            delivery_id: delivery_id.to_string(),
+            source: EventSourceMeta {
+                kind: EventSourceKind::Jira,
+                instance_id: "jira-main".to_string(),
+                trust_level: EventTrustLevel::VerifiedExternal,
+            },
+            event_type: "thread.reply".to_string(),
+            occurred_at: "2026-11-25T10:00:00Z".to_string(),
+            actor: EventActor {
+                id: "user-1".to_string(),
+                display_name: Some("Alice".to_string()),
+                roles: vec!["member".to_string()],
+                is_bot: false,
+                is_self: false,
+            },
+            thread_key: Some(thread_key.to_string()),
+            correlations: Vec::new(),
+            reply_channels: Vec::new(),
+            trace: EventTrace {
+                root_event_id: format!("evt-{delivery_id}"),
+                parent_run_id: None,
+                hop_count: 0,
+            },
+            payload: json!({ "text": format!("reply {delivery_id}") }),
+        }
+    }
+
+    #[tokio::test]
+    async fn thread_subscription_debounce_suppresses_burst_and_allows_after_window() {
+        let pool = test_pool().await;
+        let engine = PulseEngine::new(pool).with_subscription_debounce_ms(2_000);
+        let t0 = Utc.with_ymd_and_hms(2026, 11, 25, 10, 0, 0).unwrap();
+
+        engine
+            .store()
+            .subscribe_thread("sub-1", "thread:debounce-1", "session", "sess-1", &t0.to_rfc3339())
+            .await
+            .expect("subscribe thread");
+
+        let first = engine
+            .ingest_event(thread_event("d1", "thread:debounce-1"), t0)
+            .await
+            .expect("ingest first");
+        assert_eq!(first.subscription_hits.len(), 1);
+        assert_eq!(first.dispatch_plan.actions.len(), 1);
+        assert_eq!(first.rejected_reason, None);
+
+        let burst = engine
+            .ingest_event(
+                thread_event("d2", "thread:debounce-1"),
+                t0 + Duration::milliseconds(500),
+            )
+            .await
+            .expect("ingest burst");
+        assert!(
+            burst.subscription_hits.is_empty(),
+            "burst event inside debounce window must be suppressed"
+        );
+        assert!(burst.dispatch_plan.actions.is_empty());
+
+        let after_window = engine
+            .ingest_event(
+                thread_event("d3", "thread:debounce-1"),
+                t0 + Duration::milliseconds(2_500),
+            )
+            .await
+            .expect("ingest after debounce window");
+        assert_eq!(after_window.subscription_hits.len(), 1);
+        assert_eq!(after_window.dispatch_plan.actions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn thread_subscription_fanout_trips_chain_rate_breaker_and_halts_dispatch() {
+        let pool = test_pool().await;
+        let engine = PulseEngine::with_guards(
+            pool.clone(),
+            ChainRateBreaker::new(Duration::seconds(60), 2),
+            DEFAULT_MAX_HOP_COUNT,
+        )
+        .with_subscription_debounce_ms(0);
+        let t0 = Utc.with_ymd_and_hms(2026, 11, 25, 10, 0, 0).unwrap();
+
+        engine
+            .store()
+            .subscribe_thread("sub-bot-1", "thread:rate-1", "bot", "bot-alpha", &t0.to_rfc3339())
+            .await
+            .expect("subscribe bot");
+
+        for i in 1..=2 {
+            let outcome = engine
+                .ingest_event(
+                    thread_event(&format!("r{i}"), "thread:rate-1"),
+                    t0 + Duration::seconds(i),
+                )
+                .await
+                .expect("ingest allowed event");
+            assert_eq!(outcome.subscription_hits.len(), 1);
+            assert_eq!(outcome.dispatch_plan.actions.len(), 1);
+            assert_eq!(outcome.rejected_reason, None);
+        }
+
+        let tripped = engine
+            .ingest_event(thread_event("r3", "thread:rate-1"), t0 + Duration::seconds(3))
+            .await
+            .expect("ingest tripped event");
+        assert!(tripped.subscription_hits.is_empty());
+        assert!(tripped.dispatch_plan.actions.is_empty());
+        assert_eq!(
+            tripped.rejected_reason.as_deref(),
+            Some("rate_breaker_tripped")
+        );
+
+        let queued_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pulse_bot_mailbox WHERE member_id = 'bot-alpha'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count bot mailbox rows");
+        assert_eq!(
+            queued_count, 2,
+            "rate-breaker-tripped subscription must not enqueue additional bot mailbox work"
+        );
     }
 }

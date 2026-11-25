@@ -22,6 +22,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import { useOptionalProject } from '@/contexts/ProjectContext';
 import { useOptionalWorktree } from '@/contexts/WorktreeContext';
 import { useOptionalKanbanSessionContext } from '@/contexts/KanbanSessionContext';
 import { useWorkspaceBranchStatus } from '@/hooks/useWorkspaceBranchStatus';
@@ -79,6 +80,7 @@ export function BranchInfoHeader({
   const prefersReducedMotion = useMediaQuery(
     '(prefers-reduced-motion: reduce)'
   );
+  const projectContext = useOptionalProject();
   const worktree = useOptionalWorktree();
   const kanbanSession = useOptionalKanbanSessionContext();
   const effectiveWorktreeId =
@@ -97,7 +99,10 @@ export function BranchInfoHeader({
   if (
     !effectiveWorktreeId ||
     !branchStatus?.length ||
-    !workspace?.use_worktree
+    !workspace?.use_worktree ||
+    (projectContext?.projectId &&
+      workspace.project_id &&
+      workspace.project_id !== projectContext.projectId)
   ) {
     return null;
   }

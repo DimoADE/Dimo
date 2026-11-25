@@ -173,7 +173,11 @@ import {
   SIDECAR_READY_EVENT,
   SIDECAR_RESTARTED_EVENT,
 } from '../shared/ipcContract';
-import { DeepLinkManager } from './deeplink';
+import {
+  DESKTOP_OPEN_FILE_EVENT,
+  DeepLinkManager,
+  extractFilePathsFromArgs,
+} from './deeplink';
 import {
   DESKTOP_TOAST_ACTIVATED_EVENT,
   DESKTOP_TOAST_MAX_PENDING,
@@ -271,6 +275,98 @@ describe('DeepLinkManager cold-start session activation race', () => {
       workspaceId: 'w4',
       sessionId: 's4',
     });
+  });
+});
+
+describe('DeepLinkManager external Open With file routing', () => {
+  it('extracts valid existing file paths while skipping flags, URLs, defaultApp entry, and duplicates', () => {
+    const existing = new Set([
+      'D:\\notes\\config.yaml',
+      '/tmp/demo/settings.toml',
+      'C:\\Users\\alice\\doc.md',
+    ]);
+
+    expect(
+      extractFilePathsFromArgs(
+        [
+          'Dimo.exe',
+          '--allow-file-access-from-files',
+          'D:\\notes\\config.yaml',
+          'dimo://open?project=p1&workspace=w1&session=s1',
+          'D:\\notes\\missing.yaml',
+          'D:\\notes\\config.yaml',
+          '--',
+          '/tmp/demo/settings.toml',
+        ],
+        { isExistingFile: (candidate) => existing.has(candidate) }
+      )
+    ).toEqual(['D:\\notes\\config.yaml', '/tmp/demo/settings.toml']);
+
+    expect(
+      extractFilePathsFromArgs(
+        ['electron.exe', 'dist/main/index.js', 'C:\\Users\\alice\\doc.md'],
+        {
+          hasDefaultAppArg: true,
+          isExistingFile: (candidate) =>
+            candidate === 'dist/main/index.js' || existing.has(candidate),
+        }
+      )
+    ).toEqual(['C:\\Users\\alice\\doc.md']);
+  });
+
+  it('queues cold-start Open With files until React drains and broadcasts warm-start files immediately', () => {
+    const existing = new Set([
+      'D:\\work\\app.yaml',
+      'D:\\work\\second.toml',
+      '/Users/alice/readme.md',
+    ]);
+    const manager = new DeepLinkManager({
+      isExistingFile: (candidate) => existing.has(candidate),
+    });
+    const showMainWindow = vi.fn();
+    const broadcastEvent = vi.fn();
+
+    // Cold-start open-file before handlers attach
+    manager.handleOpenFile('/Users/alice/readme.md');
+
+    manager.attachHandlers({
+      showMainWindow,
+      openSettingsWindow: vi.fn(),
+      openAppWindow: vi.fn(),
+      broadcastEvent,
+    });
+
+    // Cold-start Windows CLI file arg before main window finishes loading
+    manager.handleProcessArgs(['Dimo.exe', 'D:\\work\\app.yaml'], {
+      isStartup: true,
+    });
+
+    expect(showMainWindow).toHaveBeenCalled();
+    expect(broadcastEvent).not.toHaveBeenCalled();
+
+    // did-finish-load broadcasts once while keeping files stored for React mount drain
+    manager.markMainWindowReady();
+    expect(broadcastEvent).toHaveBeenCalledTimes(1);
+    expect(broadcastEvent).toHaveBeenCalledWith(DESKTOP_OPEN_FILE_EVENT, {
+      paths: ['/Users/alice/readme.md', 'D:\\work\\app.yaml'],
+    });
+
+    // React drains pending files on mount
+    expect(manager.takePendingOpenFiles()).toEqual([
+      '/Users/alice/readme.md',
+      'D:\\work\\app.yaml',
+    ]);
+    expect(manager.takePendingOpenFiles()).toEqual([]);
+
+    // Warm-start second-instance broadcasts immediately without leaving stale queue
+    broadcastEvent.mockClear();
+    manager.handleProcessArgs(['Dimo.exe', 'D:\\work\\second.toml'], {
+      isStartup: false,
+    });
+    expect(broadcastEvent).toHaveBeenCalledWith(DESKTOP_OPEN_FILE_EVENT, {
+      paths: ['D:\\work\\second.toml'],
+    });
+    expect(manager.takePendingOpenFiles()).toEqual([]);
   });
 });
 
@@ -551,6 +647,114 @@ describe('preload sidecar-restarted live backend and drag-drop reset', () => {
 
       unsub();
       expect(docListeners.get('drop')?.size).toBe(0);
+    } finally {
+      Object.defineProperty(globalThis, 'window', {
+        value: originalWindow,
+        configurable: true,
+        writable: true,
+      });
+      Object.defineProperty(globalThis, 'document', {
+        value: originalDocument,
+        configurable: true,
+        writable: true,
+      });
+    }
+  });
+
+  it('never exposes or updates local sidecar backend in remote host-* windows', async () => {
+    const windowListeners = new Map<string, Set<(event: unknown) => void>>();
+    const docListeners = new Map<string, Set<(event: unknown) => void>>();
+    const makeTarget = (map: Map<string, Set<(event: unknown) => void>>) => ({
+      addEventListener: vi.fn((type: string, fn: (event: unknown) => void) => {
+        let set = map.get(type);
+        if (!set) {
+          set = new Set();
+          map.set(type, set);
+        }
+        set.add(fn);
+      }),
+      removeEventListener: vi.fn((type: string, fn: (event: unknown) => void) => {
+        map.get(type)?.delete(fn);
+      }),
+    });
+
+    const originalWindow = globalThis.window;
+    const originalDocument = globalThis.document;
+    Object.defineProperty(globalThis, 'window', {
+      value: makeTarget(windowListeners),
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(globalThis, 'document', {
+      value: {
+        ...makeTarget(docListeners),
+        documentElement: { dataset: {} as Record<string, string> },
+      },
+      configurable: true,
+      writable: true,
+    });
+
+    preloadMocks.ipcSendSync.mockReturnValueOnce({
+      platform: 'win32',
+      windowLabel: 'host-remote-1',
+      gpuMode: 'hardware',
+      backend: {
+        baseUrl: 'http://127.0.0.1:4100',
+        token: 'leaked-token',
+        dataDir: '/tmp/dimo',
+      } as unknown as null,
+      sidecarStatus: 'running',
+    });
+
+    let capturedBridge:
+      | { backend?: unknown; getBackend: () => unknown }
+      | undefined;
+    let capturedGetBackend: (() => unknown) | undefined;
+    preloadMocks.executeInMainWorld.mockImplementationOnce(
+      (opts: { func: (...args: unknown[]) => void; args?: unknown[] }) => {
+        capturedBridge = opts.args?.[0] as {
+          backend?: unknown;
+          getBackend: () => unknown;
+        };
+        capturedGetBackend = opts.args?.[1] as () => unknown;
+      }
+    );
+
+    try {
+      vi.resetModules();
+      await import('../preload/index');
+
+      expect(capturedBridge).toBeDefined();
+      expect(capturedGetBackend).toBeTypeOf('function');
+      expect(capturedBridge!.backend).toBeUndefined();
+      expect(capturedBridge!.getBackend()).toBeUndefined();
+      expect(capturedGetBackend!()).toBeUndefined();
+
+      const eventsListener = preloadMocks.ipcOnListeners.get(
+        IPC_CHANNELS.EVENTS_MESSAGE
+      );
+      eventsListener?.({}, {
+        event: SIDECAR_READY_EVENT,
+        payload: {
+          backend: {
+            baseUrl: 'http://127.0.0.1:4100',
+            token: 'tok-initial',
+            dataDir: '/tmp/dimo',
+          },
+        },
+      });
+      eventsListener?.({}, {
+        event: SIDECAR_RESTARTED_EVENT,
+        payload: {
+          baseUrl: 'http://127.0.0.1:5200',
+          token: 'tok-restarted',
+          dataDir: '/tmp/dimo',
+        },
+      });
+
+      expect(capturedBridge!.backend).toBeUndefined();
+      expect(capturedBridge!.getBackend()).toBeUndefined();
+      expect(capturedGetBackend!()).toBeUndefined();
     } finally {
       Object.defineProperty(globalThis, 'window', {
         value: originalWindow,

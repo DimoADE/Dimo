@@ -405,7 +405,10 @@ export const ComposerDock = memo(function ComposerDock() {
           className="collaboration-composer-wrap"
         >
           {activePulseProposal ? (
-            <div className="mb-2" data-testid="composer-pulse-proposal-drawer">
+            <div
+              className="pointer-events-auto mb-2"
+              data-testid="composer-pulse-proposal-drawer"
+            >
               <PulseRuleProposalCard
                 key={activePulseProposal.key}
                 initialSpec={activePulseProposal.spec}

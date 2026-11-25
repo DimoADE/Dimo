@@ -22,6 +22,7 @@ import { exportConversation } from '@/lib/exportConversation';
 import { requestCreateSessionInExecutionArea } from '@/lib/requestCreateSession';
 import { requestConversationScrollToGoal } from '@/lib/conversationScroll';
 import { writeClipboardViaBridge } from '@/vscode/bridge';
+import { deriveWorkspaceRootPath } from '@/components/panels/workspaceRootPath';
 
 import type {
   AgentElicitationResponse,
@@ -207,7 +208,8 @@ const AgentTimelineConversation = forwardRef<
   // Non-worktree workspaces leave container_ref null, so fall back to the repo
   // path — otherwise a relative "README.md" can't be opened in a preview tab.
   const { repos } = useAttemptRepo(attempt.id);
-  const workspaceRoot = attempt.container_ref ?? repos[0]?.path ?? null;
+  const workspaceRoot =
+    deriveWorkspaceRootPath(attempt, repos) ?? repos[0]?.path ?? null;
   const conversation = useConversationTimeline(sessionId, {
     active: surfaceActive,
   });
@@ -400,12 +402,8 @@ const AgentTimelineConversation = forwardRef<
 
   const conversationResetAndReload = conversation.resetAndReload;
   const conversationReconnectAndReload = conversation.reconnectAndReload;
+  const conversationRebindSession = conversation.rebindAndReload;
   const conversationCancel = conversation.cancel;
-  const conversationRebindSession = useCallback(async () => {
-    if (!sessionId) return;
-    await conversationApi.rebindSession(sessionId);
-    await conversationResetAndReload();
-  }, [conversationResetAndReload, sessionId]);
 
   const conversationRespondPermission = conversation.respondPermission;
   const [respondingPermissionId, setRespondingPermissionId] = useState<
@@ -757,7 +755,7 @@ const AgentTimelineConversation = forwardRef<
       if (
         shouldConfirmResendCheckpoint({
           files: rollbackFiles,
-          previewUnavailable: false,
+          previewUnavailable,
           safetyReport,
         })
       ) {
@@ -785,9 +783,6 @@ const AgentTimelineConversation = forwardRef<
           ordinal,
         });
         await conversationResetAndReload();
-        await conversationApi.ensureSessionControls(session.id, {
-          reload: false,
-        });
 
         await sendAgentRuntimeTurn({
           workspaceId: attempt.id,
@@ -1388,7 +1383,7 @@ const AgentTimelineConversation = forwardRef<
           </div>
         </div>
         {!(detailLoading && timeline.length === 0) && navEntries.length > 0 ? (
-          <div className="pointer-events-none absolute inset-x-0 inset-y-3 z-10 px-2">
+          <div className="conv-message-nav-layer pointer-events-none absolute inset-x-0 inset-y-3 z-10 px-2">
             <div
               className={cn(
                 'relative mx-auto h-full w-full',
@@ -1426,6 +1421,7 @@ const AgentTimelineConversation = forwardRef<
             />
             {sessionId && activeRateLimitState ? (
               <RateLimitRecoveryBanner
+                key={sessionId}
                 conversationId={sessionId}
                 rateLimit={activeRateLimitState}
                 onUpdateAutoResume={handleRateLimitAutoResume}

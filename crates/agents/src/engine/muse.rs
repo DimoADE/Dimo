@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock, RwLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -15,7 +15,7 @@ use command_group::AsyncGroupChild;
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader},
-    sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock, broadcast, oneshot},
+    sync::{Mutex as AsyncMutex, broadcast, oneshot},
     time::timeout,
 };
 use uuid::Uuid;
@@ -43,6 +43,7 @@ use crate::{
             serialize_muse_session_mcp, str_any,
         },
         prepare_instance_isolation_env,
+        server_pool::{PooledWorkspaceServer, ServerHandleLease, WorkspaceServerPool},
         stream_router::spawn_stderr_tail_reader,
     },
     stderr_tail::StderrTail,
@@ -56,17 +57,7 @@ pub use super::muse_protocol::MuseServerCacheKey;
 /// Evicts all pooled `MuseServer` instances so subsequent session launches pick up
 /// modified `settings.json`, `auth.json`, or `trust.json`, shutting down idle servers.
 pub async fn invalidate_muse_servers() -> usize {
-    let drained: Vec<Arc<MuseServer>> = {
-        let mut guard = global_muse_servers().write().await;
-        guard.drain().map(|(_, server)| server).collect()
-    };
-    let count = drained.len();
-    for server in drained {
-        if Arc::strong_count(&server) <= 1 {
-            let _ = server.shutdown().await;
-        }
-    }
-    count
+    global_muse_servers().invalidate_all().await
 }
 
 type PendingRpcEntry = (oneshot::Sender<Result<Value, EngineError>>, u64);
@@ -122,6 +113,7 @@ pub struct MuseServer {
     event_tx: broadcast::Sender<EngineEvent>,
     latest_rate_limits: Arc<RwLock<Option<EngineRateLimits>>>,
     alive: Arc<AtomicBool>,
+    active_handles: AtomicUsize,
 }
 
 impl std::fmt::Debug for MuseServer {
@@ -145,10 +137,37 @@ impl Drop for MuseServer {
     }
 }
 
-fn global_muse_servers() -> &'static AsyncRwLock<HashMap<MuseServerCacheKey, Arc<MuseServer>>> {
-    static SERVERS: OnceLock<AsyncRwLock<HashMap<MuseServerCacheKey, Arc<MuseServer>>>> =
-        OnceLock::new();
-    SERVERS.get_or_init(|| AsyncRwLock::new(HashMap::new()))
+#[async_trait]
+impl PooledWorkspaceServer for MuseServer {
+    fn is_alive(&self) -> bool {
+        MuseServer::is_alive(self)
+    }
+
+    fn acquire_handle(&self) -> usize {
+        self.active_handles.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    fn release_handle(&self) -> usize {
+        self.active_handles
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                Some(n.saturating_sub(1))
+            })
+            .map(|prev| prev.saturating_sub(1))
+            .unwrap_or(0)
+    }
+
+    fn active_handles(&self) -> usize {
+        self.active_handles.load(Ordering::Acquire)
+    }
+
+    async fn shutdown_server(&self) {
+        let _ = self.shutdown().await;
+    }
+}
+
+fn global_muse_servers() -> &'static WorkspaceServerPool<MuseServerCacheKey, MuseServer> {
+    static SERVERS: OnceLock<WorkspaceServerPool<MuseServerCacheKey, MuseServer>> = OnceLock::new();
+    SERVERS.get_or_init(WorkspaceServerPool::new)
 }
 
 impl MuseServer {
@@ -278,6 +297,7 @@ impl MuseServer {
             event_tx: event_tx.clone(),
             latest_rate_limits: Arc::new(RwLock::new(None)),
             alive: Arc::new(AtomicBool::new(true)),
+            active_handles: AtomicUsize::new(0),
         });
 
         let auto_approve_server = Arc::downgrade(&server);
@@ -412,6 +432,23 @@ impl MuseServer {
         }
     }
 
+    pub fn cleanup_session(&self, session_id: &str) {
+        if let Ok(mut state) = self.tracker.lock() {
+            state.clear_session(session_id);
+        }
+        if let Ok(mut models) = self.session_models.write() {
+            models.remove(session_id);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracker_counts_for_test(&self) -> (usize, usize) {
+        self.tracker
+            .lock()
+            .map(|state| (state.tracked_item_count(), state.full_access_sessions.len()))
+            .unwrap_or((0, 0))
+    }
+
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, EngineError> {
         let mark = self.stderr_tail.mark();
         if !self.is_alive() {
@@ -521,13 +558,20 @@ impl MuseServer {
             if let Some(cfg) = config_obj {
                 resume_params["config"] = cfg;
             }
-            let result = self.command("session/resume", resume_params, None).await?;
+            let result = match self.command("session/resume", resume_params, None).await {
+                Ok(result) => result,
+                Err(error) => {
+                    self.cleanup_session(id);
+                    return Err(error);
+                }
+            };
             if result
                 .get("history")
                 .and_then(|h| h.get("noneReason"))
                 .and_then(Value::as_str)
                 == Some("projectionUnavailable")
             {
+                self.cleanup_session(id);
                 return Err(EngineError::Transport(format!(
                     "Muse session `{id}` history projection is unavailable; start a new session"
                 )));
@@ -577,15 +621,29 @@ impl MuseServer {
         if let Some(cfg) = config_obj {
             start_params["config"] = cfg;
         }
-        let result = self.command("session/start", start_params, None).await?;
-        let session_id = result
+        let result = match self.command("session/start", start_params, None).await {
+            Ok(res) => res,
+            Err(err) => {
+                self.cleanup_session(&new_session_id);
+                return Err(err);
+            }
+        };
+        let returned_session_id = result
             .get("session")
             .and_then(|s| s.get("sessionId"))
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .unwrap_or(new_session_id);
+            .map(str::to_string);
+        let session_id = match returned_session_id {
+            Some(returned) => {
+                if returned != new_session_id {
+                    self.cleanup_session(&new_session_id);
+                }
+                returned
+            }
+            None => new_session_id,
+        };
         self.set_session_full_access(&session_id, full_access);
 
         let started_model = result
@@ -984,9 +1042,7 @@ async fn run_reader_loop<R>(
         }
     }
     if let Ok(mut state) = tracker.lock() {
-        state.pending_approvals.clear();
-        state.pending_user_inputs.clear();
-        state.active_compact_sessions.clear();
+        state.clear_all();
     }
     turn_router.fail_active_turns("muse serve exited", &stderr_tail);
 }
@@ -995,9 +1051,15 @@ pub use super::muse_protocol::resolve_muse_binary;
 
 struct MuseHandleContext {
     spec: EngineStartSpec,
-    server: Arc<MuseServer>,
+    lease: ServerHandleLease<MuseServer>,
     active_prompt_id: RwLock<Option<Uuid>>,
     active_turn_id: RwLock<Option<String>>,
+}
+
+impl MuseHandleContext {
+    fn server(&self) -> &Arc<MuseServer> {
+        self.lease.server()
+    }
 }
 
 /// `NativeEngineDriver` implementation backed by `MuseServer` (`muse serve`).
@@ -1048,6 +1110,15 @@ impl MuseNativeDriver {
         server: Arc<MuseServer>,
         initial_session_id: Option<String>,
     ) -> EngineHandle {
+        self.bind_leased_server(spec, ServerHandleLease::acquire(server), initial_session_id)
+    }
+
+    fn bind_leased_server(
+        &self,
+        spec: EngineStartSpec,
+        lease: ServerHandleLease<MuseServer>,
+        initial_session_id: Option<String>,
+    ) -> EngineHandle {
         let connection_id = Uuid::new_v4();
         let official = !spec.uses_custom_base_url(NativeEngineKind::MuseNative);
         let clean_initial = initial_session_id.filter(|s| !is_placeholder_engine_session_id(s));
@@ -1061,7 +1132,7 @@ impl MuseNativeDriver {
         );
         let ctx = Arc::new(MuseHandleContext {
             spec,
-            server,
+            lease,
             active_prompt_id: RwLock::new(None),
             active_turn_id: RwLock::new(None),
         });
@@ -1083,47 +1154,58 @@ impl MuseNativeDriver {
             .and_then(|map| map.get(&handle.connection_id).cloned())
             .ok_or(EngineError::UnknownHandle(handle.connection_id))?;
 
-        let want_disable = desired_disable_sandbox.unwrap_or_else(|| ctx.server.disable_sandbox());
-        if ctx.server.is_alive() && ctx.server.disable_sandbox() == want_disable {
-            return Ok((Arc::clone(&ctx), Arc::clone(&ctx.server)));
+        let want_disable = desired_disable_sandbox.unwrap_or_else(|| ctx.server().disable_sandbox());
+        if ctx.server().is_alive() && ctx.server().disable_sandbox() == want_disable {
+            return Ok((Arc::clone(&ctx), Arc::clone(ctx.server())));
         }
 
         let reconnected = get_or_spawn_workspace_server(&ctx.spec, want_disable).await?;
+        let reconnected_server = Arc::clone(reconnected.server());
         let preserved_prompt_id = ctx.active_prompt_id.read().ok().and_then(|g| *g);
         let preserved_turn_id = ctx.active_turn_id.read().ok().and_then(|g| g.clone());
         let updated_ctx = Arc::new(MuseHandleContext {
             spec: ctx.spec.clone(),
-            server: Arc::clone(&reconnected),
+            lease: reconnected,
             active_prompt_id: RwLock::new(preserved_prompt_id),
             active_turn_id: RwLock::new(preserved_turn_id),
         });
-        if let Ok(mut map) = self.handles.write() {
-            map.insert(handle.connection_id, Arc::clone(&updated_ctx));
+        let previous = self.handles.write().ok().and_then(|mut map| {
+            match map.entry(handle.connection_id) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    Some(entry.insert(Arc::clone(&updated_ctx)))
+                }
+                std::collections::hash_map::Entry::Vacant(_) => None,
+            }
+        });
+        let Some(prev) = previous else {
+            let new_key = MuseServerCacheKey::from_spec(&updated_ctx.spec, want_disable);
+            global_muse_servers()
+                .release_and_shutdown_if_unused(&new_key, &updated_ctx.lease)
+                .await;
+            return Err(EngineError::UnknownHandle(handle.connection_id));
+        };
+        if let Some(sid) = handle
+            .external_session_id()
+            .filter(|s| !is_placeholder_engine_session_id(s))
+        {
+            prev.server().cleanup_session(&sid);
         }
-        Ok((updated_ctx, reconnected))
+        let prev_key = MuseServerCacheKey::from_spec(&prev.spec, prev.server().disable_sandbox());
+        global_muse_servers()
+            .release_and_shutdown_if_unused(&prev_key, &prev.lease)
+            .await;
+        Ok((updated_ctx, reconnected_server))
     }
 }
 
 async fn get_or_spawn_workspace_server(
     spec: &EngineStartSpec,
     disable_sandbox: bool,
-) -> Result<Arc<MuseServer>, EngineError> {
+) -> Result<ServerHandleLease<MuseServer>, EngineError> {
     let key = MuseServerCacheKey::from_spec(spec, disable_sandbox);
-    if let Some(existing) = global_muse_servers().read().await.get(&key)
-        && existing.is_alive()
-    {
-        return Ok(Arc::clone(existing));
-    }
-    let mut write_guard = global_muse_servers().write().await;
-    if let Some(existing) = write_guard.get(&key)
-        && existing.is_alive()
-    {
-        return Ok(Arc::clone(existing));
-    }
-    write_guard.retain(|_, server| server.is_alive());
-    let spawned = MuseServer::spawn_for_workspace(spec, disable_sandbox).await?;
-    write_guard.insert(key, Arc::clone(&spawned));
-    Ok(spawned)
+    global_muse_servers()
+        .get_or_spawn(key, || MuseServer::spawn_for_workspace(spec, disable_sandbox))
+        .await
 }
 
 #[async_trait]
@@ -1202,8 +1284,8 @@ impl NativeEngineDriver for MuseNativeDriver {
             .and_then(Value::as_str)
             .or(default_mode.as_deref());
         let disable_sandbox = is_muse_full_access(initial_mode);
-        let server = get_or_spawn_workspace_server(&spec, disable_sandbox).await?;
-        Ok(self.bind_existing_server(spec, server, None))
+        let lease = get_or_spawn_workspace_server(&spec, disable_sandbox).await?;
+        Ok(self.bind_leased_server(spec, lease, None))
     }
 
     async fn send_prompt(
@@ -1438,7 +1520,7 @@ impl NativeEngineDriver for MuseNativeDriver {
             .read()
             .ok()
             .and_then(|map| map.get(&handle.connection_id).cloned())?;
-        ctx.server.latest_rate_limits()
+        ctx.server().latest_rate_limits()
     }
 
     fn cache_status(&self, _handle: &EngineHandle) -> Option<EngineCacheStatus> {
@@ -1452,25 +1534,16 @@ impl NativeEngineDriver for MuseNativeDriver {
             .ok()
             .and_then(|mut map| map.remove(&handle.connection_id));
         if let Some(ctx) = removed {
-            let should_shutdown = {
-                let mut guard = global_muse_servers().write().await;
-                let matching_key = guard.iter().find_map(|(k, cached)| {
-                    (Arc::ptr_eq(cached, &ctx.server) && Arc::strong_count(&ctx.server) <= 2)
-                        .then(|| k.clone())
-                });
-                if let Some(key) = matching_key {
-                    guard.remove(&key);
-                    true
-                } else {
-                    !guard
-                        .values()
-                        .any(|cached| Arc::ptr_eq(cached, &ctx.server))
-                        && Arc::strong_count(&ctx.server) <= 1
-                }
-            };
-            if should_shutdown {
-                let _ = ctx.server.shutdown().await;
+            if let Some(sid) = handle
+                .external_session_id()
+                .filter(|s| !is_placeholder_engine_session_id(s))
+            {
+                ctx.server().cleanup_session(&sid);
             }
+            let key = MuseServerCacheKey::from_spec(&ctx.spec, ctx.server().disable_sandbox());
+            global_muse_servers()
+                .release_and_shutdown_if_unused(&key, &ctx.lease)
+                .await;
         }
         Ok(())
     }

@@ -370,6 +370,14 @@ pub trait ConversationExecutionPort: Send + Sync {
         ))
     }
 
+    async fn close_conversation(
+        &self,
+        _conversation_id: Uuid,
+        _reason: Option<String>,
+    ) -> Result<(), ApplicationError> {
+        Ok(())
+    }
+
     async fn steer(
         &self,
         _request: ConversationSteerInput,

@@ -160,10 +160,6 @@ impl AgentConnectionRunner {
             launch_env.insert(key.clone(), value.clone());
         }
         crate::sanitize_runtime_executable_env(&self.snapshot.agent_id, &mut launch_env);
-        for key in crate::bundled_adapter_runtime_env_keys(&self.snapshot.agent_id) {
-            command.env_remove(*key);
-            launch_env.remove(*key);
-        }
         let runtime_env_key = crate::runtime_executable_env_key(&self.snapshot.agent_id);
         let drop_inherited_runtime_path = runtime_env_key.is_some_and(|key| {
             self.snapshot.env.contains_key(key) || launch_lock.env.contains_key(key)
@@ -271,17 +267,13 @@ impl AgentConnectionRunner {
         workspace_utils::process::scrub_host_secret_env_tokio(&mut command);
         // The child inherits the full parent env. A blank `OPENAI_API_KEY=""`
         // (or `OPENAI_BASE_URL=""`) leaked from the shell that launched Dimo
-        // makes codex think an API key is present but empty, derailing its
-        // ChatGPT-oauth auth. Drop such empty, non-user-configured creds so the
-        // agent authenticates the same way it does when launched from a clean
-        // shell. Non-empty values are left untouched (a real key is honored).
-        let codex_subscription = self.snapshot.agent_id.as_str() == "codex"
-            && crate::codex_uses_chatgpt_subscription(&self.snapshot.env);
+        // can derail OAuth/provider authentication. Drop such empty,
+        // non-user-configured creds while leaving non-empty values untouched.
         for key in ["OPENAI_API_KEY", "OPENAI_BASE_URL"] {
             let inherited_blank = std::env::var(key)
                 .map(|value| value.trim().is_empty())
                 .unwrap_or(false);
-            if (codex_subscription || inherited_blank) && !self.snapshot.env.contains_key(key) {
+            if inherited_blank && !self.snapshot.env.contains_key(key) {
                 command.env_remove(key);
             }
         }

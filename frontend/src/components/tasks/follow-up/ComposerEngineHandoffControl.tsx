@@ -51,7 +51,22 @@ export function useComposerEngineHandoff({
   resolveTargetInstanceIdForAgent?: (agentId: string) => string | null;
 }): ComposerEngineHandoffController {
   const queryClient = useContext(QueryClientContext);
-  const switchSeqRef = useRef(0);
+  const switchSeqByConversationRef = useRef<Map<string, number>>(new Map());
+  const activeSessionIdRef = useRef(sessionId);
+  activeSessionIdRef.current = sessionId;
+
+  const nextSwitchSeq = useCallback((conversationId: string): number => {
+    const next =
+      (switchSeqByConversationRef.current.get(conversationId) ?? 0) + 1;
+    switchSeqByConversationRef.current.set(conversationId, next);
+    return next;
+  }, []);
+
+  const isLatestSwitchSeq = useCallback(
+    (conversationId: string, seq: number): boolean =>
+      switchSeqByConversationRef.current.get(conversationId) === seq,
+    []
+  );
 
   const handleChangeExecutorProfile = useCallback(
     (nextProfile: ExecutorProfileId | null) => {
@@ -80,6 +95,7 @@ export function useComposerEngineHandoff({
         return;
       }
 
+      const targetSessionId = sessionId;
       const previousExecutor = currentExecutor ?? null;
       const previousInstance = normalizeProviderInstanceIdForApi(
         currentProviderInstanceId
@@ -90,9 +106,9 @@ export function useComposerEngineHandoff({
             variant: null,
           }
         : null;
-      const switchSeq = ++switchSeqRef.current;
+      const switchSeq = nextSwitchSeq(targetSessionId);
       const handoffToken = beginConversationEngineHandoff(
-        sessionId,
+        targetSessionId,
         nextProfile.executor,
         { forceInvalidate: true }
       );
@@ -100,7 +116,7 @@ export function useComposerEngineHandoff({
       if (resolvedTargetInstance !== undefined) {
         syncSessionAgentInCaches(
           queryClient,
-          sessionId,
+          targetSessionId,
           nextProfile.executor,
           resolvedTargetInstance,
           { deferBind: true, forceInvalidate: true }
@@ -112,7 +128,7 @@ export function useComposerEngineHandoff({
       } else {
         syncSessionAgentInCaches(
           queryClient,
-          sessionId,
+          targetSessionId,
           nextProfile.executor,
           undefined,
           { deferBind: true, forceInvalidate: true }
@@ -121,7 +137,7 @@ export function useComposerEngineHandoff({
       onApplyExecutorProfile(nextProfile);
       void conversationApi
         .confirmEngineHandoff({
-          conversationId: sessionId,
+          conversationId: targetSessionId,
           targetEngine: nextProfile.executor,
           ...(resolvedTargetInstance !== undefined
             ? {
@@ -131,24 +147,28 @@ export function useComposerEngineHandoff({
             : {}),
         })
         .then(() => {
-          if (switchSeq === switchSeqRef.current) {
-            completeConversationEngineHandoff(sessionId, handoffToken);
+          if (isLatestSwitchSeq(targetSessionId, switchSeq)) {
+            completeConversationEngineHandoff(targetSessionId, handoffToken);
           }
         })
         .catch((error: unknown) => {
           if (isUnavailableHandoffCommandError(error)) {
-            if (switchSeq === switchSeqRef.current) {
-              completeConversationEngineHandoff(sessionId, handoffToken);
+            if (isLatestSwitchSeq(targetSessionId, switchSeq)) {
+              completeConversationEngineHandoff(targetSessionId, handoffToken);
             }
             return;
           }
-          if (switchSeq === switchSeqRef.current) {
-            cancelConversationEngineHandoff(sessionId, null, handoffToken);
+          if (isLatestSwitchSeq(targetSessionId, switchSeq)) {
+            cancelConversationEngineHandoff(
+              targetSessionId,
+              null,
+              handoffToken
+            );
             if (previousExecutor) {
               if (resolvedTargetInstance !== undefined) {
                 syncSessionAgentInCaches(
                   queryClient,
-                  sessionId,
+                  targetSessionId,
                   previousExecutor,
                   previousInstance,
                   { deferBind: false, forceInvalidate: true }
@@ -156,17 +176,19 @@ export function useComposerEngineHandoff({
               } else {
                 syncSessionAgentInCaches(
                   queryClient,
-                  sessionId,
+                  targetSessionId,
                   previousExecutor,
                   undefined,
                   { deferBind: false, forceInvalidate: true }
                 );
               }
             }
-            if (resolvedTargetInstance !== undefined) {
-              onApplyProviderInstanceId?.(previousInstance, previousExecutor);
+            if (activeSessionIdRef.current === targetSessionId) {
+              if (resolvedTargetInstance !== undefined) {
+                onApplyProviderInstanceId?.(previousInstance, previousExecutor);
+              }
+              onApplyExecutorProfile(previousProfile);
             }
-            onApplyExecutorProfile(previousProfile);
           }
           toast.error(error instanceof Error ? error.message : String(error));
         });
@@ -174,6 +196,8 @@ export function useComposerEngineHandoff({
     [
       currentExecutor,
       currentProviderInstanceId,
+      isLatestSwitchSeq,
+      nextSwitchSeq,
       onApplyExecutorProfile,
       onApplyProviderInstanceId,
       queryClient,
@@ -201,18 +225,19 @@ export function useComposerEngineHandoff({
         return;
       }
 
+      const targetSessionId = sessionId;
       const nextWireInstance =
         nextStorageInstance ?? LOCAL_PROVIDER_INSTANCE_ID;
-      const switchSeq = ++switchSeqRef.current;
+      const switchSeq = nextSwitchSeq(targetSessionId);
       const handoffToken = beginConversationEngineHandoff(
-        sessionId,
+        targetSessionId,
         currentExecutor,
         { forceInvalidate: true }
       );
 
       syncSessionAgentInCaches(
         queryClient,
-        sessionId,
+        targetSessionId,
         currentExecutor,
         nextStorageInstance,
         { deferBind: true, forceInvalidate: true }
@@ -220,32 +245,38 @@ export function useComposerEngineHandoff({
 
       void conversationApi
         .confirmEngineHandoff({
-          conversationId: sessionId,
+          conversationId: targetSessionId,
           targetEngine: currentExecutor,
           targetProviderInstanceId: nextWireInstance,
         })
         .then(() => {
-          if (switchSeq === switchSeqRef.current) {
-            completeConversationEngineHandoff(sessionId, handoffToken);
+          if (isLatestSwitchSeq(targetSessionId, switchSeq)) {
+            completeConversationEngineHandoff(targetSessionId, handoffToken);
           }
         })
         .catch((error: unknown) => {
           if (isUnavailableHandoffCommandError(error)) {
-            if (switchSeq === switchSeqRef.current) {
-              completeConversationEngineHandoff(sessionId, handoffToken);
+            if (isLatestSwitchSeq(targetSessionId, switchSeq)) {
+              completeConversationEngineHandoff(targetSessionId, handoffToken);
             }
             return;
           }
-          if (switchSeq === switchSeqRef.current) {
-            cancelConversationEngineHandoff(sessionId, null, handoffToken);
+          if (isLatestSwitchSeq(targetSessionId, switchSeq)) {
+            cancelConversationEngineHandoff(
+              targetSessionId,
+              null,
+              handoffToken
+            );
             syncSessionAgentInCaches(
               queryClient,
-              sessionId,
+              targetSessionId,
               currentExecutor,
               previousInstance,
               { deferBind: false, forceInvalidate: true }
             );
-            onApplyProviderInstanceId?.(previousInstance, currentExecutor);
+            if (activeSessionIdRef.current === targetSessionId) {
+              onApplyProviderInstanceId?.(previousInstance, currentExecutor);
+            }
           }
           toast.error(error instanceof Error ? error.message : String(error));
         });
@@ -253,6 +284,8 @@ export function useComposerEngineHandoff({
     [
       currentExecutor,
       currentProviderInstanceId,
+      isLatestSwitchSeq,
+      nextSwitchSeq,
       onApplyProviderInstanceId,
       queryClient,
       sessionId,

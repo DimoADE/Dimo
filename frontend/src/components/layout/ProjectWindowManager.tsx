@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 import type { TFunction } from 'i18next';
 import { SoundFile } from 'shared/types';
 import { useTranslation } from 'react-i18next';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useProject } from '@/contexts/ProjectContext';
 import { useProjects } from '@/hooks/useProjects';
 import {
@@ -20,6 +20,13 @@ import { showDesktopToast } from '@/lib/desktopToast';
 import { backendListen } from '@/lib/backendTransport';
 import { getDesktopShell, hasElectronDesktopRuntime } from '@/lib/desktopShell';
 import { desktopApi } from '@/lib/api';
+import {
+  DESKTOP_OPEN_FILE_EVENT,
+  enqueueDesktopOpenFiles,
+  hasPendingDesktopOpenFiles,
+  type DesktopOpenFilePayload,
+} from '@/lib/desktopOpenFiles';
+import { paths } from '@/lib/paths';
 import { useWindowProjectsStore } from '@/stores/useWindowProjectsStore';
 import { useStopToastSuppression } from '@/stores/useTaskDetailsUiStore';
 import { useOpenProjectSession } from '@/hooks/useOpenProjectSession';
@@ -115,6 +122,8 @@ function resolveSummaryDisplayName(summary: SessionSummary, t: TFunction) {
 
 function ProjectNotificationBridge() {
   const { t } = useTranslation(['panels', 'common']);
+  const location = useLocation();
+  const navigate = useNavigate();
   const { projectId: activeProjectId } = useProject();
   const { config } = useUserSystem();
   const { projectsById } = useProjects();
@@ -127,6 +136,7 @@ function ProjectNotificationBridge() {
     config,
     projectsById,
     consumeStopToastSuppression,
+    pathname: location.pathname,
     t,
   });
   latestNotificationStateRef.current = {
@@ -134,6 +144,7 @@ function ProjectNotificationBridge() {
     config,
     projectsById,
     consumeStopToastSuppression,
+    pathname: location.pathname,
     t,
   };
 
@@ -227,6 +238,105 @@ function ProjectNotificationBridge() {
       unlisten?.();
     };
   }, [openProjectSession]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    let drainInFlight = false;
+    const livePathsBeforeDrain = new Set<string>();
+    const recentDrainedPaths = new Map<string, number>();
+
+    const normalizeIncomingPaths = (rawPaths: unknown): string[] => {
+      if (!Array.isArray(rawPaths)) {
+        return [];
+      }
+      return rawPaths
+        .filter((entry): entry is string => typeof entry === 'string')
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0);
+    };
+
+    const dispatchOpenFiles = (filePaths: string[]) => {
+      if (filePaths.length === 0) {
+        return;
+      }
+      enqueueDesktopOpenFiles(filePaths);
+      if (!hasPendingDesktopOpenFiles()) {
+        return;
+      }
+      const { pathname, activeProjectId: currentProjectId } =
+        latestNotificationStateRef.current;
+      const isOutsideWorkspace =
+        pathname.startsWith('/workflows/') || pathname.endsWith('/full');
+      if (isOutsideWorkspace) {
+        navigate(
+          currentProjectId ? paths.projectSessions(currentProjectId) : '/'
+        );
+      }
+    };
+
+    const handleLiveOpenFiles = (payload: DesktopOpenFilePayload) => {
+      if (cancelled) return;
+      const now = Date.now();
+      const incoming = normalizeIncomingPaths(payload?.paths);
+      const filtered: string[] = [];
+      for (const filePath of incoming) {
+        if (drainInFlight) {
+          livePathsBeforeDrain.add(filePath);
+        }
+        const drainedAt = recentDrainedPaths.get(filePath);
+        if (drainedAt !== undefined) {
+          recentDrainedPaths.delete(filePath);
+          if (now - drainedAt < 1_000) {
+            continue;
+          }
+        }
+        filtered.push(filePath);
+      }
+      dispatchOpenFiles(filtered);
+    };
+
+    void backendListen<DesktopOpenFilePayload>(
+      DESKTOP_OPEN_FILE_EVENT,
+      handleLiveOpenFiles
+    )
+      .then((dispose) => {
+        if (cancelled) {
+          dispose();
+          return;
+        }
+        unlisten = dispose;
+        if (!hasElectronDesktopRuntime()) {
+          return;
+        }
+        drainInFlight = true;
+        void getDesktopShell()
+          .invoke<string[]>('take_pending_open_files')
+          .catch(() => [] as string[])
+          .then((pending) => {
+            drainInFlight = false;
+            if (cancelled) {
+              return;
+            }
+            const now = Date.now();
+            const remaining = normalizeIncomingPaths(pending).filter(
+              (filePath) => !livePathsBeforeDrain.has(filePath)
+            );
+            for (const filePath of remaining) {
+              recentDrainedPaths.set(filePath, now);
+            }
+            dispatchOpenFiles(remaining);
+          });
+      })
+      .catch(() => {
+        // Ignore listener registration errors outside the desktop shell.
+      });
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [navigate]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;

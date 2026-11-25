@@ -308,6 +308,7 @@ export function getDraftScratchHydrationDecision({
   scratchId,
   scratchData,
   localMessage = '',
+  hasLocalImages = false,
   queuedMessageTexts = [],
 }: {
   isScratchLoading: boolean;
@@ -315,6 +316,7 @@ export function getDraftScratchHydrationDecision({
   scratchId: string | undefined;
   scratchData: DraftFollowUpData | undefined;
   localMessage?: string;
+  hasLocalImages?: boolean;
   queuedMessageTexts?: readonly string[];
 }): {
   hydratedScratchId: string | undefined;
@@ -334,8 +336,9 @@ export function getDraftScratchHydrationDecision({
       configOverrides: {},
     };
   }
-  // Composer is usable before the draft stream connects. Don't clobber typing.
-  if ((localMessage ?? '').trim()) {
+  // Composer is usable before the draft stream connects. Don't clobber typing
+  // or attachments pasted before initial hydration finishes.
+  if ((localMessage ?? '').trim() || hasLocalImages) {
     return {
       hydratedScratchId: scratchId,
       shouldHydrate: false,

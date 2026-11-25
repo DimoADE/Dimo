@@ -353,8 +353,15 @@ impl PluginControlPlane {
                                 );
                             }
                         } else {
-                            plane.host_services.stop(&plugin_id);
-                            let _ = plane.activations.deactivate(&plugin_id).await;
+                            let _guard = plane.activations.lock_plugin(&plugin_id).await;
+                            if plane
+                                .activations
+                                .deactivate_if_terminal(&plugin_id)
+                                .await
+                                .unwrap_or(false)
+                            {
+                                plane.host_services.stop(&plugin_id);
+                            }
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -593,8 +600,12 @@ impl PluginControlPlane {
         plugin_id: &str,
         reason: &str,
     ) -> Result<(), PluginError> {
-        let _ = self.withdraw_with_dependents(plugin_id).await;
-        self.registry.quarantine_plugin(plugin_id, reason).await?;
+        let _ = self.withdraw_dependents_only(plugin_id).await;
+        {
+            let _plugin_guard = self.activations.lock_plugin(plugin_id).await;
+            let _ = self.withdraw_live_generation_locked(plugin_id).await;
+            self.registry.quarantine_plugin(plugin_id, reason).await?;
+        }
         let _ = self
             .registry
             .record_audit(

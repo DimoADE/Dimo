@@ -163,4 +163,37 @@ describe('MemberSessionConfigControls', () => {
     ).toBeInTheDocument();
     expect(capabilityCatalog).toHaveBeenCalledWith('codex');
   });
+
+  it('discovers and renders controls on first load when capability catalog is uncached', async () => {
+    capabilityCatalog.mockResolvedValueOnce(null).mockResolvedValueOnce({
+      modes: [{ id: 'agent', label: 'Agent', description: null }],
+      current_mode: 'agent',
+      config_options: [CODEX_MODEL, CODEX_EFFORT],
+    });
+    refreshCapabilityCatalog.mockResolvedValue(true);
+    renderControls();
+
+    await waitFor(() => {
+      expect(refreshCapabilityCatalog).toHaveBeenCalledWith('codex');
+    });
+    expect(
+      await screen.findByTestId('session-settings-summary')
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId('session-creation-status-card')
+    ).not.toBeInTheDocument();
+  });
+
+  it('shows error card when uncached capability catalog discovery rejects', async () => {
+    capabilityCatalog.mockResolvedValue(null);
+    refreshCapabilityCatalog.mockRejectedValue(new Error('probe timed out'));
+    renderControls();
+
+    await waitFor(() => {
+      expect(refreshCapabilityCatalog).toHaveBeenCalledWith('codex');
+    });
+    expect(
+      await screen.findByTestId('session-creation-status-card')
+    ).toBeInTheDocument();
+  });
 });

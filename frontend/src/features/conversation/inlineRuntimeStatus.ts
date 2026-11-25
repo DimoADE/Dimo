@@ -101,6 +101,12 @@ export function isConnectionSupersededByTurnError(
   return false;
 }
 
+function parseTimestampMs(value?: string | null): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 /**
  * Collapses connection & request runtime state into at most ONE runtime status
  * item and decides whether it belongs above the composer (pre-send / idle
@@ -132,13 +138,46 @@ export function deriveInlineStreamRuntimeStatus(
   const connectionPlacement: RuntimeStatusPlacement =
     !hasUserMessage || !isTurnInFlight ? 'composer' : 'stream';
 
+  const requestPhase = request?.activity.phase ?? null;
+  const requestMatchesCurrentTurn =
+    request != null && (!currentTurnId || request.turn_id === currentTurnId);
+  const requestTerminal =
+    requestMatchesCurrentTurn &&
+    requestPhase != null &&
+    isRequestTerminal(requestPhase);
   const connectionClosed = connection?.status === 'closed';
+  const closedAtMs = connectionClosed
+    ? parseTimestampMs(connection?.since)
+    : null;
+  const requestAtMs = requestMatchesCurrentTurn
+    ? parseTimestampMs(request?.since)
+    : null;
+  const closedBeforeCurrentRequest =
+    closedAtMs != null && requestAtMs != null && closedAtMs < requestAtMs;
+  const isPrePromptLazyStart =
+    !connectErrorNotice &&
+    !hasStreamingAssistantContent &&
+    (!requestMatchesCurrentTurn ||
+      (request.prompt_id == null &&
+        request.connection_id == null &&
+        requestPhase === 'submitting'));
+  // Lazy turn-start binding leaves idle-reaped or post-restart sessions in
+  // `closed` until the next turn connects. Keep that cold start in the
+  // connecting state instead of flashing a mid-turn disconnect error.
+  const isColdStartFromClosed =
+    connectionClosed &&
+    isTurnInFlight &&
+    !connectErrorNotice &&
+    (closedBeforeCurrentRequest || isPrePromptLazyStart);
   const connectionFailed =
     connection?.status === 'error' ||
-    (connectionClosed && (isTurnInFlight || Boolean(connectErrorNotice)));
+    (connectionClosed &&
+      !isColdStartFromClosed &&
+      (isTurnInFlight || Boolean(connectErrorNotice)));
   const connectionPending =
     connecting ||
     Boolean(reconnectNotice) ||
+    isColdStartFromClosed ||
     (!sessionBindReady &&
       connection != null &&
       !connection.bound &&
@@ -147,9 +186,6 @@ export function deriveInlineStreamRuntimeStatus(
   const isConnectionRecovering =
     Boolean(reconnectNotice) ||
     (!sessionBindReady && connection?.status === 'recovering');
-  const requestPhase = request?.activity.phase ?? null;
-  const requestTerminal =
-    requestPhase != null && isRequestTerminal(requestPhase);
   // A cancelled or otherwise finished request must not keep a stream
   // "连接中..." spinner. Reconnect after that belongs on the composer, and
   // only once the turn itself is no longer in flight.
@@ -293,6 +329,8 @@ export function deriveInlineStreamRuntimeStatus(
 
     // Before the assistant produces any content/thinking/tool block, keep the
     // lightweight connecting status inline instead of showing generation Loading.
+    // Once streaming has started, also surface mid-turn `waiting_model`,
+    // `retrying`, and `cancelling` so long silent pauses never look frozen.
     const preGenerationPhase =
       phase === 'submitting' ||
       phase === 'waiting_agent' ||
@@ -300,6 +338,7 @@ export function deriveInlineStreamRuntimeStatus(
     const shouldRenderInline =
       !hasStreamingAssistantRow ||
       (!hasStreamingAssistantContent && preGenerationPhase) ||
+      phase === 'waiting_model' ||
       phase === 'retrying' ||
       phase === 'cancelling';
 
@@ -327,6 +366,7 @@ export function deriveInlineStreamRuntimeStatus(
       suppressLiveTurnStatsStatus: hasStreamingAssistantRow,
       suppressAssistantStreamingStatus:
         !hasStreamingAssistantContent ||
+        phase === 'waiting_model' ||
         phase === 'retrying' ||
         phase === 'cancelling',
       isConnectionRecovering: false,

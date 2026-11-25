@@ -1,5 +1,12 @@
 import { Badge } from '@astryxdesign/core/Badge';
-import { ChevronDown, ChevronUp, RefreshCw, RotateCcw, X } from 'lucide-react';
+import {
+  ChevronDown,
+  ChevronUp,
+  Copy,
+  RefreshCw,
+  RotateCcw,
+  X,
+} from 'lucide-react';
 import { useEffect, useId, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import type {
@@ -11,12 +18,17 @@ import {
   ConversationStatusDetailsContent,
   ConversationStatusDetailsTrigger,
 } from '@/components/NormalizedConversation/conversation/ConversationStatusDetails';
-import { getConversationSessionNoticeCopy } from '@/features/conversation/sessionNoticeCopy';
+import {
+  getConversationSessionNoticeView,
+  stripInternalErrorPrefixes,
+} from '@/features/conversation/sessionNoticeCopy';
 import {
   rememberVisibleSessionAnnouncements,
   useConversationStatusDismissal,
 } from '@/features/conversation/conversationStatusDismissal';
 import { sessionNoticeNeedsRebind } from '@/features/conversation/sessionNoticeNeedsRebind';
+import { getErrorMessage } from '@/lib/modals';
+import { toast } from '@/components/ui/toast';
 import { AgentRuntimeStatus } from './AgentRuntimeStatus';
 import { SessionNoticeActions } from './SessionNoticeActions';
 import { StatusNoticeActorChip } from './StatusNoticeActorChip';
@@ -42,6 +54,26 @@ export function ConversationStatusDock({
 }: ConversationStatusDockProps) {
   const { t } = useTranslation(['conversation']);
   const [overflowExpanded, setOverflowExpanded] = useState(false);
+  const [pendingActionKey, setPendingActionKey] = useState<string | null>(null);
+  const runNoticeAction = (
+    key: string,
+    action: (() => void | Promise<unknown>) | undefined
+  ) => {
+    if (!action || pendingActionKey === key) return;
+    setPendingActionKey(key);
+    try {
+      void Promise.resolve(action())
+        .catch((error: unknown) => {
+          toast.error(getErrorMessage(error));
+        })
+        .finally(() => {
+          setPendingActionKey((current) => (current === key ? null : current));
+        });
+    } catch (error: unknown) {
+      toast.error(getErrorMessage(error));
+      setPendingActionKey((current) => (current === key ? null : current));
+    }
+  };
   const { dismiss: dismissNotice, isDismissed } =
     useConversationStatusDismissal(dismissalScope);
   const visibleNotices = notices.filter(
@@ -91,6 +123,23 @@ export function ConversationStatusDock({
 
   if (visibleNotices.length === 0 && !localError && extra == null) return null;
 
+  const cleanedLocalError = localError
+    ? stripInternalErrorPrefixes(localError)
+    : null;
+  const localErrorIsShort =
+    cleanedLocalError != null &&
+    !cleanedLocalError.includes('\n') &&
+    cleanedLocalError.length <= 160;
+  const localErrorSummary = localError
+    ? localErrorIsShort
+      ? cleanedLocalError
+      : t('statusDock.localErrorSummary')
+    : null;
+  const localErrorTechnicalDetail =
+    localError && (!localErrorIsShort || cleanedLocalError !== localError)
+      ? localError
+      : null;
+
   return (
     <div
       className={
@@ -110,6 +159,7 @@ export function ConversationStatusDock({
             tone="error"
             role="alert"
             title={t('statusDock.localErrorTitle')}
+            summary={localErrorSummary}
             badgeLabel={t('statusDock.errorBadge')}
             detailsLabel={t('statusDock.showDetails')}
             detailsAccessibleLabel={t('statusDock.showDetailsFor', {
@@ -117,8 +167,13 @@ export function ConversationStatusDock({
             })}
             detailsKey={localError}
             detailsMono
+            copyText={localErrorTechnicalDetail}
             detailsContent={
-              <p className="whitespace-pre-wrap break-words">{localError}</p>
+              localErrorTechnicalDetail ? (
+                <p className="whitespace-pre-wrap break-words">
+                  {localErrorTechnicalDetail}
+                </p>
+              ) : null
             }
             action={
               onDismissLocalError ? (
@@ -142,7 +197,7 @@ export function ConversationStatusDock({
                 onRebind={notice.onRebind}
                 onRetry={notice.onRetry}
                 onDismiss={() => dismissNotice(notice)}
-                dismissLabel={`${t('statusDock.dismiss')} ${notice.id}`}
+                dismissLabel={t('statusDock.dismiss')}
                 placement="composer"
               />
             );
@@ -150,7 +205,7 @@ export function ConversationStatusDock({
 
           if (notice.kind === 'interrupted-turn') {
             const title = t('messageTurnView.interruptedTitle');
-            const detailText = t('messageTurnView.interruptedDescription');
+            const summaryText = t('messageTurnView.interruptedDescription');
             return (
               <StatusSurface
                 key={notice.id}
@@ -158,13 +213,8 @@ export function ConversationStatusDock({
                 role="status"
                 actor={notice.actor}
                 title={title}
+                summary={summaryText}
                 badgeLabel={t('statusDock.warningBadge')}
-                detailsLabel={t('statusDock.showDetails')}
-                detailsAccessibleLabel={t('statusDock.showDetailsFor', {
-                  title,
-                })}
-                detailsKey={detailText}
-                detailsContent={<p className="break-words">{detailText}</p>}
                 action={
                   <div className="flex items-center gap-1">
                     {notice.onResend ? (
@@ -180,7 +230,7 @@ export function ConversationStatusDock({
                       </button>
                     ) : null}
                     <DismissButton
-                      label={`${t('statusDock.dismiss')} ${notice.id}`}
+                      label={t('statusDock.dismissFor', { title })}
                       onClick={() => dismissNotice(notice)}
                     />
                   </div>
@@ -208,25 +258,28 @@ export function ConversationStatusDock({
               : notice.notice.severity === 'warning'
                 ? 'warning'
                 : 'info';
-          const copy = getConversationSessionNoticeCopy(notice.notice, t);
+          const view = getConversationSessionNoticeView(notice.notice, t);
+          const resolvedTitle = notice.titleOverride?.trim() || view.title;
           return (
             <StatusSurface
               key={notice.id}
               tone={tone}
               role={tone === 'error' ? 'alert' : 'status'}
               actor={notice.actor}
-              title={notice.titleOverride?.trim() || copy.title}
+              title={resolvedTitle}
+              summary={view.summary}
               badgeLabel={t(`statusDock.${tone}Badge`)}
               detailsLabel={t('statusDock.showDetails')}
               detailsAccessibleLabel={t('statusDock.showDetailsFor', {
-                title: notice.titleOverride?.trim() || copy.title,
+                title: resolvedTitle,
               })}
-              detailsKey={copy.message ?? ''}
+              detailsKey={view.technicalDetail ?? ''}
               detailsMono={tone !== 'info'}
+              copyText={tone !== 'info' ? view.technicalDetail : null}
               detailsContent={
-                copy.message ? (
+                view.technicalDetail ? (
                   <p className="whitespace-pre-wrap break-words">
-                    {copy.message}
+                    {view.technicalDetail}
                   </p>
                 ) : null
               }
@@ -239,9 +292,18 @@ export function ConversationStatusDock({
                     <button
                       type="button"
                       className="composer-status-action"
-                      onClick={() => void notice.onReload?.()}
+                      disabled={pendingActionKey === `${notice.id}:reload`}
+                      onClick={() =>
+                        runNoticeAction(`${notice.id}:reload`, notice.onReload)
+                      }
                     >
-                      <RefreshCw className="h-3.5 w-3.5" />
+                      <RefreshCw
+                        className={
+                          pendingActionKey === `${notice.id}:reload`
+                            ? 'h-3.5 w-3.5 animate-spin'
+                            : 'h-3.5 w-3.5'
+                        }
+                      />
                       {t('turnErrorCard.reloadSession')}
                     </button>
                   ) : null}
@@ -250,7 +312,13 @@ export function ConversationStatusDock({
                     <button
                       type="button"
                       className="composer-status-action"
-                      onClick={() => void notice.onNewConversation?.()}
+                      disabled={pendingActionKey === `${notice.id}:new`}
+                      onClick={() =>
+                        runNoticeAction(
+                          `${notice.id}:new`,
+                          notice.onNewConversation
+                        )
+                      }
                     >
                       {t('turnErrorCard.newConversation')}
                     </button>
@@ -260,9 +328,18 @@ export function ConversationStatusDock({
                     <button
                       type="button"
                       className="composer-status-action"
-                      onClick={() => void notice.onRebind?.()}
+                      disabled={pendingActionKey === `${notice.id}:rebind`}
+                      onClick={() =>
+                        runNoticeAction(`${notice.id}:rebind`, notice.onRebind)
+                      }
                     >
-                      <RefreshCw className="h-3.5 w-3.5" />
+                      <RefreshCw
+                        className={
+                          pendingActionKey === `${notice.id}:rebind`
+                            ? 'h-3.5 w-3.5 animate-spin'
+                            : 'h-3.5 w-3.5'
+                        }
+                      />
                       {t('turnErrorCard.rebindSession')}
                     </button>
                   ) : null}
@@ -329,26 +406,31 @@ function StatusSurface({
   role,
   actor,
   title,
+  summary,
   badgeLabel,
   action,
   detailsLabel,
   detailsAccessibleLabel,
   detailsKey,
   detailsMono = false,
+  copyText,
   detailsContent,
 }: {
   tone: 'error' | 'warning' | 'info';
   role: 'alert' | 'status';
   actor?: StatusNoticeActor;
   title: string;
+  summary?: string | null;
   badgeLabel: string;
   action?: React.ReactNode;
   detailsLabel?: string;
   detailsAccessibleLabel?: string;
   detailsKey?: string;
   detailsMono?: boolean;
+  copyText?: string | null;
   detailsContent?: React.ReactNode;
 }) {
+  const { t } = useTranslation(['conversation']);
   const detailsId = useId();
   const [expanded, setExpanded] = useState(false);
   useEffect(() => {
@@ -385,9 +467,31 @@ function StatusSurface({
           </div>
         ) : null}
       </div>
+      {summary ? (
+        <p className="mt-1 break-words text-xs leading-relaxed text-muted-foreground">
+          {summary}
+        </p>
+      ) : null}
       {hasDetails && expanded ? (
         <ConversationStatusDetailsContent id={detailsId} mono={detailsMono}>
           {detailsContent}
+          {copyText ? (
+            <div className="mt-2 flex justify-end">
+              <button
+                type="button"
+                className="composer-status-action font-sans"
+                onClick={() => {
+                  void navigator.clipboard
+                    .writeText(copyText)
+                    .then(() => toast.success(t('turnErrorCard.copiedDetails')))
+                    .catch(() => toast.error(t('runtime.copyFailed')));
+                }}
+              >
+                <Copy className="h-3 w-3" aria-hidden="true" />
+                {t('turnErrorCard.copyDetails')}
+              </button>
+            </div>
+          ) : null}
         </ConversationStatusDetailsContent>
       ) : null}
     </div>

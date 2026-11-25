@@ -98,7 +98,7 @@ mod usage;
 use protocol::*;
 use requests::*;
 pub use runner::LeadingEdgeThrottle;
-pub(crate) use runner::{can_fallback_launch_lock_to_acp, prepare_native_engine_launch_env};
+pub(crate) use runner::prepare_native_engine_launch_env;
 use runner::*;
 use terminal::*;
 use usage::*;
@@ -265,37 +265,21 @@ pub const MANAGER_EVENT_SOFT_CAP: usize = 1024;
 #[derive(Debug, Clone)]
 pub struct ManagerEventSender {
     tx: mpsc::Sender<AgentConnectionManagerEvent>,
-    depth: Arc<AtomicUsize>,
     dropped: Arc<AtomicUsize>,
 }
 
 pub struct ManagerEventReceiver {
     rx: mpsc::Receiver<AgentConnectionManagerEvent>,
-    depth: Arc<AtomicUsize>,
 }
 
 impl ManagerEventReceiver {
     pub async fn recv(&mut self) -> Option<AgentConnectionManagerEvent> {
-        let event = self.rx.recv().await?;
-        decrement_manager_event_depth(&self.depth);
-        Some(event)
+        self.rx.recv().await
     }
 
     pub fn try_recv(&mut self) -> Result<AgentConnectionManagerEvent, mpsc::error::TryRecvError> {
-        match self.rx.try_recv() {
-            Ok(event) => {
-                decrement_manager_event_depth(&self.depth);
-                Ok(event)
-            }
-            err => err,
-        }
+        self.rx.try_recv()
     }
-}
-
-fn decrement_manager_event_depth(depth: &AtomicUsize) {
-    let _ = depth.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-        Some(value.saturating_sub(1))
-    });
 }
 
 fn manager_event_is_sheddable(event: &AgentEvent) -> bool {
@@ -314,15 +298,13 @@ fn manager_event_is_sheddable(event: &AgentEvent) -> bool {
 impl ManagerEventSender {
     fn emit(&self, event: AgentConnectionManagerEvent) {
         if manager_event_is_sheddable(&event.event)
-            && self.depth.load(Ordering::Relaxed) >= MANAGER_EVENT_SOFT_CAP
+            && self.tx.max_capacity().saturating_sub(self.tx.capacity()) >= MANAGER_EVENT_SOFT_CAP
         {
             self.note_drop();
             return;
         }
         match self.tx.try_send(event) {
-            Ok(()) => {
-                self.depth.fetch_add(1, Ordering::Relaxed);
-            }
+            Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => self.note_drop(),
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 tracing::debug!("ACP manager event outlet closed");
@@ -346,14 +328,12 @@ impl ManagerEventSender {
 
 pub fn manager_event_channel() -> (ManagerEventSender, ManagerEventReceiver) {
     let (tx, rx) = mpsc::channel(MANAGER_EVENT_BUFFER);
-    let depth = Arc::new(AtomicUsize::new(0));
     (
         ManagerEventSender {
             tx,
-            depth: Arc::clone(&depth),
             dropped: Arc::new(AtomicUsize::new(0)),
         },
-        ManagerEventReceiver { rx, depth },
+        ManagerEventReceiver { rx },
     )
 }
 
@@ -382,11 +362,12 @@ struct ManagedAgentConnection {
     session_controls: Arc<RwLock<HashMap<AgentSessionId, SessionControlState>>>,
     last_activity: Arc<Mutex<Instant>>,
     active_prompt: Arc<Mutex<Option<(AgentSessionId, AgentPromptId)>>>,
+    pending_session_id: Arc<Mutex<Option<AgentSessionId>>>,
     pending_permissions: Arc<Mutex<HashMap<String, PendingPermission>>>,
     pending_elicitations: Arc<Mutex<HashMap<String, PendingElicitation>>>,
     child_pid: Arc<std::sync::Mutex<Option<u32>>>,
     process_job: Arc<std::sync::Mutex<Option<ProcessTreeJob>>>,
-    status: Arc<Mutex<AgentConnectionStatus>>,
+    status: Arc<std::sync::Mutex<AgentConnectionStatus>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -471,6 +452,7 @@ impl AgentConnectionManager {
         let session_controls = Arc::clone(&runner.session_controls);
         let last_activity = Arc::clone(&runner.last_activity);
         let active_prompt = Arc::clone(&runner.active_prompt);
+        let pending_session_id = Arc::clone(&runner.pending_session_id);
         let pending_permissions = Arc::clone(&runner.pending_permissions);
         let pending_elicitations = Arc::clone(&runner.pending_elicitations);
         let child_pid = Arc::clone(&runner.child_pid);
@@ -484,7 +466,7 @@ impl AgentConnectionManager {
         } else {
             // The in-memory driver has no process to spawn / handshake — it's
             // ready the moment it's registered.
-            *status.lock().await = AgentConnectionStatus::Ready;
+            *status.lock().unwrap_or_else(|e| e.into_inner()) = AgentConnectionStatus::Ready;
             let _ = ready_tx.send(Ok(()));
             tokio::spawn(async move {
                 runner.run_in_memory(cmd_rx).await;
@@ -501,6 +483,7 @@ impl AgentConnectionManager {
                 session_controls,
                 last_activity,
                 active_prompt,
+                pending_session_id,
                 pending_permissions,
                 pending_elicitations,
                 child_pid,
@@ -1021,8 +1004,20 @@ impl AgentConnectionManager {
         let Some(connection) = connection else {
             return Err(AgentError::ConnectionNotFound(connection_id.to_string()));
         };
+        self.disconnect_removed_connection(connection_id, connection)
+            .await
+    }
 
-        let is_connecting = *connection.status.lock().await == AgentConnectionStatus::Connecting;
+    async fn disconnect_removed_connection(
+        &self,
+        connection_id: AgentConnectionId,
+        connection: ManagedAgentConnection,
+    ) -> AgentResult<()> {
+        let is_connecting = *connection
+            .status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            == AgentConnectionStatus::Connecting;
         // A closed command channel means the process task is already exiting;
         // it is still safe and necessary to join it. When still in startup
         // handshake (`Connecting`), `cmd_rx` is not polled yet, so skip the
@@ -1264,7 +1259,7 @@ impl AgentConnectionManager {
         for (id, status, active_prompt, pending_permissions, pending_elicitations, session_map) in
             candidates
         {
-            if *status.lock().await != AgentConnectionStatus::Ready {
+            if *status.lock().unwrap_or_else(|e| e.into_inner()) != AgentConnectionStatus::Ready {
                 continue;
             }
             if active_prompt.lock().await.is_some() {
@@ -1318,81 +1313,117 @@ impl AgentConnectionManager {
         idle_timeout: Duration,
         extended: Option<(HashSet<AgentSessionId>, Duration)>,
     ) -> usize {
-        let candidates = {
+        let mut finished: Vec<(AgentConnectionId, ManagedAgentConnection)> = Vec::new();
+        let mut stale: Vec<(
+            AgentConnectionId,
+            ManagedAgentConnectionSnapshot,
+            ManagedAgentConnection,
+        )> = Vec::new();
+        {
             let mut connections = self.connections.lock().await;
             let finished_ids: Vec<AgentConnectionId> = connections
                 .iter()
                 .filter_map(|(id, connection)| connection.task.is_finished().then_some(*id))
                 .collect();
             for id in finished_ids {
-                connections.remove(&id);
-            }
-            connections
-                .iter()
-                .map(|(id, connection)| {
-                    (
-                        *id,
-                        connection.snapshot.clone(),
-                        Arc::clone(&connection.status),
-                        Arc::clone(&connection.active_prompt),
-                        Arc::clone(&connection.pending_permissions),
-                        Arc::clone(&connection.pending_elicitations),
-                        Arc::clone(&connection.session_map),
-                        Arc::clone(&connection.last_activity),
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-
-        let mut stale = Vec::new();
-        for (
-            id,
-            snapshot,
-            status,
-            active_prompt,
-            pending_permissions,
-            pending_elicitations,
-            session_map,
-            last_activity,
-        ) in candidates
-        {
-            if *status.lock().await != AgentConnectionStatus::Ready {
-                continue;
-            }
-            if active_prompt.lock().await.is_some() {
-                continue;
-            }
-            if !pending_permissions.lock().await.is_empty() {
-                continue;
-            }
-            if !pending_elicitations.lock().await.is_empty() {
-                continue;
+                if let Some(connection) = connections.remove(&id) {
+                    finished.push((id, connection));
+                }
             }
 
-            let bound_sessions: Vec<AgentSessionId> =
-                session_map.read().await.keys().copied().collect();
+            let mut stale_ids = Vec::new();
+            for (id, connection) in connections.iter() {
+                if *connection
+                    .status
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    != AgentConnectionStatus::Ready
+                {
+                    continue;
+                }
+                if connection.active_prompt.lock().await.is_some() {
+                    continue;
+                }
+                if connection.pending_session_id.lock().await.is_some() {
+                    continue;
+                }
+                if !connection.pending_permissions.lock().await.is_empty() {
+                    continue;
+                }
+                if !connection.pending_elicitations.lock().await.is_empty() {
+                    continue;
+                }
 
-            let timeout = match &extended {
-                Some((ids, extended_timeout)) if !ids.is_empty() => {
-                    let is_hot = bound_sessions
-                        .iter()
-                        .any(|session_id| ids.contains(session_id));
-                    if is_hot {
-                        (*extended_timeout).max(idle_timeout)
-                    } else {
-                        idle_timeout
+                let bound_sessions: Vec<AgentSessionId> = connection
+                    .session_map
+                    .read()
+                    .await
+                    .keys()
+                    .copied()
+                    .collect();
+
+                let mut has_background_work = false;
+                for session_id in &bound_sessions {
+                    if agent_terminal_registry()
+                        .has_running_for_session(*session_id)
+                        .await
+                    {
+                        has_background_work = true;
+                        break;
                     }
                 }
-                _ => idle_timeout,
-            };
-            if last_activity.lock().await.elapsed() < timeout {
-                continue;
+                if has_background_work {
+                    continue;
+                }
+                {
+                    let controls = connection.session_controls.read().await;
+                    if bound_sessions.iter().any(|session_id| {
+                        controls.get(session_id).is_some_and(|state| {
+                            state.async_tasks.iter().any(|task| task.state == "running")
+                        })
+                    }) {
+                        continue;
+                    }
+                }
+
+                let timeout = match &extended {
+                    Some((ids, extended_timeout)) if !ids.is_empty() => {
+                        let is_hot = bound_sessions
+                            .iter()
+                            .any(|session_id| ids.contains(session_id));
+                        if is_hot {
+                            (*extended_timeout).max(idle_timeout)
+                        } else {
+                            idle_timeout
+                        }
+                    }
+                    _ => idle_timeout,
+                };
+                if connection.last_activity.lock().await.elapsed() < timeout {
+                    continue;
+                }
+                stale_ids.push(*id);
             }
-            stale.push((id, snapshot));
+
+            for id in stale_ids {
+                if let Some(connection) = connections.remove(&id) {
+                    let snapshot = connection.snapshot.clone();
+                    stale.push((id, snapshot, connection));
+                }
+            }
         }
+
+        for (connection_id, connection) in finished {
+            self.cleanup_dead_connection(connection_id, connection).await;
+        }
+
         let mut disconnected = 0;
-        for (connection_id, snapshot) in stale {
-            if self.disconnect(connection_id).await.is_ok() {
+        for (connection_id, snapshot, connection) in stale {
+            if self
+                .disconnect_removed_connection(connection_id, connection)
+                .await
+                .is_ok()
+            {
                 disconnected += 1;
                 let event_now = Utc::now();
                 send_manager_event(
@@ -1418,6 +1449,142 @@ impl AgentConnectionManager {
             }
         }
         disconnected
+    }
+
+    async fn cleanup_dead_connection(
+        &self,
+        connection_id: AgentConnectionId,
+        connection: ManagedAgentConnection,
+    ) {
+        if !connection.task.is_finished() {
+            connection.task.abort();
+        }
+        let _ = connection.task.await;
+        let _ = connection
+            .child_pid
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(job) = connection
+            .process_job
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            let _ = job.terminate();
+        }
+        let mut session_ids: HashSet<AgentSessionId> = connection
+            .session_map
+            .read()
+            .await
+            .keys()
+            .copied()
+            .collect();
+        let pending_permissions = {
+            let mut guard = connection.pending_permissions.lock().await;
+            guard.drain().map(|(_, p)| p).collect::<Vec<_>>()
+        };
+        for pending in pending_permissions {
+            session_ids.insert(pending.session_id);
+            let response = AgentPermissionResponse::Cancelled;
+            let _ = pending.tx.send(response.clone());
+            send_manager_event(
+                &self.event_tx,
+                AgentConnectionManagerEvent {
+                    connection_id,
+                    session_id: Some(pending.session_id),
+                    prompt_id: None,
+                    event: AgentEvent::PermissionResponded {
+                        permission_id: pending.permission_id,
+                        response,
+                        auto: false,
+                    },
+                },
+            );
+        }
+        let pending_elicitations = {
+            let mut guard = connection.pending_elicitations.lock().await;
+            guard.drain().map(|(_, p)| p).collect::<Vec<_>>()
+        };
+        for pending in pending_elicitations {
+            session_ids.insert(pending.session_id);
+            let response = AgentElicitationResponse::Cancel;
+            let _ = pending.tx.send(response.clone());
+            send_manager_event(
+                &self.event_tx,
+                AgentConnectionManagerEvent {
+                    connection_id,
+                    session_id: Some(pending.session_id),
+                    prompt_id: None,
+                    event: AgentEvent::ElicitationResponded {
+                        elicitation_id: pending.elicitation_id,
+                        response,
+                    },
+                },
+            );
+        }
+        if let Some((session_id, prompt_id)) = connection.active_prompt.lock().await.take() {
+            session_ids.insert(session_id);
+            send_manager_event(
+                &self.event_tx,
+                AgentConnectionManagerEvent {
+                    connection_id,
+                    session_id: Some(session_id),
+                    prompt_id: Some(prompt_id),
+                    event: AgentEvent::Error {
+                        error: AgentErrorEvent {
+                            message: CONNECTION_CLOSED_TURN_MESSAGE.to_string(),
+                            code: Some("connection_closed".to_string()),
+                            raw: None,
+                        },
+                    },
+                },
+            );
+        }
+        for session_id in session_ids {
+            agent_terminal_registry()
+                .release_all_for_session(session_id)
+                .await;
+        }
+        let status_needs_notify = {
+            let mut status = connection
+                .status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if matches!(
+                *status,
+                AgentConnectionStatus::Disconnected | AgentConnectionStatus::Failed
+            ) {
+                false
+            } else {
+                *status = AgentConnectionStatus::Disconnected;
+                true
+            }
+        };
+        if status_needs_notify {
+            let snapshot = connection.snapshot;
+            let event_now = Utc::now();
+            send_manager_event(
+                &self.event_tx,
+                AgentConnectionManagerEvent {
+                    connection_id,
+                    session_id: None,
+                    prompt_id: None,
+                    event: AgentEvent::ConnectionStatusChanged {
+                        snapshot: crate::state::AgentConnectionSnapshot {
+                            id: snapshot.connection_id,
+                            agent_id: snapshot.agent_id,
+                            workspace_id: snapshot.workspace_id,
+                            status: AgentConnectionStatus::Disconnected,
+                            working_dir: snapshot.working_dir.display().to_string(),
+                            status_message: None,
+                            created_at: event_now,
+                            updated_at: event_now,
+                        },
+                    },
+                },
+            );
+        }
     }
 
     /// Atomically rewind `num_turns` on a flagship native engine connection
@@ -1457,7 +1624,10 @@ impl AgentConnectionManager {
     ) {
         let connections = self.connections.lock().await;
         if let Some(connection) = connections.get(&connection_id) {
-            *connection.status.lock().await = status;
+            *connection
+                .status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = status;
         }
     }
 
@@ -1481,31 +1651,38 @@ impl AgentConnectionManager {
         connection_id: AgentConnectionId,
         command: AgentConnectionCommand,
     ) -> AgentResult<()> {
-        let (cmd_tx, last_activity) = {
+        let cmd_tx = {
             let mut connections = self.connections.lock().await;
             match connections.get(&connection_id) {
                 None => {
                     return Err(AgentError::ConnectionNotFound(connection_id.to_string()));
                 }
                 Some(connection) if connection.task.is_finished() => {
-                    connections.remove(&connection_id);
+                    let dead = connections.remove(&connection_id);
+                    drop(connections);
+                    if let Some(connection) = dead {
+                        self.cleanup_dead_connection(connection_id, connection)
+                            .await;
+                    }
                     return Err(AgentError::Runtime(
                         "agent connection command channel closed".into(),
                     ));
                 }
-                Some(connection) => (
-                    connection.cmd_tx.clone(),
-                    Arc::clone(&connection.last_activity),
-                ),
+                Some(connection) => {
+                    *connection.last_activity.lock().await = Instant::now();
+                    connection.cmd_tx.clone()
+                }
             }
         };
-        *last_activity.lock().await = Instant::now();
 
         if cmd_tx.send(command).await.is_ok() {
             return Ok(());
         }
 
-        self.connections.lock().await.remove(&connection_id);
+        let dead = self.connections.lock().await.remove(&connection_id);
+        if let Some(connection) = dead {
+            self.cleanup_dead_connection(connection_id, connection).await;
+        }
         Err(AgentError::Runtime(
             "agent connection command channel closed".into(),
         ))

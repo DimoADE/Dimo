@@ -16,7 +16,11 @@ export interface WorktreeInfo {
  * Returns all active (non-archived) workspaces for the current project.
  */
 export function useProjectWorktrees(projectId: string | undefined) {
-  const { data: projectWorkspaces, isLoading } = useQuery({
+  const {
+    data: projectWorkspaces,
+    isLoading,
+    isSuccess,
+  } = useQuery({
     queryKey: projectWorktreeKeys.byProject(projectId),
     queryFn: async () => {
       if (!projectId) return [];
@@ -42,5 +46,5 @@ export function useProjectWorktrees(projectId: string | undefined) {
     })
   );
 
-  return { worktrees: enriched, isLoading };
+  return { worktrees: enriched, isLoading, isSuccess };
 }

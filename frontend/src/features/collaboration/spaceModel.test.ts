@@ -297,6 +297,10 @@ describe('collaboration space model', () => {
     expect(
       surfaceErrorCopy({ code: 'bad_request', message: 'nickname_taken' })
     ).toBe(COPY.nicknameTaken);
+    expect(surfaceErrorCopy(new Error('not_found'))).toBe(COPY.objectMissing);
+    expect(surfaceErrorCopy(new Error('conversation was not found'))).toBe(
+      COPY.conversationMissing
+    );
     expect(surfaceErrorCopy(new Error('先打开一个工作区'))).toBe(
       '先打开一个工作区'
     );
@@ -856,6 +860,55 @@ describe('create group chat defaults', () => {
       excludeConversationIds: new Set(['conv-a']),
     });
     expect(bots.map((bot) => bot.conversation_id)).toEqual(['conv-b']);
+  });
+
+  it('deduplicates per-group seats against direct seats by bot identity and ignores deleted spaces', () => {
+    const masterDirect: SpaceMember = {
+      nickname: 'Master',
+      kind: 'agent',
+      visible_to_agents: 1,
+      conversation_id: 'conv-master-dm',
+      member_id: 'mem-master',
+      identity_member_id: 'mem-master',
+    };
+    const masterGroupSeat: SpaceMember = {
+      nickname: 'Master',
+      kind: 'agent',
+      visible_to_agents: 1,
+      conversation_id: 'conv-master-group-1',
+      member_id: 'seat-group-1',
+      identity_member_id: 'mem-master',
+    };
+    const ghostOnlyBot: SpaceMember = {
+      nickname: 'DeletedBot',
+      kind: 'agent',
+      visible_to_agents: 1,
+      conversation_id: 'conv-deleted-group',
+      member_id: 'seat-deleted-1',
+      identity_member_id: 'mem-deleted',
+    };
+
+    const unfiltered = uniqueBotsForGroupMemberPicker({
+      directMembers: [masterDirect],
+      membersBySpace: {
+        'space-live': [masterGroupSeat],
+        'space-deleted': [ghostOnlyBot],
+      },
+      activeSpaceIds: new Set(['space-live']),
+    });
+    expect(unfiltered.map((bot) => bot.conversation_id)).toEqual([
+      'conv-master-dm',
+    ]);
+
+    const afterSelectingMaster = uniqueBotsForGroupMemberPicker({
+      directMembers: [masterDirect],
+      membersBySpace: {
+        'space-live': [masterGroupSeat],
+      },
+      activeSpaceIds: new Set(['space-live']),
+      excludeConversationIds: new Set(['conv-master-dm']),
+    });
+    expect(afterSelectingMaster).toEqual([]);
   });
 });
 

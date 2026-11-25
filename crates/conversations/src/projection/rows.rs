@@ -422,6 +422,13 @@ impl ProjectionFold {
             ConversationEvent::AgentConnectionStatusChanged { status, bound, .. } => match status {
                 ConversationAgentConnectionStatus::Connecting
                 | ConversationAgentConnectionStatus::Recovering => {
+                    side_row_turns.remove(AGENT_SESSION_CONNECT_ERROR_NOTICE_ROW_ID);
+                    remove_side_row(
+                        side_rows,
+                        deleted_rows,
+                        AGENT_SESSION_CONNECT_ERROR_NOTICE_ROW_ID,
+                        record.sequence,
+                    );
                     if let Some(tid) = latest_turn_id {
                         side_row_turns
                             .insert(AGENT_CONNECTION_RECOVERING_NOTICE_ROW_ID.into(), tid);

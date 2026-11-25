@@ -320,11 +320,11 @@ pub(crate) async fn promote_one(
         return Ok(false);
     };
     let Some(head) = load_session(pool, conversation_id).await? else {
-        mark_delay_failed(pool, &row.id, "conversation was not found").await?;
+        mark_delay_cancelled(pool, &row.id).await?;
         return Ok(false);
     };
-    if head.deleted_at.is_some() || head.status == "archived" {
-        mark_delay_failed(pool, &row.id, "conversation was not found").await?;
+    if head.deleted_at.is_some() || matches!(head.status.as_str(), "done" | "archived") {
+        mark_delay_cancelled(pool, &row.id).await?;
         return Ok(false);
     }
     let payload: Value = serde_json::from_str(&row.payload_json).unwrap_or_else(|_| json!({}));
@@ -386,6 +386,22 @@ pub(crate) async fn promote_one(
         generation: None,
     });
     Ok(true)
+}
+
+pub(crate) async fn mark_delay_cancelled(
+    pool: &SqlitePool,
+    id: &str,
+) -> Result<(), CollaborationError> {
+    sqlx::query(
+        r#"UPDATE conversation_delayed_inputs
+           SET status = 'cancelled', error = NULL
+           WHERE id = ? AND status = 'scheduled'"#,
+    )
+    .bind(id)
+    .execute(pool)
+    .await
+    .map_err(db)?;
+    Ok(())
 }
 
 pub(crate) async fn mark_delay_failed(
@@ -760,7 +776,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn promote_failed_when_archived() {
+    async fn promote_cancelled_when_archived() {
         let pool = setup_pool().await;
         let caller = Uuid::new_v4();
         create_session(&pool, caller, Uuid::new_v4(), None).await;
@@ -780,7 +796,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        promote_due_delayed_inputs(&pool).await.unwrap();
+        assert_eq!(promote_due_delayed_inputs(&pool).await.unwrap(), 0);
         assert_eq!(input_count(&pool, caller).await, 0);
         let status: String = sqlx::query_scalar(
             "SELECT status FROM conversation_delayed_inputs WHERE conversation_id = ?",
@@ -789,7 +805,51 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!(status, "failed");
+        assert_eq!(status, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn promote_cancelled_when_done_or_missing() {
+        let pool = setup_pool().await;
+        let done_session = Uuid::new_v4();
+        let deleted_session = Uuid::new_v4();
+        let workspace = Uuid::new_v4();
+        create_session(&pool, done_session, workspace, None).await;
+        create_session(&pool, deleted_session, workspace, None).await;
+
+        for target in [done_session, deleted_session] {
+            let mut request = send_for(target, target, CompanionWritePolicy::SameWorkspace);
+            request.delay_seconds = Some(20);
+            send_session_input(&pool, request).await.unwrap();
+        }
+        sqlx::query("UPDATE sessions SET status = 'done' WHERE id = ?")
+            .bind(done_session)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM sessions WHERE id = ?")
+            .bind(deleted_session)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE conversation_delayed_inputs SET deliver_at = ?")
+            .bind(stamp(Utc::now() - Duration::seconds(1)))
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(promote_due_delayed_inputs(&pool).await.unwrap(), 0);
+        for target in [done_session, deleted_session] {
+            assert_eq!(input_count(&pool, target).await, 0);
+            let status: String = sqlx::query_scalar(
+                "SELECT status FROM conversation_delayed_inputs WHERE conversation_id = ?",
+            )
+            .bind(target.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(status, "cancelled");
+        }
     }
 
     #[tokio::test]

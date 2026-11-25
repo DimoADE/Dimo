@@ -424,6 +424,18 @@ export function SessionSettingsSummary({
     label: string;
     isPrimaryName: boolean;
   }> = [
+    ...(permissionControl
+      ? [
+          {
+            key:
+              permissionControl.source === 'mode'
+                ? 'session-mode'
+                : (permissionControl.optionKey ?? 'session-permission'),
+            label: permissionControl.activeLabel,
+            isPrimaryName: false,
+          },
+        ]
+      : []),
     ...(primaryNameLabel
       ? [
           {
@@ -438,18 +450,6 @@ export function SessionSettingsSummary({
           {
             key: effortRow.option.key,
             label: effortRow.activeLabel,
-            isPrimaryName: false,
-          },
-        ]
-      : []),
-    ...(permissionControl
-      ? [
-          {
-            key:
-              permissionControl.source === 'mode'
-                ? 'session-mode'
-                : (permissionControl.optionKey ?? 'session-permission'),
-            label: permissionControl.activeLabel,
             isPrimaryName: false,
           },
         ]

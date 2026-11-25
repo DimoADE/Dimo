@@ -340,6 +340,18 @@ Function ${UN}DimoInstFilesShow
   !insertmacro DimoFootReset
   !insertmacro DimoFootRight "${UN}" $DimoProgCancel "sec" "$(DIMO_CANCEL)"
 
+  !if "${UN}" == ""
+    ; Pre-create error footer controls on the UI thread while its message loop
+    ; owns them; creating child windows later on the section worker thread in
+    ; DimoShowError leaves them un-pumped and invisible.
+    !insertmacro DimoMakeStatic $DimoLogBtn $DimoInstDlg ${DIMO_STATIC_HIT} "" 0 0 0 0
+    !insertmacro DimoMakeStatic $DimoErrCancel $DimoInstDlg ${DIMO_STATIC_HIT} "" 0 0 0 0
+    !insertmacro DimoMakeStatic $DimoRetryBtn $DimoInstDlg ${DIMO_STATIC_HIT} "" 0 0 0 0
+    !insertmacro DimoLabelColors $DimoLogBtn
+    !insertmacro DimoLabelColors $DimoErrCancel
+    !insertmacro DimoLabelColors $DimoRetryBtn
+  !endif
+
   ${If} $DimoAction == "uninstall"
     !insertmacro DimoSetText $DimoSubLbl "$(DIMO_UNINSTALLING)"
     !insertmacro DimoSetText $DimoStatusLbl "$(DIMO_PROGRESS_UNINSTALL)"
@@ -707,19 +719,23 @@ Function DimoOnBrowse
   Pop $DimoT1
   ${If} $DimoT1 != "error"
   ${AndIf} $DimoT1 != ""
-    StrLen $DimoT2 "${PRODUCT_NAME}"
-    IntOp $DimoT2 0 - $DimoT2
-    StrCpy $DimoT3 $DimoT1 "" $DimoT2
-    ${If} $DimoT3 != "${PRODUCT_NAME}"
+    ${Do}
       StrCpy $DimoT3 $DimoT1 "" -1
-      ${If} $DimoT3 == "\"
-        StrCpy $DimoT1 "$DimoT1${PRODUCT_NAME}"
-      ${Else}
+      ${If} $DimoT3 != "\"
+        ${Break}
+      ${EndIf}
+      StrCpy $DimoT1 $DimoT1 -1
+    ${LoopWhile} $DimoT1 != ""
+    ${If} $DimoT1 != ""
+      StrLen $DimoT2 "\${PRODUCT_NAME}"
+      IntOp $DimoT2 0 - $DimoT2
+      StrCpy $DimoT3 $DimoT1 "" $DimoT2
+      ${If} $DimoT3 != "\${PRODUCT_NAME}"
         StrCpy $DimoT1 "$DimoT1\${PRODUCT_NAME}"
       ${EndIf}
+      ${NSD_SetText} $DimoEdit $DimoT1
+      Call DimoUpdateLocation
     ${EndIf}
-    ${NSD_SetText} $DimoEdit $DimoT1
-    Call DimoUpdateLocation
   ${EndIf}
 FunctionEnd
 
@@ -738,13 +754,73 @@ Function DimoOnUninstall
 FunctionEnd
 
 Function DimoPageMainLeave
-  ${If} $DimoPhase == "location"
-    ${NSD_GetText} $DimoEdit $DimoT0
+  ${If} $DimoAction != "uninstall"
+    ${If} $DimoPhase == "location"
+      ${NSD_GetText} $DimoEdit $DimoT0
+    ${Else}
+      StrCpy $DimoT0 $INSTDIR
+    ${EndIf}
+    ; Reject empty, relative, UNC, and drive-root paths before and after canonicalization.
+    StrCpy $DimoT2 $DimoT0 2 1
+    ${GetRoot} "$DimoT0" $DimoT3
+    StrLen $DimoT4 $DimoT3
     ${If} $DimoT0 == ""
+    ${OrIf} $DimoT4 != 2
+    ${OrIf} $DimoT2 != ":\"
       MessageBox MB_OK|MB_ICONEXCLAMATION "$(DIMO_PATH_INVALID)"
       Abort
     ${EndIf}
-    StrCpy $INSTDIR $DimoT0
+    GetFullPathName $DimoT1 $DimoT0
+    ${Do}
+      StrCpy $DimoT2 $DimoT1 "" -1
+      ${If} $DimoT2 != "\"
+        ${Break}
+      ${EndIf}
+      StrCpy $DimoT1 $DimoT1 -1
+    ${LoopWhile} $DimoT1 != ""
+    StrCpy $DimoT2 $DimoT1 2 1
+    ${GetRoot} "$DimoT1" $DimoT3
+    StrLen $DimoT4 $DimoT3
+    StrLen $DimoT5 $DimoT1
+    ${If} $DimoT4 != 2
+    ${OrIf} $DimoT2 != ":\"
+    ${OrIf} $DimoT5 <= 3
+    ${OrIf} $DimoT1 == $DimoT3
+      MessageBox MB_OK|MB_ICONEXCLAMATION "$(DIMO_PATH_INVALID)"
+      Abort
+    ${EndIf}
+    ; Reject existing non-empty directories without a Dimo install marker so RMDir /r cannot wipe user folders.
+    ${If} ${FileExists} "$DimoT1\*.*"
+      ${IfNot} ${FileExists} "$DimoT1\${APP_EXECUTABLE_FILENAME}"
+      ${AndIfNot} ${FileExists} "$DimoT1\${UNINSTALL_FILENAME}"
+        StrCpy $DimoT4 0
+        ClearErrors
+        FindFirst $DimoT5 $DimoT6 "$DimoT1\*"
+        ${IfNot} ${Errors}
+          ${DoWhile} $DimoT6 != ""
+            ${If} $DimoT6 != "."
+            ${AndIf} $DimoT6 != ".."
+              StrCpy $DimoT4 1
+              ${Break}
+            ${EndIf}
+            ClearErrors
+            FindNext $DimoT5 $DimoT6
+            ${If} ${Errors}
+              StrCpy $DimoT6 ""
+            ${EndIf}
+          ${Loop}
+          FindClose $DimoT5
+        ${EndIf}
+        ${If} $DimoT4 != 0
+          MessageBox MB_OK|MB_ICONEXCLAMATION "$(DIMO_PATH_NOT_EMPTY)"
+          Abort
+        ${EndIf}
+      ${EndIf}
+    ${ElseIf} ${FileExists} "$DimoT1"
+      MessageBox MB_OK|MB_ICONEXCLAMATION "$(DIMO_PATH_INVALID)"
+      Abort
+    ${EndIf}
+    StrCpy $INSTDIR $DimoT1
   ${EndIf}
   !insertmacro DimoLog "action=$DimoAction instdir=$INSTDIR"
 FunctionEnd
@@ -873,24 +949,20 @@ Function DimoShowError
   !insertmacro DimoPlace $DimoStatusLbl 52 ${DIMO_PROG_LABEL_Y} 360 ${DIMO_PROG_LABEL_H}
   !insertmacro DimoErrorColors $DimoStatusLbl
   !insertmacro DimoSetText $DimoStatusLbl "$DimoErrTitle"
-  !insertmacro DimoSetText $DimoSubLbl "$(DIMO_INSTALL_FAILED)"
+  ${If} $DimoAction == "uninstall"
+    !insertmacro DimoSetText $DimoSubLbl "$(DIMO_UNINSTALL_FAILED)"
+  ${Else}
+    !insertmacro DimoSetText $DimoSubLbl "$(DIMO_INSTALL_FAILED)"
+  ${EndIf}
   SetDetailsPrint none
   !insertmacro DimoSetText $DimoFileLbl "$(DIMO_ERROR_HINT) $DimoErrCode"
 
   ShowWindow $DimoProgCancel 0
-  ${If} $DimoRetryBtn == ""
-    !insertmacro DimoMakeStatic $DimoLogBtn $DimoInstDlg ${DIMO_STATIC_HIT} "" 0 0 0 0
-    !insertmacro DimoMakeStatic $DimoErrCancel $DimoInstDlg ${DIMO_STATIC_HIT} "" 0 0 0 0
-    !insertmacro DimoMakeStatic $DimoRetryBtn $DimoInstDlg ${DIMO_STATIC_HIT} "" 0 0 0 0
-    !insertmacro DimoLabelColors $DimoLogBtn
-    !insertmacro DimoLabelColors $DimoErrCancel
-    !insertmacro DimoLabelColors $DimoRetryBtn
-    ; the title-bar close becomes live while waiting
-    System::Call 'user32::GetWindowLongW(p $DimoCloseBtn, i -16) i.s'
-    Pop $DimoT0
-    IntOp $DimoT0 $DimoT0 | 0x100
-    System::Call 'user32::SetWindowLongW(p $DimoCloseBtn, i -16, i $DimoT0)'
-  ${EndIf}
+  ; the title-bar close becomes live while waiting
+  System::Call 'user32::GetWindowLongW(p $DimoCloseBtn, i -16) i.s'
+  Pop $DimoT0
+  IntOp $DimoT0 $DimoT0 | 0x100
+  System::Call 'user32::SetWindowLongW(p $DimoCloseBtn, i -16, i $DimoT0)'
   StrCpy $DimoHover 0
   Call DimoRedrawErrorButtons
   !insertmacro DimoFootLeft "" $DimoLogBtn "ghost" "$(DIMO_VIEW_LOG)"
@@ -969,6 +1041,7 @@ Function DimoShowError
     ShowWindow $DimoRetryBtn 0
     ShowWindow $DimoErrIcon 0
     ShowWindow $DimoProgCancel 5
+    !insertmacro DimoRemoveStyle $DimoCloseBtn 0x100
     StrCpy $DimoSB $DimoCloseBtn
     StrCpy $DimoSBKind "close"
     StrCpy $DimoSBText ""
@@ -977,9 +1050,13 @@ Function DimoShowError
     !insertmacro DimoPlace $DimoCloseBtn 474 0 ${DIMO_CAPTION_BTN_W} ${DIMO_TITLE_H}
     !insertmacro DimoPlace $DimoStatusLbl 32 ${DIMO_PROG_LABEL_Y} 380 ${DIMO_PROG_LABEL_H}
     !insertmacro DimoLabelColors $DimoStatusLbl
-    !insertmacro DimoSetText $DimoSubLbl "$(DIMO_INSTALLING)"
+    ${If} $DimoAction == "uninstall"
+      !insertmacro DimoSetText $DimoSubLbl "$(DIMO_UNINSTALLING)"
+    ${Else}
+      !insertmacro DimoSetText $DimoSubLbl "$(DIMO_INSTALLING)"
+    ${EndIf}
     !insertmacro DimoSetText $DimoFileLbl ""
-    SetDetailsPrint both
+    SetDetailsPrint none
     StrCpy $DimoBarState 0
     Call DimoRenderBar
     System::Call 'user32::InvalidateRect(p $DimoInstDlg, p 0, i 1)'

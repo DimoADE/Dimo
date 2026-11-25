@@ -306,6 +306,12 @@ pub struct HostEvent {
     pub durability: EventDurability,
 }
 
+#[derive(Default)]
+struct StreamTaskState {
+    tasks: HashMap<String, JoinHandle<()>>,
+    refs: HashMap<String, usize>,
+}
+
 /// Per-Host push surface. Desktop forwards matching channels to Tauri; Server WS
 /// attaches as `host_event`. Instances are isolated — never process-global.
 #[derive(Clone)]
@@ -314,8 +320,7 @@ pub struct HostEventBus {
     patch_tx: broadcast::Sender<HostEvent>,
     sequence: Arc<AtomicI64>,
     last_invalidation: Arc<RwLock<HashMap<String, HostEvent>>>,
-    stream_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
-    stream_task_refs: Arc<Mutex<HashMap<String, usize>>>,
+    stream_state: Arc<Mutex<StreamTaskState>>,
 }
 
 impl Default for HostEventBus {
@@ -333,17 +338,16 @@ impl HostEventBus {
             patch_tx,
             sequence: Arc::new(AtomicI64::new(0)),
             last_invalidation: Arc::new(RwLock::new(HashMap::new())),
-            stream_tasks: Arc::new(Mutex::new(HashMap::new())),
-            stream_task_refs: Arc::new(Mutex::new(HashMap::new())),
+            stream_state: Arc::new(Mutex::new(StreamTaskState::default())),
         }
     }
 
     /// Register a stream producer task for `key`, aborting any previous task
     /// registered under the same `key` on this Host Event Bus.
     pub fn replace_stream_task(&self, key: impl Into<String>, task: JoinHandle<()>) {
-        if let Ok(mut tasks) = self.stream_tasks.lock() {
-            tasks.retain(|_, handle| !handle.is_finished());
-            if let Some(previous) = tasks.insert(key.into(), task) {
+        if let Ok(mut state) = self.stream_state.lock() {
+            state.tasks.retain(|_, handle| !handle.is_finished());
+            if let Some(previous) = state.tasks.insert(key.into(), task) {
                 previous.abort();
             }
         }
@@ -356,20 +360,20 @@ impl HostEventBus {
     where
         F: FnOnce() -> JoinHandle<()>,
     {
-        if let Ok(mut tasks) = self.stream_tasks.lock() {
-            tasks.retain(|_, handle| !handle.is_finished());
+        if let Ok(mut state) = self.stream_state.lock() {
+            state.tasks.retain(|_, handle| !handle.is_finished());
             let key = key.into();
-            if tasks.contains_key(&key) {
+            if state.tasks.contains_key(&key) {
                 return;
             }
-            tasks.insert(key, spawn_fn());
+            state.tasks.insert(key, spawn_fn());
         }
     }
 
     /// Increment the subscriber refcount for an active stream producer task key.
     pub fn retain_stream_task(&self, key: &str) {
-        if let Ok(mut refs) = self.stream_task_refs.lock() {
-            let count = refs.entry(key.to_string()).or_insert(0);
+        if let Ok(mut state) = self.stream_state.lock() {
+            let count = state.refs.entry(key.to_string()).or_insert(0);
             *count = count.saturating_add(1);
         }
     }
@@ -377,26 +381,24 @@ impl HostEventBus {
     /// Decrement the subscriber refcount for a stream producer task key and abort
     /// + remove the background task once the final subscriber detaches.
     pub fn release_stream_task(&self, key: &str) {
-        let should_abort = if let Ok(mut refs) = self.stream_task_refs.lock() {
-            match refs.get_mut(key) {
+        if let Ok(mut state) = self.stream_state.lock() {
+            let should_abort = match state.refs.get_mut(key) {
                 Some(count) if *count > 1 => {
                     *count -= 1;
                     false
                 }
                 Some(_) => {
-                    refs.remove(key);
+                    state.refs.remove(key);
                     true
                 }
                 None => false,
+            };
+            if should_abort {
+                if let Some(handle) = state.tasks.remove(key) {
+                    handle.abort();
+                }
+                state.tasks.retain(|_, handle| !handle.is_finished());
             }
-        } else {
-            false
-        };
-        if should_abort && let Ok(mut tasks) = self.stream_tasks.lock() {
-            if let Some(handle) = tasks.remove(key) {
-                handle.abort();
-            }
-            tasks.retain(|_, handle| !handle.is_finished());
         }
     }
 
@@ -1107,5 +1109,73 @@ mod tests {
         bus.release_stream_task("projects-stream");
         tokio::task::yield_now().await;
         assert!(!rpc_tx.is_closed());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn stream_task_release_and_retain_are_atomic_under_contention() {
+        let bus = std::sync::Arc::new(HostEventBus::new());
+        let key = "diff-stream:ws-race";
+        let alive_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        for _ in 0..200 {
+            let bus_a = bus.clone();
+            let bus_b = bus.clone();
+            let alive_a = alive_count.clone();
+            let alive_b = alive_count.clone();
+
+            bus.retain_stream_task(key);
+            bus.ensure_stream_task(key, || {
+                let alive = alive_a.clone();
+                alive.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::spawn(async move {
+                    struct Guard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+                    impl Drop for Guard {
+                        fn drop(&mut self) {
+                            self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                    let _guard = Guard(alive);
+                    std::future::pending::<()>().await;
+                })
+            });
+
+            let releaser = tokio::spawn(async move {
+                bus_a.release_stream_task(key);
+            });
+            let subscriber = tokio::spawn(async move {
+                bus_b.retain_stream_task(key);
+                bus_b.ensure_stream_task(key, || {
+                    let alive = alive_b.clone();
+                    alive.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tokio::spawn(async move {
+                        struct Guard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+                        impl Drop for Guard {
+                            fn drop(&mut self) {
+                                self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                            }
+                        }
+                        let _guard = Guard(alive);
+                        std::future::pending::<()>().await;
+                    })
+                });
+            });
+
+            let _ = tokio::join!(releaser, subscriber);
+            tokio::task::yield_now().await;
+
+            // Exactly one subscriber remains retained, so a live task must still be registered.
+            let state = bus.stream_state.lock().expect("lock stream state");
+            assert_eq!(state.refs.get(key).copied(), Some(1));
+            let handle = state
+                .tasks
+                .get(key)
+                .expect("retained subscriber must still have an active task");
+            assert!(!handle.is_finished());
+            drop(state);
+
+            // Clean up for next iteration.
+            bus.release_stream_task(key);
+            tokio::task::yield_now().await;
+        }
     }
 }

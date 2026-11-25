@@ -159,6 +159,7 @@ describe('parkEntryWindowRows', () => {
       settledAssistantRowIds: { 'turn-1:assistant': true },
       lastSequence: 200n,
       loadedLastSequence: 199n,
+      loadedLiveSequence: 42n,
       olderCursor: 'cursor-1',
       loadedToStart: true,
       prefixHash: 'hash-abc',
@@ -177,6 +178,7 @@ describe('parkEntryWindowRows', () => {
     expect(parked.settledAssistantRowIds).toEqual({});
     expect(parked.lastSequence).toBe(0n);
     expect(parked.loadedLastSequence).toBe(0n);
+    expect(parked.loadedLiveSequence).toBe(0n);
     expect(parked.olderCursor).toBeNull();
     expect(parked.loadedToStart).toBe(false);
     expect(parked.prefixHash).toBeNull();
@@ -184,20 +186,54 @@ describe('parkEntryWindowRows', () => {
     expect(parked.gap).toEqual({ kind: 'none' });
   });
 
-  it('preserves olderCursor, loadedToStart, and prefixHash when windowRows <= MAX_PARKED_ROWS', () => {
+  it('preserves olderCursor, loadedToStart, and prefixHash when windowRows <= MAX_PARKED_ROWS while resetting loadedLiveSequence', () => {
     const rows = Array.from({ length: 10 }, (_, idx) => makeMessageRow(idx));
     const parked = parkEntryWindowRows({
       ...emptyEntry(),
       windowRows: rows,
       rows,
+      loadedLiveSequence: 15n,
       olderCursor: 'cursor-keep',
       loadedToStart: true,
       prefixHash: 'hash-keep',
     });
 
     expect(parked.windowRows).toHaveLength(10);
+    expect(parked.loadedLiveSequence).toBe(0n);
     expect(parked.olderCursor).toBe('cursor-keep');
     expect(parked.loadedToStart).toBe(true);
     expect(parked.prefixHash).toBe('hash-keep');
+
+    const reopenedState = conversationStoreReducer(
+      {
+        byConversationId: {
+          'conv-1': parked,
+        },
+      },
+      {
+        type: 'row_ops',
+        batch: {
+          conversation_id: 'conv-1',
+          last_sequence: 0n,
+          live_sequence: 1n,
+          ops: [
+            {
+              op: 'append_text',
+              row_id: 'turn-live:assistant',
+              revision: 1n,
+              stream: 'text',
+              delta: 'live chunk after reopen',
+            },
+          ],
+          session_modes: null,
+          session_config_options: null,
+        },
+      }
+    );
+
+    expect(
+      reopenedState.byConversationId['conv-1']?.liveText['turn-live:assistant']
+        ?.text
+    ).toBe('live chunk after reopen');
   });
 });

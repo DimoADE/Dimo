@@ -5709,4 +5709,309 @@ describe('CollaborationSpacePage', () => {
     expect(getComposerEditor().getAttribute('contenteditable')).toBe('true');
     expect(screen.getByRole('button', { name: '发送' })).not.toBeDisabled();
   });
+
+  it('does not leak duplicate archived group seats into the create-group picker after deleting a group', async () => {
+    const user = userEvent.setup();
+    const baseImpl = collaborationCall.getMockImplementation()!;
+    let nextSpaceNum = 0;
+    const liveSpaces: Array<{ space_id: string; name: string }> = [];
+    const groupSeatsBySpace = new Map<
+      string,
+      Array<{
+        member_id: string;
+        nickname: string;
+        kind: string;
+        visible_to_agents: number;
+        conversation_id: string;
+      }>
+    >();
+    const archivedConvs = new Set<string>();
+
+    collaborationCall.mockImplementation(
+      async (capability, method, input?: Record<string, unknown>) => {
+        if (method === 'thread.listSidebar') {
+          return {
+            supervisor_member_id: 'mem-master',
+            items: [
+              {
+                kind: 'dm',
+                thread_id: 'direct:mem-master',
+                name: 'Master',
+                member_count: 1,
+                members_preview: [
+                  {
+                    member_id: 'mem-master',
+                    name: 'Master',
+                    conversation_id: 'conv-master-dm',
+                    agent: 'CODEX',
+                    is_supervisor: true,
+                  },
+                ],
+                member: {
+                  member_id: 'mem-master',
+                  name: 'Master',
+                  conversation_id: 'conv-master-dm',
+                  agent: 'CODEX',
+                  is_supervisor: true,
+                },
+                last_activity_at: '2026-04-12T10:02:00Z',
+                unread_count: 0,
+              },
+              ...liveSpaces.map((space) => ({
+                kind: 'group',
+                thread_id: space.space_id,
+                space_id: space.space_id,
+                name: space.name,
+                member_count: (groupSeatsBySpace.get(space.space_id) ?? [])
+                  .length,
+                members_preview: (
+                  groupSeatsBySpace.get(space.space_id) ?? []
+                ).map((seat) => ({
+                  member_id: 'mem-master',
+                  name: seat.nickname,
+                  conversation_id: seat.conversation_id,
+                  agent: 'CODEX',
+                  is_supervisor: true,
+                })),
+                last_activity_at: '2026-04-12T10:03:00Z',
+                unread_count: 0,
+              })),
+            ],
+          };
+        }
+        if (method === 'space.list') {
+          return { spaces: [...liveSpaces] };
+        }
+        if (method === 'space.listMembers') {
+          const sid = String(input?.spaceId ?? '');
+          if (sid.startsWith('unassigned:')) {
+            return {
+              members: [
+                {
+                  member_id: 'seat-master-dm',
+                  identity_member_id: 'mem-master',
+                  nickname: 'Master',
+                  kind: 'agent',
+                  visible_to_agents: 1,
+                  conversation_id: 'conv-master-dm',
+                  is_supervisor: true,
+                },
+              ],
+            };
+          }
+          return { members: groupSeatsBySpace.get(sid) ?? [] };
+        }
+        if (method === 'space.create') {
+          nextSpaceNum += 1;
+          const created = {
+            space_id: `space-group-${nextSpaceNum}`,
+            name: String(input?.name ?? '新群'),
+          };
+          liveSpaces.push(created);
+          return created;
+        }
+        if (method === 'space.addMember') {
+          const sid = String(input?.spaceId ?? '');
+          const cid = String(input?.conversationId ?? '');
+          if (archivedConvs.has(cid)) {
+            throw new Error('not_found');
+          }
+          const seatConvId = `conv-seat-${sid}`;
+          const seat = {
+            member_id: `seat-${sid}`,
+            nickname: String(input?.nickname ?? 'Master'),
+            kind: 'agent',
+            visible_to_agents: 1,
+            conversation_id: seatConvId,
+          };
+          groupSeatsBySpace.set(sid, [
+            ...(groupSeatsBySpace.get(sid) ?? []),
+            seat,
+          ]);
+          return {
+            member_id: seat.member_id,
+            conversation_id: seat.conversation_id,
+            nickname: seat.nickname,
+            is_supervisor: true,
+          };
+        }
+        if (method === 'space.batchDelete') {
+          const ids = (input?.spaceIds as string[] | undefined) ?? [];
+          for (const sid of ids) {
+            const idx = liveSpaces.findIndex((s) => s.space_id === sid);
+            if (idx >= 0) liveSpaces.splice(idx, 1);
+            for (const seat of groupSeatsBySpace.get(sid) ?? []) {
+              archivedConvs.add(seat.conversation_id);
+            }
+            groupSeatsBySpace.delete(sid);
+          }
+          return {
+            deleted_space_ids: ids,
+            archived_conversation_ids: [...archivedConvs],
+            unassigned_conversation_ids: [],
+          };
+        }
+        return baseImpl(capability, method, input);
+      }
+    );
+
+    renderPage();
+    await screen.findByTestId('collaboration-supervisor-slot');
+
+    // 1. Create group "开篇报告" with Master
+    await user.click(screen.getByRole('button', { name: '创建' }));
+    await user.click(await screen.findByRole('menuitem', { name: '创建群聊' }));
+    const dialog1 = await screen.findByRole('dialog', { name: '创建群聊' });
+    await user.type(within(dialog1).getByLabelText('群聊名称'), '开篇报告');
+    await user.click(
+      within(
+        within(dialog1).getByTestId('collaboration-create-bot-list')
+      ).getByRole('button', { name: 'Master' })
+    );
+    await user.click(
+      dialog1.querySelector('button[type="submit"]') as HTMLButtonElement
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: '创建群聊' })).toBeNull()
+    );
+
+    // 2. Right-click "开篇报告" and delete it (archives conv-seat-space-group-1)
+    const groupRow = await screen.findByTestId(
+      'collaboration-contact-row-group:space-group-1'
+    );
+    fireEvent.contextMenu(groupRow);
+    await user.click(await screen.findByRole('menuitem', { name: '删除' }));
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId('collaboration-contact-row-group:space-group-1')
+      ).toBeNull()
+    );
+
+    // 3. Re-open "创建群聊": only ONE Master should appear, using the live DM conv
+    await user.click(screen.getByRole('button', { name: '创建' }));
+    await user.click(await screen.findByRole('menuitem', { name: '创建群聊' }));
+    const dialog2 = await screen.findByRole('dialog', { name: '创建群聊' });
+    const botList2 = within(dialog2).getByTestId(
+      'collaboration-create-bot-list'
+    );
+    const masterButtons = within(botList2).getAllByRole('button', {
+      name: 'Master',
+    });
+    expect(masterButtons).toHaveLength(1);
+    await user.click(masterButtons[0]);
+    expect(
+      within(botList2).queryAllByRole('button', { name: 'Master' })
+    ).toHaveLength(0);
+    await user.click(
+      dialog2.querySelector('button[type="submit"]') as HTMLButtonElement
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: '创建群聊' })).toBeNull()
+    );
+    expect(collaborationCall).toHaveBeenCalledWith(
+      'collaboration',
+      'space.addMember',
+      expect.objectContaining({
+        spaceId: 'space-group-2',
+        conversationId: 'conv-master-dm',
+      })
+    );
+  });
+
+  it('rolls back the newly created empty space when space.addMember fails during createSpace', async () => {
+    const user = userEvent.setup();
+    const baseImpl = collaborationCall.getMockImplementation()!;
+    const liveSpaces: Array<{ space_id: string; name: string }> = [];
+
+    collaborationCall.mockImplementation(
+      async (capability, method, input?: Record<string, unknown>) => {
+        if (method === 'thread.listSidebar') {
+          return {
+            supervisor_member_id: 'mem-master',
+            items: [
+              {
+                kind: 'dm',
+                thread_id: 'direct:mem-master',
+                name: 'Master',
+                member_count: 1,
+                members_preview: [
+                  {
+                    member_id: 'mem-master',
+                    name: 'Master',
+                    conversation_id: 'conv-master-dm',
+                    agent: 'CODEX',
+                    is_supervisor: true,
+                  },
+                ],
+                member: {
+                  member_id: 'mem-master',
+                  name: 'Master',
+                  conversation_id: 'conv-master-dm',
+                  agent: 'CODEX',
+                  is_supervisor: true,
+                },
+                last_activity_at: '2026-04-12T10:02:00Z',
+                unread_count: 0,
+              },
+            ],
+          };
+        }
+        if (method === 'space.list') {
+          return { spaces: [...liveSpaces] };
+        }
+        if (method === 'space.create') {
+          const created = {
+            space_id: 'space-orphan-1',
+            name: String(input?.name ?? 'Master'),
+          };
+          liveSpaces.push(created);
+          return created;
+        }
+        if (method === 'space.addMember') {
+          throw new Error('not_found');
+        }
+        if (method === 'space.batchDelete') {
+          const ids = (input?.spaceIds as string[] | undefined) ?? [];
+          for (const sid of ids) {
+            const idx = liveSpaces.findIndex((s) => s.space_id === sid);
+            if (idx >= 0) liveSpaces.splice(idx, 1);
+          }
+          return {
+            deleted_space_ids: ids,
+            archived_conversation_ids: [],
+            unassigned_conversation_ids: [],
+          };
+        }
+        return baseImpl(capability, method, input);
+      }
+    );
+
+    renderPage();
+    await screen.findByTestId('collaboration-supervisor-slot');
+
+    await user.click(screen.getByRole('button', { name: '创建' }));
+    await user.click(await screen.findByRole('menuitem', { name: '创建群聊' }));
+    const dialog = await screen.findByRole('dialog', { name: '创建群聊' });
+    await user.click(
+      within(
+        within(dialog).getByTestId('collaboration-create-bot-list')
+      ).getByRole('button', { name: 'Master' })
+    );
+    await user.click(
+      dialog.querySelector('button[type="submit"]') as HTMLButtonElement
+    );
+
+    await waitFor(() => {
+      expect(collaborationCall).toHaveBeenCalledWith(
+        'collaboration',
+        'space.batchDelete',
+        expect.objectContaining({
+          spaceIds: ['space-orphan-1'],
+        })
+      );
+    });
+    expect(liveSpaces).toHaveLength(0);
+    expect(within(dialog).queryByText('not_found')).toBeNull();
+    expect(within(dialog).getByText('找不到对应的内容')).toBeTruthy();
+  });
 });

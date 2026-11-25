@@ -898,3 +898,185 @@ describe('SidecarManager Host RPC proxy & capabilities cache', () => {
     await startPromise;
   });
 });
+
+describe('SidecarManager restart tracking & shutdown race guards (E3/E4)', () => {
+  function createFakeChild(options: {
+    pid?: number;
+    stdin?: PassThrough | null;
+  } = {}) {
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const stdin = options.stdin === undefined ? new PassThrough() : options.stdin;
+    const child = Object.assign(new EventEmitter(), {
+      pid: options.pid,
+      exitCode: null as number | null,
+      killed: false,
+      stdin,
+      stdout,
+      stderr,
+      kill: vi.fn(() => {
+        if (!child.killed) {
+          child.killed = true;
+          child.exitCode = 1;
+          child.emit('exit', 1, 'SIGKILL');
+        }
+        return true;
+      }),
+    });
+    return child;
+  }
+
+  it('tracks scheduled auto-restart inside startPromise so waitForReady awaits it and start() reuses it without duplicate spawns (E3)', async () => {
+    const children: Array<ReturnType<typeof createFakeChild>> = [];
+    let spawnCount = 0;
+    const manager = new SidecarManager();
+
+    const startOpts = {
+      binaryPath: process.execPath,
+      appVersion: '0.5.4',
+      readyTimeoutMs: 5_000,
+      restartBaseDelayMs: 30,
+      maxRestartAttempts: 2,
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      spawnProcess: (() => {
+        spawnCount += 1;
+        const child = createFakeChild();
+        children.push(child);
+        const port = 43000 + spawnCount;
+        setTimeout(() => {
+          if (child.exitCode === null) {
+            child.stdout.write(
+              `${JSON.stringify({
+                type: 'dimo-server-ready',
+                listen_addr: `127.0.0.1:${port}`,
+                port,
+                pid: 60000 + spawnCount,
+                protocol_version: '1.0',
+              })}\n`
+            );
+          }
+        }, 15);
+        return child as unknown as ChildProcess;
+      }) as unknown as typeof spawn,
+    };
+
+    const initial = await manager.start(startOpts);
+    expect(initial.baseUrl).toBe('http://127.0.0.1:43001');
+    expect(spawnCount).toBe(1);
+
+    // Trigger unexpected crash -> scheduleRestart creates a tracked startPromise
+    children[0].exitCode = 1;
+    children[0].emit('exit', 1, null);
+
+    const [waited, joinedStart] = await Promise.all([
+      manager.waitForReady(),
+      manager.start(startOpts),
+    ]);
+
+    expect(spawnCount).toBe(2);
+    expect(waited.baseUrl).toBe('http://127.0.0.1:43002');
+    expect(joinedStart).toEqual(waited);
+
+    const shutdownPromise = manager.shutdown();
+    children[1].kill();
+    await shutdownPromise;
+  });
+
+  it('force-kills superseded child and rejects dead/exited child instead of resolving a stale connection (E3)', async () => {
+    // Case 1: Child superseded before ready line finishes
+    {
+      const child = createFakeChild();
+      const manager = new SidecarManager();
+      const startPromise = manager.start({
+        binaryPath: process.execPath,
+        appVersion: '0.5.4',
+        readyTimeoutMs: 5_000,
+        logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+        spawnProcess: (() => child) as unknown as typeof spawn,
+      });
+
+      // Simulate another child superseding this.child before handshake resolves
+      (manager as unknown as { child: unknown }).child = createFakeChild();
+
+      child.stdout.write(
+        `${JSON.stringify({
+          type: 'dimo-server-ready',
+          listen_addr: '127.0.0.1:44001',
+          port: 44001,
+          pid: 61001,
+          protocol_version: '1.0',
+        })}\n`
+      );
+
+      await expect(startPromise).rejects.toThrow(/superseded/i);
+      expect(child.kill).toHaveBeenCalled();
+    }
+
+    // Case 2: Child already has exitCode !== null when ready handshake completes
+    {
+      const child = createFakeChild();
+      const manager = new SidecarManager();
+      const startPromise = manager.start({
+        binaryPath: process.execPath,
+        appVersion: '0.5.4',
+        readyTimeoutMs: 5_000,
+        logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+        spawnProcess: (() => child) as unknown as typeof spawn,
+      });
+
+      child.exitCode = 137;
+      child.stdout.write(
+        `${JSON.stringify({
+          type: 'dimo-server-ready',
+          listen_addr: '127.0.0.1:44002',
+          port: 44002,
+          pid: 61002,
+          protocol_version: '1.0',
+        })}\n`
+      );
+
+      await expect(startPromise).rejects.toThrow(
+        /exited immediately after ready/i
+      );
+      expect(manager.getConnectionOrNull()).toBeNull();
+    }
+  });
+
+  it('does not reset shuttingDown in spawnAndAwaitReady and kills null-stdin pre-handshake child immediately on shutdown (E4)', async () => {
+    // Case 1: Calling shutdown() rejects subsequent start() without resetting shuttingDown or spawning an orphan
+    let orphanSpawns = 0;
+    const manager1 = new SidecarManager();
+    await manager1.shutdown();
+    await expect(
+      manager1.start({
+        binaryPath: process.execPath,
+        appVersion: '0.5.4',
+        logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+        spawnProcess: (() => {
+          orphanSpawns += 1;
+          return createFakeChild() as unknown as ChildProcess;
+        }) as unknown as typeof spawn,
+      })
+    ).rejects.toThrow(/shutting down/i);
+    expect(orphanSpawns).toBe(0);
+
+    // Case 2: Pre-handshake Windows child (conn === null && child.stdin === null) is force-killed immediately without 5s stall
+    const winPreHandshakeChild = createFakeChild({ stdin: null });
+    const manager2 = new SidecarManager();
+    const startPromise = manager2.start({
+      binaryPath: process.execPath,
+      appVersion: '0.5.4',
+      readyTimeoutMs: 10_000,
+      logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      spawnProcess: (() => winPreHandshakeChild) as unknown as typeof spawn,
+    });
+
+    const t0 = Date.now();
+    await manager2.shutdown();
+    const elapsedMs = Date.now() - t0;
+
+    expect(winPreHandshakeChild.kill).toHaveBeenCalled();
+    expect(elapsedMs).toBeLessThan(1_000);
+    await expect(startPromise).rejects.toThrow();
+  });
+});

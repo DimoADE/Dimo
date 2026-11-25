@@ -13,6 +13,7 @@ use conversations::{
     SubmitConversationInput, UpdateConversationInput,
 };
 use executors::profile::ExecutorProfileId;
+use uuid::Uuid;
 
 use crate::{
     ApplicationError, CancelConversationTurn, CompanionSessionPort, ConversationExecutionPort,
@@ -168,6 +169,21 @@ impl ConversationExecutionPort for ConversationSessionExecutionPort {
             .cancel_turn(request.conversation_id, request.reason)
             .await
             .map_err(map_service_error)
+    }
+
+    async fn close_conversation(
+        &self,
+        conversation_id: Uuid,
+        reason: Option<String>,
+    ) -> Result<(), ApplicationError> {
+        match self
+            .service
+            .close_conversation(conversation_id, reason)
+            .await
+        {
+            Ok(()) | Err(ConversationServiceError::NotFound(_)) => Ok(()),
+            Err(error) => Err(map_service_error(error)),
+        }
     }
 
     async fn steer(

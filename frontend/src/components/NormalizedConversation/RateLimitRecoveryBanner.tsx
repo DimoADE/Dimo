@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown, Clock, Pencil, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { formatCountdownTimer } from '@/components/tasks/follow-up/MessageQueueIndicator';
@@ -53,6 +53,31 @@ export function formatRateLimitCountdown(
   return '00:00';
 }
 
+const ENGINE_DISPLAY_NAMES: Record<string, string> = {
+  claude: 'Claude Code',
+  claude_code: 'Claude Code',
+  'claude-code': 'Claude Code',
+  codex: 'Codex',
+  antigravity: 'Antigravity',
+  gemini: 'Gemini CLI',
+  gemini_cli: 'Gemini CLI',
+  'gemini-cli': 'Gemini CLI',
+  opencode: 'OpenCode',
+  cursor: 'Cursor',
+  qwen: 'Qwen Code',
+  qwen_code: 'Qwen Code',
+  'qwen-code': 'Qwen Code',
+  pi: 'Pi',
+  copilot: 'GitHub Copilot',
+  github_copilot: 'GitHub Copilot',
+};
+
+function formatRateLimitEngine(engine: string): string {
+  const trimmed = engine.trim();
+  if (!trimmed) return 'Agent';
+  return ENGINE_DISPLAY_NAMES[trimmed.toLowerCase()] ?? trimmed;
+}
+
 export function RateLimitRecoveryBanner({
   conversationId,
   rateLimit,
@@ -62,28 +87,55 @@ export function RateLimitRecoveryBanner({
 }: RateLimitRecoveryBannerProps) {
   const { t } = useTranslation(['conversation', 'common']);
   const isRateLimited = Boolean(rateLimit?.isRateLimited);
+  const hasRateLimit = Boolean(rateLimit);
+  const rateLimitAutoResume = rateLimit?.autoResume;
+  const rateLimitContinuationPrompt = rateLimit?.continuationPrompt;
 
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [autoResume, setAutoResume] = useState<boolean>(
-    rateLimit?.autoResume ?? true
+    rateLimitAutoResume ?? true
   );
   const [promptExpanded, setPromptExpanded] = useState(false);
   const [promptDraft, setPromptDraft] = useState<string>(
-    rateLimit?.continuationPrompt?.trim() || DEFAULT_CONTINUATION_PROMPT
+    rateLimitContinuationPrompt?.trim() || DEFAULT_CONTINUATION_PROMPT
   );
   const [isUpdating, setIsUpdating] = useState(false);
 
-  useEffect(() => {
-    if (!rateLimit) return;
-    setAutoResume(rateLimit.autoResume ?? true);
-  }, [rateLimit, rateLimit?.autoResume]);
+  const activeConversationIdRef = useRef(conversationId);
+  activeConversationIdRef.current = conversationId;
+  const previousConversationIdRef = useRef(conversationId);
+  const promptExpandedRef = useRef(promptExpanded);
+  promptExpandedRef.current = promptExpanded;
+  const isMountedRef = useRef(true);
 
   useEffect(() => {
-    if (!rateLimit) return;
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hasRateLimit) return;
+    setAutoResume(rateLimitAutoResume ?? true);
+  }, [conversationId, hasRateLimit, rateLimitAutoResume]);
+
+  useEffect(() => {
+    const switchedConversation =
+      previousConversationIdRef.current !== conversationId;
+    previousConversationIdRef.current = conversationId;
+    if (switchedConversation) {
+      setPromptExpanded(false);
+      setIsUpdating(false);
+    }
+    if (!hasRateLimit) return;
+    if (!switchedConversation && promptExpandedRef.current) {
+      return;
+    }
     setPromptDraft(
-      rateLimit.continuationPrompt?.trim() || DEFAULT_CONTINUATION_PROMPT
+      rateLimitContinuationPrompt?.trim() || DEFAULT_CONTINUATION_PROMPT
     );
-  }, [rateLimit, rateLimit?.continuationPrompt]);
+  }, [conversationId, hasRateLimit, rateLimitContinuationPrompt]);
 
   useEffect(() => {
     if (!isRateLimited) return;
@@ -104,31 +156,42 @@ export function RateLimitRecoveryBanner({
         promptExpanded?: boolean;
       }
     ) => {
+      const requestConversationId = conversationId;
       const normalizedPrompt = nextPrompt.trim() || DEFAULT_CONTINUATION_PROMPT;
       setIsUpdating(true);
       try {
         if (onUpdateAutoResume) {
           await onUpdateAutoResume({
-            conversationId,
+            conversationId: requestConversationId,
             autoResume: nextAutoResume,
             continuationPrompt: normalizedPrompt,
           });
         } else {
           await conversationApi.updateRateLimitAutoResume({
-            conversationId,
+            conversationId: requestConversationId,
             autoResume: nextAutoResume,
             continuationPrompt: normalizedPrompt,
           });
         }
       } catch (error) {
-        setAutoResume(rollback.autoResume);
-        setPromptDraft(rollback.promptDraft);
-        if (rollback.promptExpanded !== undefined) {
-          setPromptExpanded(rollback.promptExpanded);
+        if (
+          isMountedRef.current &&
+          activeConversationIdRef.current === requestConversationId
+        ) {
+          setAutoResume(rollback.autoResume);
+          setPromptDraft(rollback.promptDraft);
+          if (rollback.promptExpanded !== undefined) {
+            setPromptExpanded(rollback.promptExpanded);
+          }
+          toast.error(getErrorMessage(error));
         }
-        toast.error(getErrorMessage(error));
       } finally {
-        setIsUpdating(false);
+        if (
+          isMountedRef.current &&
+          activeConversationIdRef.current === requestConversationId
+        ) {
+          setIsUpdating(false);
+        }
       }
     },
     [conversationId, onUpdateAutoResume]
@@ -159,17 +222,30 @@ export function RateLimitRecoveryBanner({
   }, [autoResume, persistAutoResumeState, promptDraft]);
 
   const handleCancelWait = useCallback(async () => {
+    const requestConversationId = conversationId;
     setIsUpdating(true);
     try {
       if (onCancelWait) {
-        await onCancelWait(conversationId);
+        await onCancelWait(requestConversationId);
       } else {
-        await conversationApi.cancelRateLimitWait({ conversationId });
+        await conversationApi.cancelRateLimitWait({
+          conversationId: requestConversationId,
+        });
       }
     } catch (error) {
-      toast.error(getErrorMessage(error));
+      if (
+        isMountedRef.current &&
+        activeConversationIdRef.current === requestConversationId
+      ) {
+        toast.error(getErrorMessage(error));
+      }
     } finally {
-      setIsUpdating(false);
+      if (
+        isMountedRef.current &&
+        activeConversationIdRef.current === requestConversationId
+      ) {
+        setIsUpdating(false);
+      }
     }
   }, [conversationId, onCancelWait]);
 
@@ -182,14 +258,15 @@ export function RateLimitRecoveryBanner({
     nowMs,
     rateLimit.countdownSeconds
   );
+  const engineName = formatRateLimitEngine(rateLimit.engine);
 
   const bannerText = autoResume
     ? t('conversation:rateLimit.bannerTitle', {
-        engine: rateLimit.engine,
+        engine: engineName,
         countdown,
       })
     : t('conversation:rateLimit.bannerPausedTitle', {
-        engine: rateLimit.engine,
+        engine: engineName,
         countdown,
       });
 

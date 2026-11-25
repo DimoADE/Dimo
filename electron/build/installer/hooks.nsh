@@ -6,5 +6,6 @@
 !include "${__FILEDIR__}\theme.nsh"
 !include "${__FILEDIR__}\drawing.nsh"
 !include "${__FILEDIR__}\pages.nsh"
+!include "${__FILEDIR__}\openWith.nsh"
 
 !endif

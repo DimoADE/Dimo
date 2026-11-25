@@ -13,15 +13,75 @@ type Registration = {
   setWatch: (watch: boolean) => Promise<unknown>;
 };
 
+type WatchQueue = {
+  desired: boolean;
+  lastSent: boolean | null;
+  inFlight: boolean;
+  setWatch: (watch: boolean) => Promise<unknown>;
+};
+
 const registrations = new Map<string, Registration>();
+const watchQueues = new Map<string, WatchQueue>();
 let generationClock = 0;
 let pagehideHandler: (() => void) | null = null;
 
+function enqueueWatch(
+  conversationId: string,
+  watch: boolean,
+  setWatch: (watch: boolean) => Promise<unknown>
+): void {
+  let queue = watchQueues.get(conversationId);
+  if (!queue) {
+    queue = {
+      desired: watch,
+      lastSent: null,
+      inFlight: false,
+      setWatch,
+    };
+    watchQueues.set(conversationId, queue);
+  } else {
+    queue.desired = watch;
+    queue.setWatch = setWatch;
+  }
+  if (queue.inFlight) return;
+  void drainWatchQueue(conversationId, queue);
+}
+
+async function drainWatchQueue(
+  conversationId: string,
+  queue: WatchQueue
+): Promise<void> {
+  queue.inFlight = true;
+  try {
+    while (queue.lastSent !== queue.desired) {
+      const target = queue.desired;
+      queue.lastSent = target;
+      try {
+        await queue.setWatch(target);
+      } catch {
+        // Best-effort keepalive registration; ignore transport failures.
+      }
+      if (watchQueues.get(conversationId) !== queue) {
+        return;
+      }
+    }
+  } finally {
+    queue.inFlight = false;
+    if (
+      watchQueues.get(conversationId) === queue &&
+      !queue.desired &&
+      !registrations.has(conversationId)
+    ) {
+      watchQueues.delete(conversationId);
+    }
+  }
+}
+
 function releaseAll(): void {
-  const snapshot = [...registrations.values()];
+  const snapshot = [...registrations.entries()];
   registrations.clear();
-  for (const registration of snapshot) {
-    void registration.setWatch(false).catch(() => undefined);
+  for (const [conversationId, registration] of snapshot) {
+    enqueueWatch(conversationId, false, registration.setWatch);
   }
 }
 
@@ -41,18 +101,19 @@ export function retainConversationKeepalive(
   generationClock += 1;
   const generation = generationClock;
   registrations.set(conversationId, { generation, setWatch });
-  void setWatch(true).catch(() => undefined);
+  enqueueWatch(conversationId, true, setWatch);
   return () => {
     const current = registrations.get(conversationId);
     if (!current || current.generation !== generation) return;
     registrations.delete(conversationId);
-    void setWatch(false).catch(() => undefined);
+    enqueueWatch(conversationId, false, setWatch);
   };
 }
 
 /** Test seam. Production callers release through the function above. */
 export function resetConversationKeepaliveForTests(): void {
   registrations.clear();
+  watchQueues.clear();
   generationClock = 0;
   if (pagehideHandler != null && typeof window !== 'undefined') {
     window.removeEventListener('pagehide', pagehideHandler);

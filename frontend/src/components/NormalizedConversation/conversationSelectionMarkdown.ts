@@ -20,6 +20,7 @@ function shouldSkip(el: HTMLElement): boolean {
   if (el.classList.contains('conv-md-codeblock-copy')) return true;
   if (el.classList.contains('conv-md-codeblock-actions')) return true;
   if (el.classList.contains('conv-md-table-actions')) return true;
+  if (el.classList.contains('conv-md-table-scrollbar')) return true;
   return false;
 }
 

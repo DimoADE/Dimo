@@ -1558,4 +1558,269 @@ describe('Electron browser host-slot lifecycle, security, and navigation hardeni
       action: 'find',
     });
   });
+
+  it('installs base popup denial and scheme guards for all browser-partition webviews even when multiple pending tabs open concurrently (E2)', async () => {
+    const events: Array<Record<string, unknown>> = [];
+    const controller = new ElectronBrowserController({
+      onEvent: (ev) => events.push(ev),
+    });
+
+    const appListeners = new Map<string, (...args: unknown[]) => void>();
+    const fakeApp = {
+      on: vi.fn((event: string, cb: (...args: unknown[]) => void) => {
+        appListeners.set(event, cb);
+      }),
+    };
+    controller.installWebviewSecurity(fakeApp as unknown as Electron.App);
+
+    const hostListeners = new Map<string, (...args: unknown[]) => void>();
+    const fakeHostWc = {
+      on: vi.fn((event: string, cb: (...args: unknown[]) => void) => {
+        hostListeners.set(event, cb);
+      }),
+    };
+    appListeners.get('web-contents-created')!({}, fakeHostWc);
+    const didAttach = hostListeners.get('did-attach-webview');
+    expect(didAttach).toBeTypeOf('function');
+
+    const { session, webContents } = await import('electron');
+    const sharedSession = {
+      on: vi.fn(),
+      setPermissionRequestHandler: vi.fn(),
+      setPermissionCheckHandler: vi.fn(),
+    };
+    vi.mocked(session.fromPartition).mockReturnValue(
+      sharedSession as unknown as Electron.Session
+    );
+
+    const makeGuestWc = (id: number, initialUrl: string) => {
+      const listeners = new Map<string, Set<(...args: unknown[]) => void>>();
+      let windowOpenHandler:
+        | ((details: { url: string; disposition: string }) => { action: string })
+        | undefined;
+      return {
+        id,
+        isDestroyed: () => false,
+        getURL: () => initialUrl,
+        getTitle: () => `Tab ${id}`,
+        isLoading: () => false,
+        session: sharedSession,
+        navigationHistory: { canGoBack: () => false, canGoForward: () => false },
+        on: vi.fn((ev: string, cb: (...args: unknown[]) => void) => {
+          let set = listeners.get(ev);
+          if (!set) {
+            set = new Set();
+            listeners.set(ev, set);
+          }
+          set.add(cb);
+        }),
+        once: vi.fn((ev: string, cb: (...args: unknown[]) => void) => {
+          let set = listeners.get(ev);
+          if (!set) {
+            set = new Set();
+            listeners.set(ev, set);
+          }
+          set.add(cb);
+        }),
+        removeListener: vi.fn((ev: string, cb: (...args: unknown[]) => void) => {
+          listeners.get(ev)?.delete(cb);
+        }),
+        setWindowOpenHandler: vi.fn(
+          (
+            handler: (details: {
+              url: string;
+              disposition: string;
+            }) => { action: string }
+          ) => {
+            windowOpenHandler = handler;
+          }
+        ),
+        _listeners: listeners,
+        _invokeWindowOpen: (url: string, disposition = 'foreground-tab') =>
+          windowOpenHandler?.({ url, disposition }),
+      };
+    };
+
+    // Open two concurrent pending tabs on the SAME default partition before either binds.
+    await controller.handleRpc('open', {
+      tabId: 'tab-concurrent-1',
+      url: 'https://one.example',
+    });
+    await controller.handleRpc('open', {
+      tabId: 'tab-concurrent-2',
+      url: 'https://two.example',
+    });
+
+    const guest1 = makeGuestWc(911, 'https://one.example');
+    const guest2 = makeGuestWc(912, 'https://two.example');
+    didAttach!({}, guest1);
+    didAttach!({}, guest2);
+
+    // Both webviews must immediately deny uncontrolled native popups and block disallowed schemes.
+    expect(guest1.setWindowOpenHandler).toHaveBeenCalledTimes(1);
+    expect(guest2.setWindowOpenHandler).toHaveBeenCalledTimes(1);
+    expect(guest1._invokeWindowOpen('https://popup-a.example')).toEqual({
+      action: 'deny',
+    });
+    expect(guest2._invokeWindowOpen('https://popup-b.example')).toEqual({
+      action: 'deny',
+    });
+
+    for (const guest of [guest1, guest2]) {
+      const navEv = { preventDefault: vi.fn() };
+      for (const cb of guest._listeners.get('will-navigate') ?? []) {
+        cb(navEv, 'file:///C:/Windows/win.ini');
+      }
+      expect(navEv.preventDefault).toHaveBeenCalledOnce();
+
+      const redirEv = { preventDefault: vi.fn() };
+      for (const cb of guest._listeners.get('will-redirect') ?? []) {
+        cb(redirEv, 'dimo-app://internal');
+      }
+      expect(redirEv.preventDefault).toHaveBeenCalledOnce();
+    }
+
+    // Once bound via attachWebContents, popups route to the bound tab without duplicating hooks.
+    vi.mocked(webContents.fromId).mockImplementation((id: number) => {
+      if (id === 911) return guest1 as unknown as Electron.WebContents;
+      if (id === 912) return guest2 as unknown as Electron.WebContents;
+      return undefined as unknown as Electron.WebContents;
+    });
+    controller.attachWebContents({ tabId: 'tab-concurrent-1', webContentsId: 911 });
+    controller.attachWebContents({ tabId: 'tab-concurrent-2', webContentsId: 912 });
+    expect(guest1.setWindowOpenHandler).toHaveBeenCalledTimes(1);
+    expect(guest2.setWindowOpenHandler).toHaveBeenCalledTimes(1);
+
+    expect(guest2._invokeWindowOpen('https://bound-popup.example')).toEqual({
+      action: 'deny',
+    });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: 'tab.open',
+        sourceTabId: 'tab-concurrent-2',
+        url: 'https://bound-popup.example',
+      })
+    );
+
+    // Base guards stay active after detach until guest is destroyed or controller destroyed.
+    controller.detachWebContents('tab-concurrent-1');
+    expect(guest1._invokeWindowOpen('https://after-detach.example')).toEqual({
+      action: 'deny',
+    });
+
+    for (const cb of Array.from(guest1._listeners.get('destroyed') ?? [])) {
+      cb();
+    }
+    controller.destroy();
+  });
+
+  it('ignores stale WebSocket close/message/error events and closes any previous socket on reconnect (E5)', async () => {
+    vi.useFakeTimers();
+
+    interface FakeSocket {
+      readyState: number;
+      listeners: Map<string, Array<(ev: { data?: unknown }) => void>>;
+      sent: Array<Record<string, unknown>>;
+      addEventListener: ReturnType<typeof vi.fn>;
+      send: ReturnType<typeof vi.fn>;
+      close: ReturnType<typeof vi.fn>;
+      emit: (type: string, ev?: { data?: unknown }) => void;
+    }
+
+    const sockets: FakeSocket[] = [];
+    const OriginalWebSocket = globalThis.WebSocket;
+    const MockWebSocket = Object.assign(
+      vi.fn(() => {
+        const listeners = new Map<string, Array<(ev: { data?: unknown }) => void>>();
+        const sent: Array<Record<string, unknown>> = [];
+        const ws: FakeSocket = {
+          readyState: 1,
+          listeners,
+          sent,
+          addEventListener: vi.fn((type: string, cb: (ev: { data?: unknown }) => void) => {
+            const list = listeners.get(type) ?? [];
+            list.push(cb);
+            listeners.set(type, list);
+          }),
+          send: vi.fn((raw: string) => {
+            sent.push(JSON.parse(raw) as Record<string, unknown>);
+          }),
+          close: vi.fn(() => {
+            ws.readyState = 3;
+          }),
+          emit(type: string, ev: { data?: unknown } = {}) {
+            for (const cb of listeners.get(type) ?? []) {
+              cb(ev);
+            }
+          },
+        };
+        sockets.push(ws);
+        return ws;
+      }),
+      { OPEN: 1 }
+    );
+    (globalThis as unknown as { WebSocket: unknown }).WebSocket = MockWebSocket;
+
+    try {
+      const controller = new ElectronBrowserController({ onEvent: () => {} });
+      const client = new NativeTabsRpcClient({
+        getConnection: () => ({ baseUrl: 'http://127.0.0.1:9999', token: 'tok' }),
+        controller,
+      });
+
+      client.start();
+      expect(sockets).toHaveLength(1);
+      const ws1 = sockets[0];
+      ws1.emit('open');
+
+      // Re-invoking connect() while ws1 is active must close ws1 before opening ws2.
+      (client as unknown as { connect: () => void }).connect();
+      expect(ws1.close).toHaveBeenCalledTimes(1);
+      expect(sockets).toHaveLength(2);
+      const ws2 = sockets[1];
+      ws2.emit('open');
+
+      // Start a pending policy check on the active ws2 socket.
+      const policyPromise = client.checkNavigation('https://blocked.example');
+      const policyMsg = ws2.sent.find((m) => m.type === 'check_navigation');
+      expect(policyMsg).toBeDefined();
+      const policyId = policyMsg!.id as number;
+
+      // Fire stale close/error/message events on ws1 — MUST NOT trigger reconnect storm,
+      // MUST NOT clear ws2, and MUST NOT prematurely resolve ws2's pending policy check to allow.
+      ws1.emit('error');
+      ws1.emit('close');
+      ws1.emit('message', {
+        data: JSON.stringify({
+          type: 'policy_response',
+          id: policyId,
+          allowed: true,
+        }),
+      });
+
+      await vi.advanceTimersByTimeAsync(500);
+      expect(sockets).toHaveLength(2);
+      expect(client.isConnected()).toBe(true);
+
+      // Genuine denial arriving on ws2 resolves the pending policy check accurately.
+      ws2.emit('message', {
+        data: JSON.stringify({
+          type: 'policy_response',
+          id: policyId,
+          allowed: false,
+          preferSystem: true,
+        }),
+      });
+      await expect(policyPromise).resolves.toEqual({
+        allowed: false,
+        preferSystem: true,
+      });
+
+      client.stop();
+      expect(ws2.close).toHaveBeenCalledTimes(1);
+    } finally {
+      (globalThis as unknown as { WebSocket: unknown }).WebSocket =
+        OriginalWebSocket;
+    }
+  });
 });

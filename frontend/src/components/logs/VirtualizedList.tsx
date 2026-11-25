@@ -14,7 +14,7 @@ export type VirtualizedListScrollOptions = {
 
 export interface VirtualizedListRef {
   scrollToPreviousUserMessage: () => void;
-  scrollToBottom: () => void;
+  scrollToBottom: (behavior?: ScrollBehavior) => void;
   scrollToIndex: (
     index: number,
     options?: VirtualizedListScrollOptions
@@ -160,10 +160,12 @@ export function scrollTopToRevealVirtualWindow(input: {
   scrollMargin: number;
   windowHeight: number;
   followTail: boolean;
+  bottomPadding?: number;
 }): number | null {
   if (input.viewportHeight <= 0 || input.windowHeight <= 1) return null;
   const visualTop = Math.max(0, input.windowStart ?? input.scrollMargin);
   const visualBottom = visualTop + input.windowHeight;
+  const effectiveVisualBottom = visualBottom + Math.max(0, input.bottomPadding ?? 0);
   const viewTop = input.scrollTop;
   const viewBottom = input.scrollTop + input.viewportHeight;
   const intersects = visualBottom > viewTop + 1 && visualTop < viewBottom - 1;
@@ -177,9 +179,9 @@ export function scrollTopToRevealVirtualWindow(input: {
     } else if (input.scrollTop > maxScroll) {
       next = maxScroll;
     }
-  } else if (input.followTail && visualBottom > viewBottom + 1) {
+  } else if (input.followTail && effectiveVisualBottom > viewBottom + 1) {
     next = Math.min(
-      Math.max(0, visualBottom - input.viewportHeight),
+      Math.max(0, effectiveVisualBottom - input.viewportHeight),
       maxScroll
     );
   }

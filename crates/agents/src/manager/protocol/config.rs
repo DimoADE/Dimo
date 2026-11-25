@@ -50,164 +50,6 @@ pub(in crate::manager) fn config_option_rejects_value(
     advertised.binary_search(&value.to_string()).is_err()
 }
 
-/// `value` without its trailing `[1m]`, matched case-insensitively.
-pub(in crate::manager) fn strip_context_lane_suffix(value: &str) -> Option<&str> {
-    const SUFFIX: &str = "[1m]";
-    let split = value.len().checked_sub(SUFFIX.len())?;
-    let (twin, suffix) = (value.get(..split)?, value.get(split..)?);
-    (!twin.is_empty() && suffix.eq_ignore_ascii_case(SUFFIX)).then_some(twin)
-}
-
-/// The plain twin of a saved model pick whose `[1m]` spelling the model
-/// selector no longer lists — `opus[1m]` → `opus`, `sonnet[1m]` → `sonnet` —
-/// when the selector lists the twin. Never moves a plain pick onto `[1m]`, and
-/// never touches a `[1m]` pick the selector still offers.
-pub(in crate::manager) fn heal_retired_context_lane_pick(
-    option: &AcpSessionConfigOption,
-    value: &str,
-) -> Option<String> {
-    if !is_model_config_option(option) {
-        return None;
-    }
-    let twin = strip_context_lane_suffix(value)?;
-    (config_option_rejects_value(option, value) && !config_option_rejects_value(option, twin))
-        .then(|| twin.to_string())
-}
-
-/// Whether a model row's description opens with `name` as its own segment, the
-/// way Claude Code's CLI writes one: `Fable 5.1 · Most capable for …`.
-pub(in crate::manager) fn description_leads_with(description: &str, name: &str) -> bool {
-    let description = description.trim_start();
-    description
-        .get(..name.len())
-        .is_some_and(|head| head.eq_ignore_ascii_case(name))
-        && description[name.len()..].starts_with(" \u{b7} ")
-}
-
-/// The name Claude Code's model catalog gives a concrete model id:
-/// `claude-fable-5-1` → `Fable 5.1`, `claude-sonnet-5` → `Sonnet 5`,
-/// `claude-haiku-4-5-20251001` → `Haiku 4.5`.
-pub(in crate::manager) fn claude_catalog_label(id: &str) -> Option<String> {
-    let mut parts = id.strip_prefix("claude-")?.split('-');
-    let family = parts
-        .next()
-        .filter(|family| !family.is_empty() && family.bytes().all(|b| b.is_ascii_lowercase()))?;
-    let mut version: Vec<&str> = parts.collect();
-    if version
-        .last()
-        .is_some_and(|part| part.len() == 8 && part.bytes().all(|b| b.is_ascii_digit()))
-    {
-        version.pop();
-    }
-    let numeric =
-        |part: &&str| (1..=2).contains(&part.len()) && part.bytes().all(|b| b.is_ascii_digit());
-    if version.is_empty() || !version.iter().all(numeric) {
-        return None;
-    }
-    let (initial, tail) = family.split_at(1);
-    Some(format!(
-        "{}{tail} {}",
-        initial.to_ascii_uppercase(),
-        version.join(".")
-    ))
-}
-
-/// The row a saved CONCRETE Claude model id is now spelled as, when the model
-/// selector no longer lists the id itself: the one row whose label (or leading
-/// description segment) names that exact model (`claude-fable-5-1` → `fable`
-/// labelled `Fable 5.1`).
-pub(in crate::manager) fn heal_respelled_model_pick(
-    option: &AcpSessionConfigOption,
-    value: &str,
-) -> Option<String> {
-    if !is_model_config_option(option) || !config_option_rejects_value(option, value) {
-        return None;
-    }
-    let SessionConfigKind::Select(select) = &option.kind else {
-        return None;
-    };
-    let rows: Vec<&SessionConfigSelectOption> = match &select.options {
-        SessionConfigSelectOptions::Ungrouped(options) => options.iter().collect(),
-        SessionConfigSelectOptions::Grouped(groups) => groups
-            .iter()
-            .flat_map(|group| group.options.iter())
-            .collect(),
-        #[allow(unreachable_patterns)]
-        _ => Vec::new(),
-    };
-    let catalog_label = claude_catalog_label(value);
-    let names_the_pick = |row: &&SessionConfigSelectOption| {
-        let label = row.name.trim();
-        if label.eq_ignore_ascii_case(value) {
-            return true;
-        }
-        let Some(catalog) = catalog_label.as_deref() else {
-            return false;
-        };
-        label.eq_ignore_ascii_case(catalog)
-            || row
-                .description
-                .as_deref()
-                .is_some_and(|description| description_leads_with(description, catalog))
-    };
-    let mut matching = rows.into_iter().filter(names_the_pick);
-    let row = matching.next()?;
-    matching.next().is_none().then(|| row.value.0.to_string())
-}
-
-/// Heal a saved Claude model pick across retired `[1m]` context lanes, concrete
-/// id re-spellings (`claude-fable-5-1` → `fable`), or both at once
-/// (`claude-fable-5-1[1m]` → `fable`).
-pub(in crate::manager) fn heal_retired_model_pick(
-    option: &AcpSessionConfigOption,
-    value: &str,
-) -> Option<String> {
-    heal_retired_context_lane_pick(option, value)
-        .or_else(|| heal_respelled_model_pick(option, value))
-        .or_else(|| {
-            let twin = strip_context_lane_suffix(value)?;
-            if !config_option_rejects_value(option, value) {
-                return None;
-            }
-            heal_respelled_model_pick(option, twin)
-        })
-}
-
-/// [`heal_retired_model_pick`] over a whole preference set against the session's
-/// advertised options. Only applies to `AgentKind::ClaudeCode`; never mutates
-/// persisted preferences.
-pub(in crate::manager) fn heal_retired_model_picks(
-    agent_kind: Option<AgentKind>,
-    options: &[AcpSessionConfigOption],
-    preferred: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
-    if agent_kind != Some(AgentKind::ClaudeCode) {
-        return preferred.clone();
-    }
-    preferred
-        .iter()
-        .map(|(config_id, value_id)| {
-            let healed = options
-                .iter()
-                .find(|o| {
-                    o.id.0.as_ref() == config_id.as_str()
-                        || (config_id == "model" && is_model_config_option(o))
-                })
-                .and_then(|o| heal_retired_model_pick(o, value_id));
-            match healed {
-                Some(twin) => {
-                    tracing::info!(
-                        "[ACP] preferred config '{config_id}'='{value_id}' is no longer \
-                         offered; replaying '{twin}', the spelling the agent lists now"
-                    );
-                    (config_id.clone(), twin)
-                }
-                None => (config_id.clone(), value_id.clone()),
-            }
-        })
-        .collect()
-}
-
 /// [`config_option_rejects_value`] for the mode channel: whether the session's
 /// OWN mode list proves a saved `preferred_mode_id` (such as a withdrawn
 /// `bypassPermissions`) cannot be selected. An empty mode list rejects nothing.
@@ -222,10 +64,9 @@ pub(in crate::manager) fn session_modes_reject_id(modes: &SessionModeState, mode
 /// Prepare saved session preferences for connect-time replay:
 /// 1. Drop a preferred mode if `session_modes_reject_id` (or the unified mode
 ///    config option) rejects it.
-/// 2. Heal retired Claude model picks (`heal_retired_model_picks`) in memory.
-/// 3. Order model selections first, and drop any config preference that the
-///    advertised option still rejects via `config_option_rejects_value`,
-///    unless Antigravity's flat model list still offers that value.
+/// 2. Order model selections first, and drop any config preference that the
+///    advertised option rejects via `config_option_rejects_value`, unless
+///    Antigravity's flat model list still offers that value.
 pub(in crate::manager) fn prepare_preferred_controls_for_replay(
     agent_kind: Option<AgentKind>,
     modes: Option<&SessionModeState>,
@@ -258,27 +99,20 @@ pub(in crate::manager) fn prepare_preferred_controls_for_replay(
         })
         .map(str::to_string);
 
-    let mut raw_config_map = BTreeMap::new();
-    for item in preferred_config {
-        if let (Some(k), Some(v)) = (non_empty_trimmed(&item.key), non_empty_trimmed(&item.value)) {
-            raw_config_map.insert(k.to_string(), v.to_string());
-        }
-    }
-    let healed_map = heal_retired_model_picks(agent_kind, options, &raw_config_map);
-    let healed_overrides = preferred_config
+    let normalized_overrides = preferred_config
         .iter()
         .filter_map(|item| {
             let key = non_empty_trimmed(&item.key)?;
-            let value = healed_map.get(key)?;
+            let value = non_empty_trimmed(&item.value)?;
             Some(AgentSessionConfigOverride {
                 key: key.to_string(),
-                value: value.clone(),
+                value: value.to_string(),
             })
         })
         .collect::<Vec<_>>();
 
     let mut filtered_overrides = Vec::new();
-    for item in ordered_session_config_overrides(options, healed_overrides) {
+    for item in ordered_session_config_overrides(options, normalized_overrides) {
         if item.key == "mode"
             && modes.is_some_and(|m| session_modes_reject_id(m, item.value.as_str()))
         {
@@ -346,8 +180,7 @@ pub(in crate::manager) fn ordered_session_config_overrides(
 }
 
 /// Effective auto-approve mode for a permission decision. ACP session modes
-/// are Agent-owned semantics: for example Claude Code's `auto` asks its model
-/// classifier to decide. They must never silently upgrade Dimo's independent
+/// are Agent-owned semantics and must never silently upgrade Dimo's independent
 /// auto-approval policy.
 pub(in crate::manager) async fn effective_auto_approve_mode(
     configured: AgentAutoApproveMode,
@@ -387,37 +220,20 @@ pub(in crate::manager) fn find_config_override_selection_for_agent(
         match &option.kind {
             SessionConfigKind::Select(select) => {
                 let requested = value.as_str()?;
-                let healed = if agent_kind == Some(AgentKind::ClaudeCode)
-                    && is_model_config_option(option)
-                {
-                    heal_retired_model_pick(option, requested)
-                } else {
-                    None
-                };
-                let effective = healed.as_deref().unwrap_or(requested);
                 // A variant id the selector no longer lists must be sent as
                 // saved when the same answer's flat model list still names it.
                 // Checking this before `find_select_choice` stops
                 // `gemini-4-argon-high` being substring-matched onto the
                 // family row `gemini-4-argon`.
-                if session_model_list_offers(agent_kind, option, effective, session_model_ids) {
+                if session_model_list_offers(agent_kind, option, requested, session_model_ids) {
                     return Some(ConfigOverrideSelection {
                         config_id: option.id.0.to_string(),
-                        wire_value: SessionConfigOptionValue::value_id(effective.to_string()),
-                        event_value: serde_json::Value::String(effective.to_string()),
-                        already_selected: select.current_value.0.as_ref() == effective,
+                        wire_value: SessionConfigOptionValue::value_id(requested.to_string()),
+                        event_value: serde_json::Value::String(requested.to_string()),
+                        already_selected: select.current_value.0.as_ref() == requested,
                     });
                 }
-                // For Claude Code's model selector, once healing has run, a value
-                // that the non-empty select still rejects must be dropped rather
-                // than fuzzy-matched onto a different model row.
-                if agent_kind == Some(AgentKind::ClaudeCode)
-                    && is_model_config_option(option)
-                    && config_option_rejects_value(option, effective)
-                {
-                    continue;
-                }
-                if let Some(choice) = find_select_choice(select, key, effective) {
+                if let Some(choice) = find_select_choice(select, key, requested) {
                     let value_id = choice.value.0.to_string();
                     return Some(ConfigOverrideSelection {
                         config_id: option.id.0.to_string(),

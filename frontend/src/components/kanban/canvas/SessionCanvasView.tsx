@@ -2639,41 +2639,118 @@ function SessionCanvasFlow({
   }, [selectedIds, updateNodes]);
 
   useEffect(() => {
+    const interactiveAncestorSelector = [
+      'input',
+      'textarea',
+      'select',
+      'button',
+      'a[href]',
+      '[contenteditable=""]',
+      '[contenteditable="true"]',
+      '[contenteditable="plaintext-only"]',
+      '[role="textbox"]',
+      '[role="combobox"]',
+      '[role="searchbox"]',
+      '[role="spinbutton"]',
+      '[role="button"]',
+      '[role="menuitem"]',
+      '[role="option"]',
+      '[role="tab"]',
+      '[role="switch"]',
+      '[role="checkbox"]',
+      '[role="radio"]',
+      '[role="slider"]',
+      '[role="listbox"]',
+      '[role="dialog"]',
+      '[role="alertdialog"]',
+      '[role="menu"]',
+      '[data-radix-popper-content-wrapper]',
+      '.canvas-session-window',
+      '.session-canvas-floating-panel',
+      '[data-testid="canvas-creation-panel"]',
+    ].join(', ');
+
+    const isSurfaceVisible = (surface: HTMLElement): boolean => {
+      if (!surface.isConnected) return false;
+      if (
+        typeof surface.checkVisibility === 'function' &&
+        !surface.checkVisibility({ checkVisibilityCSS: true })
+      ) {
+        return false;
+      }
+      for (let el: HTMLElement | null = surface; el; el = el.parentElement) {
+        if (
+          el.hidden ||
+          el.hasAttribute('inert') ||
+          (el as HTMLElement & { inert?: boolean }).inert === true ||
+          el.getAttribute('aria-hidden') === 'true'
+        ) {
+          return false;
+        }
+        const style = window.getComputedStyle(el);
+        if (
+          style.display === 'none' ||
+          style.visibility === 'hidden' ||
+          style.visibility === 'collapse'
+        ) {
+          return false;
+        }
+      }
+      return true;
+    };
+
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
-      const target = event.target as HTMLElement | null;
+      const surface = surfaceRef.current;
+      if (!surface || !isSurfaceVisible(surface)) return;
+
+      const target =
+        event.target instanceof HTMLElement
+          ? event.target
+          : event.target instanceof Node
+            ? event.target.parentElement
+            : null;
+      if (!target || !surface.contains(target)) return;
       if (
-        target &&
-        (target.tagName === 'INPUT' ||
-          target.tagName === 'TEXTAREA' ||
-          target.isContentEditable)
+        target.isContentEditable ||
+        Boolean(target.closest(interactiveAncestorSelector))
       ) {
         return;
       }
+
       if (event.key === 'Delete' || event.key === 'Backspace') {
+        if (selectedIds.size === 0) return;
         event.preventDefault();
         deleteSelection();
+        return;
       }
+
       const withMeta = event.metaKey || event.ctrlKey;
-      if (withMeta && event.key.toLowerCase() === 'z' && !event.shiftKey) {
+      const lowerKey = event.key.toLowerCase();
+      if (withMeta && lowerKey === 'z' && !event.shiftKey) {
+        if (getCurrentHistory().past.length === 0) return;
         event.preventDefault();
         undoCanvas();
+        return;
       }
       if (
         withMeta &&
-        (event.key.toLowerCase() === 'y' ||
-          (event.key.toLowerCase() === 'z' && event.shiftKey))
+        (lowerKey === 'y' || (lowerKey === 'z' && event.shiftKey))
       ) {
+        if (getCurrentHistory().future.length === 0) return;
         event.preventDefault();
         redoCanvas();
+        return;
       }
       if (event.key === 'Enter' && selectedIds.size === 1) {
         const instanceId = [...selectedIds][0];
         const current = documentRef.current.nodes.find(
           (node) => node.id === instanceId
         );
-        if (current?.expanded && instanceId) collapseCard(instanceId);
-        else if (instanceId) expandCard(instanceId);
+        if (!current || isGroupNode(current) || !instanceId) return;
+        event.preventDefault();
+        if (current.expanded) collapseCard(instanceId);
+        else expandCard(instanceId);
       }
     };
     window.addEventListener('keydown', onKeyDown, true);
@@ -2682,6 +2759,7 @@ function SessionCanvasFlow({
     collapseCard,
     deleteSelection,
     expandCard,
+    getCurrentHistory,
     redoCanvas,
     selectedIds,
     undoCanvas,
@@ -2920,8 +2998,9 @@ function SessionCanvasFlow({
     <SessionCanvasViewProvider value={viewContext}>
       <div
         ref={surfaceRef}
+        tabIndex={-1}
         data-canvas-drop="true"
-        className="canvas-surface relative h-full w-full"
+        className="canvas-surface relative h-full w-full outline-none"
         onDragOver={handleNativeDragOver}
         onDrop={handleNativeDrop}
       >

@@ -1469,5 +1469,100 @@ fn workspace_repo_path_preserves_git_checkout_root() {
     );
 }
 
+#[tokio::test]
+async fn stop_execution_aborts_cleanup_script_exit_monitor_without_committing() {
+    let pool = stop_execution_test_pool().await;
+    let temp_root = TempDir::new().unwrap();
+    let repo_dir = temp_root.path().join("repo");
+    fs::create_dir_all(&repo_dir).unwrap();
+    let git = GitService::new();
+    seed_committed_repo(&git, &repo_dir);
+    let head_before = git.get_head_info(&repo_dir).unwrap().oid;
+    // Leave an uncommitted change that CleanupScript's exit monitor would commit if not stopped.
+    fs::write(repo_dir.join("README.md"), "hello\nuncommitted\n").unwrap();
+    assert!(!git.is_worktree_clean(&repo_dir).unwrap());
+
+    let workspace = sample_workspace(Some(&temp_root.path().to_string_lossy()), true, None);
+    let repo = sample_repo("repo", &repo_dir.to_string_lossy());
+    let session_id = Uuid::new_v4();
+    insert_workspace_with_repo(&pool, &workspace, &repo).await;
+    insert_stop_project_and_task(&pool, &workspace).await;
+    sqlx::query(
+        r#"
+        INSERT INTO sessions (id, workspace_id, task_id, status)
+        VALUES (?, ?, ?, 'todo')
+        "#,
+    )
+    .bind(session_id)
+    .bind(workspace.id)
+    .bind(workspace.task_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let container = test_container(pool.clone());
+    let action = ExecutorAction::new(
+        ExecutorActionType::ScriptRequest(ScriptRequest {
+            script: long_running_script().to_string(),
+            language: ScriptRequestLanguage::Bash,
+            context: ScriptContext::CleanupScript,
+            working_dir: None,
+        }),
+        None,
+    );
+    let session = db::models::session::Session::find_by_id(&pool, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let process = container
+        .start_execution(
+            &workspace,
+            &session,
+            &action,
+            &db::models::execution_process::ExecutionProcessRunReason::CleanupScript,
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        !container
+            .cancellation_tokens
+            .read()
+            .await
+            .contains_key(&process.id),
+        "script executions have no cancellation token"
+    );
+    assert!(
+        container
+            .exit_monitor_handles
+            .read()
+            .await
+            .contains_key(&process.id)
+    );
+
+    container
+        .stop_execution(&process, ExecutionProcessStatus::Killed)
+        .await
+        .unwrap();
+
+    assert!(
+        !container
+            .exit_monitor_handles
+            .read()
+            .await
+            .contains_key(&process.id),
+        "stop_execution must take and abort exit_monitor_handle even without a cancellation token"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+    let head_after = git.get_head_info(&repo_dir).unwrap().oid;
+    assert_eq!(
+        head_after, head_before,
+        "killed CleanupScript must never auto-commit uncommitted workspace changes"
+    );
+    assert!(!git.is_worktree_clean(&repo_dir).unwrap());
+}
+
 #[path = "lifecycle_tests.rs"]
 mod lifecycle;

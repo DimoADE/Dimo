@@ -27,6 +27,7 @@ export function SubagentCard({
   lifecycle = [],
   childrenTools = [],
   parentAgentId = null,
+  workspacePath = null,
   expansionKey,
   onExpandedChange,
 }: {
@@ -35,6 +36,7 @@ export function SubagentCard({
   lifecycle?: SubagentLifecycleEvent[];
   childrenTools?: SubagentChildTool[];
   parentAgentId?: string | null;
+  workspacePath?: string | null;
   expansionKey?: string;
   onExpandedChange?: (expanded: boolean) => void;
 }) {
@@ -128,14 +130,20 @@ export function SubagentCard({
               </div>
               {openSection === 'prompt' && model.prompt ? (
                 <SubagentDisclosurePanel>
-                  <AstryxMarkdown value={model.prompt} />
+                  <AstryxMarkdown
+                    value={model.prompt}
+                    workspacePath={workspacePath}
+                  />
                 </SubagentDisclosurePanel>
               ) : null}
               {openSection === 'result' && model.resultText ? (
                 <SubagentDisclosurePanel
                   tone={model.status === 'failed' ? 'danger' : 'default'}
                 >
-                  <AstryxMarkdown value={model.resultText} />
+                  <AstryxMarkdown
+                    value={model.resultText}
+                    workspacePath={workspacePath}
+                  />
                 </SubagentDisclosurePanel>
               ) : null}
             </div>

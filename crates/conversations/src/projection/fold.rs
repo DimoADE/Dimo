@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{
-    ParsedEvent, ProjectionFold,
+    AGENT_SESSION_CONNECT_ERROR_NOTICE_ROW_ID, ParsedEvent, ProjectionFold,
     cache::{
         AssistantEmit, TouchedTurnRows, clear_session_connect_notices, remove_side_row,
         upsert_stable_notice,
@@ -58,6 +58,14 @@ impl ProjectionFold {
                     turn.user.blocks = content_blocks_from_input(&blocks, true);
                     touched_turn_rows = Some(TouchedTurnRows::ChangedAt(turn_id, record.sequence));
                 }
+                self.side_row_turns
+                    .remove(AGENT_SESSION_CONNECT_ERROR_NOTICE_ROW_ID);
+                remove_side_row(
+                    &mut self.side_rows,
+                    &mut deleted_rows,
+                    AGENT_SESSION_CONNECT_ERROR_NOTICE_ROW_ID,
+                    record.sequence,
+                );
             }
             ConversationEvent::UserTurnStarted => {
                 if let Some(turn_id) = record.turn_id {
@@ -864,16 +872,24 @@ fn settle_pending_questions_for_turn(
         if !owned_by_turn {
             continue;
         }
-        if let ConversationTimelineRow::QuestionRequest {
-            response: slot @ None,
-            ..
-        } = &mut entry.row
-        {
-            *slot = Some(ConversationQuestionResponse {
-                answer: "cancelled".to_string(),
-                content: None,
-            });
-            entry.revision = sequence;
+        match &mut entry.row {
+            ConversationTimelineRow::QuestionRequest {
+                response: slot @ None,
+                ..
+            } => {
+                *slot = Some(ConversationQuestionResponse {
+                    answer: "cancelled".to_string(),
+                    content: None,
+                });
+                entry.revision = sequence;
+            }
+            ConversationTimelineRow::PermissionRequest { request }
+                if request.status == "pending" =>
+            {
+                request.status = "responded".into();
+                entry.revision = sequence;
+            }
+            _ => {}
         }
     }
 }

@@ -174,8 +174,116 @@ Function .onInit
   ${EndIf}
 FunctionEnd
 
+Var DimoCheckDir
+
+!macro DimoInitProcessHelpers
+  System::Call 'kernel32::GetCurrentProcessId() i.s'
+  Pop $pid
+  StrCpy $CmdPath "$SYSDIR\cmd.exe"
+  StrCpy $PowerShellPath "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
+  nsExec::Exec `"$PowerShellPath" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"`
+  Pop $0
+  ${If} $0 != 0
+    StrCpy $0 1
+  ${EndIf}
+  StrCpy $IsPowerShellAvailable $0
+!macroend
+
+!macro DimoFindRunningInDir dirVar outVar
+  ${If} $IsPowerShellAvailable == 0
+    System::Call 'Kernel32::SetEnvironmentVariable(t "DIMO_NSIS_INSTDIR", t "${dirVar}")'
+    System::Call 'Kernel32::SetEnvironmentVariable(t "DIMO_NSIS_SELF_PID", t "$pid")'
+    nsExec::Exec `"$PowerShellPath" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$root = $$env:DIMO_NSIS_INSTDIR; if (-not $$root) { exit 1 }; $$prefix = $$root.TrimEnd('\') + '\'; $$procs = @(Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue); $$exclude = New-Object 'System.Collections.Generic.HashSet[int]'; $$selfPid = 0; [void][int]::TryParse($$env:DIMO_NSIS_SELF_PID, [ref]$$selfPid); foreach ($$seed in @([int]$$PID, $$selfPid)) { $$cur = $$seed; while ($$cur -gt 0 -and $$exclude.Add($$cur)) { $$p = $$procs | Where-Object { $$_.ProcessId -eq $$cur } | Select-Object -First 1; $$cur = if ($$p) { [int]$$p.ParentProcessId } else { 0 } } }; $$hits = @($$procs | Where-Object { -not $$exclude.Contains([int]$$_.ProcessId) -and $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$prefix, [System.StringComparison]::OrdinalIgnoreCase) }); if ($$hits.Count -gt 0) { exit 0 } else { exit 1 }"`
+    Pop ${outVar}
+    System::Call 'Kernel32::SetEnvironmentVariable(t "DIMO_NSIS_INSTDIR", i 0)'
+    System::Call 'Kernel32::SetEnvironmentVariable(t "DIMO_NSIS_SELF_PID", i 0)'
+  ${Else}
+    nsExec::Exec `"$CmdPath" /C tasklist /FI "USERNAME eq %USERNAME%" /FI "IMAGENAME eq ${APP_EXECUTABLE_FILENAME}" /FO CSV /NH | "$SYSDIR\findstr.exe" /B /I /C:"\"${APP_EXECUTABLE_FILENAME}\""`
+    Pop ${outVar}
+  ${EndIf}
+!macroend
+
+!macro DimoKillRunningInDir dirVar forceFlag
+  Push $0
+  ${If} $IsPowerShellAvailable == 0
+    !if ${forceFlag} == 1
+      StrCpy $0 "-Force"
+    !else
+      StrCpy $0 ""
+    !endif
+    System::Call 'Kernel32::SetEnvironmentVariable(t "DIMO_NSIS_INSTDIR", t "${dirVar}")'
+    System::Call 'Kernel32::SetEnvironmentVariable(t "DIMO_NSIS_SELF_PID", t "$pid")'
+    nsExec::Exec `"$PowerShellPath" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$root = $$env:DIMO_NSIS_INSTDIR; if ($$root) { $$prefix = $$root.TrimEnd('\') + '\'; $$procs = @(Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue); $$exclude = New-Object 'System.Collections.Generic.HashSet[int]'; $$selfPid = 0; [void][int]::TryParse($$env:DIMO_NSIS_SELF_PID, [ref]$$selfPid); foreach ($$seed in @([int]$$PID, $$selfPid)) { $$cur = $$seed; while ($$cur -gt 0 -and $$exclude.Add($$cur)) { $$p = $$procs | Where-Object { $$_.ProcessId -eq $$cur } | Select-Object -First 1; $$cur = if ($$p) { [int]$$p.ParentProcessId } else { 0 } } }; $$pids = @($$procs | Where-Object { -not $$exclude.Contains([int]$$_.ProcessId) -and $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$prefix, [System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -ExpandProperty ProcessId); if ($$pids.Count -gt 0) { Stop-Process -Id $$pids $0 -ErrorAction SilentlyContinue; Wait-Process -Id $$pids -Timeout 5 -ErrorAction SilentlyContinue } }"`
+    Pop $0
+    System::Call 'Kernel32::SetEnvironmentVariable(t "DIMO_NSIS_INSTDIR", i 0)'
+    System::Call 'Kernel32::SetEnvironmentVariable(t "DIMO_NSIS_SELF_PID", i 0)'
+  ${Else}
+    !if ${forceFlag} == 1
+      StrCpy $0 "/F"
+    !else
+      StrCpy $0 ""
+    !endif
+    nsExec::Exec `"$CmdPath" /C taskkill $0 /IM "${APP_EXECUTABLE_FILENAME}" /FI "PID ne $pid" /FI "USERNAME eq %USERNAME%"`
+    Pop $0
+  ${EndIf}
+  Pop $0
+!macroend
+
+!macro DimoCheckAppRunningInDirBody dirVar labelPrefix
+  ${If} "${dirVar}" == ""
+    Return
+  ${EndIf}
+
+  ${If} ${isUpdated}
+    Sleep 300
+  ${EndIf}
+  !insertmacro DimoFindRunningInDir "${dirVar}" $R0
+  ${If} $R0 == 0
+    ${If} ${isUpdated}
+      Sleep 1000
+      Goto ${labelPrefix}_stop_process
+    ${EndIf}
+    ${IfNot} ${Silent}
+      MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "$(appRunning)" /SD IDOK IDOK ${labelPrefix}_stop_process
+      Quit
+    ${EndIf}
+    ${labelPrefix}_stop_process:
+    DetailPrint "$(appClosing)"
+    !insertmacro DimoKillRunningInDir "${dirVar}" 0
+    Sleep 300
+    StrCpy $R1 0
+    ${labelPrefix}_wait_loop:
+      IntOp $R1 $R1 + 1
+      !insertmacro DimoFindRunningInDir "${dirVar}" $R0
+      ${If} $R0 == 0
+        Sleep 1000
+        !insertmacro DimoKillRunningInDir "${dirVar}" 1
+        !insertmacro DimoFindRunningInDir "${dirVar}" $R0
+        ${If} $R0 == 0
+          Sleep 2000
+        ${Else}
+          Goto ${labelPrefix}_not_running
+        ${EndIf}
+      ${Else}
+        Goto ${labelPrefix}_not_running
+      ${EndIf}
+      ${If} $R1 > 1
+        MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "$(appCannotBeClosed)" /SD IDCANCEL IDRETRY ${labelPrefix}_wait_loop
+        Quit
+      ${Else}
+        Goto ${labelPrefix}_wait_loop
+      ${EndIf}
+    ${labelPrefix}_not_running:
+  ${EndIf}
+!macroend
+
 Function DimoCheckAppRunning
   !insertmacro CHECK_APP_RUNNING
+FunctionEnd
+
+Function DimoCheckAppRunningInDir
+  !insertmacro DimoInitProcessHelpers
+  !insertmacro DimoCheckAppRunningInDirBody "$DimoCheckDir" "inst_dir"
 FunctionEnd
 
 Section "install" INSTALL_SECTION_ID
@@ -187,13 +295,21 @@ Section "install" INSTALL_SECTION_ID
 
   ; User picked "Uninstall" on the existing-installation view
   ${If} $DimoAction == "uninstall"
+  dimo_uninstall_retry:
     !insertmacro DimoSetStage "" "$(DIMO_PROGRESS_UNINSTALL)" 150
-    StrCpy $appExe "$DimoExistingDir\${APP_EXECUTABLE_FILENAME}"
-    Call DimoCheckAppRunning
+    ${If} $DimoExistingDir != ""
+      StrCpy $appExe "$DimoExistingDir\${APP_EXECUTABLE_FILENAME}"
+      StrCpy $DimoCheckDir "$DimoExistingDir"
+      Call DimoCheckAppRunningInDir
+    ${EndIf}
 
     !insertmacro DimoSetStage "" "$(DIMO_PROGRESS_UNINSTALL)" 450
+    StrCpy $0 0
     ${If} $DimoExistingUninstall != ""
       !insertmacro GetInQuotes $R1 "$DimoExistingUninstall"
+      ${If} $R1 == ""
+        StrCpy $R1 "$DimoExistingUninstall"
+      ${EndIf}
       ${If} $R1 != ""
       ${AndIf} ${FileExists} "$R1"
         StrCpy $R2 "$PLUGINSDIR\old-uninstaller.exe"
@@ -201,10 +317,20 @@ Section "install" INSTALL_SECTION_ID
         ClearErrors
         ExecWait '"$R2" /S _?=$DimoExistingDir' $0
         ${If} ${Errors}
-          ExecWait '$DimoExistingUninstall /S _?=$DimoExistingDir' $0
+          ClearErrors
+          ExecWait '"$R1" /S _?=$DimoExistingDir' $0
         ${EndIf}
       ${Else}
+        ClearErrors
         ExecWait '$DimoExistingUninstall /S _?=$DimoExistingDir' $0
+      ${EndIf}
+      ${If} ${Errors}
+      ${OrIf} $0 != 0
+        !insertmacro DimoLog "uninstall failed: exit=$0 cmd=$DimoExistingUninstall dir=$DimoExistingDir"
+        StrCpy $DimoErrTitle "$(DIMO_UNINSTALL_FAILED)"
+        StrCpy $DimoErrCode "0xE0010003"
+        Call DimoShowError
+        Goto dimo_uninstall_retry
       ${EndIf}
     ${EndIf}
 
@@ -252,12 +378,20 @@ Section "install" INSTALL_SECTION_ID
         StrCpy $R3 "$PLUGINSDIR\legacy-tauri-uninstaller.exe"
         !insertmacro copyFile "$R2" "$R3"
         ExecWait '"$R3" /S /UPDATE _?=$R1' $0
+      ${Else}
+        ${If} $R2 == ""
+          ${If} ${FileExists} "$R0"
+            StrCpy $R3 "$PLUGINSDIR\legacy-tauri-uninstaller.exe"
+            !insertmacro copyFile "$R0" "$R3"
+            ExecWait '"$R3" /S /UPDATE _?=$R1' $0
+          ${Else}
+            ExecWait '$R0 /S /UPDATE _?=$R1' $0
+          ${EndIf}
+        ${EndIf}
       ${EndIf}
       Delete "$R1\uninstall.exe"
     ${EndIf}
   ${EndIf}
-
-  SetOutPath $INSTDIR
 
   ; Embed arch package verbatim (SetCompress off) so differential .blockmap
   ; locates stored members identically to stock electron-builder.
@@ -275,42 +409,79 @@ Section "install" INSTALL_SECTION_ID
 
   !insertmacro DimoSetStage "" "$(DIMO_PROGRESS_EXTRACT)" 120
 
-  ; Extract 7z archive with live smooth progress updates (12% -> 87%)
+  ; Extract 7z archive into $PLUGINSDIR\7z-out with live smooth progress updates (12% -> 87%).
+  ; Verify extraction errors BEFORE touching $INSTDIR so a transient STATUS_DELETE_PENDING
+  ; or AV/process lock on $INSTDIR is never misreported as a 7z extraction failure (0xE0010001).
   dimo_extract_retry:
+    SetOutPath "$PLUGINSDIR"
     RMDir /r "$PLUGINSDIR\7z-out"
     CreateDirectory "$PLUGINSDIR\7z-out"
     ClearErrors
-    Push $OUTDIR
     SetOutPath "$PLUGINSDIR\7z-out"
-    GetFunctionAddress $R9 DimoNsis7zCallback
-    Nsis7z::ExtractWithCallback "$PLUGINSDIR\app-$packageArch.${COMPRESSION_METHOD}" $R9
-    Pop $R0
-    SetOutPath $R0
-
     ${If} ${Errors}
-    ${OrIfNot} ${FileExists} "$PLUGINSDIR\7z-out\${APP_EXECUTABLE_FILENAME}"
+      !insertmacro DimoLog "extract setup failed: SetOutPath $PLUGINSDIR\7z-out"
+      SetOutPath "$PLUGINSDIR"
       StrCpy $DimoErrTitle "$(DIMO_EXTRACT_FAILED)"
       StrCpy $DimoErrCode "0xE0010001"
       Call DimoShowError
       Goto dimo_extract_retry
     ${EndIf}
+    GetFunctionAddress $R9 DimoNsis7zCallback
+    Nsis7z::ExtractWithCallback "$PLUGINSDIR\app-$packageArch.${COMPRESSION_METHOD}" $R9
+    ${If} ${Errors}
+      !insertmacro DimoLog "extract failed: Nsis7z error flag set (arch=$packageArch)"
+      SetOutPath "$PLUGINSDIR"
+      StrCpy $DimoErrTitle "$(DIMO_EXTRACT_FAILED)"
+      StrCpy $DimoErrCode "0xE0010001"
+      Call DimoShowError
+      Goto dimo_extract_retry
+    ${EndIf}
+    ${IfNot} ${FileExists} "$PLUGINSDIR\7z-out\${APP_EXECUTABLE_FILENAME}"
+      !insertmacro DimoLog "extract failed: missing ${APP_EXECUTABLE_FILENAME} in $PLUGINSDIR\7z-out"
+      SetOutPath "$PLUGINSDIR"
+      StrCpy $DimoErrTitle "$(DIMO_EXTRACT_FAILED)"
+      StrCpy $DimoErrCode "0xE0010001"
+      Call DimoShowError
+      Goto dimo_extract_retry
+    ${EndIf}
+    SetOutPath "$PLUGINSDIR"
 
     Push 880
     Call DimoSetProgress
 
-    ; Copy unpacked files atomically into $INSTDIR (with brief retry loop, then custom error UI)
+    ; Ensure $INSTDIR is writable and copy unpacked files into $INSTDIR
+    ; (with retry loop for transient delete-pending/AV/process locks, then custom error UI)
     StrCpy $R1 0
   dimo_copy_loop:
     IntOp $R1 $R1 + 1
     ClearErrors
+    SetOutPath "$INSTDIR"
+    ${If} ${Errors}
+      !insertmacro DimoLog "copy attempt $R1: SetOutPath failed ($INSTDIR)"
+      ${If} $R1 < 6
+        ${If} $R1 = 2
+          Call DimoCheckAppRunning
+        ${EndIf}
+        Sleep 800
+        Goto dimo_copy_loop
+      ${EndIf}
+      Goto dimo_copy_error
+    ${EndIf}
+    ClearErrors
     CopyFiles /SILENT "$PLUGINSDIR\7z-out\*" "$INSTDIR"
     ${IfNot} ${Errors}
+    ${AndIf} ${FileExists} "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
       Goto dimo_copy_done
     ${EndIf}
-    ${If} $R1 < 4
+    !insertmacro DimoLog "copy attempt $R1: CopyFiles failed ($INSTDIR)"
+    ${If} $R1 < 6
+      ${If} $R1 = 2
+        Call DimoCheckAppRunning
+      ${EndIf}
       Sleep 800
       Goto dimo_copy_loop
     ${EndIf}
+  dimo_copy_error:
     StrCpy $DimoErrTitle "$(DIMO_COPY_FAILED)"
     StrCpy $DimoErrCode "0xE0010002"
     Call DimoShowError
@@ -343,6 +514,9 @@ Section "install" INSTALL_SECTION_ID
   WriteRegStr HKCU "Software\Classes\dimo\DefaultIcon" "" '"$appExe",0'
   WriteRegStr HKCU "Software\Classes\dimo\shell\open\command" "" '"$appExe" "%1"'
 
+  ; Register Dimo in Windows "Open with" menu without claiming default handlers
+  !insertmacro DimoRegisterOpenWith
+
   !ifmacrodef registerFileAssociations
     !insertmacro registerFileAssociations
   !endif
@@ -350,6 +524,8 @@ Section "install" INSTALL_SECTION_ID
   !ifmacrodef customInstall
     !insertmacro customInstall
   !endif
+
+  System::Call 'shell32::SHChangeNotify(i, i, i, i) v (0x08000000, 0, 0, 0)'
 
   !insertmacro DimoSetStage "" "$(DIMO_PROGRESS_FINISH)" 970
 
@@ -485,7 +661,7 @@ Function un.atomicRMDir
     isNotDir:
       ClearErrors
       Rename "$INSTDIR$R0\$R2" "$PLUGINSDIR\old-install$R0\$R2"
-      StrCmp "$R0\$R2" "${UNINSTALL_FILENAME}" 0 +2
+      StrCmp "$R0\$R2" "\${UNINSTALL_FILENAME}" 0 +2
       ClearErrors
       IfErrors 0 +3
       StrCpy $R3 "$INSTDIR$R0\$R2"
@@ -547,62 +723,8 @@ Function un.restoreFiles
 FunctionEnd
 
 Function un.DimoCheckAppRunning
-  System::Call 'kernel32::GetCurrentProcessId() i.s'
-  Pop $pid
-  StrCpy $CmdPath "$SYSDIR\cmd.exe"
-  StrCpy $PowerShellPath "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
-  nsExec::Exec `"$PowerShellPath" -NoProfile -NonInteractive -C "if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"`
-  Pop $0
-  ${If} $0 == 0
-    nsExec::Exec `"$PowerShellPath" -NoProfile -NonInteractive -C "if ((Get-ExecutionPolicy -Scope Process) -eq 'Restricted') { exit 1 } else { exit 0 }"`
-    Pop $0
-  ${EndIf}
-  ${If} $0 != 0
-    StrCpy $0 1
-  ${EndIf}
-  StrCpy $IsPowerShellAvailable $0
-
-  ${If} ${isUpdated}
-    Sleep 300
-  ${EndIf}
-  !insertmacro FIND_PROCESS "${APP_EXECUTABLE_FILENAME}" $R0
-  ${If} $R0 == 0
-    ${If} ${isUpdated}
-      Sleep 1000
-      Goto un_stop_process
-    ${EndIf}
-    ${IfNot} ${Silent}
-      MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION "$(appRunning)" /SD IDOK IDOK un_stop_process
-      Quit
-    ${EndIf}
-    un_stop_process:
-    DetailPrint "$(appClosing)"
-    !insertmacro KILL_PROCESS "${APP_EXECUTABLE_FILENAME}" 0
-    Sleep 300
-    StrCpy $R1 0
-    un_wait_loop:
-      IntOp $R1 $R1 + 1
-      !insertmacro FIND_PROCESS "${APP_EXECUTABLE_FILENAME}" $R0
-      ${If} $R0 == 0
-        Sleep 1000
-        !insertmacro KILL_PROCESS "${APP_EXECUTABLE_FILENAME}" 1
-        !insertmacro FIND_PROCESS "${APP_EXECUTABLE_FILENAME}" $R0
-        ${If} $R0 == 0
-          Sleep 2000
-        ${Else}
-          Goto un_not_running
-        ${EndIf}
-      ${Else}
-        Goto un_not_running
-      ${EndIf}
-      ${If} $R1 > 1
-        MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "$(appCannotBeClosed)" /SD IDCANCEL IDRETRY un_wait_loop
-        Quit
-      ${Else}
-        Goto un_wait_loop
-      ${EndIf}
-    un_not_running:
-  ${EndIf}
+  !insertmacro DimoInitProcessHelpers
+  !insertmacro DimoCheckAppRunningInDirBody "$INSTDIR" "un"
 
   !ifmacrodef customUnInit
     !insertmacro customUnInit
@@ -626,16 +748,23 @@ Section "un.Uninstall"
   Call un.DimoSetProgress
 
   ${If} ${isUpdated}
-    CreateDirectory "$PLUGINSDIR\old-install"
-    Push ""
-    Call un.atomicRMDir
-    Pop $R0
-    ${If} $R0 != 0
-      DetailPrint "File is busy, aborting: $R0"
+    ; Win32 Rename fails across volumes (ERROR_NOT_SAME_DEVICE) if $INSTDIR is on
+    ; a different drive than %TEMP% ($PLUGINSDIR). Only stage via un.atomicRMDir
+    ; when both paths share the same drive letter; otherwise fall through to RMDir /r.
+    StrCpy $R1 $INSTDIR 2
+    StrCpy $R2 $PLUGINSDIR 2
+    ${If} $R1 == $R2
+      CreateDirectory "$PLUGINSDIR\old-install"
       Push ""
-      Call un.restoreFiles
+      Call un.atomicRMDir
       Pop $R0
-      Abort `Can't rename "$INSTDIR" to "$PLUGINSDIR\old-install".`
+      ${If} $R0 != 0
+        DetailPrint "File is busy, aborting: $R0"
+        Push ""
+        Call un.restoreFiles
+        Pop $R0
+        Abort `Can't rename "$INSTDIR" to "$PLUGINSDIR\old-install".`
+      ${EndIf}
     ${EndIf}
   ${EndIf}
 
@@ -669,6 +798,8 @@ Section "un.Uninstall"
   ${If} $R7 == '"$INSTDIR\${APP_EXECUTABLE_FILENAME}" "%1"'
     DeleteRegKey HKCU "Software\Classes\dimo"
   ${EndIf}
+
+  !insertmacro DimoUnregisterOpenWith
 
   System::Call 'shell32::SHChangeNotify(i, i, i, i) v (0x08000000, 0, 0, 0)'
 

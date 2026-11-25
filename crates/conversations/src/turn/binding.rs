@@ -6,7 +6,11 @@ use agents::{
 };
 use db::models::{
     agent_management::SessionDefaultRepository,
-    conversation::{BindingStatus, ConversationAgentBindingRecord, CreateConversationAgentBinding},
+    conversation::{
+        BindingStatus, ConversationAgentBindingRecord, ConversationRecord,
+        CreateConversationAgentBinding,
+    },
+    conversation_turn::ConversationTurnRecord,
     session::Session,
     workspace::Workspace,
     workspace_repo::WorkspaceRepo,
@@ -16,7 +20,7 @@ use uuid::Uuid;
 
 pub(super) use super::binding_controls::*;
 use super::{
-    ConversationSessionService,
+    ConversationSessionService, is_in_flight_turn_status,
     recover::{known_acp_session_id, restorable_agent_binding, resume_external_session_id},
 };
 use crate::ConversationServiceError;
@@ -128,11 +132,7 @@ impl ConversationSessionService {
                 .await?;
                 Ok(())
             }
-            Err(
-                agents::AgentError::SessionNotFound(_)
-                | agents::AgentError::ConnectionNotFound(_)
-                | agents::AgentError::AcpSessionNotBound,
-            ) => {
+            Err(error) if is_offline_controls_fallback_error(&error) => {
                 let controls = self
                     .persist_offline_session_controls_selection(
                         conversation_id,
@@ -219,11 +219,7 @@ impl ConversationSessionService {
                 }
                 Ok(())
             }
-            Err(
-                agents::AgentError::SessionNotFound(_)
-                | agents::AgentError::ConnectionNotFound(_)
-                | agents::AgentError::AcpSessionNotBound,
-            ) => {
+            Err(error) if is_offline_controls_fallback_error(&error) => {
                 if overrides[0].key == "mode" {
                     let mode_value = overrides[0].value.clone();
                     let controls = self
@@ -258,24 +254,9 @@ impl ConversationSessionService {
                     }
                     return Ok(());
                 }
-                let mut controls = self
+                let controls = self
                     .persist_offline_session_controls_selection(conversation_id, None, &overrides)
                     .await?;
-                for ovr in &overrides {
-                    if !controls.config_options.iter().any(|opt| opt.key == ovr.key) {
-                        controls
-                            .config_options
-                            .push(agents::AgentSessionConfigOption {
-                                key: ovr.key.clone(),
-                                label: ovr.key.clone(),
-                                description: None,
-                                category: None,
-                                value: Some(serde_json::Value::String(ovr.value.clone())),
-                                choices: Vec::new(),
-                                dependency: None,
-                            });
-                    }
-                }
                 self.append_event(
                     conversation_id,
                     None,
@@ -338,10 +319,37 @@ impl ConversationSessionService {
                 persisted_session.provider_instance_id.as_deref(),
             )
             .await;
-        if let Some(mode) = mode.map(str::trim).filter(|m| !m.is_empty())
-            && controls.current_mode.is_none()
-        {
+        if let Some(mode) = mode.map(str::trim).filter(|m| !m.is_empty()) {
             controls.current_mode = Some(mode.to_string());
+            if let Some(mode_option) = controls
+                .config_options
+                .iter_mut()
+                .find(|opt| opt.key == "mode")
+            {
+                mode_option.value = Some(serde_json::Value::String(mode.to_string()));
+            }
+        }
+        for ovr in config_overrides {
+            let value = serde_json::Value::String(ovr.value.clone());
+            if let Some(existing) = controls
+                .config_options
+                .iter_mut()
+                .find(|opt| opt.key == ovr.key)
+            {
+                existing.value = Some(value);
+            } else {
+                controls
+                    .config_options
+                    .push(agents::AgentSessionConfigOption {
+                        key: ovr.key.clone(),
+                        label: ovr.key.clone(),
+                        description: None,
+                        category: None,
+                        value: Some(value),
+                        choices: Vec::new(),
+                        dependency: None,
+                    });
+            }
         }
         Ok(controls)
     }
@@ -353,34 +361,28 @@ impl ConversationSessionService {
         agent_id: &AgentId,
         provider_instance_id: Option<&str>,
     ) -> AgentSessionControlsSnapshot {
-        let target_instance =
+        let requested_instance =
             db::models::session::normalize_provider_instance_id(provider_instance_id);
-        let remembered = bindings
-            .iter()
-            .rev()
-            .find(|binding| {
-                super::continuation::binding_matches_target_instance(
-                    binding,
-                    agent_id,
-                    target_instance.as_deref(),
-                ) && binding.resume_allowed
-                    && binding.acp_session_id.as_deref().is_some_and(|id| {
-                        !id.trim().is_empty() && !is_placeholder_acp_session_id(id)
-                    })
-            })
-            .or_else(|| {
-                bindings.iter().rev().find(|binding| {
-                    super::continuation::binding_matches_target_instance(
-                        binding,
-                        agent_id,
-                        target_instance.as_deref(),
-                    )
-                })
-            });
+        let effective_instance = crate::resolve_effective_provider_instance_id(
+            pool,
+            agent_id,
+            requested_instance.as_deref(),
+        )
+        .await
+        .ok()
+        .flatten()
+        .or(requested_instance);
+        let remembered = bindings.iter().rev().find(|binding| {
+            super::continuation::binding_matches_target_instance(
+                binding,
+                agent_id,
+                effective_instance.as_deref(),
+            )
+        });
         let preferences = self
             .resolved_session_control_preferences(pool, agent_id, remembered)
             .await;
-        let launch_instance_id = target_instance
+        let launch_instance_id = effective_instance
             .as_deref()
             .unwrap_or(db::models::provider_instance::LOCAL_PROVIDER_INSTANCE_ID);
         let mut controls = crate::resolve_instant_capability_catalog_for_provider_instance(
@@ -577,14 +579,70 @@ impl ConversationSessionService {
         let controls = {
             let preparation = crate::continuation::preparation_lock(conversation_id);
             let _preparation_guard = preparation.lock().await;
-            if reload {
-                self.drop_live_agent_connection(conversation_id).await;
+            self.interrupt_orphaned_turn(conversation_id).await?;
+            let live_turn_active = self
+                .has_live_in_flight_turn_on_ready_connection(conversation_id)
+                .await?;
+            if live_turn_active
+                && let Ok(controls) = self
+                    .ctx
+                    .agent_runtime
+                    .session_controls_snapshot(AgentSessionId(conversation_id))
+                    .await
+            {
+                if reload {
+                    tracing::info!(
+                        %conversation_id,
+                        "skipping session reload drop while a turn is actively running on a live connection"
+                    );
+                }
+                controls
+            } else {
+                if reload && !live_turn_active {
+                    self.drop_live_agent_connection(conversation_id).await;
+                }
+                self.ensure_session_controls_locked(conversation_id, None)
+                    .await?
             }
-            self.ensure_session_controls_locked(conversation_id, None)
-                .await?
         };
         self.spawn_dispatch_queued_after_bind(conversation_id);
         Ok(controls)
+    }
+
+    async fn has_live_in_flight_turn_on_ready_connection(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<bool, ConversationServiceError> {
+        let pool = &self.ctx.deployment.db().pool;
+        let has_in_flight_turn = if let Some(conversation) =
+            ConversationRecord::find_by_id(pool, conversation_id).await?
+            && let Some(turn_id) = conversation.active_turn_id
+            && let Some(turn) = ConversationTurnRecord::find_by_id(pool, turn_id).await?
+        {
+            is_in_flight_turn_status(&turn.status)
+        } else {
+            false
+        };
+        let session_id = AgentSessionId(conversation_id);
+        let has_active_prompt = self
+            .ctx
+            .agent_runtime
+            .live_cancel_target(session_id)
+            .await
+            .is_some();
+        if !has_in_flight_turn && !has_active_prompt {
+            return Ok(false);
+        }
+        Ok(self
+            .ctx
+            .agent_runtime
+            .session_has_ready_connection(session_id)
+            .await
+            && self
+                .ctx
+                .agent_runtime
+                .has_bound_acp_session(session_id)
+                .await)
     }
 
     /// Bind ACP for an existing conversation, optionally using a subdirectory
@@ -706,12 +764,18 @@ impl ConversationSessionService {
             .as_deref()
             .unwrap_or(db::models::provider_instance::LOCAL_PROVIDER_INSTANCE_ID);
 
-        if let Some(bound_acp_session_id) = self
+        let bound_acp_session_id = self
             .ctx
             .agent_runtime
             .bound_acp_session_id(runtime_session_id)
-            .await
-        {
+            .await;
+        let has_live_bound_session = bound_acp_session_id.is_some()
+            || self
+                .ctx
+                .agent_runtime
+                .has_bound_acp_session(runtime_session_id)
+                .await;
+        if has_live_bound_session {
             let live_agent_id = self
                 .ctx
                 .agent_runtime
@@ -727,12 +791,21 @@ impl ConversationSessionService {
                     effective_instance.as_deref(),
                 )
             });
-            if self
+            let config_stale = self
                 .ctx
                 .agent_runtime
                 .session_connection_config_stale(runtime_session_id)
-                .await
+                .await;
+            let live_turn_active = if config_stale
+                || live_agent_id.as_ref() != Some(&agent_id)
+                || !live_matches_instance
             {
+                self.has_live_in_flight_turn_on_ready_connection(conversation_id)
+                    .await?
+            } else {
+                false
+            };
+            if config_stale && !live_turn_active {
                 self.drop_live_agent_connection(conversation_id).await;
             } else if live_agent_id.as_ref() == Some(&agent_id)
                 && live_matches_instance
@@ -760,40 +833,42 @@ impl ConversationSessionService {
                 }) {
                     return Ok(controls);
                 }
-                let fast_working_dir = if let Some(ref override_path) = working_dir_override {
-                    utils::path::normalize_windows_extended_path_prefix(override_path.clone())
-                        .to_string_lossy()
-                        .into_owned()
-                } else if let Some(existing) = active_for_live
-                    .as_ref()
-                    .map(|binding| binding.working_dir.as_str())
-                    .filter(|dir| !dir.is_empty())
-                {
-                    existing.to_string()
-                } else {
-                    self.resolve_session_working_dir_fallback(
-                        pool,
+                if let Some(bound_acp_session_id) = bound_acp_session_id {
+                    let fast_working_dir = if let Some(ref override_path) = working_dir_override {
+                        utils::path::normalize_windows_extended_path_prefix(override_path.clone())
+                            .to_string_lossy()
+                            .into_owned()
+                    } else if let Some(existing) = active_for_live
+                        .as_ref()
+                        .map(|binding| binding.working_dir.as_str())
+                        .filter(|dir| !dir.is_empty())
+                    {
+                        existing.to_string()
+                    } else {
+                        self.resolve_session_working_dir_fallback(
+                            pool,
+                            conversation_id,
+                            persisted_session.workspace_id,
+                        )
+                        .await
+                        .unwrap_or_default()
+                    };
+                    self.commit_native_binding(
                         conversation_id,
-                        persisted_session.workspace_id,
+                        &agent_id,
+                        &fast_working_dir,
+                        &bound_acp_session_id,
+                        connection_id,
+                        effective_instance.as_deref(),
                     )
-                    .await
-                    .unwrap_or_default()
-                };
-                self.commit_native_binding(
-                    conversation_id,
-                    &agent_id,
-                    &fast_working_dir,
-                    &bound_acp_session_id,
-                    connection_id,
-                    effective_instance.as_deref(),
-                )
-                .await?;
-                self.ctx
-                    .agent_runtime
-                    .commit_prepared_session(runtime_session_id)
-                    .await;
-                return Ok(controls);
-            } else if live_agent_id.is_some() {
+                    .await?;
+                    self.ctx
+                        .agent_runtime
+                        .commit_prepared_session(runtime_session_id)
+                        .await;
+                    return Ok(controls);
+                }
+            } else if live_agent_id.is_some() && !live_turn_active {
                 // Live connection belongs to a previous Agent or provider instance before a switch;
                 // release it so we never return stale controls or overwrite the target binding.
                 self.drop_live_agent_connection(conversation_id).await;
@@ -1358,30 +1433,93 @@ async fn persist_confirmed_session_controls_inner(
     if mode.is_none() && config_selection_json.is_none() {
         return Ok(());
     }
-    // Live sessions are not given a binding until import or fork. Without a row,
-    // the update below matches nothing and a cold resume replays only the agent
-    // default (Antigravity: Default + Gemini 3.8 Flash).
-    ensure_conversation_binding_for_controls(pool, conversation_id).await?;
-    ConversationAgentBindingRecord::update_session_controls_selection(
-        pool,
-        conversation_id,
-        mode,
-        config_selection_json.as_deref(),
-    )
-    .await?;
+
+    let resolved_target =
+        resolve_conversation_target_agent_and_instance(pool, conversation_id).await?;
+    let active_binding =
+        ConversationAgentBindingRecord::active_for_conversation(pool, conversation_id).await?;
+    let pending_handoff =
+        resolved_target
+            .as_ref()
+            .is_some_and(|(target_agent_id, effective_instance)| {
+                active_binding.as_ref().is_some_and(|binding| {
+                    !super::continuation::binding_matches_target_instance(
+                        binding,
+                        target_agent_id,
+                        effective_instance.as_deref(),
+                    ) && binding.resume_allowed
+                })
+            })
+            && conversation_has_recorded_turns(pool, conversation_id).await?;
+
+    let defaults_agent_id = if pending_handoff {
+        // Pending cross-agent or cross-instance handoff: never overwrite
+        // `sessions.active_agent_binding_id` (which anchors the handoff source)
+        // and never mutate the previous agent's binding. If the target already
+        // has a prior inactive binding on this conversation, update it in place
+        // without activating it.
+        if let Some((target_agent_id, effective_instance)) = resolved_target.as_ref() {
+            let bindings =
+                ConversationAgentBindingRecord::list_for_conversation(pool, conversation_id)
+                    .await?;
+            if let Some(existing_target) = bindings.iter().rev().find(|binding| {
+                super::continuation::binding_matches_target_instance(
+                    binding,
+                    target_agent_id,
+                    effective_instance.as_deref(),
+                )
+            }) {
+                let merged = config_selection_json.as_deref().map(|incoming| {
+                    merge_config_selection_json(&existing_target.config_selection_json, incoming)
+                });
+                sqlx::query(
+                    "UPDATE conversation_agent_bindings \
+                     SET current_mode = COALESCE(?, current_mode), \
+                         config_selection_json = COALESCE(?, config_selection_json), \
+                         updated_at = datetime('now', 'subsec') \
+                     WHERE id = ?",
+                )
+                .bind(mode)
+                .bind(merged)
+                .bind(existing_target.id)
+                .execute(pool)
+                .await?;
+            }
+            Some(target_agent_id.clone())
+        } else {
+            None
+        }
+    } else {
+        // Live sessions are not given a binding until import or fork. Without a row,
+        // the update below matches nothing and a cold resume replays only the agent
+        // default (Antigravity: Default + Gemini 3.8 Flash).
+        ensure_conversation_binding_for_controls(pool, conversation_id).await?;
+        ConversationAgentBindingRecord::update_session_controls_selection(
+            pool,
+            conversation_id,
+            mode,
+            config_selection_json.as_deref(),
+        )
+        .await?;
+        ConversationAgentBindingRecord::active_for_conversation(pool, conversation_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|binding| binding.agent_id)
+            .or_else(|| resolved_target.map(|(agent_id, _)| agent_id))
+    };
+
     if !update_agent_defaults {
         return Ok(());
     }
     // Last-used per Agent, same store new sessions already read (CodeG
     // `selector-prefs` per agentType). A rejected upsert must not fail the pick.
-    if let Ok(Some(binding)) =
-        ConversationAgentBindingRecord::active_for_conversation(pool, conversation_id).await
-    {
+    if let Some(agent_id) = defaults_agent_id {
         let repo = SessionDefaultRepository::new(pool.clone());
         if let Some(mode) = mode.filter(|mode| !mode.is_empty())
             && let Err(error) = repo
                 .upsert(
-                    &binding.agent_id,
+                    &agent_id,
                     "mode",
                     &serde_json::Value::String(mode.to_string()).to_string(),
                 )
@@ -1389,7 +1527,7 @@ async fn persist_confirmed_session_controls_inner(
         {
             tracing::warn!(
                 %conversation_id,
-                agent_id = %binding.agent_id,
+                agent_id = %agent_id,
                 %error,
                 "failed to remember the agent's last-used session mode"
             );
@@ -1397,12 +1535,12 @@ async fn persist_confirmed_session_controls_inner(
         for override_item in config_overrides {
             let value_json = serde_json::Value::String(override_item.value.clone()).to_string();
             if let Err(error) = repo
-                .upsert(&binding.agent_id, &override_item.key, &value_json)
+                .upsert(&agent_id, &override_item.key, &value_json)
                 .await
             {
                 tracing::warn!(
                     %conversation_id,
-                    agent_id = %binding.agent_id,
+                    agent_id = %agent_id,
                     option_id = %override_item.key,
                     %error,
                     "failed to remember the agent's last-used session config"
@@ -1551,25 +1689,11 @@ async fn ensure_conversation_binding_for_controls(
     let Some(session) = Session::find_by_id(pool, conversation_id).await? else {
         return Ok(());
     };
-    let agent_id = match session.agent_id {
-        Some(agent_id) => agent_id,
-        None => {
-            let Some(resolved) = resolve_agent_id_from_executor(session.executor.as_deref()) else {
-                return Ok(());
-            };
-            let _ = Session::update_agent_metadata(
-                pool,
-                conversation_id,
-                session.external_session_id.as_deref(),
-                Some(&resolved),
-            )
-            .await;
-            resolved
-        }
+    let Some((agent_id, target_instance)) =
+        resolve_conversation_target_agent_and_instance(pool, conversation_id).await?
+    else {
+        return Ok(());
     };
-    let target_instance = db::models::session::normalize_provider_instance_id(
-        session.provider_instance_id.as_deref(),
-    );
     if ConversationAgentBindingRecord::active_for_conversation(pool, conversation_id)
         .await?
         .is_some_and(|latest| {
@@ -1626,4 +1750,66 @@ async fn ensure_conversation_binding_for_controls(
     )
     .await?;
     Ok(())
+}
+
+fn is_offline_controls_fallback_error(error: &agents::AgentError) -> bool {
+    matches!(
+        error,
+        agents::AgentError::SessionNotFound(_)
+            | agents::AgentError::ConnectionNotFound(_)
+            | agents::AgentError::AcpSessionNotBound
+            | agents::AgentError::ConnectionClosed(_)
+    ) || error.is_connection_death()
+}
+
+async fn resolve_conversation_target_agent_and_instance(
+    pool: &SqlitePool,
+    conversation_id: Uuid,
+) -> Result<Option<(AgentId, Option<String>)>, sqlx::Error> {
+    let Some(session) = Session::find_by_id(pool, conversation_id).await? else {
+        return Ok(None);
+    };
+    let agent_id = match session.agent_id {
+        Some(agent_id) => agent_id,
+        None => {
+            let Some(resolved) = resolve_agent_id_from_executor(session.executor.as_deref()) else {
+                return Ok(None);
+            };
+            let _ = Session::update_agent_metadata(
+                pool,
+                conversation_id,
+                session.external_session_id.as_deref(),
+                Some(&resolved),
+            )
+            .await;
+            resolved
+        }
+    };
+    let requested_instance = db::models::session::normalize_provider_instance_id(
+        session.provider_instance_id.as_deref(),
+    );
+    let effective_instance = crate::resolve_effective_provider_instance_id(
+        pool,
+        &agent_id,
+        requested_instance.as_deref(),
+    )
+    .await
+    .ok()
+    .flatten()
+    .or(requested_instance);
+    Ok(Some((agent_id, effective_instance)))
+}
+
+fn merge_config_selection_json(existing_json: &str, incoming_json: &str) -> String {
+    let mut merged =
+        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(existing_json)
+            .unwrap_or_default();
+    if let Ok(incoming) =
+        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(incoming_json)
+    {
+        for (key, value) in incoming {
+            merged.insert(key, value);
+        }
+    }
+    serde_json::Value::Object(merged).to_string()
 }

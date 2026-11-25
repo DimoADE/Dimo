@@ -227,9 +227,9 @@ pub fn credential_matches_url(cred: &StoredCredential, tab_url: &str) -> bool {
             url.host_str()
                 .map(str::to_ascii_lowercase)
                 .unwrap_or_else(|| cred.host.to_ascii_lowercase()),
-            url.port(),
+            url.port_or_known_default(),
         ),
-        None => ("https".to_owned(), cred.host.to_ascii_lowercase(), None),
+        None => ("https".to_owned(), cred.host.to_ascii_lowercase(), Some(443)),
     };
 
     if cred_host.is_empty() {
@@ -239,9 +239,7 @@ pub fn credential_matches_url(cred: &StoredCredential, tab_url: &str) -> bool {
     if cred_scheme == "https" && parsed_tab.scheme() != "https" {
         return false;
     }
-    if let (Some(c_port), Some(t_port)) = (cred_port, parsed_tab.port())
-        && c_port != t_port
-    {
+    if cred_port != parsed_tab.port_or_known_default() {
         return false;
     }
 
@@ -1050,5 +1048,69 @@ mod tests {
             "https://evilgithub.com/login"
         ));
         assert!(!credential_matches_url(&cred, "about:blank"));
+    }
+
+    #[test]
+    fn credential_origin_matching_enforces_port_on_default_ports() {
+        let https_default = StoredCredential {
+            id: "1".into(),
+            name: "Localhost HTTPS".into(),
+            url: "https://localhost/login".into(),
+            origin: "https://localhost".into(),
+            host: "localhost".into(),
+            username: "admin".into(),
+            password: "pw".into(),
+            note: String::new(),
+            source: "manual".into(),
+            updated_at: 1,
+        };
+        assert!(credential_matches_url(&https_default, "https://localhost/"));
+        assert!(credential_matches_url(
+            &https_default,
+            "https://localhost:443/account"
+        ));
+        assert!(
+            !credential_matches_url(&https_default, "https://localhost:8443/"),
+            "default HTTPS port 443 must not match explicit port 8443"
+        );
+
+        let https_alt = StoredCredential {
+            id: "2".into(),
+            name: "Localhost 8443".into(),
+            url: "https://localhost:8443/login".into(),
+            origin: "https://localhost:8443".into(),
+            host: "localhost".into(),
+            username: "admin".into(),
+            password: "pw".into(),
+            note: String::new(),
+            source: "manual".into(),
+            updated_at: 2,
+        };
+        assert!(credential_matches_url(
+            &https_alt,
+            "https://localhost:8443/dashboard"
+        ));
+        assert!(
+            !credential_matches_url(&https_alt, "https://localhost/"),
+            "explicit port 8443 must not match default HTTPS port 443"
+        );
+
+        let http_default = StoredCredential {
+            id: "3".into(),
+            name: "Localhost HTTP".into(),
+            url: "http://localhost/login".into(),
+            origin: "http://localhost".into(),
+            host: "localhost".into(),
+            username: "dev".into(),
+            password: "pw".into(),
+            note: String::new(),
+            source: "manual".into(),
+            updated_at: 3,
+        };
+        assert!(credential_matches_url(&http_default, "http://localhost:80/"));
+        assert!(!credential_matches_url(
+            &http_default,
+            "http://localhost:8080/"
+        ));
     }
 }

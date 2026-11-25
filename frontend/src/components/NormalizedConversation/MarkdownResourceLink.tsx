@@ -88,8 +88,16 @@ function isSameAppOriginUrl(url: URL): boolean {
   );
 }
 
+function safeDecodeURIComponent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 function filePathFromFileUrl(url: URL): string {
-  const pathname = decodeURIComponent(url.pathname);
+  const pathname = safeDecodeURIComponent(url.pathname);
   return pathname.replace(/^\/([a-zA-Z]:[\\/])/, '$1');
 }
 
@@ -100,6 +108,10 @@ function hrefToWorkspacePathCandidate(
   if (!href) return null;
   const raw = trimFilePathCandidate(href);
   if (!raw || raw.startsWith('#')) return null;
+
+  if (/^[a-zA-Z]:[\\/]/.test(raw) || raw.startsWith('\\\\')) {
+    return safeDecodeURIComponent(raw);
+  }
 
   const parsed = parseHref(raw);
   if (parsed?.protocol === 'file:') {
@@ -113,13 +125,17 @@ function hrefToWorkspacePathCandidate(
     raw.startsWith('/') &&
     !(workspacePath && /^[a-zA-Z]:[\\/]/.test(workspacePath))
   ) {
-    return raw;
+    return safeDecodeURIComponent(raw);
   }
 
-  if (parsed && (parsed.protocol === 'http:' || parsed.protocol === 'https:')) {
+  if (
+    /^https?:\/\//i.test(raw) &&
+    parsed &&
+    (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+  ) {
     if (!isSameAppOriginUrl(parsed)) return null;
     if (parsed.pathname.startsWith('/local-projects')) return null;
-    return decodeURIComponent(parsed.pathname).replace(/^\/+/, '');
+    return safeDecodeURIComponent(parsed.pathname).replace(/^\/+/, '');
   }
 
   if (
@@ -127,10 +143,10 @@ function hrefToWorkspacePathCandidate(
     workspacePath &&
     /^[a-zA-Z]:[\\/]/.test(workspacePath)
   ) {
-    return raw.replace(/^\/+/, '');
+    return safeDecodeURIComponent(raw).replace(/^\/+/, '');
   }
 
-  return raw;
+  return safeDecodeURIComponent(raw);
 }
 
 function looksLikeWorkspaceFilePath(value: string): boolean {
@@ -298,8 +314,8 @@ export function resolveMarkdownWorkspacePathTarget(
     extractFileLocation(childrenText);
 
   const candidates = [
-    childrenText,
     hrefToWorkspacePathCandidate(href, workspacePath) ?? '',
+    childrenText,
     href ?? '',
   ]
     .map(trimFilePathCandidate)

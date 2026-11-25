@@ -222,13 +222,16 @@ export function KanbanSessionHub({
   const createWorkspaceOptions = useMemo(() => {
     if (
       !lastActiveWorkspace ||
+      (projectId &&
+        lastActiveWorkspace.project_id &&
+        lastActiveWorkspace.project_id !== projectId) ||
       workspaces.some((workspace) => workspace.id === lastActiveWorkspace.id)
     ) {
       return workspaces;
     }
 
     return [lastActiveWorkspace, ...workspaces];
-  }, [lastActiveWorkspace, workspaces]);
+  }, [lastActiveWorkspace, projectId, workspaces]);
 
   const preferredMainBranch = useMemo(
     () =>

@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { getConversationSessionNoticeCopy } from './sessionNoticeCopy';
+import {
+  formatRuntimeConnectionMessage,
+  getConversationSessionNoticeCopy,
+  getConversationSessionNoticeView,
+  localizeBackendNoticeTitle,
+  stripInternalErrorPrefixes,
+} from './sessionNoticeCopy';
 
 describe('getConversationSessionNoticeCopy', () => {
   const translations: Record<string, string> = {
@@ -77,5 +83,104 @@ describe('getConversationSessionNoticeCopy', () => {
         t
       ).title
     ).toBe('conversation:backendNotice.resumeUnsupported');
+  });
+
+  it('strips stacked internal transport and runtime error prefixes', () => {
+    expect(
+      stripInternalErrorPrefixes(
+        'Internal error: Agent runtime error: RPC error: upstream overloaded'
+      )
+    ).toBe('upstream overloaded');
+    expect(
+      stripInternalErrorPrefixes('Runtime error: connection reset by peer')
+    ).toBe('connection reset by peer');
+  });
+
+  it('humanizes internal runtime connection messages while keeping raw text in details', () => {
+    const tRuntime = (key: string) => key;
+    expect(
+      formatRuntimeConnectionMessage(
+        'agent session retired after cancel was not acknowledged',
+        tRuntime
+      )
+    ).toEqual({
+      summary: 'conversation:runtime.cancelRetiredSummary',
+      technicalDetail:
+        'agent session retired after cancel was not acknowledged',
+    });
+    expect(
+      formatRuntimeConnectionMessage(
+        'session retired after prompt idle timeout (300s)',
+        tRuntime
+      )
+    ).toEqual({
+      summary: 'conversation:runtime.idleRetiredSummary',
+      technicalDetail: 'session retired after prompt idle timeout (300s)',
+    });
+    expect(
+      formatRuntimeConnectionMessage(
+        'Agent connection closed before the turn completed.',
+        tRuntime
+      )
+    ).toEqual({
+      summary: 'conversation:runtime.connectionClosedSummary',
+      technicalDetail: 'Agent connection closed before the turn completed.',
+    });
+  });
+
+  it('localizes dynamic backend notice titles and produces 3-tier notice views', () => {
+    const tRich = (key: string, options?: Record<string, unknown>) =>
+      options ? `${key}:${JSON.stringify(options)}` : key;
+
+    expect(
+      localizeBackendNoticeTitle('会话加载异常，正在重连 3/10 次…', tRich)
+    ).toBe(
+      'conversation:backendNotice.reconnectingProgress:{"attempt":3,"max":10}'
+    );
+    expect(
+      localizeBackendNoticeTitle('Queued message (position 2)', tRich)
+    ).toBe('conversation:backendNotice.queuedPosition:{"position":2}');
+    expect(
+      localizeBackendNoticeTitle(
+        'Automatic compaction finished (saved 40%)',
+        tRich
+      )
+    ).toBe('conversation:backendNotice.contextCompacted');
+
+    expect(
+      getConversationSessionNoticeView(
+        {
+          title: '代理会话已归档',
+          message: '运行命令解除归档',
+          severity: 'warning',
+          action: {
+            kind: 'copy_command',
+            label: 'Copy command',
+            command: 'codex unarchive abc',
+          },
+        },
+        tRich
+      )
+    ).toEqual({
+      title: 'conversation:backendNotice.sessionArchived',
+      summary: 'conversation:backendNotice.sessionArchivedWithCommand',
+      technicalDetail: 'codex unarchive abc',
+    });
+
+    expect(
+      getConversationSessionNoticeView(
+        {
+          title: '加载代理会话失败',
+          message:
+            'session/load failed: enoent 确认重新绑定后将冷启动，不会保留 Agent 侧上下文。',
+          severity: 'warning',
+        },
+        tRich
+      )
+    ).toEqual({
+      title: 'conversation:backendNotice.sessionLoadFailed',
+      summary: 'conversation:backendNotice.sessionLoadFailedDescription',
+      technicalDetail: 'session/load failed: enoent',
+    });
   });
 });

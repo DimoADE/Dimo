@@ -177,6 +177,10 @@ impl HostCapabilityBroker {
     ) -> Self {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let http_client = reqwest::Client::builder()
+            .redirect(build_network_fetch_redirect_policy(
+                String::new(),
+                Vec::new(),
+            ))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {
@@ -2359,18 +2363,27 @@ impl HostCapabilityBroker {
                 max_bytes = max_bytes.min(limit);
             }
         }
-        if !patterns.is_empty()
-            && !patterns
+        if !patterns.is_empty() {
+            if !patterns
                 .iter()
                 .any(|pattern| crate::grants::url_matches_grant_pattern(&parsed_url, pattern))
-        {
-            return Err(broker_error(
-                "network_url_denied",
-                format!(
-                    "URL `{}` is not permitted by plugin `{plugin_id}` `net.fetch` allowlist",
-                    parsed_url
-                ),
-            ));
+            {
+                return Err(broker_error(
+                    "network_url_denied",
+                    format!(
+                        "URL `{}` is not permitted by plugin `{plugin_id}` `net.fetch` allowlist",
+                        parsed_url
+                    ),
+                ));
+            }
+            let allowlisted_client = reqwest::Client::builder()
+                .redirect(build_network_fetch_redirect_policy(
+                    plugin_id.to_owned(),
+                    patterns,
+                ))
+                .build()
+                .map_err(|error| broker_error("network_request_failed", error))?;
+            return execute_network_fetch_limited(&allowlisted_client, input, max_bytes).await;
         }
 
         execute_network_fetch_limited(&self.http_client, input, max_bytes).await
@@ -2851,6 +2864,76 @@ fn include_network_body_base64(explicit: bool, valid_utf8: bool, byte_len: usize
     byte_len < NETWORK_BODY_BASE64_ALWAYS_BELOW
 }
 
+const MAX_NETWORK_FETCH_REDIRECTS: usize = 10;
+
+#[derive(Debug)]
+struct RedirectPolicyError {
+    code: &'static str,
+    message: String,
+}
+
+impl std::fmt::Display for RedirectPolicyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RedirectPolicyError {}
+
+fn build_network_fetch_redirect_policy(
+    plugin_id: String,
+    patterns: Vec<String>,
+) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= MAX_NETWORK_FETCH_REDIRECTS {
+            return attempt.error(RedirectPolicyError {
+                code: "network_too_many_redirects",
+                message: format!(
+                    "network fetch exceeded maximum of {MAX_NETWORK_FETCH_REDIRECTS} redirects"
+                ),
+            });
+        }
+        let parsed = match crate::grants::validate_network_url(attempt.url().as_str(), false) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                let code = match err.code() {
+                    "network_url_blocked" => "network_url_blocked",
+                    "network_invalid_url" => "network_invalid_url",
+                    _ => "network_url_denied",
+                };
+                return attempt.error(RedirectPolicyError {
+                    code,
+                    message: err.message().to_owned(),
+                });
+            }
+        };
+        if !patterns.is_empty()
+            && !patterns
+                .iter()
+                .any(|pattern| crate::grants::url_matches_grant_pattern(&parsed, pattern))
+        {
+            return attempt.error(RedirectPolicyError {
+                code: "network_url_denied",
+                message: format!(
+                    "redirect target URL `{parsed}` is not permitted by plugin `{plugin_id}` `net.fetch` allowlist"
+                ),
+            });
+        }
+        attempt.follow()
+    })
+}
+
+fn extract_redirect_policy_error(error: &reqwest::Error) -> Option<(&'static str, String)> {
+    let mut source = std::error::Error::source(error);
+    while let Some(err) = source {
+        if let Some(policy_err) = err.downcast_ref::<RedirectPolicyError>() {
+            return Some((policy_err.code, policy_err.message.clone()));
+        }
+        source = err.source();
+    }
+    None
+}
+
 async fn execute_network_fetch_limited(
     client: &reqwest::Client,
     input: Value,
@@ -2900,10 +2983,13 @@ async fn execute_network_fetch_limited(
             }
         }
     }
-    let mut response = request
-        .send()
-        .await
-        .map_err(|error| broker_error("network_request_failed", error))?;
+    let mut response = request.send().await.map_err(|error| {
+        if let Some((code, message)) = extract_redirect_policy_error(&error) {
+            broker_error(code, message)
+        } else {
+            broker_error("network_request_failed", error)
+        }
+    })?;
     let status = response.status().as_u16();
     let ok = response.status().is_success();
     let status_text = response
@@ -4212,5 +4298,153 @@ mod tests {
             .expect("env snapshot");
         let env_obj = env_snapshot["env"].as_object().expect("env object");
         assert!(env_obj.len() <= 1);
+    }
+
+    #[tokio::test]
+    async fn net_fetch_revalidates_redirects_against_allowlist_and_ssrf_rules() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let allowed_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let allowed_port = allowed_listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = allowed_listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nallowed-ok",
+                    )
+                    .await;
+            }
+        });
+
+        let disallowed_hit = Arc::new(AtomicBool::new(false));
+        let disallowed_hit_flag = Arc::clone(&disallowed_hit);
+        let disallowed_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let disallowed_port = disallowed_listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = disallowed_listener.accept().await {
+                disallowed_hit_flag.store(true, Ordering::SeqCst);
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nsecret",
+                    )
+                    .await;
+            }
+        });
+
+        let redirect_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_port = redirect_listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = redirect_listener.accept().await {
+                let mut buf = [0u8; 2048];
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let location = if req.starts_with("GET /to-allowed ") {
+                    format!("http://127.0.0.1:{allowed_port}/ok")
+                } else if req.starts_with("GET /to-disallowed ") {
+                    format!("http://127.0.0.1:{disallowed_port}/secret")
+                } else {
+                    "http://169.254.169.254/latest/meta-data/".to_owned()
+                };
+                let resp = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = socket.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let broker = sqlite_broker().await;
+        let manifest = crate::PermissionManifest {
+            net_fetch: vec![
+                format!("http://127.0.0.1:{redirect_port}"),
+                format!("http://127.0.0.1:{allowed_port}"),
+            ],
+            net_websocket: Vec::new(),
+            fs_read: Vec::new(),
+            fs_write: Vec::new(),
+            env_read: Vec::new(),
+            secret_keep: Vec::new(),
+            storage_kv: false,
+        };
+        for grant in manifest.to_capability_grants() {
+            broker
+                .grant_capability("dimo.redirect-allowlist", grant)
+                .await;
+        }
+
+        // 1. Allowlisted redirect target succeeds.
+        let allowed_res = broker
+            .call(
+                "dimo.redirect-allowlist",
+                1,
+                "network",
+                "fetch",
+                json!({ "url": format!("http://127.0.0.1:{redirect_port}/to-allowed") }),
+            )
+            .await
+            .expect("redirect to allowlisted local origin must succeed");
+        assert_eq!(allowed_res["status"], 200);
+        assert_eq!(allowed_res["body"], "allowed-ok");
+
+        // 2. Redirect escaping the allowlist is denied before contacting the disallowed origin.
+        let denied_err = broker
+            .call(
+                "dimo.redirect-allowlist",
+                1,
+                "network",
+                "fetch",
+                json!({ "url": format!("http://127.0.0.1:{redirect_port}/to-disallowed") }),
+            )
+            .await
+            .expect_err("redirect outside net.fetch allowlist must be denied");
+        assert_eq!(denied_err.code(), "network_url_denied");
+        assert!(
+            !disallowed_hit.load(Ordering::SeqCst),
+            "disallowed redirect target must never be contacted"
+        );
+
+        // 3. Redirect to cloud metadata IP is blocked by validate_network_url.
+        let ssrf_err = broker
+            .call(
+                "dimo.redirect-allowlist",
+                1,
+                "network",
+                "fetch",
+                json!({ "url": format!("http://127.0.0.1:{redirect_port}/to-metadata") }),
+            )
+            .await
+            .expect_err("redirect to cloud metadata IP must be blocked");
+        assert_eq!(ssrf_err.code(), "network_url_blocked");
+
+        // 4. Full-trust plugin (no allowlist) retains local redirect access while still blocking metadata SSRF.
+        let full_trust_ok = broker
+            .call(
+                "dimo.redirect-full-trust",
+                1,
+                "network",
+                "fetch",
+                json!({ "url": format!("http://127.0.0.1:{redirect_port}/to-allowed") }),
+            )
+            .await
+            .expect("full-trust plugin must retain local redirect access");
+        assert_eq!(full_trust_ok["status"], 200);
+        assert_eq!(full_trust_ok["body"], "allowed-ok");
+
+        let full_trust_ssrf = broker
+            .call(
+                "dimo.redirect-full-trust",
+                1,
+                "network",
+                "fetch",
+                json!({ "url": format!("http://127.0.0.1:{redirect_port}/to-metadata") }),
+            )
+            .await
+            .expect_err("full-trust redirect to metadata IP must still be blocked");
+        assert_eq!(full_trust_ssrf.code(), "network_url_blocked");
     }
 }

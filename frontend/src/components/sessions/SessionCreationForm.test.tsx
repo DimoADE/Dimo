@@ -294,13 +294,13 @@ describe('SessionCreationForm agent capability catalog controls', () => {
     await waitFor(() => expect(agentManagementBar).toHaveBeenCalled());
   });
 
-  it('shows the Codex-style settings summary for Grok model, effort, and permission', async () => {
+  it('shows the Codex-style settings summary for Grok permission, model, and effort', async () => {
     capabilityCatalog.mockResolvedValue(GROK_CONTROLS);
     const onPreset = vi.fn();
     renderForm('grok', onPreset, 'new_workspace');
 
     const summary = await screen.findByTestId('session-settings-summary');
-    expect(summary).toHaveTextContent('Grok 4.6 · 高 · Ask');
+    expect(summary).toHaveTextContent('Ask · Grok 4.6 · 高');
     expect(summary).toHaveAttribute(
       'aria-label',
       expect.stringMatching(/Grok 4\.6/)
@@ -354,14 +354,14 @@ describe('SessionCreationForm agent capability catalog controls', () => {
     const user = userEvent.setup();
 
     const summary = await screen.findByTestId('session-settings-summary');
-    expect(summary).toHaveTextContent('Gemini 4 Neon · 高 · YOLO');
+    expect(summary).toHaveTextContent('YOLO · Gemini 4 Neon · 高');
 
     await user.click(summary);
     await user.click(screen.getByText('sessionModeSelector.title'));
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Ask' }));
 
     await waitFor(() =>
-      expect(summary).toHaveTextContent('Gemini 4 Neon · 高 · Ask')
+      expect(summary).toHaveTextContent('Ask · Gemini 4 Neon · 高')
     );
     expect(onPreset).toHaveBeenLastCalledWith({
       modeOverride: 'ask',

@@ -174,6 +174,7 @@ async fn incremental_projector_hydrates_only_latest_turn_and_reloads_older_turn_
         &pool,
         conversation_id,
         projector.complete_antigravity_reads(),
+        projector.denied_tool_calls(),
         &missing,
     )
     .await

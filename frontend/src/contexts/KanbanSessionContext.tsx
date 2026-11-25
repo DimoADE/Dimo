@@ -27,10 +27,7 @@ import {
   type KanbanSessionLayoutState,
   type KanbanSessionPlacement,
 } from '@/lib/kanbanSessionLayout';
-import {
-  DEFAULT_KANBAN_VIEW,
-  type KanbanPanelView,
-} from '@/lib/kanbanPanelView';
+import { type KanbanPanelView } from '@/lib/kanbanPanelView';
 import {
   DEFAULT_KANBAN_VIEW_ID,
   legacyKanbanPanelView,
@@ -89,8 +86,47 @@ const KanbanSessionContext: Context<KanbanSessionContextValue | null> =
   (globalKanbanSessionScope[GLOBAL_KANBAN_SESSION_CONTEXT_KEY] =
     createContext<KanbanSessionContextValue | null>(null));
 
+interface ProjectKanbanState {
+  projectKey: string;
+  panelView: KanbanPanelView;
+  activeViewId: string;
+  layoutState: KanbanSessionLayoutState;
+  lastActiveWorkspaceId: string | null;
+}
+
+function readProjectKanbanState(
+  projectKey: string,
+  hasProject: boolean
+): ProjectKanbanState {
+  const style = getKanbanBoardStyle();
+  if (!hasProject) {
+    const viewId = viewIdForBoardStyleChange(style, DEFAULT_KANBAN_VIEW_ID);
+    return {
+      projectKey,
+      panelView: legacyKanbanPanelView(viewId),
+      activeViewId: viewId,
+      layoutState: createEmptyKanbanSessionLayoutState(),
+      lastActiveWorkspaceId: null,
+    };
+  }
+  const stored = useProjectViewStateStore
+    .getState()
+    .getKanbanState(projectKey);
+  const migrated =
+    stored.activeViewId ?? migrateKanbanViewId(stored.panelView, style);
+  const viewId = viewIdForBoardStyleChange(style, migrated);
+  return {
+    projectKey,
+    panelView: legacyKanbanPanelView(viewId),
+    activeViewId: viewId,
+    layoutState: stored.layoutState,
+    lastActiveWorkspaceId: stored.lastActiveWorkspaceId,
+  };
+}
+
 export function KanbanSessionProvider({ children }: { children: ReactNode }) {
   const { projectId } = useProject();
+  const hasProject = Boolean(projectId);
   const projectKey = getProjectScopeKey(projectId);
   const { activeWorktreeId } = useWorktree();
   const {
@@ -103,41 +139,43 @@ export function KanbanSessionProvider({ children }: { children: ReactNode }) {
   );
   const boardStyle = useKanbanBoardStyle();
 
-  const [panelView, setPanelViewState] =
-    useState<KanbanPanelView>(DEFAULT_KANBAN_VIEW);
-  const [activeViewId, setActiveViewIdState] = useState<string>(
-    DEFAULT_KANBAN_VIEW_ID
+  const [projectState, setProjectState] = useState<ProjectKanbanState>(() =>
+    readProjectKanbanState(projectKey, hasProject)
   );
-  const [layoutState, setLayoutState] = useState<KanbanSessionLayoutState>(
-    createEmptyKanbanSessionLayoutState()
-  );
-  const [lastActiveWorkspaceId, setLastActiveWorkspaceId] = useState<
-    string | null
-  >(null);
-  const [hydratedProjectKey, setHydratedProjectKey] = useState<string | null>(
-    null
+
+  // Swap project-scoped state synchronously during render so children (e.g.
+  // Toolbar, RightPanelContent) never observe or navigate using the previous
+  // project's session/workspace before passive effects run.
+  let currentProjectState = projectState;
+  if (projectState.projectKey !== projectKey) {
+    currentProjectState = readProjectKanbanState(projectKey, hasProject);
+    setProjectState(currentProjectState);
+  }
+
+  const { panelView, activeViewId, layoutState, lastActiveWorkspaceId } =
+    currentProjectState;
+
+  const updateCurrentProjectState = useCallback(
+    (updater: (current: ProjectKanbanState) => ProjectKanbanState) => {
+      setProjectState((current) => {
+        const base =
+          current.projectKey === projectKey
+            ? current
+            : readProjectKanbanState(projectKey, hasProject);
+        return updater(base);
+      });
+    },
+    [hasProject, projectKey]
   );
 
   // Derived state for backward compatibility
   const isSessionHubVisible = panelView === 'sessionHub';
 
   useEffect(() => {
-    const stored = useProjectViewStateStore
-      .getState()
-      .getKanbanState(projectKey);
-    const style = getKanbanBoardStyle();
-    const migrated =
-      stored.activeViewId ?? migrateKanbanViewId(stored.panelView, style);
-    const viewId = viewIdForBoardStyleChange(style, migrated);
-    setPanelViewState(legacyKanbanPanelView(viewId));
-    setActiveViewIdState(viewId);
-    setLayoutState(stored.layoutState);
-    setLastActiveWorkspaceId(stored.lastActiveWorkspaceId);
-    setHydratedProjectKey(projectKey);
-  }, [projectKey]);
-
-  useEffect(() => {
-    if (hydratedProjectKey !== projectKey) return;
+    if (!projectId) {
+      useProjectViewStateStore.getState().resetKanbanState(projectKey);
+      return;
+    }
     useProjectViewStateStore.getState().setKanbanState(projectKey, {
       panelView,
       activeViewId,
@@ -145,7 +183,7 @@ export function KanbanSessionProvider({ children }: { children: ReactNode }) {
       lastActiveWorkspaceId,
     });
   }, [
-    hydratedProjectKey,
+    projectId,
     projectKey,
     panelView,
     activeViewId,
@@ -153,47 +191,69 @@ export function KanbanSessionProvider({ children }: { children: ReactNode }) {
     lastActiveWorkspaceId,
   ]);
 
-  useEffect(() => {
-    if (!activeWorktreeId) return;
-    setLastActiveWorkspaceId(activeWorktreeId);
-  }, [activeWorktreeId]);
+  const activeWorkspaceBelongsToAnotherProject = Boolean(
+    projectId &&
+      activeWorkspaceWithSession?.project_id &&
+      activeWorkspaceWithSession.project_id !== projectId
+  );
 
   useEffect(() => {
-    if (hydratedProjectKey !== projectKey) return;
-    setActiveViewIdState((current) => {
-      const next = viewIdForBoardStyleChange(boardStyle, current);
-      if (next !== current) {
-        setPanelViewState(legacyKanbanPanelView(next));
+    if (!activeWorktreeId || activeWorkspaceBelongsToAnotherProject) return;
+    updateCurrentProjectState((current) =>
+      current.lastActiveWorkspaceId === activeWorktreeId
+        ? current
+        : { ...current, lastActiveWorkspaceId: activeWorktreeId }
+    );
+  }, [
+    activeWorkspaceBelongsToAnotherProject,
+    activeWorktreeId,
+    updateCurrentProjectState,
+  ]);
+
+  useEffect(() => {
+    updateCurrentProjectState((current) => {
+      const next = viewIdForBoardStyleChange(boardStyle, current.activeViewId);
+      if (next === current.activeViewId) {
+        return current;
       }
-      return next;
+      return {
+        ...current,
+        activeViewId: next,
+        panelView: legacyKanbanPanelView(next),
+      };
     });
-  }, [boardStyle, hydratedProjectKey, projectKey]);
+  }, [boardStyle, updateCurrentProjectState]);
 
-  const setActiveViewId = useCallback((viewId: string) => {
-    setActiveViewIdState(viewId);
-    setPanelViewState(legacyKanbanPanelView(viewId));
-  }, []);
+  const setActiveViewId = useCallback(
+    (viewId: string) => {
+      updateCurrentProjectState((current) => ({
+        ...current,
+        activeViewId: viewId,
+        panelView: legacyKanbanPanelView(viewId),
+      }));
+    },
+    [updateCurrentProjectState]
+  );
 
-  const setPanelView = useCallback((view: KanbanPanelView) => {
-    setPanelViewState(view);
-    setActiveViewIdState(migrateKanbanViewId(view, getKanbanBoardStyle()));
-  }, []);
-
-  useEffect(() => {
-    if (!projectId) {
-      setPanelView(DEFAULT_KANBAN_VIEW);
-      setLayoutState(createEmptyKanbanSessionLayoutState());
-      setLastActiveWorkspaceId(null);
-      useProjectViewStateStore
-        .getState()
-        .resetKanbanState(getProjectScopeKey(projectId));
-    }
-  }, [projectId, setPanelView]);
+  const setPanelView = useCallback(
+    (view: KanbanPanelView) => {
+      updateCurrentProjectState((current) => ({
+        ...current,
+        panelView: view,
+        activeViewId: migrateKanbanViewId(view, getKanbanBoardStyle()),
+      }));
+    },
+    [updateCurrentProjectState]
+  );
 
   // A session already open in this workspace stays. A session that belongs
   // to another workspace leaves as soon as the workspace identity changes.
   useEffect(() => {
-    if (!projectId || hydratedProjectKey !== projectKey || !activeWorktreeId) {
+    if (
+      !projectId ||
+      !activeWorktreeId ||
+      activeWorkspaceBelongsToAnotherProject
+    ) {
       return;
     }
 
@@ -205,23 +265,31 @@ export function KanbanSessionProvider({ children }: { children: ReactNode }) {
         }
       : null;
 
-    setLayoutState((current) =>
-      sessionLayoutForWorkspaceChange(current, activeWorktreeId, nextSession, {
-        sessionKnown:
-          !isActiveWorkspaceLoading && activeWorkspaceWithSession != null,
-      })
-    );
+    updateCurrentProjectState((current) => {
+      const nextLayout = sessionLayoutForWorkspaceChange(
+        current.layoutState,
+        activeWorktreeId,
+        nextSession,
+        {
+          sessionKnown:
+            !isActiveWorkspaceLoading && activeWorkspaceWithSession != null,
+        }
+      );
+      return nextLayout === current.layoutState
+        ? current
+        : { ...current, layoutState: nextLayout };
+    });
   }, [
+    activeWorkspaceBelongsToAnotherProject,
     activeWorkspaceWithSession,
     activeWorktreeId,
-    hydratedProjectKey,
     isActiveWorkspaceLoading,
     projectId,
-    projectKey,
+    updateCurrentProjectState,
   ]);
 
   const canUseRightPanelForSessions = isKanbanSessionVisible;
-  const isLayoutHydrated = hydratedProjectKey === projectKey;
+  const isLayoutHydrated = currentProjectState.projectKey === projectKey;
 
   const goToBoard = useCallback(() => {
     setActiveViewId(DEFAULT_KANBAN_VIEW_ID);
@@ -236,15 +304,18 @@ export function KanbanSessionProvider({ children }: { children: ReactNode }) {
   }, [setActiveViewId]);
 
   const toggleSessionHub = useCallback(() => {
-    setActiveViewIdState((current) => {
+    updateCurrentProjectState((current) => {
       const next =
-        current === 'builtin:canvas'
+        current.activeViewId === 'builtin:canvas'
           ? DEFAULT_KANBAN_VIEW_ID
           : 'builtin:canvas';
-      setPanelViewState(legacyKanbanPanelView(next));
-      return next;
+      return {
+        ...current,
+        activeViewId: next,
+        panelView: legacyKanbanPanelView(next),
+      };
     });
-  }, []);
+  }, [updateCurrentProjectState]);
 
   const setSessionHubVisible = useCallback(
     (visible: boolean) => {
@@ -257,20 +328,22 @@ export function KanbanSessionProvider({ children }: { children: ReactNode }) {
     (
       updater: (current: KanbanSessionLayoutState) => KanbanSessionLayoutState
     ) => {
-      setLayoutState((current) => {
-        const next = updater(current);
+      updateCurrentProjectState((current) => {
+        const next = updater(current.layoutState);
         if (
           shouldRevealKanbanMonitorOnPlacement(
-            current.monitorSessions.length,
+            current.layoutState.monitorSessions.length,
             next.monitorSessions.length
           )
         ) {
           useLayoutStore.getState().setKanbanMonitorVisible(true);
         }
-        return next;
+        return next === current.layoutState
+          ? current
+          : { ...current, layoutState: next };
       });
     },
-    []
+    [updateCurrentProjectState]
   );
 
   const openSessionFromList = useCallback(
@@ -366,7 +439,8 @@ export function KanbanSessionProvider({ children }: { children: ReactNode }) {
       layoutState.rightSession &&
       layoutState.rightSession.workspaceId !== activeWorktreeId
     ) {
-      return activeWorkspaceWithSession?.id === activeWorktreeId &&
+      return !activeWorkspaceBelongsToAnotherProject &&
+        activeWorkspaceWithSession?.id === activeWorktreeId &&
         activeWorkspaceWithSession.session?.id
         ? {
             sessionId: activeWorkspaceWithSession.session.id,
@@ -376,6 +450,7 @@ export function KanbanSessionProvider({ children }: { children: ReactNode }) {
     }
     return layoutState.rightSession;
   }, [
+    activeWorkspaceBelongsToAnotherProject,
     activeWorkspaceWithSession?.id,
     activeWorkspaceWithSession?.session?.id,
     activeWorktreeId,
@@ -384,6 +459,7 @@ export function KanbanSessionProvider({ children }: { children: ReactNode }) {
   const isRightSessionPending =
     !visibleRightSession &&
     !!activeWorktreeId &&
+    !activeWorkspaceBelongsToAnotherProject &&
     !isActiveWorkspaceError &&
     (isActiveWorkspaceLoading ||
       typeof activeWorkspaceWithSession === 'undefined');

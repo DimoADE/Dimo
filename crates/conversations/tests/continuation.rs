@@ -1444,3 +1444,68 @@ async fn same_agent_fork_also_uses_handoff_on_first_turn() {
 
     f.service.cancel_turn(child_id, None).await.unwrap();
 }
+
+#[tokio::test]
+async fn close_conversation_cancels_scheduled_delayed_inputs() {
+    let f = Fixture::new().await;
+    let pool = &f.ctx.deployment.db().pool;
+    let control = conversations::ConversationInputControl::new(pool.clone());
+
+    let payload = agents::ConversationInputPayload {
+        continuation_policy: None,
+        expected_binding_revision: None,
+        agent_id: AgentId::parse("claude_code").unwrap(),
+        workspace_id: f.workspace,
+        executor_profile_id: None,
+        text: "delayed follow-up".into(),
+        display_text: None,
+        images: Vec::new(),
+        mode_override: None,
+        config_overrides: Vec::new(),
+        workflow_refs: Vec::new(),
+        file_refs: Vec::new(),
+        internal_prompt_contributions: Vec::new(),
+        collaboration_origin: None,
+        provider_instance_id: None,
+    };
+    let queued = control
+        .submit(conversations::SubmitConversationInput {
+            conversation_id: f.conversation,
+            operation_id: Uuid::new_v4(),
+            payload: payload.clone(),
+            principal: serde_json::json!({ "kind": "user" }),
+        })
+        .await
+        .expect("submit queued input");
+    let scheduled = control
+        .update(conversations::UpdateConversationInput {
+            conversation_id: f.conversation,
+            input_id: queued.id,
+            operation_id: Uuid::new_v4(),
+            expected_revision: queued.revision,
+            payload,
+            delay_seconds: Some(300),
+        })
+        .await
+        .expect("schedule delayed input");
+    assert_eq!(
+        scheduled.status,
+        conversations::ConversationInputStatus::Scheduled
+    );
+
+    f.service
+        .close_conversation(f.conversation, None)
+        .await
+        .expect("close conversation");
+
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM conversation_delayed_inputs WHERE id = ?")
+            .bind(scheduled.id.to_string())
+            .fetch_one(pool)
+            .await
+            .expect("delayed row exists");
+    assert_eq!(
+        status, "cancelled",
+        "closing a conversation must cancel all scheduled delayed inputs"
+    );
+}

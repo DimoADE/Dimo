@@ -403,6 +403,12 @@ impl ConversationSessionService {
         restore_files: bool,
         checkpoint_handle: Option<agents::checkpoint_ref::CheckpointRefHandle>,
     ) -> Result<Option<agents::checkpoint_ref::GitDiffSummary>, ConversationServiceError> {
+        // Hold the conversation turn lock across preflight, optional workspace file
+        // restoration, and DB truncation so a concurrent turn cannot start or mutate
+        // files between preflight and truncate.
+        let turn_lock = self.turn_lock(conversation_id).await;
+        let _turn_guard = turn_lock.lock().await;
+
         self.preflight_rewind_with_checkpoint(
             conversation_id,
             user_ordinal,
@@ -455,7 +461,8 @@ impl ConversationSessionService {
             None
         };
 
-        self.truncate_to_turn(conversation_id, user_ordinal).await?;
+        self.truncate_to_turn_locked(conversation_id, user_ordinal)
+            .await?;
         Ok(summary)
     }
 
@@ -471,16 +478,17 @@ impl ConversationSessionService {
         user_ordinal: i64,
     ) -> Result<(), ConversationServiceError> {
         // Serialize against start_turn / cancel_turn on the same conversation.
-        let turn_lock = {
-            let mut locks = self.ctx.turn_locks.lock().await;
-            Arc::clone(
-                locks
-                    .entry(conversation_id)
-                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-            )
-        };
+        let turn_lock = self.turn_lock(conversation_id).await;
         let _turn_guard = turn_lock.lock().await;
+        self.truncate_to_turn_locked(conversation_id, user_ordinal)
+            .await
+    }
 
+    async fn truncate_to_turn_locked(
+        &self,
+        conversation_id: Uuid,
+        user_ordinal: i64,
+    ) -> Result<(), ConversationServiceError> {
         let pool = &self.ctx.deployment.db().pool;
         // Reject truncation while a Turn is in flight; the pending Turn's
         // history and binding are still being established.
@@ -594,6 +602,22 @@ impl ConversationSessionService {
             };
             if !native_rolled_back {
                 self.detach_agent_session(conversation_id).await?;
+            }
+
+            // Cancel queued follow-up inputs so stale prompts authored against the
+            // discarded suffix do not auto-dispatch after rewind/truncate.
+            if let Err(error) = crate::ConversationInputControl::with_publisher(
+                pool.clone(),
+                self.ctx.event_publisher.clone(),
+            )
+            .cancel_queued(conversation_id)
+            .await
+            {
+                tracing::warn!(
+                    %conversation_id,
+                    %error,
+                    "failed to cancel queued conversation inputs during truncate"
+                );
             }
 
             // `user_ordinal` is the 0-based user-message index (same basis as the checkpoint
@@ -710,7 +734,7 @@ impl ConversationSessionService {
         Ok(true)
     }
 
-    async fn void_pending_turn_interactions(
+    pub(crate) async fn void_pending_turn_interactions(
         &self,
         conversation_id: Uuid,
         turn_id: Uuid,
@@ -846,6 +870,8 @@ impl ConversationSessionService {
             && let Some(turn) = ConversationTurnRecord::find_by_id(pool, turn_id).await?
             && is_in_flight_turn_status(&turn.status)
         {
+            self.void_pending_turn_interactions(conversation_id, turn.id)
+                .await?;
             self.append_event(
                 conversation_id,
                 Some(turn.id),
@@ -856,7 +882,26 @@ impl ConversationSessionService {
                 Some(format!("turn:{}:cancelled", turn.id)),
             )
             .await?;
+            crate::handoff::settle(pool, turn.id).await?;
             ConversationRecord::update_active_turn(pool, conversation_id, None).await?;
+        }
+        let inputs = crate::ConversationInputControl::with_publisher(
+            pool.clone(),
+            self.ctx.event_publisher.clone(),
+        );
+        if let Err(error) = inputs.cancel_queued(conversation_id).await {
+            tracing::warn!(
+                %conversation_id,
+                %error,
+                "failed to cancel queued conversation inputs while closing conversation"
+            );
+        }
+        if let Err(error) = inputs.cancel_scheduled_delayed(conversation_id).await {
+            tracing::warn!(
+                %conversation_id,
+                %error,
+                "failed to cancel scheduled delayed conversation inputs while closing conversation"
+            );
         }
         self.append_event(
             conversation_id,
@@ -867,7 +912,7 @@ impl ConversationSessionService {
                 message: None,
                 bound: false,
             },
-            Some(format!("conversation:{conversation_id}:closed")),
+            None,
         )
         .await?;
         ConversationRecord::update_status(
@@ -878,13 +923,17 @@ impl ConversationSessionService {
         .await?;
         self.update_runtime_state(conversation_id, |state| {
             state.turn_in_flight = false;
+            state.active_turn_id = None;
+            state.active_prompt_id = None;
+            state.pending_permission_id = None;
+            state.pending_question_id = None;
             state.connection_status = Some("closed".to_string());
             state.recovery_status = reason;
         })
         .await;
-        // Release the ACP child before forgetting maps. Close previously only
-        // dropped in-memory coordination, so the agent process kept running
-        // until process exit (the UI also never called this path).
+        // Release the ACP child, keepalive registration, and hosted terminals before
+        // forgetting maps. Close previously only dropped in-memory coordination, so
+        // the agent process kept running until process exit.
         self.drop_live_agent_connection(conversation_id).await;
         // Drop this conversation's in-memory coordination state now that it is closed.
         // Without this, both maps leaked one entry per conversation ever opened — the
@@ -935,6 +984,25 @@ impl ConversationSessionService {
         let mut failed = 0usize;
         let mut settled_turns = Vec::with_capacity(in_flight.len());
         for turn in in_flight {
+            let turn_lock = self.turn_lock(turn.conversation_id).await;
+            let _turn_guard = turn_lock.lock().await;
+            let still_in_flight = ConversationTurnRecord::find_by_id(pool, turn.id)
+                .await?
+                .is_some_and(|current| is_in_flight_turn_status(&current.status));
+            if !still_in_flight {
+                continue;
+            }
+            if self
+                .conversation_has_live_host_activity(turn.conversation_id)
+                .await
+            {
+                tracing::info!(
+                    conversation_id = %turn.conversation_id,
+                    turn_id = %turn.id,
+                    "startup recovery: skipping live in-flight turn owned by current host"
+                );
+                continue;
+            }
             let had_pending_user_interaction = self
                 .turn_had_pending_user_interaction(&turn)
                 .await
@@ -975,12 +1043,28 @@ impl ConversationSessionService {
         Ok(recovered)
     }
 
+    async fn conversation_has_live_host_activity(&self, conversation_id: Uuid) -> bool {
+        let session_id = AgentSessionId(conversation_id);
+        self.ctx
+            .agent_runtime
+            .has_live_agent_process(session_id)
+            .await
+            || self
+                .ctx
+                .agent_runtime
+                .live_connection_id(session_id)
+                .await
+                .is_some()
+            || self.runtime_snapshot(conversation_id).await.turn_in_flight
+    }
+
     async fn recover_orphaned_connecting_conversations(
         &self,
     ) -> Result<usize, ConversationServiceError> {
-        reconcile_orphaned_connecting_conversations_in_pool(
+        reconcile_orphaned_connecting_conversations_with_skip(
             &self.ctx.deployment.db().pool,
             Some(self.ctx.event_publisher.as_ref()),
+            |conversation_id| self.conversation_has_live_host_activity(conversation_id),
         )
         .await
     }
@@ -1029,6 +1113,15 @@ impl ConversationSessionService {
                 );
             }
         }
+        let session_id = AgentSessionId(conversation_id);
+        let _ = self
+            .ctx
+            .agent_runtime
+            .set_session_keepalive(session_id, false)
+            .await;
+        agents::terminal::agent_terminal_registry()
+            .release_all_for_session(session_id)
+            .await;
         self.update_runtime_state(conversation_id, |state| {
             state.connection_id = None;
             state.active_prompt_id = None;
@@ -1388,62 +1481,89 @@ pub(super) fn known_acp_session_id(
         })
 }
 
+#[cfg(test)]
 pub(super) async fn reconcile_orphaned_connecting_conversations_in_pool(
     pool: &sqlx::SqlitePool,
     publisher: Option<&dyn super::ConversationEventPublisher>,
 ) -> Result<usize, ConversationServiceError> {
-    let mut candidates: Vec<Uuid> = sqlx::query_scalar(
-        r#"SELECT e.conversation_id
-           FROM conversation_events e
-           INNER JOIN (
-               SELECT conversation_id, MAX(sequence) AS max_seq
-               FROM conversation_events
-               WHERE event_kind IN (
-                   'agent_connection_status_changed',
-                   'agent_binding_ready',
-                   'agent_binding_recovered',
-                   'agent_binding_recovery_failed',
-                   'agent_binding_load_failed'
-               )
-               GROUP BY conversation_id
-           ) latest
-           ON e.conversation_id = latest.conversation_id AND e.sequence = latest.max_seq
-           WHERE e.event_kind IN ('agent_connection_status_changed', 'agent_binding_ready', 'agent_binding_recovered')"#,
-    )
-    .fetch_all(pool)
-    .await?;
+    reconcile_orphaned_connecting_conversations_with_skip(pool, publisher, |_| async { false })
+        .await
+}
 
-    let materialized_candidates: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT DISTINCT conversation_id FROM conversation_timeline_rows WHERE row_id IN ('notice:agent-connection-recovering', 'status:agent-connection')",
+pub(super) async fn reconcile_orphaned_connecting_conversations_with_skip<F, Fut>(
+    pool: &sqlx::SqlitePool,
+    publisher: Option<&dyn super::ConversationEventPublisher>,
+    is_live: F,
+) -> Result<usize, ConversationServiceError>
+where
+    F: Fn(Uuid) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let candidates: Vec<Uuid> = sqlx::query_scalar(
+        r#"SELECT DISTINCT r.conversation_id
+           FROM conversation_timeline_rows r
+           LEFT JOIN sessions s ON s.id = r.conversation_id
+           WHERE r.deleted_sequence IS NULL
+             AND COALESCE(s.status, '') NOT IN ('done', 'archived')
+             AND s.deleted_at IS NULL
+             AND (
+                 r.row_id = 'notice:agent-connection-recovering'
+                 OR (
+                     r.row_id = 'status:agent-connection'
+                     AND COALESCE(
+                         json_extract(r.row_json, '$.row.notice.connection_status.status'),
+                         ''
+                     ) NOT IN ('', 'closed', 'error')
+                 )
+             )"#,
     )
     .fetch_all(pool)
     .await?;
-    for cid in materialized_candidates {
-        if !candidates.contains(&cid) {
-            candidates.push(cid);
-        }
-    }
 
     let mut closed_count = 0usize;
     for conversation_id in candidates {
-        let fold = ConversationProjector::fold(pool, conversation_id).await?;
-        let has_recovering_notice = fold
-            .side_rows
-            .iter()
-            .any(|row| row.row_id == "notice:agent-connection-recovering");
-        let had_live_connection = fold.side_rows.iter().any(|row| match &row.row {
-            agents::conversation::ConversationTimelineRow::SessionNotice { notice } => {
-                notice.connection_status.as_ref().is_some_and(|connection| {
+        if is_live(conversation_id).await {
+            continue;
+        }
+        let side_rows: Vec<(String, String)> = sqlx::query_as(
+            r#"SELECT row_id, row_json
+               FROM conversation_timeline_rows
+               WHERE conversation_id = ?
+                 AND deleted_sequence IS NULL
+                 AND row_id IN ('notice:agent-connection-recovering', 'status:agent-connection')"#,
+        )
+        .bind(conversation_id)
+        .fetch_all(pool)
+        .await?;
+
+        let mut has_recovering_notice = false;
+        let mut had_live_connection = false;
+        for (row_id, row_json) in side_rows {
+            if row_id == "notice:agent-connection-recovering" {
+                has_recovering_notice = true;
+            } else if row_id == "status:agent-connection"
+                && let Ok(row) = serde_json::from_str::<agents::conversation::TimelineRow>(&row_json)
+                && let agents::conversation::ConversationTimelineRow::SessionNotice { notice } =
+                    row.row
+                && notice.connection_status.as_ref().is_some_and(|connection| {
                     !matches!(
                         connection.status,
                         ConversationAgentConnectionStatus::Closed
                             | ConversationAgentConnectionStatus::Error
                     )
                 })
+            {
+                had_live_connection = true;
             }
-            _ => false,
-        });
+        }
+
         if has_recovering_notice || had_live_connection {
+            let last_sequence: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(MAX(sequence), 0) FROM conversation_events WHERE conversation_id = ?",
+            )
+            .bind(conversation_id)
+            .fetch_one(pool)
+            .await?;
             let event = ConversationEvent::AgentConnectionStatusChanged {
                 status: ConversationAgentConnectionStatus::Closed,
                 message: None,
@@ -1451,7 +1571,7 @@ pub(super) async fn reconcile_orphaned_connecting_conversations_in_pool(
             };
             let normalized_json = serde_json::to_string(&event)
                 .map_err(|e| ConversationServiceError::Internal(e.to_string()))?;
-            let idempotency_key = format!("recovery:connection-closed:{}", fold.last_sequence);
+            let idempotency_key = format!("recovery:connection-closed:{last_sequence}");
             let record = crate::ConversationEventAppender::append(
                 pool,
                 db::models::conversation_event::AppendConversationEvent {

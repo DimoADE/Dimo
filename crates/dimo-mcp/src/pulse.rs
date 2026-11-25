@@ -405,11 +405,9 @@ impl PulseState {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or("dimo-mcp");
-        let root_event_id = meta
-            .and_then(|m| m.get("root_event_id").or_else(|| m.get("rootEventId")))
-            .and_then(Value::as_str)
-            .map(str::to_string)
+        let root_event_id = extract_trace_root_event_id(arguments, meta)
             .unwrap_or_else(|| event_id.clone());
+        let parent_run_id = extract_trace_parent_run_id(arguments, meta);
         let correlations = arguments
             .get("correlations")
             .and_then(Value::as_array)
@@ -443,7 +441,7 @@ impl PulseState {
             "replyChannels": [],
             "trace": {
                 "rootEventId": root_event_id,
-                "parentRunId": meta.and_then(|m| m.get("parent_run_id")).and_then(Value::as_str),
+                "parentRunId": parent_run_id,
                 "hopCount": hop_count,
             },
             "payload": payload,
@@ -702,26 +700,110 @@ pub(crate) fn bool_field(value: &Value, keys: &[&str]) -> Option<bool> {
 }
 
 pub(crate) fn compute_effective_hop_count(arguments: &Value, meta: Option<&Value>) -> u32 {
-    let parent_env_hop = std::env::var("DIMO_PULSE_HOP_COUNT")
-        .ok()
-        .or_else(|| std::env::var("VIBEX_PULSE_HOP_COUNT").ok())
-        .and_then(|v| v.trim().parse::<u32>().ok());
+    let parent_env_hop = [
+        std::env::var("DIMO_PULSE_HOP_COUNT").ok(),
+        std::env::var("VIBEX_PULSE_HOP_COUNT").ok(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|v| {
+        v.trim()
+            .parse::<u64>()
+            .ok()
+            .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
+    })
+    .max();
+    compute_effective_hop_count_with_env(arguments, meta, parent_env_hop)
+}
+
+pub(crate) fn compute_effective_hop_count_with_env(
+    arguments: &Value,
+    meta: Option<&Value>,
+    parent_env_hop: Option<u32>,
+) -> u32 {
     let meta_parent_hop = meta
-        .and_then(|m| m.get("parent_hop_count").or_else(|| m.get("hopCount")))
+        .and_then(|m| {
+            m.get("parent_hop_count")
+                .or_else(|| m.get("parentHopCount"))
+                .or_else(|| m.get("hopCount"))
+                .or_else(|| m.get("hop_count"))
+        })
         .and_then(Value::as_u64)
-        .map(|v| v as u32);
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
     let explicit_hop = arguments
         .get("hop_count")
         .or_else(|| arguments.get("hopCount"))
+        .or_else(|| {
+            arguments
+                .get("trace")
+                .and_then(|t| t.get("hopCount").or_else(|| t.get("hop_count")))
+        })
         .and_then(Value::as_u64)
-        .map(|v| v as u32);
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
 
-    match (parent_env_hop.or(meta_parent_hop), explicit_hop) {
+    let parent_hop = match (parent_env_hop, meta_parent_hop) {
+        (Some(env_hop), Some(meta_hop)) => Some(env_hop.max(meta_hop)),
+        (Some(env_hop), None) => Some(env_hop),
+        (None, Some(meta_hop)) => Some(meta_hop),
+        (None, None) => None,
+    };
+
+    match (parent_hop, explicit_hop) {
         (Some(parent), Some(explicit)) => (parent.saturating_add(1)).max(explicit),
         (Some(parent), None) => parent.saturating_add(1),
         (None, Some(explicit)) => explicit,
         (None, None) => 0,
     }
+}
+
+pub(crate) fn extract_trace_root_event_id(
+    arguments: &Value,
+    meta: Option<&Value>,
+) -> Option<String> {
+    let from_args = str_field(arguments, &["root_event_id", "rootEventId"])
+        .or_else(|| {
+            arguments
+                .get("trace")
+                .and_then(|t| str_field(t, &["rootEventId", "root_event_id"]))
+        })
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let from_meta = meta
+        .and_then(|m| str_field(m, &["root_event_id", "rootEventId"]))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let from_env = std::env::var("DIMO_PULSE_ROOT_EVENT_ID")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|s| !s.is_empty());
+    from_meta.or(from_args).or(from_env)
+}
+
+pub(crate) fn extract_trace_parent_run_id(
+    arguments: &Value,
+    meta: Option<&Value>,
+) -> Option<String> {
+    let from_args = str_field(arguments, &["parent_run_id", "parentRunId"])
+        .or_else(|| {
+            arguments
+                .get("trace")
+                .and_then(|t| str_field(t, &["parentRunId", "parent_run_id"]))
+        })
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let from_meta = meta
+        .and_then(|m| str_field(m, &["parent_run_id", "parentRunId"]))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let from_env = std::env::var("DIMO_PULSE_PARENT_RUN_ID")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|s| !s.is_empty());
+    from_meta.or(from_args).or(from_env)
 }
 
 pub(crate) fn hop_limit_exceeded_error(event_type: &str, hop_count: u32) -> Value {
@@ -993,4 +1075,40 @@ pub(crate) fn workflow_presets_catalog() -> Value {
             "summary": "Sliding debounce/batch window collapsing noisy external alerts into one summarized Bot/User digest."
         }
     ])
+}
+
+#[cfg(test)]
+mod hop_count_regression_tests {
+    use super::*;
+
+    #[test]
+    fn env_zero_does_not_overwrite_higher_meta_hop_count() {
+        let meta = json!({ "parent_hop_count": 3 });
+        assert_eq!(
+            compute_effective_hop_count_with_env(&json!({}), Some(&meta), Some(0)),
+            4
+        );
+        // Conversely, higher env wins over lower meta.
+        let low_meta = json!({ "parent_hop_count": 1 });
+        assert_eq!(
+            compute_effective_hop_count_with_env(&json!({}), Some(&low_meta), Some(4)),
+            5
+        );
+    }
+
+    #[test]
+    fn u64_hop_count_overflow_saturates_instead_of_truncating_to_zero() {
+        // 1u64 << 32 would truncate to 0 under `as u32`!
+        let overflow_u64 = 1u64 << 32;
+        let args = json!({ "hopCount": overflow_u64 });
+        assert_eq!(
+            compute_effective_hop_count_with_env(&args, None, None),
+            u32::MAX
+        );
+        let meta = json!({ "parent_hop_count": overflow_u64 });
+        assert_eq!(
+            compute_effective_hop_count_with_env(&json!({}), Some(&meta), None),
+            u32::MAX
+        );
+    }
 }

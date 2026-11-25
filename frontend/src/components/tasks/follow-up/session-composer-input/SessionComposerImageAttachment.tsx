@@ -44,6 +44,7 @@ export function SessionComposerImageAttachment({
     image.previewUrl && !previewUrlFailed
       ? image.previewUrl
       : metadata?.proxy_url;
+  const hasDirectPrimaryUrl = isBrowserDisplayUrl(primaryImageUrl);
   const fallbackImageUrl =
     fallbackByUrl.forUrl === primaryImageUrl ? fallbackByUrl.url : null;
   const imageLoadFailed =
@@ -55,10 +56,21 @@ export function SessionComposerImageAttachment({
     image.name || metadata?.file_name || '',
     metadata?.format
   );
+  const isFallbackLoading =
+    previewKind !== 'file' &&
+    !hasDirectPrimaryUrl &&
+    !imageUrl &&
+    !imageLoadFailed &&
+    Boolean(metadata?.path);
   const openImagePreview = useOpenImagePreview();
 
   useEffect(() => {
-    if (previewKind === 'file' || imageUrl || isLoading || !metadata?.path) {
+    if (
+      previewKind === 'file' ||
+      hasDirectPrimaryUrl ||
+      isLoading ||
+      !metadata?.path
+    ) {
       return;
     }
 
@@ -88,7 +100,7 @@ export function SessionComposerImageAttachment({
         releaseHostFileSrc(acquiredPath);
       }
     };
-  }, [imageUrl, isLoading, metadata?.path, previewKind, primaryImageUrl]);
+  }, [hasDirectPrimaryUrl, isLoading, metadata?.path, previewKind, primaryImageUrl]);
 
   const handlePreview = useCallback(() => {
     if (previewKind === 'file' || !imageUrl || imageLoadFailed) return;
@@ -189,7 +201,7 @@ export function SessionComposerImageAttachment({
           )
         ) : (
           <span className="flex h-full w-full items-center justify-center text-muted-foreground">
-            {isLoading ? (
+            {isLoading || isFallbackLoading ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
               <Image className="h-5 w-5" />

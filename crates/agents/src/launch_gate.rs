@@ -318,12 +318,6 @@ pub fn prefer_path_launch_program(locked: &Path) -> PathBuf {
         .unwrap_or(locked)
 }
 
-/// Whether Dimo's own component directories may precede the user's `PATH` in a
-/// launch environment.
-pub fn component_dirs_precede_user_path(agent_id: &AgentId) -> bool {
-    crate::adapter_bundles_runtime(agent_id)
-}
-
 /// Environment variable an adapter-backed Agent uses to locate its local Runtime.
 pub fn runtime_executable_env_key(agent_id: &AgentId) -> Option<&'static str> {
     BuiltInProfileCatalog::bundled()
@@ -331,20 +325,13 @@ pub fn runtime_executable_env_key(agent_id: &AgentId) -> Option<&'static str> {
         .and_then(|profile| profile.runtime_executable_env)
 }
 
-/// Bind a Runtime path for ACP adapters. Adapters that ship their own vendor
-/// CLI never receive this binding. `.cmd` / `.bat` shims are omitted so Node
-/// can fall back to a bundled native binary; a sibling `.exe` is preferred.
+/// Bind a Runtime path for ACP adapters. `.cmd` / `.bat` shims are omitted so
+/// Node can resolve a spawnable binary; a sibling `.exe` is preferred.
 pub fn bind_runtime_executable_env(
     agent_id: &AgentId,
     runtime_path: &Path,
     env: &mut BTreeMap<String, String>,
 ) {
-    for key in crate::bundled_adapter_runtime_env_keys(agent_id) {
-        env.remove(*key);
-    }
-    if crate::adapter_bundles_runtime(agent_id) {
-        return;
-    }
     let Some(variable) = runtime_executable_env_key(agent_id) else {
         return;
     };
@@ -358,14 +345,8 @@ pub fn bind_runtime_executable_env(
     }
 }
 
-/// Drop a bundled-adapter Runtime binding, or rewrite a Node-spawnable path.
+/// Rewrite a Runtime binding to a Node-spawnable path, dropping non-spawnable shims.
 pub fn sanitize_runtime_executable_env(agent_id: &AgentId, env: &mut HashMap<String, String>) {
-    for key in crate::bundled_adapter_runtime_env_keys(agent_id) {
-        env.remove(*key);
-    }
-    if crate::adapter_bundles_runtime(agent_id) {
-        return;
-    }
     let Some(variable) = runtime_executable_env_key(agent_id) else {
         return;
     };
@@ -387,12 +368,6 @@ pub fn sanitize_runtime_executable_lock_env(
     agent_id: &AgentId,
     env: &mut BTreeMap<String, String>,
 ) {
-    for key in crate::bundled_adapter_runtime_env_keys(agent_id) {
-        env.remove(*key);
-    }
-    if crate::adapter_bundles_runtime(agent_id) {
-        return;
-    }
     let Some(current) = runtime_executable_env_key(agent_id)
         .and_then(|variable| env.get(variable).map(PathBuf::from))
     else {
@@ -539,10 +514,9 @@ mod tests {
     };
 
     use super::{
-        bind_runtime_executable_env, component_dirs_precede_user_path, launch_command_name,
-        launch_program_available, lifecycle_ready_for_path_acp, missing_launch_program_error,
-        prefer_path_launch_program, sanitize_runtime_executable_env,
-        sanitize_runtime_executable_lock_env,
+        bind_runtime_executable_env, launch_command_name, launch_program_available,
+        lifecycle_ready_for_path_acp, missing_launch_program_error, prefer_path_launch_program,
+        sanitize_runtime_executable_env, sanitize_runtime_executable_lock_env,
     };
     use crate::{AgentId, AgentLifecycleState, BuiltInProfileCatalog, ProfileComponent};
 
@@ -586,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn native_engine_profiles_do_not_inject_adapter_runtime_env_or_shadow_user_path() {
+    fn native_engine_profiles_do_not_inject_adapter_runtime_env() {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("codex.exe");
         fs::write(&exe, b"").unwrap();
@@ -603,13 +577,6 @@ mod tests {
         let mut runtime_env = HashMap::new();
         sanitize_runtime_executable_env(&AgentId::parse("codex").unwrap(), &mut runtime_env);
         sanitize_runtime_executable_lock_env(&AgentId::parse("claude_code").unwrap(), &mut env);
-
-        for agent_id in ["claude_code", "codex", "pi", "opencode", "cursor"] {
-            assert!(
-                !component_dirs_precede_user_path(&AgentId::parse(agent_id).unwrap()),
-                "{agent_id} resolves its runtime from the user environment and must not shadow PATH"
-            );
-        }
     }
 
     #[test]

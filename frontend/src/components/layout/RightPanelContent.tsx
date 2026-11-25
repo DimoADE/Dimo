@@ -343,6 +343,13 @@ export function RightPanelContent() {
         if (!workspace) {
           return;
         }
+        if (
+          effectiveProjectId &&
+          workspace.project_id &&
+          workspace.project_id !== effectiveProjectId
+        ) {
+          return;
+        }
 
         if (nextWorkspaces.some((candidate) => candidate.id === workspace.id)) {
           return;
@@ -353,7 +360,7 @@ export function RightPanelContent() {
     );
 
     return nextWorkspaces;
-  }, [fallbackWorkspace, lastActiveWorkspace, worktrees]);
+  }, [effectiveProjectId, fallbackWorkspace, lastActiveWorkspace, worktrees]);
   const workspaceBranchOptions = useMemo(
     () =>
       buildWorkspaceBranchOptions({
@@ -594,7 +601,29 @@ export function RightPanelContent() {
   // until the live session reports the same mode.
   const sessionControlsPresetRef = useRef<SessionControlsPreset | null>(null);
 
+  const safeFallbackWorkspaceId =
+    fallbackWorkspace &&
+    effectiveProjectId &&
+    fallbackWorkspace.project_id &&
+    fallbackWorkspace.project_id !== effectiveProjectId
+      ? null
+      : (fallbackWorkspaceId ?? null);
+
+  const effectiveProjectIdRef = useRef<string | undefined>(effectiveProjectId);
+  effectiveProjectIdRef.current = effectiveProjectId;
+  const projectSwitchGenerationRef = useRef(0);
+
   const createSessionMutation = useMutation({
+    onMutate: (input?: {
+      includeUncommitted?: boolean;
+      executorProfile?: ExecutorProfileId;
+    }) => ({
+      originProjectId: effectiveProjectId,
+      originPrimaryRepoId: primaryRepo?.id ?? null,
+      originGeneration: projectSwitchGenerationRef.current,
+      originProfile: input?.executorProfile ?? selectedExecutorProfile,
+      originSessionControls: sessionControlsPresetRef.current,
+    }),
     mutationFn: async (input?: {
       includeUncommitted?: boolean;
       executorProfile?: ExecutorProfileId;
@@ -604,14 +633,12 @@ export function RightPanelContent() {
       }
 
       const activeProfile = input?.executorProfile ?? selectedExecutorProfile;
-      const fallbackWorkspaceId =
-        activeWorktreeId ?? visibleRightSession?.workspaceId ?? workspaceId;
 
       const workspaceSelection = isGitProject
         ? createMode === 'existing_workspace' || input?.executorProfile
           ? selectedWorkspaceOption
             ? resolveWorkspaceBranchSelection(selectedWorkspaceOption)
-            : { workspaceId: fallbackWorkspaceId ?? null, branch: null }
+            : { workspaceId: safeFallbackWorkspaceId, branch: null }
           : { workspaceId: null, branch: null }
         : { workspaceId: null, branch: null };
 
@@ -645,9 +672,14 @@ export function RightPanelContent() {
           : {}),
       });
     },
-    onSuccess: async (newSession, variables) => {
+    onSuccess: async (newSession, variables, context) => {
+      const originProjectId = context?.originProjectId;
+      const originPrimaryRepoId = context?.originPrimaryRepoId ?? null;
+      const originSessionControls = context?.originSessionControls ?? null;
       const profileToPersist =
-        variables?.executorProfile ?? selectedExecutorProfile;
+        context?.originProfile ??
+        variables?.executorProfile ??
+        selectedExecutorProfile;
       if (profileToPersist?.executor) {
         try {
           await scratchApi.update(ScratchType.DRAFT_FOLLOW_UP, newSession.id, {
@@ -658,10 +690,8 @@ export function RightPanelContent() {
                 images: [],
                 executor_config: profileToPersist,
                 queued: false,
-                mode_override:
-                  sessionControlsPresetRef.current?.modeOverride ?? undefined,
-                config_overrides:
-                  sessionControlsPresetRef.current?.configOverrides ?? {},
+                mode_override: originSessionControls?.modeOverride ?? undefined,
+                config_overrides: originSessionControls?.configOverrides ?? {},
               },
             },
           });
@@ -678,13 +708,22 @@ export function RightPanelContent() {
       await queryClient.invalidateQueries({
         queryKey: ['taskAttemptWithSession', newSession.workspace_id],
       });
-      await queryClient.invalidateQueries({
-        queryKey: ['projectWorktrees', effectiveProjectId],
-      });
-      if (primaryRepo?.id) {
+      if (originProjectId) {
         await queryClient.invalidateQueries({
-          queryKey: ['repoBranches', primaryRepo.id],
+          queryKey: ['projectWorktrees', originProjectId],
         });
+      }
+      if (originPrimaryRepoId) {
+        await queryClient.invalidateQueries({
+          queryKey: ['repoBranches', originPrimaryRepoId],
+        });
+      }
+      const isCurrentProject =
+        Boolean(originProjectId) &&
+        effectiveProjectIdRef.current === originProjectId &&
+        projectSwitchGenerationRef.current === context?.originGeneration;
+      if (!isCurrentProject) {
+        return;
       }
       handleCreatedSession({
         sessionId: newSession.id,
@@ -693,18 +732,44 @@ export function RightPanelContent() {
       });
       setIsCreateOverlayOpen(false);
     },
-    onError: () => {
-      if (!isCreateOverlayOpen && effectiveProjectId) {
+    onError: (_error, _variables, context) => {
+      const originProjectId = context?.originProjectId;
+      const isCurrentProject =
+        Boolean(originProjectId) &&
+        effectiveProjectIdRef.current === originProjectId &&
+        projectSwitchGenerationRef.current === context?.originGeneration;
+      if (!isCurrentProject) {
+        return;
+      }
+      if (!isCreateOverlayOpen && originProjectId) {
         collaborationStore?.getSnapshot().closeAllOverlays();
         dismissCollaborationCreateOverlays();
         setIsCreateOverlayOpen(true);
-        setCreateOverlayProjectId(effectiveProjectId);
+        setCreateOverlayProjectId(originProjectId);
         setCreateOverlayWorkspaceId(currentOverlayWorkspaceId);
       }
     },
   });
 
   const { reset: resetCreateSessionMutation } = createSessionMutation;
+
+  const previousProjectIdRef = useRef<string | undefined>(effectiveProjectId);
+  useEffect(() => {
+    if (previousProjectIdRef.current === effectiveProjectId) {
+      return;
+    }
+    previousProjectIdRef.current = effectiveProjectId;
+    projectSwitchGenerationRef.current += 1;
+    sessionControlsPresetRef.current = null;
+    setCreateWorkspaceValue('');
+    setUserCreateMode(null);
+    resetRepoBranchSelection();
+    resetCreateSessionMutation();
+  }, [
+    effectiveProjectId,
+    resetCreateSessionMutation,
+    resetRepoBranchSelection,
+  ]);
 
   const handleCreateOverlayOpenChange = useCallback(
     (open: boolean) => {
@@ -858,12 +923,10 @@ export function RightPanelContent() {
 
       setSelectedExecutorProfile(targetProfile);
 
-      const fallbackWorkspaceId =
-        activeWorktreeId ?? visibleRightSession?.workspaceId ?? workspaceId;
       const canCreateImmediately =
         Boolean(effectiveProjectId) &&
         (!isGitProject ||
-          Boolean(selectedWorkspaceOption || fallbackWorkspaceId));
+          Boolean(selectedWorkspaceOption || safeFallbackWorkspaceId));
 
       if (canCreateImmediately) {
         sessionControlsPresetRef.current = null;
@@ -886,15 +949,13 @@ export function RightPanelContent() {
       );
     };
   }, [
-    activeWorktreeId,
     createSessionMutation,
     effectiveProjectId,
     isGitProject,
     openCreateSessionOverlay,
     profiles,
+    safeFallbackWorkspaceId,
     selectedWorkspaceOption,
-    visibleRightSession?.workspaceId,
-    workspaceId,
   ]);
 
   // Stable props for the conversation view: the view mounts placement slots

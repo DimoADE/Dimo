@@ -3,6 +3,7 @@ import type {
   AgentElicitationResponse,
   AgentPermissionResponse,
   AgentSessionConfigOption,
+  AgentSessionControlsSnapshot,
   AsyncTaskRecord,
   ConversationRowOp,
   ConversationSessionGoal,
@@ -103,6 +104,7 @@ type Slot = {
   connectionId?: string;
   retiredConnectionIds?: Set<string>;
   bindGeneration?: number;
+  reestablishGeneration?: number;
   keepalive?: () => void;
   controller: Controller | null;
 };
@@ -133,6 +135,7 @@ export type ConversationTimelineView = {
   refresh: () => void;
   resetAndReload: () => Promise<void>;
   reconnectAndReload: () => Promise<void>;
+  rebindAndReload: () => Promise<void>;
   cancel: (reason?: string) => Promise<void>;
   respondPermission: (
     permissionId: string,
@@ -250,6 +253,7 @@ const EMPTY_VIEW: ConversationTimelineView = {
   refresh: () => undefined,
   resetAndReload: () => Promise.resolve(),
   reconnectAndReload: () => Promise.resolve(),
+  rebindAndReload: () => Promise.resolve(),
   cancel: () => Promise.resolve(),
   respondPermission: () => Promise.resolve(),
   respondQuestion: () => Promise.resolve(),
@@ -477,6 +481,11 @@ export function beginConversationEngineHandoff(
     targetAgentKey,
     startedAt: new Date().toISOString(),
   });
+  const existingSlot = slots.get(id);
+  if (existingSlot) {
+    existingSlot.reestablishGeneration =
+      (existingSlot.reestablishGeneration ?? 0) + 1;
+  }
   syncConversationSelectedAgent(id, normalized, {
     deferBind: true,
     forceInvalidate: options?.forceInvalidate ?? true,
@@ -552,6 +561,14 @@ export function syncConversationSelectedAgent(
     if (forceInvalidate || deferBind) {
       const slot = slots.get(id);
       if (slot) {
+        if (slot.connectionId) {
+          (slot.retiredConnectionIds ??= new Set()).add(slot.connectionId);
+          slot.connectionId = undefined;
+        }
+        slot.connectionSequence = undefined;
+        slot.connectionStatus = undefined;
+        slot.keepalive?.();
+        slot.keepalive = undefined;
         slot.bindReady = !deferBind && slot.refs > 0;
         setSlotConnecting(slot, deferBind, { resetSince: deferBind });
         slot.bindGeneration = (slot.bindGeneration ?? 0) + 1;
@@ -932,7 +949,7 @@ function startController(conversationId: string, slot: Slot): void {
         nextStatus === 'connecting' || nextStatus === 'recovering'
       );
       current.bindReady =
-        nextStatus === 'closed'
+        nextStatus === 'closed' || nextStatus === 'disconnected'
           ? !pendingEngineHandoffs.has(conversationId)
           : false;
       current.bindGeneration = (current.bindGeneration ?? 0) + 1;
@@ -943,14 +960,10 @@ function startController(conversationId: string, slot: Slot): void {
     }
     if (envelope.event.kind === 'connection_status_changed') {
       current.connectionStatus = envelope.event.snapshot.status;
-      if (connectionChanged) {
-        setSlotConnecting(
-          current,
-          current.connectionStatus === 'connecting' ||
-            current.connectionStatus === 'recovering'
-        );
-        notify(conversationId);
-      }
+      setSlotConnecting(current, false);
+      current.bindReady = !pendingEngineHandoffs.has(conversationId);
+      startKeepalive(conversationId, current);
+      notify(conversationId);
       return;
     }
     if (connectionChanged) {
@@ -1103,6 +1116,9 @@ function loadDetail(
   const fromIndex =
     !forceReplaceWindow && loaded?.loadedToStart ? 0 : undefined;
   const storedHash = forceReplaceWindow ? null : (loaded?.prefixHash ?? null);
+  const clearGapLock = () => {
+    controller.gapFetchedFor = null;
+  };
   ensureLive(conversationId, controller);
   dispatch({ type: 'load_start', conversationId });
   const requested = conversationApi.detail(
@@ -1119,6 +1135,7 @@ function loadDetail(
           conversationId,
           error: 'Conversation not found',
         });
+        clearGapLock();
         return;
       }
       let resolved = detail;
@@ -1156,6 +1173,36 @@ function loadDetail(
         detail: effectiveDetail,
         forceReplaceWindow,
       });
+      clearGapLock();
+      const slot = slots.get(conversationId);
+      if (slot && !pendingHandoff) {
+        const connectionRow = effectiveDetail.timeline.rows.find(
+          (row) =>
+            row.row_id === 'status:agent-connection' &&
+            row.row.kind === 'session_notice' &&
+            row.row.notice.connection_status != null
+        );
+        const connStatus =
+          connectionRow?.row.kind === 'session_notice'
+            ? connectionRow.row.notice.connection_status
+            : null;
+        if (connStatus) {
+          if (!slot.connectionStatus) {
+            slot.connectionStatus = connStatus.status;
+          }
+          if (!slot.connectionId && connStatus.connection_id) {
+            slot.connectionId = connStatus.connection_id;
+          }
+          if (
+            connStatus.status === 'ready' &&
+            connStatus.bound &&
+            !slot.keepalive &&
+            slot.refs > 0
+          ) {
+            startKeepalive(conversationId, slot);
+          }
+        }
+      }
       const detailCursor = toBigIntSeq(
         (resolved.timeline as { row_ops_cursor?: unknown }).row_ops_cursor ??
           resolved.timeline.last_sequence,
@@ -1181,6 +1228,7 @@ function loadDetail(
       if (controller.stopped || controller.loadEpoch !== epoch) return;
       controller.preDetailBatches = [];
       report(conversationId, error);
+      clearGapLock();
     });
 }
 
@@ -1360,12 +1408,13 @@ async function backfillSmallGap(
     }
   } catch (error: unknown) {
     if (controller.stopped || controller.loadEpoch !== epoch) return;
-    controller.gapFetchedFor = null;
     if (isUnimplementedGapError(error)) {
+      controller.gapFetchedFor = null;
       await loadDetail(conversationId, controller);
       return;
     }
     report(conversationId, error);
+    controller.gapFetchedFor = null;
   }
 }
 
@@ -1380,7 +1429,9 @@ function watchGap(conversationId: string, controller: Controller): void {
   controller.gapFetchedFor = gap.expectedSequence;
   const gapSize = gap.receivedSequence - gap.expectedSequence;
   if (gapSize > SMALL_SEQUENCE_GAP_MAX) {
-    void loadDetail(conversationId, controller, { forceReplaceWindow: true });
+    void loadDetail(conversationId, controller, {
+      forceReplaceWindow: true,
+    });
     return;
   }
   void backfillSmallGap(conversationId, controller, gap.expectedSequence - 1n);
@@ -1406,7 +1457,12 @@ async function resetAndReload(conversationId: string): Promise<void> {
   await loadDetail(conversationId, controller);
 }
 
-async function reconnectAndReload(conversationId: string): Promise<void> {
+async function reestablishAndReload(
+  conversationId: string,
+  fetchControls: (
+    conversationId: string
+  ) => Promise<AgentSessionControlsSnapshot>
+): Promise<void> {
   const slot = slots.get(conversationId);
   if (!slot?.controller) return;
   if (slot.connectionId) {
@@ -1419,26 +1475,30 @@ async function reconnectAndReload(conversationId: string): Promise<void> {
   slot.keepalive = undefined;
   slot.bindGeneration = (slot.bindGeneration ?? 0) + 1;
   const bindGeneration = slot.bindGeneration;
+  slot.reestablishGeneration = (slot.reestablishGeneration ?? 0) + 1;
+  const reestablishGeneration = slot.reestablishGeneration;
   slot.bindReady = false;
   setSlotConnecting(slot, true, { resetSince: true });
   notify(conversationId);
   try {
-    const controls = await conversationApi.ensureSessionControls(
-      conversationId,
-      { reload: true }
-    );
+    const controls = await fetchControls(conversationId);
     const current = slots.get(conversationId);
-    const generationMatched = (current?.bindGeneration ?? 0) === bindGeneration;
+    const sameReestablish =
+      (current?.reestablishGeneration ?? 0) === reestablishGeneration;
+    const generationMatched =
+      sameReestablish && (current?.bindGeneration ?? 0) === bindGeneration;
     const canRecoverReadyBind =
+      sameReestablish &&
       current === slot &&
       current.refs > 0 &&
-      !current.bindReady &&
       !pendingEngineHandoffs.has(conversationId) &&
-      current.connectionStatus === 'ready';
+      (current.connectionStatus === 'ready' ||
+        current.connectionStatus === 'connecting');
     if (
       !current ||
       current !== slot ||
       current.refs <= 0 ||
+      pendingEngineHandoffs.has(conversationId) ||
       (!generationMatched && !canRecoverReadyBind)
     ) {
       if (
@@ -1466,11 +1526,21 @@ async function reconnectAndReload(conversationId: string): Promise<void> {
       await loadDetail(conversationId, current.controller);
   } catch (error: unknown) {
     const current = slots.get(conversationId);
+    const sameReestablish =
+      (current?.reestablishGeneration ?? 0) === reestablishGeneration;
+    const generationMatched =
+      sameReestablish && (current?.bindGeneration ?? 0) === bindGeneration;
+    const onlyIntermediateConnecting =
+      sameReestablish &&
+      current === slot &&
+      !current.bindReady &&
+      current.connectionStatus === 'connecting';
     if (
       !current ||
       current !== slot ||
       current.refs <= 0 ||
-      (current.bindGeneration ?? 0) !== bindGeneration
+      pendingEngineHandoffs.has(conversationId) ||
+      (!generationMatched && !onlyIntermediateConnecting)
     ) {
       if (
         current === slot &&
@@ -1488,6 +1558,18 @@ async function reconnectAndReload(conversationId: string): Promise<void> {
     notify(conversationId);
     report(conversationId, error);
   }
+}
+
+async function reconnectAndReload(conversationId: string): Promise<void> {
+  await reestablishAndReload(conversationId, (id) =>
+    conversationApi.ensureSessionControls(id, { reload: true })
+  );
+}
+
+async function rebindAndReload(conversationId: string): Promise<void> {
+  await reestablishAndReload(conversationId, (id) =>
+    conversationApi.rebindSession(id)
+  );
 }
 
 async function loadOlder(conversationId: string): Promise<void> {
@@ -1618,6 +1700,7 @@ function buildView(
     },
     resetAndReload: () => resetAndReload(conversationId),
     reconnectAndReload: () => reconnectAndReload(conversationId),
+    rebindAndReload: () => rebindAndReload(conversationId),
     cancel: (reason) => conversationApi.cancel({ conversationId, reason }),
     respondPermission: (permissionId, response) =>
       conversationApi.respondPermission({

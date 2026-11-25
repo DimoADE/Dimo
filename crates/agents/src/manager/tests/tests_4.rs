@@ -1,116 +1,6 @@
 use super::*;
 
 #[tokio::test]
-async fn async_task_and_prompt_suggestion_ext_notifications_route_to_session_controls() {
-    let session_id = AgentSessionId::new();
-    let (event_tx, mut event_rx) = manager_event_channel();
-    let runner = dummy_runner_for_agent("claude_code", event_tx.clone());
-    let bridge = AcpClientBridge::new(
-        AgentConnectionId::new(),
-        AgentId::parse("claude_code").unwrap(),
-        event_tx,
-        Arc::new(RwLock::new(HashMap::from([(
-            session_id,
-            "acp-claude".into(),
-        )]))),
-        Arc::new(RwLock::new(HashMap::new())),
-        Arc::new(Mutex::new(HashMap::new())),
-        Arc::new(Mutex::new(HashMap::new())),
-        Arc::new(Mutex::new(AgentAutoApproveMode::default())),
-        Arc::new(Mutex::new(HashMap::new())),
-        Arc::new(Mutex::new(Instant::now())),
-        Arc::new(Mutex::new(GrokSubagentTracker::default())),
-        Arc::new(Mutex::new(GrokMcpTracker::default())),
-        Arc::new(Mutex::new(None)),
-        PathBuf::from("C:/workspace"),
-        HashMap::new(),
-        runner.clone(),
-    );
-
-    let spawned_raw = serde_json::value::to_raw_value(&serde_json::json!({
-        "sessionId": "acp-claude",
-        "update": {
-            "sessionUpdate": "async_task_spawned",
-            "taskId": "task-1",
-            "name": "cargo test",
-            "taskType": "shell",
-            "state": "running",
-            "canStop": true
-        }
-    }))
-    .unwrap();
-    bridge
-        .handle_ext_notification(acp::schema::v1::ExtNotification::new(
-            AIR_SESSION_UPDATE_METHOD,
-            spawned_raw.into(),
-        ))
-        .await
-        .unwrap();
-
-    let task_event = event_rx.try_recv().expect("AsyncTasksUpdated");
-    match task_event.event {
-        AgentEvent::AsyncTasksUpdated { tasks } => {
-            assert_eq!(tasks.len(), 1);
-            assert_eq!(tasks[0].id, "task-1");
-            assert_eq!(tasks[0].name.as_deref(), Some("cargo test"));
-            assert!(tasks[0].can_stop);
-        }
-        other => panic!("expected AsyncTasksUpdated, got {other:?}"),
-    }
-
-    let suggestion_raw = serde_json::value::to_raw_value(&serde_json::json!({
-        "sessionId": "acp-claude",
-        "update": {
-            "sessionUpdate": "prompt_suggestion_update",
-            "_meta": {
-                "promptSuggestions": {
-                    "version": 1,
-                    "suggestions": [{ "text": "Commit the changes" }]
-                }
-            }
-        }
-    }))
-    .unwrap();
-    bridge
-        .handle_ext_notification(acp::schema::v1::ExtNotification::new(
-            AIR_SESSION_UPDATE_METHOD,
-            suggestion_raw.clone().into(),
-        ))
-        .await
-        .unwrap();
-    assert!(
-        event_rx.try_recv().is_err(),
-        "headless sessions without wants_prompt_suggestions must ignore suggestions"
-    );
-
-    runner
-        .record_wants_prompt_suggestions(session_id, true)
-        .await;
-    bridge
-        .handle_ext_notification(acp::schema::v1::ExtNotification::new(
-            AIR_SESSION_UPDATE_METHOD,
-            suggestion_raw.into(),
-        ))
-        .await
-        .unwrap();
-
-    let suggestion_event = event_rx.try_recv().expect("PromptSuggestionUpdated");
-    match suggestion_event.event {
-        AgentEvent::PromptSuggestionUpdated { suggestion } => {
-            assert_eq!(suggestion.as_deref(), Some("Commit the changes"));
-        }
-        other => panic!("expected PromptSuggestionUpdated, got {other:?}"),
-    }
-
-    let controls = runner.session_controls_snapshot(session_id).await;
-    assert_eq!(controls.async_tasks.len(), 1);
-    assert_eq!(
-        controls.prompt_suggestion.as_deref(),
-        Some("Commit the changes")
-    );
-}
-
-#[tokio::test]
 async fn in_memory_goal_control_orchestration_respects_claude_and_codex_rules() {
     let (event_tx, _event_rx) = manager_event_channel();
     let manager = AgentConnectionManager::new_with_driver(event_tx, false);
@@ -607,12 +497,20 @@ async fn run_prompt_completes_cleanly_when_antigravity_emits_websocket_1000_ok_a
                 )
                 .await
                 .expect("run_prompt should settle cleanly");
-            assert_eq!(outcome, RunPromptOutcome::Settled);
+            assert_eq!(
+                outcome,
+                RunPromptOutcome::Closed,
+                "dead Antigravity adapter connection must retire cleanly after completing the turn"
+            );
             Ok(())
         })
         .await;
     assert!(outcome.is_ok());
     agent_task.await.unwrap();
+    assert!(
+        !runner.session_map.read().await.contains_key(&session_id),
+        "retired Antigravity connection must clear its dead session mapping"
+    );
 
     let mut collected = Vec::new();
     while let Ok(ev) = event_rx.try_recv() {
@@ -637,6 +535,15 @@ async fn run_prompt_completes_cleanly_when_antigravity_emits_websocket_1000_ok_a
             .iter()
             .any(|ev| matches!(ev, AgentEvent::PromptFinished { .. })),
         "must emit PromptFinished so the turn completes normally"
+    );
+    assert!(
+        collected.iter().any(|ev| matches!(
+            ev,
+            AgentEvent::ConnectionStatusChanged { snapshot }
+                if snapshot.status == AgentConnectionStatus::Disconnected
+                    && snapshot.status_message.is_none()
+        )),
+        "must emit clean Disconnected status so the next turn reconnects fresh"
     );
 }
 
@@ -1260,4 +1167,296 @@ async fn acp_drifted_mode_pushes_preserve_confirmed_mode_until_retry_budget_exha
     );
     let snap = runner.session_controls_snapshot(session_id).await;
     assert_eq!(snap.current_mode.as_deref(), Some("agent"));
+}
+
+#[tokio::test]
+async fn native_turn_controls_fallback_to_preferred_controls() {
+    let session_id = AgentSessionId::new();
+    let (event_tx, _event_rx) = manager_event_channel();
+    let runner = dummy_runner_for_agent("claude_code", event_tx);
+    let driver = crate::engine::ClaudeNativeDriver::new();
+
+    {
+        let mut prefs = runner.preferred_controls.write().await;
+        prefs.insert(
+            session_id,
+            crate::SessionControlPreferences {
+                mode: Some("plan".to_string()),
+                config: vec![
+                    AgentSessionConfigOverride {
+                        key: "model".to_string(),
+                        value: "claude-sonnet-4-6".to_string(),
+                    },
+                    AgentSessionConfigOverride {
+                        key: "reasoning_effort".to_string(),
+                        value: "high".to_string(),
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+    }
+
+    let (model, effort, mode) = runner
+        .resolve_native_turn_controls(&driver, session_id, None, &[])
+        .await;
+    assert_eq!(model.as_deref(), Some("claude-sonnet-4-6"));
+    assert_eq!(effort.as_deref(), Some("high"));
+    assert_eq!(mode.as_deref(), Some("plan"));
+
+    // Explicit per-turn override takes precedence over preferred_controls,
+    // including effort aliases like thought_level.
+    let (override_model, override_effort, override_mode) = runner
+        .resolve_native_turn_controls(
+            &driver,
+            session_id,
+            Some("acceptEdits"),
+            &[AgentSessionConfigOverride {
+                key: "thought_level".to_string(),
+                value: "low".to_string(),
+            }],
+        )
+        .await;
+    assert_eq!(override_model.as_deref(), Some("claude-sonnet-4-6"));
+    assert_eq!(override_effort.as_deref(), Some("low"));
+    assert_eq!(override_mode.as_deref(), Some("acceptEdits"));
+}
+
+#[tokio::test]
+async fn native_request_retrying_forwards_activity_and_progress_clears_retry_state() {
+    let session_id = AgentSessionId::new();
+    let prompt_id = AgentPromptId::new();
+    let (event_tx, mut event_rx) = manager_event_channel();
+    let runner = dummy_runner_for_agent("codex", event_tx);
+    let driver: Arc<dyn crate::engine::NativeEngineDriver> =
+        Arc::new(crate::engine::CodexNativeDriver::new());
+    let handle = crate::engine::EngineHandle::new(
+        uuid::Uuid::new_v4(),
+        crate::engine::NativeEngineKind::CodexNative,
+        uuid::Uuid::nil(),
+        PathBuf::from("C:/workspace"),
+        false,
+        Some("thr-retry-1".to_string()),
+    );
+    let mut char_acc = 0usize;
+    let mut state = runner::native_events::NativeTurnState::default();
+
+    let finished = runner
+        .handle_native_stream_event(
+            &driver,
+            &handle,
+            false,
+            None,
+            session_id,
+            prompt_id,
+            crate::engine::EngineEvent::RequestRetrying {
+                prompt_id: Some(prompt_id.0.to_string()),
+                session_id: Some("thr-retry-1".into()),
+                attempt: Some(2),
+                max_attempts: Some(5),
+                delay_ms: Some(3000),
+                reason: Some("Reconnecting... 2/5".into()),
+                code: Some("503".into()),
+            },
+            &mut char_acc,
+            &mut state,
+        )
+        .await;
+    assert!(!finished);
+    assert!(state.in_retry);
+
+    let mut saw_retry = false;
+    while let Ok(ev) = event_rx.try_recv() {
+        if let AgentEvent::RequestActivity { activity, .. } = ev.event
+            && activity.phase == crate::request_status::RequestPhase::Retrying
+        {
+            let retry = activity.retry.expect("retry payload");
+            assert_eq!(retry.attempt, Some(2));
+            assert_eq!(retry.max_attempts, Some(5));
+            assert_eq!(retry.delay_ms, Some(3000));
+            assert_eq!(retry.code.as_deref(), Some("503"));
+            saw_retry = true;
+        }
+    }
+    assert!(
+        saw_retry,
+        "RequestRetrying must emit AgentEvent::RequestActivity"
+    );
+
+    // Once real output arrives, retry state clears so future silence can trigger WaitingModel.
+    runner
+        .handle_native_stream_event(
+            &driver,
+            &handle,
+            false,
+            None,
+            session_id,
+            prompt_id,
+            crate::engine::EngineEvent::AssistantTextDelta {
+                prompt_id: Some(prompt_id.0.to_string()),
+                session_id: Some("thr-retry-1".into()),
+                message_id: Some("msg-1".into()),
+                text: "Back online.".into(),
+            },
+            &mut char_acc,
+            &mut state,
+        )
+        .await;
+    assert!(!state.in_retry);
+    assert!(!state.silence_waiting_emitted);
+}
+
+#[tokio::test]
+async fn acp_session_overrides_respects_cancel_instead_of_hanging_forever() {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+
+    let session_id = AgentSessionId::new();
+    let prompt_id = AgentPromptId::new();
+    let (event_tx, mut event_rx) = manager_event_channel();
+    let runner = dummy_runner_for_agent("opencode", event_tx.clone());
+    runner
+        .session_map
+        .write()
+        .await
+        .insert(session_id, "acp-hang-override".to_string());
+    let controls = SessionControlState {
+        modes: Some(SessionModeState::new(
+            "agent",
+            vec![
+                acp::schema::v1::SessionMode::new("agent", "Agent"),
+                acp::schema::v1::SessionMode::new("plan", "Plan"),
+            ],
+        )),
+        config_options: vec![
+            AcpSessionConfigOption::select(
+                "mode",
+                "Mode",
+                "agent",
+                SessionConfigSelectOptions::Ungrouped(vec![
+                    SessionConfigSelectOption::new("agent", "Agent"),
+                    SessionConfigSelectOption::new("plan", "Plan"),
+                ]),
+            )
+            .category(SessionConfigOptionCategory::Mode),
+        ],
+        mode_uses_set_mode: true,
+        ..Default::default()
+    };
+    runner
+        .session_controls
+        .write()
+        .await
+        .insert(session_id, controls);
+
+    let (client_to_agent, agent_from_client) = tokio::io::duplex(64 * 1024);
+    let (_agent_to_client, client_from_agent) = tokio::io::duplex(64 * 1024);
+
+    // Read the incoming session/set_mode request and intentionally never reply.
+    let (override_seen_tx, override_seen_rx) = oneshot::channel();
+    let agent_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(agent_from_client);
+        let mut line = String::new();
+        if reader.read_line(&mut line).await.is_ok() {
+            let _ = override_seen_tx.send(line);
+        }
+        std::future::pending::<()>().await;
+    });
+
+    let transport =
+        acp::ByteStreams::new(client_to_agent.compat_write(), client_from_agent.compat());
+    let bridge = AcpClientBridge::new(
+        runner.snapshot.connection_id,
+        runner.snapshot.agent_id.clone(),
+        event_tx,
+        Arc::clone(&runner.session_map),
+        Arc::clone(&runner.session_controls),
+        Arc::clone(&runner.pending_permissions),
+        Arc::clone(&runner.pending_elicitations),
+        Arc::clone(&runner.auto_approve_mode),
+        Arc::clone(&runner.stream_dedup),
+        Arc::clone(&runner.last_activity),
+        Arc::clone(&runner.grok_subagent),
+        Arc::clone(&runner.grok_mcp),
+        Arc::clone(&runner.pending_session_id),
+        runner.snapshot.working_dir.clone(),
+        runner.snapshot.env.clone(),
+        runner.clone(),
+    );
+    let (cmd_tx, mut cmd_rx) = mpsc::channel(8);
+    let runner_for_conn = runner.clone();
+    acp::Client
+        .builder()
+        .name("Dimo")
+        .on_receive_notification(
+            async move |notification: AgentNotification, _cx| {
+                bridge.handle_agent_notification(notification).await
+            },
+            acp::on_receive_notification!(),
+        )
+        .connect_with(transport, |conn: ConnectionTo<Agent>| async move {
+            let cancel_task = tokio::spawn(async move {
+                let seen = tokio::time::timeout(Duration::from_secs(2), override_seen_rx)
+                    .await
+                    .expect("agent should receive session/set_mode")
+                    .expect("override_seen channel");
+                assert!(
+                    seen.contains("session/set_mode"),
+                    "expected set_mode, got {seen}"
+                );
+                let (ack_tx, ack_rx) = oneshot::channel();
+                cmd_tx
+                    .send(AgentConnectionCommand::Cancel {
+                        session_id,
+                        prompt_id,
+                        result_tx: ack_tx,
+                    })
+                    .await
+                    .expect("send cancel");
+                assert!(ack_rx.await.expect("cancel ack"));
+            });
+
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(3),
+                runner_for_conn.run_prompt(
+                    &conn,
+                    RunPromptRequest {
+                        acp_session_id: "acp-hang-override".to_string(),
+                        session_id,
+                        prompt_id,
+                        blocks: vec![AgentContentBlock::Text {
+                            text: "hello".into(),
+                        }],
+                        display_blocks: None,
+                        mode_override: Some("plan".into()),
+                        config_overrides: Vec::new(),
+                    },
+                    &mut cmd_rx,
+                ),
+            )
+            .await
+            .expect("cancel during hanging session/set_mode must settle promptly")
+            .expect("run_prompt ok");
+            assert_eq!(outcome, RunPromptOutcome::RetireConnection);
+            cancel_task.await.expect("cancel task");
+            Ok(())
+        })
+        .await
+        .expect("connect_with");
+
+    agent_task.abort();
+
+    let mut saw_cancelled_finish = false;
+    while let Ok(ev) = event_rx.try_recv() {
+        if let AgentEvent::PromptFinished { finished } = ev.event
+            && finished.prompt_id == prompt_id
+            && finished.stop_reason.as_deref() == Some("cancelled")
+        {
+            saw_cancelled_finish = true;
+        }
+    }
+    assert!(
+        saw_cancelled_finish,
+        "cancelling during hanging session overrides must finish prompt as cancelled"
+    );
 }

@@ -30,6 +30,7 @@ const SIDECAR_RESTARTED_EVENT = 'sidecar-restarted';
 const SHELL_ONLY_EVENTS = new Set<string>([
   'desktop-toast',
   'desktop-toast-activated',
+  'desktop-open-file',
   'dimo://modelrouter-import',
   SIDECAR_READY_EVENT,
   SIDECAR_EXITED_EVENT,

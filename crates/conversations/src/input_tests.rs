@@ -1137,3 +1137,210 @@ fn rebuilds_ten_thousand_input_events_with_one_thousand_queued_inputs() {
         elapsed.as_millis()
     );
 }
+
+#[tokio::test]
+async fn converting_queued_input_to_delayed_cancels_queued_and_keeps_delayed_active() {
+    let pool = setup_pool().await;
+    let conversation_id = Uuid::new_v4();
+    ConversationRecord::create(
+        &pool,
+        conversation_id,
+        CreateConversationRecord {
+            workspace_id: Uuid::new_v4(),
+            task_id: None,
+            title: None,
+            initial_prompt: None,
+            status: None,
+            executor: Some("codex"),
+        },
+    )
+    .await
+    .expect("create conversation");
+    let control = ConversationInputControl::new(pool.clone());
+
+    let queued = control
+        .submit(SubmitConversationInput {
+            conversation_id,
+            operation_id: Uuid::new_v4(),
+            payload: payload("run later"),
+            principal: serde_json::json!({ "kind": "test" }),
+        })
+        .await
+        .expect("submit queued input");
+    assert_eq!(queued.status, ConversationInputStatus::Queued);
+
+    let converted = control
+        .update(UpdateConversationInput {
+            conversation_id,
+            input_id: queued.id,
+            operation_id: Uuid::new_v4(),
+            expected_revision: queued.revision,
+            payload: payload("run later edited"),
+            delay_seconds: Some(120),
+        })
+        .await
+        .expect("convert queued input to delayed");
+    assert_eq!(converted.id, queued.id);
+    assert_eq!(converted.status, ConversationInputStatus::Scheduled);
+    assert!(converted.deliver_at.is_some());
+    assert_eq!(converted.payload.text, "run later edited");
+
+    // Delayed row must remain scheduled while the original queued row is cancelled.
+    let delayed_status: String =
+        sqlx::query_scalar("SELECT status FROM conversation_delayed_inputs WHERE id = ?")
+            .bind(queued.id.to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("delayed row exists");
+    assert_eq!(delayed_status, "scheduled");
+
+    let queued_status: String =
+        sqlx::query_scalar("SELECT status FROM conversation_inputs WHERE id = ?")
+            .bind(queued.id)
+            .fetch_one(&pool)
+            .await
+            .expect("queued row exists");
+    assert_eq!(queued_status, "cancelled");
+
+    // No ghost queued entry should remain claimable.
+    assert!(
+        control
+            .claim_next(conversation_id, Duration::seconds(30))
+            .await
+            .expect("claim_next")
+            .is_none(),
+        "converted queued input must not remain claimable"
+    );
+
+    // find() and list() must agree on a single Scheduled entry.
+    let found = control
+        .find(conversation_id, queued.id)
+        .await
+        .expect("find");
+    assert_eq!(found.status, ConversationInputStatus::Scheduled);
+
+    let listed = control.list(conversation_id).await.expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, queued.id);
+    assert_eq!(listed[0].status, ConversationInputStatus::Scheduled);
+
+    // Explicit cancel afterwards cancels the delayed record cleanly.
+    let cancelled = control
+        .cancel(CancelConversationInput {
+            conversation_id,
+            input_id: queued.id,
+            operation_id: Uuid::new_v4(),
+            expected_revision: converted.revision,
+        })
+        .await
+        .expect("cancel converted delayed input");
+    assert_eq!(cancelled.status, ConversationInputStatus::Cancelled);
+
+    let delayed_status_after: String =
+        sqlx::query_scalar("SELECT status FROM conversation_delayed_inputs WHERE id = ?")
+            .bind(queued.id.to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("delayed row after cancel");
+    assert_eq!(delayed_status_after, "cancelled");
+}
+
+#[tokio::test]
+async fn cancel_scheduled_delayed_cancels_only_target_conversation_delayed_inputs() {
+    let pool = setup_pool().await;
+    let conv_a = Uuid::new_v4();
+    let conv_b = Uuid::new_v4();
+    for cid in [conv_a, conv_b] {
+        ConversationRecord::create(
+            &pool,
+            cid,
+            CreateConversationRecord {
+                workspace_id: Uuid::new_v4(),
+                task_id: None,
+                title: None,
+                initial_prompt: None,
+                status: None,
+                executor: Some("codex"),
+            },
+        )
+        .await
+        .expect("create conversation");
+    }
+    let control = ConversationInputControl::new(pool.clone());
+
+    let make_delayed = |cid: Uuid, text: &'static str| {
+        let control = control.clone();
+        async move {
+            let queued = control
+                .submit(SubmitConversationInput {
+                    conversation_id: cid,
+                    operation_id: Uuid::new_v4(),
+                    payload: payload(text),
+                    principal: serde_json::json!({ "kind": "test" }),
+                })
+                .await
+                .expect("submit queued");
+            control
+                .update(UpdateConversationInput {
+                    conversation_id: cid,
+                    input_id: queued.id,
+                    operation_id: Uuid::new_v4(),
+                    expected_revision: queued.revision,
+                    payload: payload(text),
+                    delay_seconds: Some(300),
+                })
+                .await
+                .expect("convert to delayed")
+        }
+    };
+
+    let a1 = make_delayed(conv_a, "scheduled a1").await;
+    let a2 = make_delayed(conv_a, "scheduled a2").await;
+    let b1 = make_delayed(conv_b, "scheduled b1").await;
+
+    // Also insert a collaboration_space_post row sharing conv_a as conversation_id;
+    // cancel_scheduled_delayed must not touch space-post schedules.
+    let space_post_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO conversation_delayed_inputs
+         (id, conversation_id, operation_id, payload_json, payload_digest, principal_json, deliver_at, status, created_at)
+         VALUES (?, ?, ?, '{}', 'space-post-digest', '{\"kind\":\"collaboration_space_post\"}', datetime('now', '+5 minutes'), 'scheduled', datetime('now'))",
+    )
+    .bind(&space_post_id)
+    .bind(conv_a.to_string())
+    .bind(Uuid::new_v4().to_string())
+    .execute(&pool)
+    .await
+    .expect("insert space post");
+
+    let cancelled = control
+        .cancel_scheduled_delayed(conv_a)
+        .await
+        .expect("cancel scheduled delayed");
+    assert_eq!(cancelled, 2);
+
+    for id in [a1.id, a2.id] {
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM conversation_delayed_inputs WHERE id = ?")
+                .bind(id.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "cancelled");
+    }
+    let b1_status: String =
+        sqlx::query_scalar("SELECT status FROM conversation_delayed_inputs WHERE id = ?")
+            .bind(b1.id.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(b1_status, "scheduled");
+
+    let space_status: String =
+        sqlx::query_scalar("SELECT status FROM conversation_delayed_inputs WHERE id = ?")
+            .bind(&space_post_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(space_status, "scheduled");
+}

@@ -20,9 +20,10 @@ import { remarkFilterRawHtml } from './remarkFilterRawHtml';
 import { remarkGithubAlerts } from './remarkGithubAlerts';
 import { normalizeOverIndentedNestedLists } from './remarkNormalizeListIndentation';
 
-const WINDOWS_DRIVE_LETTERS = Array.from({ length: 26 }, (_, idx) =>
-  String.fromCharCode(97 + idx)
-);
+const WINDOWS_DRIVE_LETTERS = Array.from({ length: 26 }, (_, idx) => [
+  String.fromCharCode(97 + idx),
+  String.fromCharCode(65 + idx),
+]).flat();
 
 const SAFE_DATA_IMAGE_REGEX =
   /^data:image\/(?:png|jpe?g|gif|webp|bmp|ico|avif);/i;

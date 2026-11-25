@@ -1132,10 +1132,15 @@ export function useTimelineScrollController({
         const visualBottom = visualTop + liveWindowHeight;
 
         if (followTailRef.current) {
+          const bottomPadding =
+            Number.parseFloat(getComputedStyle(container).paddingBottom) || 0;
           const targetTop =
             win && liveWindowHeight > 1
               ? Math.min(
-                  Math.max(0, visualBottom - currentViewportHeight),
+                  Math.max(
+                    0,
+                    visualBottom + bottomPadding - currentViewportHeight
+                  ),
                   maxScroll
                 )
               : maxScroll;
@@ -1474,6 +1479,8 @@ export function useTimelineScrollController({
     }
     const liveWindowHeight =
       virtualWindowRef.current?.offsetHeight || paintedWindowHeight;
+    const bottomPadding =
+      Number.parseFloat(getComputedStyle(container).paddingBottom) || 0;
     const next = scrollTopToRevealVirtualWindow({
       scrollTop: container.scrollTop,
       viewportHeight: container.clientHeight,
@@ -1481,6 +1488,7 @@ export function useTimelineScrollController({
       windowStart: virtualRows[0]?.start,
       scrollMargin,
       windowHeight: liveWindowHeight,
+      bottomPadding,
       followTail: followTailRef.current,
     });
     if (next == null) {
@@ -1553,8 +1561,8 @@ export function useTimelineScrollController({
   useImperativeHandle(
     ref,
     () => ({
-      scrollToBottom() {
-        scrollToBottom(scrollBehavior);
+      scrollToBottom(behavior?: ScrollBehavior) {
+        scrollToBottom(behavior ?? scrollBehavior);
       },
       scrollToIndex(index, options) {
         const shouldDetach = (options?.behavior ?? scrollBehavior) === 'smooth';

@@ -376,3 +376,90 @@ async fn missing_acp_program_fails_with_actionable_error_not_raw_enoent() {
         "raw spawn ENOENT must not leak: {message}"
     );
 }
+
+#[tokio::test]
+async fn prepare_session_emits_session_scoped_connecting_event_for_fresh_and_rebound_connections() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let runtime = AgentRuntime::new_with_driver(Arc::new(TestSink { tx }), false);
+    let agent_id = AgentId::parse("codex").unwrap();
+    let workspace_id = Uuid::new_v4();
+    let working_dir = PathBuf::from("fixture-workspace/connecting-session-id");
+    let session_id = AgentSessionId::new();
+
+    let prepared = runtime
+        .prepare_session(EnsureAgentSessionInput {
+            agent_id: agent_id.clone(),
+            launch_lock: fixture_launch_lock(agent_id.clone()),
+            workspace_id,
+            working_dir: working_dir.clone(),
+            additional_directories: Vec::new(),
+            session_id,
+            acp_session_id: String::new(),
+            auto_approve_mode: AgentAutoApproveMode::Off,
+            env: HashMap::new(),
+            preferences: Default::default(),
+        })
+        .await
+        .unwrap();
+
+    let mut initial_envelopes = Vec::new();
+    while let Ok(envelope) = rx.try_recv() {
+        initial_envelopes.push(envelope);
+    }
+    assert!(
+        initial_envelopes.iter().any(|env| {
+            env.connection_id == prepared.session.connection_id
+                && env.session_id == Some(session_id)
+                && matches!(
+                    &env.event,
+                    AgentEvent::ConnectionStatusChanged { snapshot }
+                        if snapshot.status == agents::AgentConnectionStatus::Connecting
+                )
+        }),
+        "expected Connecting ConnectionStatusChanged with session_id={session_id:?}, got: {initial_envelopes:?}"
+    );
+
+    // Simulate idle reap disconnecting the connection while keeping session history.
+    runtime
+        .disconnect(prepared.session.connection_id)
+        .await
+        .unwrap();
+    while rx.try_recv().is_ok() {}
+
+    let (rebound_session, _) = runtime
+        .resume_session(ResumeAgentSessionInput {
+            agent_id: agent_id.clone(),
+            launch_lock: fixture_launch_lock(agent_id),
+            workspace_id,
+            working_dir,
+            additional_directories: Vec::new(),
+            session_id,
+            external_session_id: prepared.session.acp_session_id.clone(),
+            auto_approve_mode: AgentAutoApproveMode::Off,
+            env: HashMap::new(),
+            preferences: Default::default(),
+        })
+        .await
+        .unwrap();
+    assert_ne!(
+        rebound_session.connection_id,
+        prepared.session.connection_id
+    );
+
+    let mut rebound_envelopes = Vec::new();
+    while let Ok(envelope) = rx.try_recv() {
+        rebound_envelopes.push(envelope);
+    }
+    assert!(
+        rebound_envelopes.iter().any(|env| {
+            env.connection_id == rebound_session.connection_id
+                && env.session_id == Some(session_id)
+                && matches!(
+                    &env.event,
+                    AgentEvent::ConnectionStatusChanged { snapshot }
+                        if snapshot.status == agents::AgentConnectionStatus::Connecting
+                )
+        }),
+        "expected rebound Connecting event with session_id={session_id:?}, got: {rebound_envelopes:?}"
+    );
+}

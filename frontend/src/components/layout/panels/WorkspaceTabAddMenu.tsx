@@ -34,6 +34,7 @@ import { useWorkspaceOverlay } from '@/contexts/WorkspaceOverlayContext';
 import { useOptionalWorktree } from '@/contexts/WorktreeContext';
 import { isEnabledInstalledAgent } from '@/features/agents/operationalAgent';
 import { useSelectableAgents } from '@/features/agents/useSelectableAgents';
+import { isHostBrowserEngine } from '@/features/host-browser/hostBrowserEngine';
 import {
   contributionMetadata,
   usePluginHostContributions,
@@ -104,6 +105,9 @@ export function WorkspaceTabAddMenu({
   const workflowStudioLabel = t('tabCreation.workflowStudio', {
     defaultValue: 'Workflow Studio',
   });
+  const browserLabel = t('tabCreation.browser', {
+    defaultValue: 'Browser',
+  });
 
   const openWorkflowStudio = () => {
     const matchedPluginPanel = pluginPanels.find(
@@ -156,6 +160,9 @@ export function WorkspaceTabAddMenu({
       onSelect: () => void;
     }> = [];
 
+    const stripPluginPrefix = (pluginId: string, id: string) =>
+      id.startsWith(`${pluginId}:`) ? id.slice(pluginId.length + 1) : id;
+
     for (const item of pluginPanels) {
       if (item.id === 'workflow-studio') continue;
       const metadata = contributionMetadata(item);
@@ -163,13 +170,16 @@ export function WorkspaceTabAddMenu({
       const key = `${item.pluginId}:${item.id}`;
       if (seen.has(key)) continue;
       seen.add(key);
+      const label = isHostBrowserEngine(item.pluginId, metadata)
+        ? browserLabel
+        : item.label;
       items.push({
         key,
-        label: item.label,
+        label,
         icon: contributionIconComponent(icon, Puzzle),
         onSelect: () =>
           openPluginPanel({
-            title: item.label,
+            title: label,
             pluginId: item.pluginId,
             contributionId: item.id,
             icon,
@@ -179,51 +189,10 @@ export function WorkspaceTabAddMenu({
       });
     }
 
-    for (const slotItem of sdkRailSlots) {
-      if (slotItem.component || slotItem.render) continue;
-      const pluginId = slotItem.pluginId ?? 'plugin';
-      const rawId = slotItem.id.startsWith(`${pluginId}:`)
-        ? slotItem.id.slice(pluginId.length + 1)
-        : slotItem.id;
-      const key = `${pluginId}:${rawId}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const label = slotItem.label ?? slotItem.tooltip ?? rawId;
-      const iconName = slotItem.icon ?? null;
-      const opens =
-        slotItem.metadata?.opens &&
-        typeof slotItem.metadata.opens === 'object' &&
-        !Array.isArray(slotItem.metadata.opens)
-          ? (slotItem.metadata.opens as { id?: string; instance?: string })
-          : null;
-      const contributionId = typeof opens?.id === 'string' ? opens.id : rawId;
-      items.push({
-        key,
-        label,
-        icon: contributionIconComponent(iconName, Puzzle),
-        onSelect: () => {
-          if (slotItem.onActivate) {
-            void Promise.resolve(slotItem.onActivate()).catch(() => undefined);
-            return;
-          }
-          openPluginPanel({
-            title: label,
-            pluginId,
-            contributionId,
-            icon: iconName,
-            multiInstance: true,
-            instance: opens?.instance === 'new' ? 'new' : 'focus',
-          });
-        },
-      });
-    }
-
     for (const panel of sdkPanels) {
       if (panel.builtin || panel.zone === 'left') continue;
       const pluginId = panel.pluginId ?? 'plugin';
-      const rawId = panel.id.startsWith(`${pluginId}:`)
-        ? panel.id.slice(pluginId.length + 1)
-        : panel.id;
+      const rawId = stripPluginPrefix(pluginId, panel.id);
       if (rawId === 'workflow-studio') continue;
       const key = `${pluginId}:${rawId}`;
       if (seen.has(key)) continue;
@@ -245,6 +214,49 @@ export function WorkspaceTabAddMenu({
       });
     }
 
+    for (const slotItem of sdkRailSlots) {
+      if (slotItem.component || slotItem.render) continue;
+      const pluginId = slotItem.pluginId ?? 'plugin';
+      const rawId = stripPluginPrefix(pluginId, slotItem.id);
+      const opens =
+        slotItem.metadata?.opens &&
+        typeof slotItem.metadata.opens === 'object' &&
+        !Array.isArray(slotItem.metadata.opens)
+          ? (slotItem.metadata.opens as { id?: string; instance?: string })
+          : null;
+      const contributionId =
+        typeof opens?.id === 'string'
+          ? stripPluginPrefix(pluginId, opens.id)
+          : rawId;
+      if (contributionId === 'workflow-studio') continue;
+      const key = `${pluginId}:${rawId}`;
+      const targetKey = `${pluginId}:${contributionId}`;
+      if (seen.has(key) || seen.has(targetKey)) continue;
+      seen.add(key);
+      seen.add(targetKey);
+      const label = slotItem.label ?? slotItem.tooltip ?? rawId;
+      const iconName = slotItem.icon ?? null;
+      items.push({
+        key,
+        label,
+        icon: contributionIconComponent(iconName, Puzzle),
+        onSelect: () => {
+          if (slotItem.onActivate) {
+            void Promise.resolve(slotItem.onActivate()).catch(() => undefined);
+            return;
+          }
+          openPluginPanel({
+            title: label,
+            pluginId,
+            contributionId,
+            icon: iconName,
+            multiInstance: true,
+            instance: opens?.instance === 'new' ? 'new' : 'focus',
+          });
+        },
+      });
+    }
+
     for (const item of railSections) {
       const metadata = contributionMetadata(item);
       const icon = typeof metadata.icon === 'string' ? metadata.icon : null;
@@ -258,12 +270,18 @@ export function WorkspaceTabAddMenu({
               instance?: string;
             })
           : null;
-      const contributionId = typeof opens?.id === 'string' ? opens.id : item.id;
+      const contributionId =
+        typeof opens?.id === 'string'
+          ? stripPluginPrefix(item.pluginId, opens.id)
+          : item.id;
+      if (contributionId === 'workflow-studio') continue;
       const key = `${item.pluginId}:${item.id}`;
-      if (seen.has(key) || seen.has(`${item.pluginId}:${contributionId}`)) {
+      const targetKey = `${item.pluginId}:${contributionId}`;
+      if (seen.has(key) || seen.has(targetKey)) {
         continue;
       }
       seen.add(key);
+      seen.add(targetKey);
       items.push({
         key,
         label: item.label,
@@ -281,7 +299,14 @@ export function WorkspaceTabAddMenu({
     }
 
     return items;
-  }, [openPluginPanel, pluginPanels, railSections, sdkPanels, sdkRailSlots]);
+  }, [
+    browserLabel,
+    openPluginPanel,
+    pluginPanels,
+    railSections,
+    sdkPanels,
+    sdkRailSlots,
+  ]);
 
   if (!isEditorGroup(group) && !isSessionGroup(group)) {
     return null;
@@ -383,29 +408,34 @@ export function WorkspaceTabAddMenu({
         </DropdownMenuItem>
 
         <DropdownMenuSeparator />
-        <DropdownMenuLabel className="px-2 py-1 text-[11px] font-medium text-muted-foreground">
-          {t('tabCreation.sections.agents')}
-        </DropdownMenuLabel>
-        {enabledAgents.length > 0 ? (
-          enabledAgents.map((agent) => (
-            <DropdownMenuItem
-              key={agent.id}
-              onSelect={() =>
-                requestCreateAgentSessionInExecutionArea(agent.id, group.id)
-              }
-            >
-              <span aria-hidden="true" className="inline-flex shrink-0">
-                <AgentIcon agent={agent.id} className="size-4 shrink-0" />
-              </span>
-              <span className="truncate">{agent.name}</span>
-            </DropdownMenuItem>
-          ))
-        ) : (
-          <DropdownMenuItem disabled>
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger>
             <Bot />
-            {t('tabCreation.noEnabledAgents')}
-          </DropdownMenuItem>
-        )}
+            {t('tabCreation.sections.agents')}
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent className="workspace-tab-add-menu w-52 max-h-[75vh] overflow-y-auto">
+            {enabledAgents.length > 0 ? (
+              enabledAgents.map((agent) => (
+                <DropdownMenuItem
+                  key={agent.id}
+                  onSelect={() =>
+                    requestCreateAgentSessionInExecutionArea(agent.id, group.id)
+                  }
+                >
+                  <span aria-hidden="true" className="inline-flex shrink-0">
+                    <AgentIcon agent={agent.id} className="size-4 shrink-0" />
+                  </span>
+                  <span className="truncate">{agent.name}</span>
+                </DropdownMenuItem>
+              ))
+            ) : (
+              <DropdownMenuItem disabled>
+                <Bot />
+                {t('tabCreation.noEnabledAgents')}
+              </DropdownMenuItem>
+            )}
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
 
         <DropdownMenuSeparator />
         <DropdownMenuLabel className="px-2 py-1 text-[11px] font-medium text-muted-foreground">

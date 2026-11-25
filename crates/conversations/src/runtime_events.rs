@@ -256,12 +256,14 @@ impl ConversationAgentEventRecorder {
         }
         let active_binding = self.active_binding_cached(conversation_id).await?;
         let connection = envelope.connection_id.to_string();
-        if self.conversation_context.is_some()
+        if let Some(context) = &self.conversation_context
             && matches!(envelope.event, AgentEvent::SessionLinked { .. })
             && active_binding
                 .as_ref()
                 .and_then(|b| b.connection_id.as_deref())
                 != Some(connection.as_str())
+            && context.agent_runtime.live_connection_id(session_id).await
+                != Some(envelope.connection_id)
         {
             return Ok(None);
         }
@@ -721,6 +723,14 @@ impl ConversationAgentEventRecorder {
                 _ if terminal => {
                     let mut states = context.runtime_states.lock().await;
                     if let Some(state) = states.get_mut(&mapped.conversation_id) {
+                        if mapped.turn_id.is_none()
+                            || state.active_turn_id == mapped.turn_id
+                            || state.active_turn_id.is_none()
+                        {
+                            state.turn_in_flight = false;
+                            state.active_turn_id = None;
+                            state.active_prompt_id = None;
+                        }
                         state.pending_permission_id = None;
                         state.pending_question_id = None;
                     }
@@ -780,6 +790,23 @@ impl ConversationAgentEventRecorder {
         }
 
         if terminal && let Some(turn_id) = mapped.turn_id {
+            if matches!(
+                &mapped.event,
+                ConversationEvent::TurnFailed { .. }
+                    | ConversationEvent::TurnCancelled { .. }
+                    | ConversationEvent::TurnInterrupted { .. }
+            ) && let Some(context) = &self.conversation_context
+                && let Err(error) = ConversationSessionService::new(context.clone())
+                    .void_pending_turn_interactions(mapped.conversation_id, turn_id)
+                    .await
+            {
+                tracing::warn!(
+                    conversation_id = %mapped.conversation_id,
+                    %turn_id,
+                    %error,
+                    "failed to void pending interactions after terminal turn event"
+                );
+            }
             crate::handoff::settle(&self.pool, turn_id).await?;
             let (status, stop_reason, error_message) = match &mapped.event {
                 ConversationEvent::TurnCompleted { stop_reason, .. } => {
@@ -822,6 +849,7 @@ impl ConversationAgentEventRecorder {
             if !is_completed {
                 crate::collaboration::reset_space_turn_streaming_step(conversation_id);
             }
+            let should_drain_queue = should_drain_queued_inputs_after_terminal(&mapped.event);
             let pool_for_collab = self.pool.clone();
             let delivery_ctx = self.delivery_context();
             let next_input_context = self.conversation_context.clone();
@@ -855,7 +883,8 @@ impl ConversationAgentEventRecorder {
                 let _ =
                     crate::collaboration::release_member_write(&pool_for_collab, conversation_id)
                         .await;
-                if let Some(context) = next_input_context
+                if should_drain_queue
+                    && let Some(context) = next_input_context
                     && let Err(error) = ConversationSessionService::new(context)
                         .dispatch_next_queued_input(conversation_id)
                         .await
@@ -1124,6 +1153,44 @@ impl ConversationAgentEventRecorder {
             }
         }
     }
+}
+
+fn should_drain_queued_inputs_after_terminal(event: &ConversationEvent) -> bool {
+    let ConversationEvent::TurnFailed { error } = event else {
+        return true;
+    };
+    if let Some(code) = error.code.as_deref()
+        && matches!(
+            code.to_ascii_lowercase().as_str(),
+            "connection_closed"
+                | "agent_connection_lost"
+                | "auth_required"
+                | "authentication_required"
+                | "session_unavailable"
+                | "session_not_found"
+                | "rate_limited"
+                | "rate_limit"
+                | "usage_limit_reached"
+                | "quota_exceeded"
+                | "insufficient_quota"
+                | "insufficient_balance"
+                | "payment_required"
+                | "billing_error"
+                | "agent_not_installed"
+        )
+    {
+        return false;
+    }
+    let lower = error.message.to_ascii_lowercase();
+    !(lower.contains("connection closed")
+        || lower.contains("connection lost")
+        || lower.contains("authentication required")
+        || lower.contains("not authenticated")
+        || lower.contains("session unavailable")
+        || lower.contains("rate limit")
+        || lower.contains("quota exceeded")
+        || lower.contains("insufficient balance")
+        || lower.contains("insufficient quota"))
 }
 
 async fn load_latest_assistant_conclusion(

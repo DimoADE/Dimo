@@ -225,4 +225,112 @@ describe('overlay scrollbar host', () => {
     horizontal.remove();
     ancestor.remove();
   });
+
+  it('tracks a nested horizontal scroller independently from its outer vertical scroller', () => {
+    const vertical = document.createElement('div');
+    const horizontal = document.createElement('div');
+    document.body.append(vertical, horizontal);
+    const detach = attachOverlayScrollbars(document, {
+      vertical,
+      horizontal,
+    });
+
+    const outer = document.createElement('div');
+    outer.style.overflowY = 'auto';
+    outer.style.overflowX = 'hidden';
+    Object.defineProperty(outer, 'clientWidth', { value: 400 });
+    Object.defineProperty(outer, 'clientHeight', { value: 300 });
+    Object.defineProperty(outer, 'scrollWidth', { value: 400 });
+    Object.defineProperty(outer, 'scrollHeight', { value: 1200 });
+    Object.defineProperty(outer, 'scrollTop', { value: 0, writable: true });
+    outer.getBoundingClientRect = () =>
+      ({
+        top: 0,
+        left: 0,
+        right: 400,
+        bottom: 300,
+        width: 400,
+        height: 300,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    outer.getClientRects = () =>
+      ({
+        length: 1,
+        0: outer.getBoundingClientRect(),
+        item: () => outer.getBoundingClientRect(),
+      }) as unknown as DOMRectList;
+
+    const inner = document.createElement('div');
+    inner.style.overflowX = 'auto';
+    inner.style.overflowY = 'hidden';
+    Object.defineProperty(inner, 'clientWidth', { value: 360 });
+    Object.defineProperty(inner, 'clientHeight', { value: 120 });
+    Object.defineProperty(inner, 'scrollWidth', { value: 900 });
+    Object.defineProperty(inner, 'scrollHeight', { value: 120 });
+    Object.defineProperty(inner, 'scrollLeft', { value: 0, writable: true });
+    inner.getBoundingClientRect = () =>
+      ({
+        top: 40,
+        left: 20,
+        right: 380,
+        bottom: 160,
+        width: 360,
+        height: 120,
+        x: 20,
+        y: 40,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    inner.getClientRects = () =>
+      ({
+        length: 1,
+        0: inner.getBoundingClientRect(),
+        item: () => inner.getBoundingClientRect(),
+      }) as unknown as DOMRectList;
+
+    outer.append(inner);
+    document.body.append(outer);
+
+    inner.dispatchEvent(new Event('pointerover', { bubbles: true }));
+
+    expect(vertical.classList.contains('is-visible')).toBe(true);
+    expect(horizontal.classList.contains('is-visible')).toBe(true);
+    expect(parseFloat(horizontal.style.top)).toBe(160 - THUMB_PX - EDGE_INSET);
+
+    detach();
+    vertical.remove();
+    horizontal.remove();
+    outer.remove();
+  });
+
+  it('skips only the horizontal overlay thumb when data-overlay-scrollbar-x="off" is set', () => {
+    const outer = document.createElement('div');
+    outer.style.overflowY = 'auto';
+    outer.style.overflowX = 'hidden';
+    Object.defineProperty(outer, 'clientWidth', { value: 400 });
+    Object.defineProperty(outer, 'clientHeight', { value: 300 });
+    Object.defineProperty(outer, 'scrollWidth', { value: 400 });
+    Object.defineProperty(outer, 'scrollHeight', { value: 1000 });
+
+    const tableScroll = document.createElement('div');
+    tableScroll.dataset.overlayScrollbarX = 'off';
+    tableScroll.style.overflowX = 'auto';
+    tableScroll.style.overflowY = 'hidden';
+    Object.defineProperty(tableScroll, 'clientWidth', { value: 360 });
+    Object.defineProperty(tableScroll, 'clientHeight', { value: 120 });
+    Object.defineProperty(tableScroll, 'scrollWidth', { value: 900 });
+    Object.defineProperty(tableScroll, 'scrollHeight', { value: 120 });
+
+    const cell = document.createElement('span');
+    tableScroll.append(cell);
+    outer.append(tableScroll);
+    document.body.append(outer);
+
+    expect(findScroller(cell, 'x')).toBeNull();
+    expect(findScroller(cell, 'y')).toBe(outer);
+
+    outer.remove();
+  });
 });
+

@@ -459,6 +459,64 @@ describe('Markdown', () => {
     );
   });
 
+  it('prefers explicit href target over shorter file-like link text', () => {
+    renderMarkdown(
+      '[生财航海/AI助理/高手领航2-小志同学.md](E:/0A/生财航海/AI助理/高手领航2-小志同学.md)',
+      { workspacePath: 'E:\\0A\\AI助理' }
+    );
+
+    const link = screen.getByRole('link', {
+      name: '高手领航2-小志同学.md',
+    });
+    fireEvent.click(link);
+
+    expect(panelActionsMock.openFilePreview).toHaveBeenCalledWith(
+      'E:/0A/生财航海/AI助理/高手领航2-小志同学.md',
+      {
+        displayPath: 'E:/0A/生财航海/AI助理/高手领航2-小志同学.md',
+        title: 'E:/0A/生财航海/AI助理/高手领航2-小志同学.md',
+      }
+    );
+  });
+
+  it('decodes percent-encoded Windows drive file hrefs', () => {
+    renderMarkdown(
+      '[note](E:/0A/AI%E5%8A%A9%E7%90%86/%E9%AB%98%E6%89%8B%201.md)',
+      { workspacePath: 'E:/0A/AI助理' }
+    );
+
+    const link = screen.getByRole('link', { name: 'note' });
+    fireEvent.click(link);
+
+    expect(panelActionsMock.openFilePreview).toHaveBeenCalledWith(
+      'E:/0A/AI助理/高手 1.md',
+      {
+        displayPath: '高手 1.md',
+        title: '高手 1.md',
+      }
+    );
+  });
+
+  it('normalizes relative parent-directory segments in markdown workspace links', () => {
+    renderMarkdown(
+      '[高手领航2-小志同学.md](../生财航海/AI助理/高手领航2-小志同学.md)',
+      { workspacePath: 'E:/0A/AI助理' }
+    );
+
+    const link = screen.getByRole('link', {
+      name: '高手领航2-小志同学.md',
+    });
+    fireEvent.click(link);
+
+    expect(panelActionsMock.openFilePreview).toHaveBeenCalledWith(
+      'E:/0A/生财航海/AI助理/高手领航2-小志同学.md',
+      {
+        displayPath: '../生财航海/AI助理/高手领航2-小志同学.md',
+        title: '../生财航海/AI助理/高手领航2-小志同学.md',
+      }
+    );
+  });
+
   it('opens workspace links with the keyboard', () => {
     renderMarkdown('[manager.rs](crates/agents/src/manager.rs)');
 

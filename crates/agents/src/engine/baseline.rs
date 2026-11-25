@@ -104,9 +104,7 @@ pub fn build_native_controls_snapshot(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        && !model_choices
-            .iter()
-            .any(|c| c.value.as_str() == Some(pref))
+        && !model_choices.iter().any(|c| c.value.as_str() == Some(pref))
     {
         model_choices.insert(
             0,
@@ -255,10 +253,7 @@ mod tests {
         for agent_id in ["claude_code", "codex"] {
             let snapshot = bundled_controls_snapshot(agent_id, &env, false)
                 .unwrap_or_else(|| panic!("expected bundled baseline for {agent_id}"));
-            assert!(
-                !snapshot.modes.is_empty(),
-                "expected modes for {agent_id}"
-            );
+            assert!(!snapshot.modes.is_empty(), "expected modes for {agent_id}");
             assert!(snapshot.current_mode.is_some());
             assert!(
                 snapshot

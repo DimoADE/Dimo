@@ -452,6 +452,21 @@ describe('conversation bottom distance', () => {
     ).toBe(1600);
   });
 
+  it('includes floating composer bottomPadding when docking a followed tail', () => {
+    expect(
+      scrollTopToRevealVirtualWindow({
+        scrollTop: 1480,
+        viewportHeight: 500,
+        scrollHeight: 2140,
+        windowStart: 1100,
+        scrollMargin: 0,
+        windowHeight: 900,
+        bottomPadding: 140,
+        followTail: true,
+      })
+    ).toBe(1640);
+  });
+
   it('remeasures only the mounted rows of this list', () => {
     const list = document.createElement('div');
     const windowEl = document.createElement('div');

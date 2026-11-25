@@ -410,8 +410,6 @@ pub struct AgentRuntime {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct EnsureSessionKey {
-    agent_id: AgentId,
-    working_dir: PathBuf,
     session_id: AgentSessionId,
 }
 
@@ -670,6 +668,33 @@ impl AgentRuntime {
                     {
                         continue;
                     }
+                    let stranded_disconnect_sessions: Vec<(AgentSessionId, String)> =
+                        if let AgentEvent::ConnectionStatusChanged { snapshot } =
+                            &manager_event.event
+                            && matches!(
+                                snapshot.status,
+                                AgentConnectionStatus::Disconnected | AgentConnectionStatus::Failed
+                            )
+                        {
+                            let reason = snapshot
+                                .status_message
+                                .clone()
+                                .filter(|m| !m.trim().is_empty())
+                                .unwrap_or_else(|| {
+                                    "Agent connection closed before the turn completed.".to_string()
+                                });
+                            state
+                                .sessions
+                                .iter()
+                                .filter(|(_, session)| {
+                                    session.snapshot.connection_id == manager_event.connection_id
+                                        && session.snapshot.active_prompt_id.is_some()
+                                })
+                                .map(|(id, _)| (*id, reason.clone()))
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
                     Self::apply_manager_event_locked(&mut state, &manager_event);
                     let mut connection_envelopes = Vec::new();
                     if manager_event.session_id.is_none()
@@ -694,6 +719,20 @@ impl AgentRuntime {
                                 manager_event.event.clone(),
                             ));
                         }
+                    }
+                    for (session, reason) in stranded_disconnect_sessions {
+                        connection_envelopes.push(Self::queue_envelope_locked(
+                            &mut state,
+                            manager_event.connection_id,
+                            Some(session),
+                            AgentEvent::Error {
+                                error: AgentErrorEvent {
+                                    message: reason,
+                                    code: Some("connection_closed".to_string()),
+                                    raw: None,
+                                },
+                            },
+                        ));
                     }
                     let next_prompt = Self::prompt_to_dispatch_after_manager_event_locked(
                         &state,
@@ -805,7 +844,15 @@ impl AgentRuntime {
                         .await
                 {
                     let mut state = state.write().await;
-                    fail_prompt_locked(&mut state, session_id, prompt_id, error.to_string());
+                    if is_connection_loss_during_session_preparation(&error) {
+                        fail_connection_sessions_locked(
+                            &mut state,
+                            manager_event.connection_id,
+                            error.to_string(),
+                        );
+                    } else {
+                        fail_prompt_locked(&mut state, session_id, prompt_id, error.to_string());
+                    }
                     let envelope = Self::queue_envelope_locked(
                         &mut state,
                         manager_event.connection_id,
@@ -1122,7 +1169,7 @@ impl AgentRuntime {
             event_sink,
             event_tx,
             snapshot.id,
-            None,
+            for_session_id,
             AgentEvent::ConnectionStatusChanged {
                 snapshot: snapshot.clone(),
             },
@@ -1210,12 +1257,6 @@ impl AgentRuntime {
         }
 
         let mut state_guard = state.write().await;
-        if let Some(session_id) = for_session_id
-            && state_guard.pending_session_connections.get(&session_id) == Some(&snapshot.id)
-        {
-            state_guard.pending_session_connections.remove(&session_id);
-        }
-        pending_guard.armed = false;
         let Some(connection) = state_guard.connections.get_mut(&snapshot.id) else {
             drop(state_guard);
             let _ = connection_manager.disconnect(snapshot.id).await;
@@ -1243,6 +1284,10 @@ impl AgentRuntime {
                 snapshot: ready_snapshot.clone(),
             },
         );
+        // Keep `pending_session_connections` populated across the handoff into
+        // `bind_or_create_session` / `new_session_with_id` so async event
+        // consumers never observe a gap in `live_connection_id`.
+        pending_guard.armed = false;
 
         Ok(ready_snapshot)
     }
@@ -1325,8 +1370,6 @@ impl AgentRuntime {
         input: EnsureAgentSessionInput,
     ) -> AgentResult<AgentSessionSnapshot> {
         let key = EnsureSessionKey {
-            agent_id: input.agent_id.clone(),
-            working_dir: input.working_dir.clone(),
             session_id: input.session_id,
         };
         let session_lock = {
@@ -1409,13 +1452,14 @@ impl AgentRuntime {
 
         let rebound = {
             let mut state = self.state.write().await;
-            state.pending_session_connections.remove(&input.session_id);
             if let Some(existing) = state.sessions.get_mut(&input.session_id) {
                 existing.snapshot.connection_id = connection_id;
                 existing.snapshot.acp_session_id = input.acp_session_id.clone();
                 existing.snapshot.status = AgentSessionStatus::Ready;
                 existing.snapshot.updated_at = Utc::now();
-                Some(existing.snapshot.clone())
+                let snapshot = existing.snapshot.clone();
+                state.pending_session_connections.remove(&input.session_id);
+                Some(snapshot)
             } else {
                 None
             }
@@ -1464,9 +1508,6 @@ impl AgentRuntime {
             .get("DIMO_ENGINE_MODE")
             .cloned()
             .or_else(|| std::env::var("DIMO_ENGINE_MODE").ok());
-        let force_native = mode_env
-            .as_deref()
-            .is_some_and(|v| v.trim().eq_ignore_ascii_case("native"));
 
         let Some(driver) = crate::engine::EngineRegistry::bundled().resolve_driver_for_agent(
             input.agent_id.as_str(),
@@ -1520,21 +1561,6 @@ impl AgentRuntime {
                 Ok(Some(snapshot))
             }
             Ok(None) => Ok(None),
-            Err(error)
-                if !force_native
-                    && crate::manager::can_fallback_launch_lock_to_acp(
-                        &input.launch_lock,
-                        mode_env.as_deref(),
-                    ) =>
-            {
-                tracing::warn!(
-                    agent_id = %input.agent_id,
-                    engine = %driver.engine_id(),
-                    %error,
-                    "native provider capability probe failed; falling back to ACP session probe"
-                );
-                Ok(None)
-            }
             Err(error) => Err(AgentError::Runtime(error.to_string())),
         }
     }
@@ -2367,10 +2393,15 @@ impl AgentRuntime {
     ) -> Option<AgentConnectionId> {
         let state = self.state.read().await;
         state
-            .sessions
+            .pending_session_connections
             .get(&session_id)
-            .map(|session| session.snapshot.connection_id)
-            .or_else(|| state.pending_session_connections.get(&session_id).copied())
+            .copied()
+            .or_else(|| {
+                state
+                    .sessions
+                    .get(&session_id)
+                    .map(|session| session.snapshot.connection_id)
+            })
     }
 
     pub async fn session_agent_id(&self, session_id: AgentSessionId) -> Option<AgentId> {
@@ -2391,7 +2422,10 @@ impl AgentRuntime {
         let Some(connection_id) = self.live_connection_id(session_id).await else {
             return Ok(());
         };
-        self.connection_manager.touch(connection_id).await
+        match self.connection_manager.touch(connection_id).await {
+            Ok(()) | Err(AgentError::ConnectionNotFound(_)) => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     pub fn idle_extension(&self) -> crate::idle_sweep::IdleExtension {
@@ -2630,9 +2664,31 @@ impl AgentRuntime {
                 drop(state);
 
                 if was_active {
-                    self.connection_manager
+                    let connection_already_gone = match self
+                        .connection_manager
                         .cancel_prompt(input.connection_id, input.session_id, input.prompt_id)
-                        .await?;
+                        .await
+                    {
+                        Ok(()) => false,
+                        Err(err)
+                            if matches!(
+                                err,
+                                AgentError::ConnectionNotFound(_)
+                                    | AgentError::SessionNotFound(_)
+                                    | AgentError::AcpSessionNotBound
+                            ) || err.is_connection_death() =>
+                        {
+                            tracing::debug!(
+                                connection_id = %input.connection_id,
+                                session_id = %input.session_id,
+                                prompt_id = %input.prompt_id,
+                                error = %err,
+                                "cancel_prompt target connection already gone; settling cancelling prompt locally"
+                            );
+                            true
+                        }
+                        Err(err) => return Err(err),
+                    };
                     let mut state = self.state.write().await;
                     let can_settle_now =
                         state
@@ -2640,7 +2696,8 @@ impl AgentRuntime {
                             .get(&input.session_id)
                             .is_some_and(|session| {
                                 session.queue.active() == Some(input.prompt_id)
-                                    && session.queue.queued().is_empty()
+                                    && (connection_already_gone
+                                        || session.queue.queued().is_empty())
                             });
                     if can_settle_now {
                         let now = Utc::now();
@@ -2652,17 +2709,39 @@ impl AgentRuntime {
                             };
                             prompt.updated_at = now;
                         }
+                        let mut cancelled_queued_ids = Vec::new();
                         if let Some(session) = state.sessions.get_mut(&input.session_id) {
                             let _ = session.queue.complete(input.prompt_id);
+                            if connection_already_gone {
+                                while let Some(queued_id) = session.queue.active() {
+                                    let _ = session.queue.complete(queued_id);
+                                    cancelled_queued_ids.push(queued_id);
+                                }
+                            }
                             session.snapshot.active_prompt_id = session.queue.active();
                             session.snapshot.queued_prompt_ids = session.queue.queued();
-                            session.snapshot.status = if session.snapshot.active_prompt_id.is_some()
-                            {
+                            session.snapshot.status = if connection_already_gone {
+                                AgentSessionStatus::Failed
+                            } else if session.snapshot.active_prompt_id.is_some() {
                                 AgentSessionStatus::Running
                             } else {
                                 AgentSessionStatus::Ready
                             };
                             session.snapshot.updated_at = now;
+                        }
+                        for queued_id in cancelled_queued_ids {
+                            if let Some(prompt) = state.prompts.get_mut(&queued_id) {
+                                prompt.status = AgentPromptStatus::Failed {
+                                    message: "Agent connection closed before the turn completed."
+                                        .to_string(),
+                                };
+                                prompt.updated_at = now;
+                            }
+                            state.prompt_blocks.remove(&queued_id);
+                            state.prompt_display_blocks.remove(&queued_id);
+                            state.prompt_options.remove(&queued_id);
+                            state.request_activity.remove(&queued_id);
+                            state.background_compactions.remove(&queued_id);
                         }
                         state.prompt_blocks.remove(&input.prompt_id);
                         state.prompt_display_blocks.remove(&input.prompt_id);
@@ -2840,7 +2919,7 @@ impl AgentRuntime {
             }
         }
 
-        let evicted_session_ids = {
+        let (snapshot, affected_sessions, evicted_sessions) = {
             let mut state = self.state.write().await;
             state
                 .pending_session_connections
@@ -2855,6 +2934,39 @@ impl AgentRuntime {
                 })
                 .ok_or_else(|| AgentError::ConnectionNotFound(connection_id.to_string()))?;
 
+            let affected_sessions: Vec<AgentSessionId> = state
+                .sessions
+                .iter()
+                .filter_map(|(sid, session)| {
+                    (session.snapshot.connection_id == connection_id).then_some(*sid)
+                })
+                .collect();
+            let has_running_or_queued = affected_sessions.iter().any(|sid| {
+                state.sessions.get(sid).is_some_and(|session| {
+                    session.snapshot.active_prompt_id.is_some()
+                        || !session.snapshot.queued_prompt_ids.is_empty()
+                        || session.snapshot.status == AgentSessionStatus::Running
+                })
+            });
+            if has_running_or_queued {
+                fail_connection_sessions_locked(
+                    &mut state,
+                    connection_id,
+                    "Agent connection closed before the turn completed.".to_string(),
+                );
+            }
+
+            for session_id in &affected_sessions {
+                self.emit_locked(
+                    &mut state,
+                    snapshot.workspace_id,
+                    snapshot.id,
+                    Some(*session_id),
+                    AgentEvent::ConnectionStatusChanged {
+                        snapshot: snapshot.clone(),
+                    },
+                );
+            }
             self.emit_locked(
                 &mut state,
                 snapshot.workspace_id,
@@ -2866,16 +2978,24 @@ impl AgentRuntime {
             );
 
             let evicted_sessions = prune_settled_history_locked(&mut state);
-            (snapshot, evicted_sessions)
+            (snapshot, affected_sessions, evicted_sessions)
         };
-        if !evicted_session_ids.1.is_empty() {
+        if !affected_sessions.is_empty() || !evicted_sessions.is_empty() {
             let mut keepalive = self.keepalive_sessions.lock().await;
-            for sid in evicted_session_ids.1 {
+            for sid in &affected_sessions {
+                keepalive.remove(sid);
+            }
+            for sid in evicted_sessions {
                 keepalive.remove(&sid);
             }
         }
+        for sid in affected_sessions {
+            crate::terminal::agent_terminal_registry()
+                .release_all_for_session(sid)
+                .await;
+        }
 
-        Ok(evicted_session_ids.0)
+        Ok(snapshot)
     }
 
     /// Reap a short-lived probe/discovery connection and remove it from the
@@ -3010,6 +3130,12 @@ impl AgentRuntime {
     ) {
         match &manager_event.event {
             AgentEvent::ConnectionStatusChanged { snapshot } => {
+                if let Some(connection) = state.connections.get_mut(&snapshot.id) {
+                    let created_at = connection.snapshot.created_at;
+                    let mut updated = snapshot.clone();
+                    updated.created_at = created_at;
+                    connection.snapshot = updated;
+                }
                 if matches!(
                     snapshot.status,
                     AgentConnectionStatus::Disconnected | AgentConnectionStatus::Failed
@@ -3017,12 +3143,22 @@ impl AgentRuntime {
                     state
                         .pending_session_connections
                         .retain(|_, cid| *cid != snapshot.id);
-                }
-                if let Some(connection) = state.connections.get_mut(&snapshot.id) {
-                    let created_at = connection.snapshot.created_at;
-                    let mut updated = snapshot.clone();
-                    updated.created_at = created_at;
-                    connection.snapshot = updated;
+                    let has_running_or_queued = state.sessions.values().any(|session| {
+                        session.snapshot.connection_id == snapshot.id
+                            && (session.snapshot.active_prompt_id.is_some()
+                                || !session.snapshot.queued_prompt_ids.is_empty()
+                                || session.snapshot.status == AgentSessionStatus::Running)
+                    });
+                    if has_running_or_queued {
+                        let reason = snapshot
+                            .status_message
+                            .clone()
+                            .filter(|m| !m.trim().is_empty())
+                            .unwrap_or_else(|| {
+                                "Agent connection closed before the turn completed.".to_string()
+                            });
+                        fail_connection_sessions_locked(state, snapshot.id, reason);
+                    }
                 }
             }
             AgentEvent::PromptFinished { finished } => {
@@ -3430,10 +3566,12 @@ pub fn is_placeholder_acp_session_id(acp_session_id: &str) -> bool {
     let id = acp_session_id.trim();
     id.is_empty()
         || id.starts_with("dimo-new-session-")
+        || id.starts_with("vibex-new-session-")
         || id.starts_with("prepared-")
         || id.starts_with("pending-")
         || id.starts_with("claude-native-")
         || id.starts_with("codex-native-")
+        || id.starts_with("muse-native-")
 }
 
 /// True when `acp_session_id` is an agent-assigned thread id that can be
@@ -4376,6 +4514,8 @@ mod tests {
     #[test]
     fn placeholder_acp_session_ids_skip_resume_during_recovery() {
         assert!(is_placeholder_acp_session_id("dimo-new-session-abc"));
+        assert!(is_placeholder_acp_session_id("vibex-new-session-abc"));
+        assert!(is_placeholder_acp_session_id("muse-native-123"));
         assert!(is_placeholder_acp_session_id("prepared-xyz"));
         assert!(is_placeholder_acp_session_id("pending-abc"));
         assert!(is_placeholder_acp_session_id(""));
@@ -4384,6 +4524,42 @@ mod tests {
         assert!(!is_placeholder_acp_session_id("inmem-abc"));
         assert!(is_restorable_acp_session_id("codex-thread-a"));
         assert!(!is_restorable_acp_session_id("pending-abc"));
+        assert!(!is_restorable_acp_session_id("muse-native-123"));
+    }
+
+    #[tokio::test]
+    async fn touch_session_tolerates_missing_connection() {
+        let runtime = AgentRuntime::new_with_driver(Arc::new(NoopEventSink), false);
+        let connection_id = AgentConnectionId::new();
+        let session_id = AgentSessionId::new();
+        let now = Utc::now();
+        {
+            let mut state = runtime.state.write().await;
+            state.sessions.insert(
+                session_id,
+                RuntimeSession {
+                    snapshot: AgentSessionSnapshot {
+                        id: session_id,
+                        connection_id,
+                        acp_session_id: "sess-retired".to_string(),
+                        status: AgentSessionStatus::Ready,
+                        active_prompt_id: None,
+                        queued_prompt_ids: Vec::new(),
+                        created_at: now,
+                        updated_at: now,
+                    },
+                    queue: AgentPromptQueue::default(),
+                    ownership: RuntimeSessionOwnership::Owned,
+                    controls: Default::default(),
+                },
+            );
+        }
+        // Connection was already swept/retired from AgentConnectionManager;
+        // keepalive touch must return Ok(()) instead of failing the client loop.
+        runtime
+            .touch_session(session_id)
+            .await
+            .expect("touch_session should tolerate ConnectionNotFound");
     }
 
     #[tokio::test]
@@ -6509,5 +6685,232 @@ mod tests {
                 .auto_approve_mode,
             AgentAutoApproveMode::Off
         );
+    }
+
+    #[tokio::test]
+    async fn disconnect_fails_active_and_queued_prompts_clears_keepalive_and_fans_out_session_status()
+     {
+        let runtime = AgentRuntime::new_with_driver(Arc::new(NoopEventSink), false);
+        let workspace_id = Uuid::new_v4();
+        let session = test_session(&runtime, workspace_id, "C:/w-disc", "acp-disc").await;
+        runtime
+            .set_session_keepalive(session.id, true)
+            .await
+            .expect("register keepalive");
+        assert!(
+            runtime
+                .keepalive_sessions
+                .lock()
+                .await
+                .contains(&session.id)
+        );
+
+        let first = runtime
+            .send_prompt(SendAgentPromptInput {
+                connection_id: session.connection_id,
+                session_id: session.id,
+                blocks: vec![AgentContentBlock::Text {
+                    text: "first".to_string(),
+                }],
+                mode_override: None,
+                config_overrides: Vec::new(),
+            })
+            .await
+            .expect("send first prompt");
+        let queued = runtime
+            .send_prompt(SendAgentPromptInput {
+                connection_id: session.connection_id,
+                session_id: session.id,
+                blocks: vec![AgentContentBlock::Text {
+                    text: "second".to_string(),
+                }],
+                mode_override: None,
+                config_overrides: Vec::new(),
+            })
+            .await
+            .expect("queue second prompt");
+
+        let mut rx = runtime.event_tx.subscribe();
+        runtime
+            .disconnect(session.connection_id)
+            .await
+            .expect("disconnect");
+
+        assert!(
+            !runtime
+                .keepalive_sessions
+                .lock()
+                .await
+                .contains(&session.id),
+            "disconnect must clear keepalive registrations for sessions on the connection"
+        );
+        let snapshot = runtime.snapshot().await;
+        let updated_session = snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == session.id)
+            .expect("session present");
+        assert_eq!(updated_session.active_prompt_id, None);
+        assert!(updated_session.queued_prompt_ids.is_empty());
+        let first_snap = snapshot
+            .prompts
+            .iter()
+            .find(|p| p.id == first.id)
+            .expect("first prompt");
+        let queued_snap = snapshot
+            .prompts
+            .iter()
+            .find(|p| p.id == queued.id)
+            .expect("queued prompt");
+        assert!(matches!(
+            first_snap.status,
+            AgentPromptStatus::Failed { .. }
+        ));
+        assert!(matches!(
+            queued_snap.status,
+            AgentPromptStatus::Failed { .. }
+        ));
+
+        let mut saw_session_disconnected = false;
+        while let Ok(env) = rx.try_recv() {
+            if env.session_id == Some(session.id)
+                && matches!(
+                    env.event,
+                    AgentEvent::ConnectionStatusChanged {
+                        snapshot: AgentConnectionSnapshot {
+                            status: AgentConnectionStatus::Disconnected,
+                            ..
+                        }
+                    }
+                )
+            {
+                saw_session_disconnected = true;
+            }
+        }
+        assert!(
+            saw_session_disconnected,
+            "disconnect must fan out ConnectionStatusChanged with session_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_prompt_settles_locally_when_connection_already_gone() {
+        let runtime = AgentRuntime::new_with_driver(Arc::new(NoopEventSink), false);
+        let workspace_id = Uuid::new_v4();
+        let session = test_session(&runtime, workspace_id, "C:/w-cancel", "acp-cancel").await;
+        let first = runtime
+            .send_prompt(SendAgentPromptInput {
+                connection_id: session.connection_id,
+                session_id: session.id,
+                blocks: vec![AgentContentBlock::Text {
+                    text: "running".to_string(),
+                }],
+                mode_override: None,
+                config_overrides: Vec::new(),
+            })
+            .await
+            .expect("send active prompt");
+        let queued = runtime
+            .send_prompt(SendAgentPromptInput {
+                connection_id: session.connection_id,
+                session_id: session.id,
+                blocks: vec![AgentContentBlock::Text {
+                    text: "queued".to_string(),
+                }],
+                mode_override: None,
+                config_overrides: Vec::new(),
+            })
+            .await
+            .expect("queue follow-up");
+
+        // Drop the underlying transport connection while runtime state still has the active prompt.
+        let _ = runtime
+            .connection_manager
+            .disconnect(session.connection_id)
+            .await;
+
+        runtime
+            .cancel_prompt(CancelAgentPromptInput {
+                connection_id: session.connection_id,
+                session_id: session.id,
+                prompt_id: first.id,
+            })
+            .await
+            .expect("cancel_prompt must succeed when connection is already gone");
+
+        let snapshot = runtime.snapshot().await;
+        let updated_session = snapshot
+            .sessions
+            .iter()
+            .find(|s| s.id == session.id)
+            .expect("session present");
+        assert_eq!(updated_session.active_prompt_id, None);
+        assert!(updated_session.queued_prompt_ids.is_empty());
+        let first_snap = snapshot
+            .prompts
+            .iter()
+            .find(|p| p.id == first.id)
+            .expect("first prompt");
+        assert!(matches!(
+            first_snap.status,
+            AgentPromptStatus::Completed {
+                stop_reason: Some(ref reason)
+            } if reason == "cancelled"
+        ));
+        let queued_snap = snapshot
+            .prompts
+            .iter()
+            .find(|p| p.id == queued.id)
+            .expect("queued prompt");
+        assert!(matches!(
+            queued_snap.status,
+            AgentPromptStatus::Failed { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn manager_disconnected_event_settles_stranded_active_prompts() {
+        let runtime = AgentRuntime::new_with_driver(Arc::new(NoopEventSink), false);
+        let workspace_id = Uuid::new_v4();
+        let session = test_session(&runtime, workspace_id, "C:/w-drop", "acp-drop").await;
+        let prompt = runtime
+            .send_prompt(SendAgentPromptInput {
+                connection_id: session.connection_id,
+                session_id: session.id,
+                blocks: vec![AgentContentBlock::Text {
+                    text: "in flight".to_string(),
+                }],
+                mode_override: None,
+                config_overrides: Vec::new(),
+            })
+            .await
+            .expect("send prompt");
+
+        let mut state = runtime.state.write().await;
+        let event = AgentConnectionManagerEvent {
+            connection_id: session.connection_id,
+            session_id: None,
+            prompt_id: None,
+            event: AgentEvent::ConnectionStatusChanged {
+                snapshot: AgentConnectionSnapshot {
+                    id: session.connection_id,
+                    agent_id: AgentId::parse("codex").unwrap(),
+                    workspace_id,
+                    status: AgentConnectionStatus::Disconnected,
+                    working_dir: "C:/w-drop".to_string(),
+                    status_message: Some("transport EOF".to_string()),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+            },
+        };
+        AgentRuntime::apply_manager_event_locked(&mut state, &event);
+        let updated_session = state.sessions.get(&session.id).expect("session exists");
+        assert_eq!(updated_session.snapshot.active_prompt_id, None);
+        assert!(updated_session.snapshot.queued_prompt_ids.is_empty());
+        assert!(matches!(
+            state.prompts.get(&prompt.id).unwrap().status,
+            AgentPromptStatus::Failed { .. }
+        ));
     }
 }

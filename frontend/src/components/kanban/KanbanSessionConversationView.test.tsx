@@ -1,6 +1,12 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
-import { forwardRef, StrictMode, useState, type ReactNode } from 'react';
+import { act, render, screen, waitFor } from '@testing-library/react';
+import {
+  forwardRef,
+  StrictMode,
+  useImperativeHandle,
+  useState,
+  type ReactNode,
+} from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
 import type { Session, Workspace } from 'shared/types';
@@ -16,10 +22,16 @@ const {
   sessionsGetByIdMock,
   sessionsMarkViewedMock,
   useWorkspaceSessionsMock,
+  virtualizedListScrollToBottomMock,
+  virtualizedListAtBottomHandlers,
 } = vi.hoisted(() => ({
   attemptsGetMock: vi.fn(() => new Promise<Workspace>(() => {})),
   sessionsGetByIdMock: vi.fn(() => new Promise<Session>(() => {})),
   sessionsMarkViewedMock: vi.fn().mockResolvedValue({}),
+  virtualizedListScrollToBottomMock: vi.fn(),
+  virtualizedListAtBottomHandlers: {
+    latest: null as ((atBottom: boolean) => void) | null,
+  },
   useWorkspaceSessionsMock: vi.fn(() => ({
     sessions: [] as Array<Record<string, unknown>>,
     selectedSession: undefined as Session | undefined,
@@ -75,12 +87,28 @@ vi.mock('@/components/logs/VirtualizedList', () => ({
     {
       attempt,
       widthMode,
+      onAtBottomChange,
     }: {
       attempt: { id: string; session?: { id?: string } | undefined };
       widthMode?: 'bounded' | 'workspace';
+      onAtBottomChange?: (atBottom: boolean) => void;
     },
-    _ref
+    ref
   ) {
+    virtualizedListAtBottomHandlers.latest = onAtBottomChange ?? null;
+    useImperativeHandle(
+      ref,
+      () => ({
+        scrollToBottom: (behavior?: ScrollBehavior) => {
+          virtualizedListScrollToBottomMock(behavior);
+        },
+        scrollToIndex: vi.fn(),
+        scrollToPreviousUserMessage: vi.fn(),
+        scrollToNextUserMessage: vi.fn(),
+        scrollToGoal: vi.fn(),
+      }),
+      []
+    );
     const imagePreviewPresentation = useImagePreviewPresentation();
     return (
       <div
@@ -1525,5 +1553,115 @@ describe('KanbanSessionConversationView', () => {
     expect(screen.getByTestId('execution-slot')).toContainElement(
       screen.getByTestId('virtualized-list')
     );
+  });
+
+  it('floats the composer over the message stream, tracks its inset height, and re-pins only when at bottom', () => {
+    const workspace = createWorkspace('workspace-floating');
+    const session = createSession('session-floating', workspace.id);
+    virtualizedListScrollToBottomMock.mockClear();
+
+    let resizeCallbacks: ResizeObserverCallback[] = [];
+    const originalResizeObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class MockResizeObserver {
+      private callback: ResizeObserverCallback;
+      constructor(callback: ResizeObserverCallback) {
+        this.callback = callback;
+        resizeCallbacks.push(callback);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {
+        resizeCallbacks = resizeCallbacks.filter((cb) => cb !== this.callback);
+      }
+    } as unknown as typeof ResizeObserver;
+
+    try {
+      useWorkspaceSessionsMock.mockReturnValue({
+        sessions: [session],
+        selectedSession: session,
+        selectedSessionId: session.id,
+        selectSession: vi.fn(),
+        selectLatestSession: vi.fn(),
+        isLoading: false,
+        isNewSessionMode: false,
+        isPendingNewSessionMode: false,
+        requestNewSession: vi.fn(),
+        confirmNewSession: vi.fn(),
+        cancelNewSession: vi.fn(),
+        startNewSession: vi.fn(),
+      });
+
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      queryClient.setQueryData(['taskAttempt', workspace.id], workspace);
+      queryClient.setQueryData(['session', session.id], session);
+
+      const { container } = render(
+        <MemoryRouter>
+          <QueryClientProvider client={queryClient}>
+            <KanbanSessionConversationPlacementProvider>
+              <KanbanSessionConversationView
+                workspaceId={workspace.id}
+                sessionId={session.id}
+                interactive={true}
+              />
+            </KanbanSessionConversationPlacementProvider>
+          </QueryClientProvider>
+        </MemoryRouter>
+      );
+
+      const stage = container.querySelector<HTMLElement>(
+        '.conversation-floating-stage'
+      );
+      const dock = screen.getByTestId('conversation-floating-composer-dock');
+      expect(stage).not.toBeNull();
+      expect(stage).toHaveAttribute('data-floating-composer', 'true');
+      expect(dock.className).toContain('absolute');
+      expect(dock.className).toContain('bottom-0');
+      expect(dock.className).toContain('pointer-events-none');
+      expect(dock).toContainElement(screen.getByTestId('follow-up-section'));
+
+      let dockHeight = 136;
+      dock.getBoundingClientRect = () =>
+        ({
+          height: dockHeight,
+          width: 720,
+          top: 0,
+          left: 0,
+          right: 720,
+          bottom: dockHeight,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        }) as DOMRect;
+
+      act(() => {
+        resizeCallbacks.forEach((cb) => cb([], {} as ResizeObserver));
+      });
+
+      expect(
+        stage?.style.getPropertyValue('--conv-floating-composer-height')
+      ).toBe('136px');
+      expect(virtualizedListScrollToBottomMock).toHaveBeenCalledWith('auto');
+
+      // Detach from bottom -> composer resize updates CSS var without forcing scroll
+      virtualizedListScrollToBottomMock.mockClear();
+      act(() => {
+        virtualizedListAtBottomHandlers.latest?.(false);
+      });
+
+      dockHeight = 196;
+      act(() => {
+        resizeCallbacks.forEach((cb) => cb([], {} as ResizeObserver));
+      });
+
+      expect(
+        stage?.style.getPropertyValue('--conv-floating-composer-height')
+      ).toBe('196px');
+      expect(virtualizedListScrollToBottomMock).not.toHaveBeenCalled();
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
   });
 });

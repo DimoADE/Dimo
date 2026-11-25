@@ -565,8 +565,7 @@ pub async fn resolve_instant_capability_catalog_for_provider_instance(
     provider_instance_id: Option<&str>,
 ) -> Result<InstantCapabilityCatalog, ConversationServiceError> {
     let refresh_policy = catalog_refresh_policy_for_agent(agent_id.as_str());
-    let target_instance =
-        db::models::session::normalize_provider_instance_id(provider_instance_id);
+    let target_instance = db::models::session::normalize_provider_instance_id(provider_instance_id);
     let launch_result = resolve_agent_runtime_launch_settings_for_provider_instance(
         pool,
         agent_id,
@@ -574,7 +573,7 @@ pub async fn resolve_instant_capability_catalog_for_provider_instance(
     )
     .await;
 
-    let (launch_available, baseline_env, yolo) = match &launch_result {
+    let (launch_available, baseline_env, yolo, effective_target_instance) = match &launch_result {
         Ok(launch) => {
             let fingerprint = open_capability_catalog_fingerprint(pool, launch).await?;
             if let Some(record) =
@@ -596,19 +595,26 @@ pub async fn resolve_instant_capability_catalog_for_provider_instance(
             }
             let effective_env: HashMap<String, String> =
                 effective_launch_environment(launch).into_iter().collect();
+            let resolved_instance = db::models::session::normalize_provider_instance_id(
+                effective_env
+                    .get("DIMO_PROVIDER_INSTANCE_ID")
+                    .map(String::as_str),
+            )
+            .or_else(|| target_instance.clone());
             (
                 true,
                 effective_env,
                 launch.auto_approve_mode == AgentAutoApproveMode::Yolo,
+                resolved_instance,
             )
         }
-        Err(_) => (false, HashMap::new(), false),
+        Err(_) => (false, HashMap::new(), false, target_instance.clone()),
     };
 
     let can_background_refresh =
         launch_available && refresh_policy == CatalogRefreshPolicy::BackgroundNativeProbe;
 
-    if target_instance.is_none()
+    if effective_target_instance.is_none()
         && !agent_is_explicitly_signed_out(pool, agent_id).await
         && let Some(snapshot) = latest_persisted_catalog_for_agent(pool, agent_id).await
     {
@@ -1743,10 +1749,18 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(claude.source, Some(CatalogResolutionSource::Bundled));
-        assert_eq!(claude.refresh_policy, CatalogRefreshPolicy::BackgroundNativeProbe);
+        assert_eq!(
+            claude.refresh_policy,
+            CatalogRefreshPolicy::BackgroundNativeProbe
+        );
         let claude_controls = claude.snapshot.expect("claude bundled baseline");
         assert!(!claude_controls.modes.is_empty());
-        assert!(claude_controls.config_options.iter().any(|o| o.key == "model"));
+        assert!(
+            claude_controls
+                .config_options
+                .iter()
+                .any(|o| o.key == "model")
+        );
 
         let codex = resolve_instant_capability_catalog_for_provider_instance(
             &pool,
@@ -1757,7 +1771,12 @@ mod tests {
         .unwrap();
         assert_eq!(codex.source, Some(CatalogResolutionSource::Bundled));
         let codex_controls = codex.snapshot.expect("codex bundled baseline");
-        assert!(codex_controls.config_options.iter().any(|o| o.key == "model"));
+        assert!(
+            codex_controls
+                .config_options
+                .iter()
+                .any(|o| o.key == "model")
+        );
 
         let agy = resolve_instant_capability_catalog_for_provider_instance(
             &pool,
@@ -1863,13 +1882,17 @@ mod tests {
         }
 
         let codex_id = AgentId::parse("codex").unwrap();
-        let codex = resolve_instant_capability_catalog_for_provider_instance(&pool, &codex_id, None)
-            .await
-            .unwrap();
+        let codex =
+            resolve_instant_capability_catalog_for_provider_instance(&pool, &codex_id, None)
+                .await
+                .unwrap();
         assert_eq!(codex.source, Some(CatalogResolutionSource::Cached));
         assert!(codex.needs_background_refresh);
         assert_eq!(
-            codex.snapshot.as_ref().and_then(|s| s.current_mode.as_deref()),
+            codex
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.current_mode.as_deref()),
             Some("cached-mode")
         );
         assert!(
@@ -1885,7 +1908,9 @@ mod tests {
         assert_eq!(agy.source, Some(CatalogResolutionSource::Cached));
         assert!(!agy.needs_background_refresh);
         assert_eq!(
-            agy.snapshot.as_ref().and_then(|s| s.current_mode.as_deref()),
+            agy.snapshot
+                .as_ref()
+                .and_then(|s| s.current_mode.as_deref()),
             Some("cached-mode")
         );
         assert!(

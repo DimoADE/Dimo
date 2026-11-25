@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock, RwLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader},
-    sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock, broadcast, oneshot},
+    sync::{Mutex as AsyncMutex, broadcast, oneshot},
     time::timeout,
 };
 use uuid::Uuid;
@@ -48,6 +48,7 @@ use crate::{
         descriptor::normalize_agent_token,
         format_bounded_diagnostic, is_placeholder_engine_session_id,
         prepare_instance_isolation_env_for_keys,
+        server_pool::{PooledWorkspaceServer, ServerHandleLease, WorkspaceServerPool},
         stream_router::spawn_stderr_tail_reader,
     },
     stderr_tail::StderrTail,
@@ -87,17 +88,7 @@ impl CodexServerCacheKey {
 /// session starts/reloads pick up modified `config.toml`, `auth.json`, or model catalogs,
 /// shutting down any idle instances that no active driver handle references.
 pub async fn invalidate_codex_servers() -> usize {
-    let drained: Vec<Arc<CodexAppServer>> = {
-        let mut guard = global_codex_servers().write().await;
-        guard.drain().map(|(_, server)| server).collect()
-    };
-    let count = drained.len();
-    for server in drained {
-        if Arc::strong_count(&server) <= 1 {
-            let _ = server.shutdown().await;
-        }
-    }
-    count
+    global_codex_servers().invalidate_all().await
 }
 
 /// Tracks auto-compaction progress per Codex thread so turn dispatchers and UI
@@ -174,6 +165,7 @@ pub struct CodexAppServer {
     models_cache: Arc<RwLock<Option<Vec<EngineModelInfo>>>>,
     compaction_states: Arc<RwLock<HashMap<String, CodexAutoCompactionThreadState>>>,
     alive: Arc<AtomicBool>,
+    active_handles: AtomicUsize,
 }
 
 impl std::fmt::Debug for CodexAppServer {
@@ -196,11 +188,38 @@ impl Drop for CodexAppServer {
     }
 }
 
-fn global_codex_servers() -> &'static AsyncRwLock<HashMap<CodexServerCacheKey, Arc<CodexAppServer>>>
-{
-    static SERVERS: OnceLock<AsyncRwLock<HashMap<CodexServerCacheKey, Arc<CodexAppServer>>>> =
+#[async_trait]
+impl PooledWorkspaceServer for CodexAppServer {
+    fn is_alive(&self) -> bool {
+        CodexAppServer::is_alive(self)
+    }
+
+    fn acquire_handle(&self) -> usize {
+        self.active_handles.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    fn release_handle(&self) -> usize {
+        self.active_handles
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                Some(n.saturating_sub(1))
+            })
+            .map(|prev| prev.saturating_sub(1))
+            .unwrap_or(0)
+    }
+
+    fn active_handles(&self) -> usize {
+        self.active_handles.load(Ordering::Acquire)
+    }
+
+    async fn shutdown_server(&self) {
+        let _ = self.shutdown().await;
+    }
+}
+
+fn global_codex_servers() -> &'static WorkspaceServerPool<CodexServerCacheKey, CodexAppServer> {
+    static SERVERS: OnceLock<WorkspaceServerPool<CodexServerCacheKey, CodexAppServer>> =
         OnceLock::new();
-    SERVERS.get_or_init(|| AsyncRwLock::new(HashMap::new()))
+    SERVERS.get_or_init(WorkspaceServerPool::new)
 }
 
 impl CodexAppServer {
@@ -281,9 +300,11 @@ impl CodexAppServer {
             );
             return Err(enrich_codex_engine_error(err, &roots));
         }
-        let bg_server = Arc::clone(&server);
+        let bg_server = Arc::downgrade(&server);
         tokio::spawn(async move {
-            let _ = timeout(Duration::from_secs(3), bg_server.read_rate_limits()).await;
+            if let Some(bg_server) = bg_server.upgrade() {
+                let _ = timeout(Duration::from_secs(3), bg_server.read_rate_limits()).await;
+            }
         });
         Ok(server)
     }
@@ -340,6 +361,7 @@ impl CodexAppServer {
             models_cache: Arc::new(RwLock::new(None)),
             compaction_states: Arc::new(RwLock::new(HashMap::new())),
             alive: Arc::new(AtomicBool::new(true)),
+            active_handles: AtomicUsize::new(0),
         });
 
         tokio::spawn(run_reader_loop(
@@ -1072,9 +1094,15 @@ pub async fn resolve_codex_binary(spec: &EngineStartSpec) -> Result<PathBuf, Eng
 
 struct CodexHandleContext {
     spec: EngineStartSpec,
-    server: Arc<CodexAppServer>,
+    lease: ServerHandleLease<CodexAppServer>,
     active_prompt_id: RwLock<Option<Uuid>>,
     active_turn_id: RwLock<Option<String>>,
+}
+
+impl CodexHandleContext {
+    fn server(&self) -> &Arc<CodexAppServer> {
+        self.lease.server()
+    }
 }
 
 /// `NativeEngineDriver` implementation backed by `CodexAppServer`.
@@ -1123,6 +1151,15 @@ impl CodexNativeDriver {
         server: Arc<CodexAppServer>,
         initial_thread_id: Option<String>,
     ) -> EngineHandle {
+        self.bind_leased_server(spec, ServerHandleLease::acquire(server), initial_thread_id)
+    }
+
+    fn bind_leased_server(
+        &self,
+        spec: EngineStartSpec,
+        lease: ServerHandleLease<CodexAppServer>,
+        initial_thread_id: Option<String>,
+    ) -> EngineHandle {
         let connection_id = Uuid::new_v4();
         let official = !spec.uses_custom_base_url(NativeEngineKind::CodexNative);
         let clean_initial = initial_thread_id.filter(|s| !is_placeholder_engine_session_id(s));
@@ -1136,7 +1173,7 @@ impl CodexNativeDriver {
         );
         let ctx = Arc::new(CodexHandleContext {
             spec,
-            server,
+            lease,
             active_prompt_id: RwLock::new(None),
             active_turn_id: RwLock::new(None),
         });
@@ -1157,11 +1194,12 @@ impl CodexNativeDriver {
             .and_then(|map| map.get(&handle.connection_id).cloned())
             .ok_or(EngineError::UnknownHandle(handle.connection_id))?;
 
-        if ctx.server.is_alive() {
-            return Ok((Arc::clone(&ctx), Arc::clone(&ctx.server)));
+        if ctx.server().is_alive() {
+            return Ok((Arc::clone(&ctx), Arc::clone(ctx.server())));
         }
 
         let reconnected = get_or_spawn_workspace_server(&ctx.spec).await?;
+        let reconnected_server = Arc::clone(reconnected.server());
         // Preserve in-flight turn identity across reconnection so that steer /
         // interrupt issued immediately after auto-reconnect can still find the
         // active prompt/turn IDs and reach the new server.
@@ -1169,14 +1207,30 @@ impl CodexNativeDriver {
         let preserved_turn_id = ctx.active_turn_id.read().ok().and_then(|g| g.clone());
         let updated_ctx = Arc::new(CodexHandleContext {
             spec: ctx.spec.clone(),
-            server: Arc::clone(&reconnected),
+            lease: reconnected,
             active_prompt_id: RwLock::new(preserved_prompt_id),
             active_turn_id: RwLock::new(preserved_turn_id),
         });
-        if let Ok(mut map) = self.handles.write() {
-            map.insert(handle.connection_id, Arc::clone(&updated_ctx));
-        }
-        Ok((updated_ctx, reconnected))
+        let previous = self.handles.write().ok().and_then(|mut map| {
+            match map.entry(handle.connection_id) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    Some(entry.insert(Arc::clone(&updated_ctx)))
+                }
+                std::collections::hash_map::Entry::Vacant(_) => None,
+            }
+        });
+        let Some(prev) = previous else {
+            let new_key = CodexServerCacheKey::from_spec(&updated_ctx.spec);
+            global_codex_servers()
+                .release_and_shutdown_if_unused(&new_key, &updated_ctx.lease)
+                .await;
+            return Err(EngineError::UnknownHandle(handle.connection_id));
+        };
+        let prev_key = CodexServerCacheKey::from_spec(&prev.spec);
+        global_codex_servers()
+            .release_and_shutdown_if_unused(&prev_key, &prev.lease)
+            .await;
+        Ok((updated_ctx, reconnected_server))
     }
 
     pub async fn list_thread_turns(
@@ -1201,37 +1255,22 @@ impl CodexNativeDriver {
 
 async fn get_or_spawn_workspace_server(
     spec: &EngineStartSpec,
-) -> Result<Arc<CodexAppServer>, EngineError> {
+) -> Result<ServerHandleLease<CodexAppServer>, EngineError> {
     let key = CodexServerCacheKey::from_spec(spec);
-    if let Some(existing) = global_codex_servers().read().await.get(&key)
-        && existing.is_alive()
-    {
-        return Ok(Arc::clone(existing));
-    }
-    let mut write_guard = global_codex_servers().write().await;
-    if let Some(existing) = write_guard.get(&key)
-        && existing.is_alive()
-    {
-        return Ok(Arc::clone(existing));
-    }
-    // Sweep any dead entries across keys before spawning so exited or rotated
-    // workspace servers do not stay pinned in the global pool.
-    write_guard.retain(|_, server| server.is_alive());
-    let spawned = CodexAppServer::spawn_for_workspace(spec).await?;
-    write_guard.insert(key, Arc::clone(&spawned));
-    Ok(spawned)
+    global_codex_servers()
+        .get_or_spawn(key, || CodexAppServer::spawn_for_workspace(spec))
+        .await
 }
 
 async fn find_alive_server_for_provider(spec: &EngineStartSpec) -> Option<Arc<CodexAppServer>> {
     let target = CodexServerCacheKey::from_spec(spec);
-    let guard = global_codex_servers().read().await;
-    guard.iter().find_map(|(key, server)| {
-        (server.is_alive()
-            && key.provider_instance_id == target.provider_instance_id
-            && key.auth_fingerprint == target.auth_fingerprint
-            && key.native_config_fingerprint == target.native_config_fingerprint)
-            .then(|| Arc::clone(server))
-    })
+    global_codex_servers()
+        .find_alive(|key| {
+            key.provider_instance_id == target.provider_instance_id
+                && key.auth_fingerprint == target.auth_fingerprint
+                && key.native_config_fingerprint == target.native_config_fingerprint
+        })
+        .await
 }
 
 #[async_trait]
@@ -1302,8 +1341,8 @@ impl NativeEngineDriver for CodexNativeDriver {
     }
 
     async fn start(&self, spec: EngineStartSpec) -> Result<EngineHandle, EngineError> {
-        let server = get_or_spawn_workspace_server(&spec).await?;
-        Ok(self.bind_existing_server(spec, server, None))
+        let lease = get_or_spawn_workspace_server(&spec).await?;
+        Ok(self.bind_leased_server(spec, lease, None))
     }
 
     async fn send_prompt(
@@ -1520,7 +1559,7 @@ impl NativeEngineDriver for CodexNativeDriver {
             .read()
             .ok()?
             .get(&handle.connection_id)?
-            .server
+            .server()
             .latest_rate_limits()
     }
 
@@ -1535,25 +1574,10 @@ impl NativeEngineDriver for CodexNativeDriver {
             .ok()
             .and_then(|mut m| m.remove(&handle.connection_id));
         if let Some(ctx) = removed {
-            let should_shutdown = {
-                let mut guard = global_codex_servers().write().await;
-                let matching_key = guard.iter().find_map(|(k, cached)| {
-                    (Arc::ptr_eq(cached, &ctx.server) && Arc::strong_count(&ctx.server) <= 2)
-                        .then(|| k.clone())
-                });
-                if let Some(key) = matching_key {
-                    guard.remove(&key);
-                    true
-                } else {
-                    !guard
-                        .values()
-                        .any(|cached| Arc::ptr_eq(cached, &ctx.server))
-                        && Arc::strong_count(&ctx.server) <= 1
-                }
-            };
-            if should_shutdown {
-                let _ = ctx.server.shutdown().await;
-            }
+            let key = CodexServerCacheKey::from_spec(&ctx.spec);
+            global_codex_servers()
+                .release_and_shutdown_if_unused(&key, &ctx.lease)
+                .await;
         }
         Ok(())
     }

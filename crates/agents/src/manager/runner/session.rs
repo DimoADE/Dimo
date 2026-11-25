@@ -73,7 +73,6 @@ impl AgentConnectionRunner {
         let session_working_dir = self
             .resolve_session_working_dir(working_dir, &external_session_id)
             .await;
-        let wants_prompt_suggestions = self.wants_prompt_suggestions(session_id).await;
         let mut resume_auth_error: Option<acp::Error> = None;
         {
             // Always attempt resume for a known sid, even when the agent did
@@ -87,7 +86,6 @@ impl AgentConnectionRunner {
                     session_id,
                     &external_session_id,
                     companion_capabilities,
-                    wants_prompt_suggestions,
                 )
                 .await;
             match resume_result {
@@ -156,12 +154,10 @@ impl AgentConnectionRunner {
                     session_id,
                     &external_session_id,
                     companion_capabilities,
-                    wants_prompt_suggestions,
                 )
                 .await;
             self.end_load_replay(session_id, &external_session_id, result.is_ok())
                 .await;
-            *self.pending_session_id.lock().await = None;
             result
         } else if let Some(error) = resume_auth_error {
             Err(error)
@@ -197,12 +193,14 @@ impl AgentConnectionRunner {
                     session_model_ids(raw_models.as_ref()),
                 )
                 .await;
+                *self.pending_session_id.lock().await = None;
                 Ok((
                     external_session_id,
                     Some(crate::conversation::SessionRecoveryStrategy::Loaded),
                 ))
             }
             Err(error) => {
+                *self.pending_session_id.lock().await = None;
                 self.resolve_session_load_failure(
                     conn,
                     working_dir,
@@ -332,16 +330,11 @@ impl AgentConnectionRunner {
         let acp_session_id = self
             .ensure_acp_session(conn, working_dir, session_id, companion_capabilities)
             .await?;
-        let wants_prompt_suggestions = self.wants_prompt_suggestions(session_id).await;
         let request = AcpForkSessionRequest {
             session_id: acp_session_id,
             cwd: working_dir.to_path_buf(),
-            meta: crate::session_meta::session_request_meta(
-                &self.snapshot.agent_id,
-                fork_point.as_ref(),
-                wants_prompt_suggestions,
-            )
-            .map(serde_json::Value::Object),
+            meta: crate::session_meta::session_request_meta(fork_point.as_ref())
+                .map(serde_json::Value::Object),
         };
         let response = conn.send_request(request).block_task().await?;
         Ok(response.session_id.0.to_string())
@@ -362,14 +355,6 @@ impl AgentConnectionRunner {
         request.mcp_servers = self
             .session_mcp_servers_with_companion(working_dir, session_id, companion_capabilities)
             .await;
-        let wants_prompt_suggestions = self.wants_prompt_suggestions(session_id).await;
-        if let Some(meta) = crate::session_meta::session_request_meta(
-            &self.snapshot.agent_id,
-            None,
-            wants_prompt_suggestions,
-        ) {
-            request = request.meta(meta);
-        }
         *self.pending_session_id.lock().await = Some(session_id);
         self.emit_connection_status(AgentConnectionStatus::Connecting, None, Some(session_id));
         let response = conn
@@ -381,6 +366,8 @@ impl AgentConnectionRunner {
             Ok(response) => response,
             Err(error) => {
                 *self.pending_session_id.lock().await = None;
+                *self.status.lock().unwrap_or_else(|e| e.into_inner()) =
+                    AgentConnectionStatus::Ready;
                 return Err(error);
             }
         };
@@ -456,7 +443,6 @@ impl AgentConnectionRunner {
         session_id: AgentSessionId,
         external_session_id: &str,
         companion_capabilities: CompanionCapabilities,
-        wants_prompt_suggestions: bool,
     ) -> Result<(ResumeSessionResponse, Option<serde_json::Value>), acp::Error> {
         let mut last_contention = None;
         for attempt in 0..=SESSION_CONTENTION_RETRIES {
@@ -465,6 +451,18 @@ impl AgentConnectionRunner {
                     attempt,
                     session_id = %session_id.0,
                     "ACP session/resume retry after contention"
+                );
+                self.emit(
+                    Some(session_id),
+                    None,
+                    AgentEvent::RawAcpDiagnostic {
+                        raw: serde_json::json!({
+                            "kind": crate::session_notice::SESSION_RECONNECT_PROGRESS_KIND,
+                            "attempt": attempt,
+                            "max_attempts": SESSION_CONTENTION_RETRIES,
+                            "stage": "session/resume",
+                        }),
+                    },
                 );
                 tokio::time::sleep(SESSION_CONTENTION_BACKOFF).await;
             }
@@ -484,13 +482,6 @@ impl AgentConnectionRunner {
                 )
                 .await,
             );
-            if let Some(meta) = crate::session_meta::session_request_meta(
-                &self.snapshot.agent_id,
-                None,
-                wants_prompt_suggestions,
-            ) {
-                request = request.meta(meta);
-            }
             match conn
                 .send_request(RawResumeSessionRequest(request))
                 .block_task()
@@ -514,7 +505,6 @@ impl AgentConnectionRunner {
         session_id: AgentSessionId,
         external_session_id: &str,
         companion_capabilities: CompanionCapabilities,
-        wants_prompt_suggestions: bool,
     ) -> Result<(LoadSessionResponse, Option<serde_json::Value>), acp::Error> {
         let mut last_contention = None;
         for attempt in 0..=SESSION_CONTENTION_RETRIES {
@@ -523,6 +513,18 @@ impl AgentConnectionRunner {
                     attempt,
                     session_id = %session_id.0,
                     "ACP session/load retry after contention"
+                );
+                self.emit(
+                    Some(session_id),
+                    None,
+                    AgentEvent::RawAcpDiagnostic {
+                        raw: serde_json::json!({
+                            "kind": crate::session_notice::SESSION_RECONNECT_PROGRESS_KIND,
+                            "attempt": attempt,
+                            "max_attempts": SESSION_CONTENTION_RETRIES,
+                            "stage": "session/load",
+                        }),
+                    },
                 );
                 tokio::time::sleep(SESSION_CONTENTION_BACKOFF).await;
             }
@@ -542,13 +544,6 @@ impl AgentConnectionRunner {
                 )
                 .await,
             );
-            if let Some(meta) = crate::session_meta::session_request_meta(
-                &self.snapshot.agent_id,
-                None,
-                wants_prompt_suggestions,
-            ) {
-                request = request.meta(meta);
-            }
             match conn
                 .send_request(RawLoadSessionRequest(request))
                 .block_task()
@@ -594,93 +589,9 @@ impl AgentConnectionRunner {
                 .await
                 .unwrap_or(fallback)
             }
-            "claude_code" => {
-                let claude_home = self
-                    .snapshot
-                    .env
-                    .get("CLAUDE_CONFIG_DIR")
-                    .map(String::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(PathBuf::from)
-                    .or_else(|| {
-                        std::env::var_os("CLAUDE_CONFIG_DIR")
-                            .filter(|value| !value.is_empty())
-                            .map(PathBuf::from)
-                    })
-                    .or_else(|| dirs::home_dir().map(|home| home.join(".claude")));
-                let fallback = default_working_dir.clone();
-                tokio::task::spawn_blocking(move || {
-                    resolve_claude_session_working_dir_in_home(
-                        claude_home.as_deref(),
-                        &default_working_dir,
-                        &external_session_id,
-                    )
-                })
-                .await
-                .unwrap_or(fallback)
-            }
             _ => default_working_dir,
         }
     }
-}
-
-pub(in crate::manager) fn resolve_claude_session_working_dir_in_home(
-    claude_home: Option<&Path>,
-    default_working_dir: &Path,
-    external_session_id: &str,
-) -> PathBuf {
-    let trimmed = external_session_id.trim();
-    if trimmed.is_empty() {
-        return default_working_dir.to_path_buf();
-    }
-    let Some(projects_dir) = claude_home.map(|home| home.join("projects")) else {
-        return default_working_dir.to_path_buf();
-    };
-    let Ok(entries) = std::fs::read_dir(projects_dir) else {
-        return default_working_dir.to_path_buf();
-    };
-    let file_name = format!("{trimmed}.jsonl");
-    let mut existing_dir_fallback: Option<PathBuf> = None;
-    let mut any_recorded_fallback: Option<PathBuf> = None;
-    for entry in entries.flatten() {
-        let session_path = entry.path().join(&file_name);
-        if !session_path.is_file() {
-            continue;
-        }
-        let Ok(file) = std::fs::File::open(&session_path) else {
-            continue;
-        };
-        use std::io::BufRead as _;
-        let reader = std::io::BufReader::new(file);
-        for line in reader.lines().take(24).flatten() {
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue;
-            };
-            let Some(cwd_str) = value
-                .get("cwd")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|cwd| !cwd.is_empty())
-            else {
-                continue;
-            };
-            let candidate = PathBuf::from(cwd_str);
-            if candidate == default_working_dir {
-                return default_working_dir.to_path_buf();
-            }
-            if existing_dir_fallback.is_none() && candidate.is_dir() {
-                existing_dir_fallback = Some(candidate.clone());
-            }
-            if any_recorded_fallback.is_none() {
-                any_recorded_fallback = Some(candidate);
-            }
-            break;
-        }
-    }
-    existing_dir_fallback
-        .or(any_recorded_fallback)
-        .unwrap_or_else(|| default_working_dir.to_path_buf())
 }
 
 pub(in crate::manager) fn resolve_grok_session_working_dir_in_home(
@@ -768,36 +679,6 @@ mod tests {
         .unwrap();
 
         let resolved = resolve_grok_session_working_dir_in_home(Some(&grok_home), &parent_cwd, sid);
-        assert_eq!(resolved, worktree_cwd);
-    }
-
-    #[test]
-    fn resolve_claude_session_working_dir_uses_recorded_cwd_when_session_lives_elsewhere() {
-        let tmp = tempfile::tempdir().unwrap();
-        let claude_home = tmp.path().join(".claude");
-        let worktree_cwd = tmp.path().join("worktree-repo");
-        let parent_cwd = tmp.path().join("parent-repo");
-        std::fs::create_dir_all(&worktree_cwd).unwrap();
-        std::fs::create_dir_all(&parent_cwd).unwrap();
-
-        let sid = "37b3b719-a910-4c9e-9954-2db1b05b24de";
-        let project_dir = claude_home.join("projects").join("encoded-worktree");
-        std::fs::create_dir_all(&project_dir).unwrap();
-        std::fs::write(
-            project_dir.join(format!("{sid}.jsonl")),
-            format!(
-                "{}\n",
-                serde_json::json!({
-                    "type": "user",
-                    "sessionId": sid,
-                    "cwd": worktree_cwd.to_string_lossy(),
-                })
-            ),
-        )
-        .unwrap();
-
-        let resolved =
-            resolve_claude_session_working_dir_in_home(Some(&claude_home), &parent_cwd, sid);
         assert_eq!(resolved, worktree_cwd);
     }
 

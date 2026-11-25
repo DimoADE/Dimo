@@ -1962,6 +1962,148 @@ async fn steered_turn_does_not_double_count_usage_and_preserves_reported_context
     );
 }
 
+#[tokio::test]
+async fn turn_blocked_marks_request_status_failed_and_recovery_clears_connect_error_notice() {
+    let pool = setup_pool().await;
+    let (conversation_id, turn_id) = seed_turn(&pool).await;
+    let next_turn_id = Uuid::new_v4();
+
+    append_event(
+        &pool,
+        conversation_id,
+        Some(turn_id),
+        "user",
+        ConversationEvent::UserTurnCreated {
+            blocks: vec![ConversationInputBlock::Text {
+                text: "hello".into(),
+            }],
+            workflow_refs: Vec::new(),
+        },
+        None,
+    )
+    .await;
+    append_event(
+        &pool,
+        conversation_id,
+        Some(turn_id),
+        "runtime",
+        ConversationEvent::TurnBlocked {
+            reason: agents::conversation::TurnBlockedReason::Authentication {
+                message: "login required".into(),
+            },
+        },
+        None,
+    )
+    .await;
+
+    let open_after_block = ConversationProjector::project_open(&pool, conversation_id, 50)
+        .await
+        .expect("project_open after TurnBlocked");
+    let request_status = open_after_block
+        .timeline
+        .rows
+        .iter()
+        .find_map(|row| match &row.row {
+            ConversationTimelineRow::SessionNotice { notice }
+                if row.row_id == "status:agent-request" =>
+            {
+                notice.request_status.clone()
+            }
+            _ => None,
+        })
+        .expect("TurnBlocked must project terminal request status");
+    assert_eq!(
+        request_status.activity.phase,
+        agents::request_status::RequestPhase::Failed
+    );
+
+    // Connect-error notice appears on AgentBindingRecoveryFailed and clears on Connecting.
+    append_event(
+        &pool,
+        conversation_id,
+        None,
+        "runtime",
+        ConversationEvent::AgentBindingRecoveryFailed {
+            reason: "session gone".into(),
+        },
+        None,
+    )
+    .await;
+    let open_with_error = ConversationProjector::project_open(&pool, conversation_id, 50)
+        .await
+        .expect("project_open with error");
+    assert!(
+        open_with_error
+            .timeline
+            .rows
+            .iter()
+            .any(|row| row.row_id == crate::projection::AGENT_SESSION_CONNECT_ERROR_NOTICE_ROW_ID)
+    );
+
+    append_event(
+        &pool,
+        conversation_id,
+        None,
+        "runtime",
+        ConversationEvent::AgentConnectionStatusChanged {
+            status: agents::ConversationAgentConnectionStatus::Connecting,
+            bound: false,
+            message: None,
+        },
+        None,
+    )
+    .await;
+    let open_connecting = ConversationProjector::project_open(&pool, conversation_id, 50)
+        .await
+        .expect("project_open after Connecting");
+    assert!(
+        !open_connecting
+            .timeline
+            .rows
+            .iter()
+            .any(|row| row.row_id == crate::projection::AGENT_SESSION_CONNECT_ERROR_NOTICE_ROW_ID),
+        "Connecting status must clear stale connect-error notice"
+    );
+
+    // Another recovery failure should also clear when the user starts a new turn.
+    append_event(
+        &pool,
+        conversation_id,
+        None,
+        "runtime",
+        ConversationEvent::AgentBindingRecoveryFailed {
+            reason: "session gone again".into(),
+        },
+        None,
+    )
+    .await;
+    append_event(
+        &pool,
+        conversation_id,
+        Some(next_turn_id),
+        "user",
+        ConversationEvent::UserTurnCreated {
+            blocks: vec![ConversationInputBlock::Text {
+                text: "retry".into(),
+            }],
+            workflow_refs: Vec::new(),
+        },
+        None,
+    )
+    .await;
+    let open_after_retry_turn = ConversationProjector::project_open(&pool, conversation_id, 50)
+        .await
+        .expect("project_open after UserTurnCreated");
+    assert!(
+        !open_after_retry_turn
+            .timeline
+            .rows
+            .iter()
+            .any(|row| row.row_id == crate::projection::AGENT_SESSION_CONNECT_ERROR_NOTICE_ROW_ID),
+        "UserTurnCreated must clear stale connect-error notice"
+    );
+}
+
 #[path = "rows_tests_interactions.rs"]
 mod interactions;
 

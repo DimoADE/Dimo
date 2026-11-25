@@ -149,7 +149,7 @@ describe('SessionSettingsSummary', () => {
     );
 
     const trigger = screen.getByTestId('session-settings-summary');
-    expect(trigger).toHaveTextContent('5.6 Terra · 高 · YOLO');
+    expect(trigger).toHaveTextContent('YOLO · 5.6 Terra · 高');
     expect(trigger).not.toHaveTextContent('Enabled');
 
     rerender(
@@ -174,7 +174,7 @@ describe('SessionSettingsSummary', () => {
     );
 
     expect(screen.getByTestId('session-settings-summary')).toHaveTextContent(
-      '5.6 Terra · 高 · On Request'
+      'On Request · 5.6 Terra · 高'
     );
   });
 

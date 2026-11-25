@@ -167,6 +167,7 @@ impl AgentConnectionRunner {
                                 .filter(|id| !is_placeholder_engine_session_id(id))
                         });
 
+                    *self.pending_session_id.lock().await = Some(session_id);
                     let controls = self
                         .seed_native_session_controls(&*driver, &handle, session_id)
                         .await;
@@ -207,6 +208,7 @@ impl AgentConnectionRunner {
                             prepared_id
                         }
                     };
+                    *self.pending_session_id.lock().await = None;
                     self.emit_controls_snapshot(session_id, &controls);
                     let _ = result_tx.send(Ok((ext_id, controls)));
                 }
@@ -231,11 +233,20 @@ impl AgentConnectionRunner {
                     )
                     .await;
                     self.store_preferred_controls(session_id, preferences).await;
+                    *self.pending_session_id.lock().await = Some(session_id);
+                    let is_placeholder = is_placeholder_engine_session_id(&external_session_id);
+                    if !is_placeholder {
+                        self.emit_connection_status(
+                            AgentConnectionStatus::Recovering,
+                            None,
+                            Some(session_id),
+                        );
+                    }
                     let controls = self
                         .seed_native_session_controls(&*driver, &handle, session_id)
                         .await;
 
-                    let ext_id = if is_placeholder_engine_session_id(&external_session_id) {
+                    let (ext_id, strategy) = if is_placeholder {
                         let prepared_id = format!("prepared-{}", session_id.0);
                         self.session_map
                             .write()
@@ -253,7 +264,7 @@ impl AgentConnectionRunner {
                                 acp_session_id: prepared_id.clone(),
                             },
                         );
-                        prepared_id
+                        (prepared_id, None)
                     } else {
                         handle.set_external_session_id(Some(external_session_id.clone()));
                         self.session_map
@@ -262,10 +273,14 @@ impl AgentConnectionRunner {
                             .insert(session_id, external_session_id.clone());
                         self.emit_session_linked(session_id, external_session_id.clone())
                             .await;
-                        external_session_id
+                        (
+                            external_session_id,
+                            Some(crate::conversation::SessionRecoveryStrategy::Resumed),
+                        )
                     };
+                    *self.pending_session_id.lock().await = None;
                     self.emit_controls_snapshot(session_id, &controls);
-                    let _ = result_tx.send(Ok((ext_id, controls, None)));
+                    let _ = result_tx.send(Ok((ext_id, controls, strategy)));
                 }
                 AgentConnectionCommand::ForkSession {
                     session_id,
@@ -325,9 +340,24 @@ impl AgentConnectionRunner {
                         break;
                     }
                 }
-                AgentConnectionCommand::Cancel { result_tx, .. } => {
-                    let ok = driver.interrupt(&handle).await.is_ok();
-                    let _ = result_tx.send(ok);
+                AgentConnectionCommand::Cancel {
+                    session_id,
+                    prompt_id,
+                    result_tx,
+                } => {
+                    let _ = driver.interrupt(&handle).await;
+                    self.emit(
+                        Some(session_id),
+                        Some(prompt_id),
+                        AgentEvent::PromptFinished {
+                            finished: AgentPromptFinished {
+                                prompt_id,
+                                stop_reason: Some("cancelled".to_string()),
+                                usage: None,
+                            },
+                        },
+                    );
+                    let _ = result_tx.send(true);
                 }
                 AgentConnectionCommand::Steer { result_tx, .. } => {
                     let _ = result_tx.send(Ok(AgentSteerReceipt {
@@ -561,6 +591,8 @@ impl AgentConnectionRunner {
 
         let mut turn_state = NativeTurnState::default();
         let mut disconnect_requested = false;
+        let mut pending_cancel_acks: Vec<oneshot::Sender<bool>> = Vec::new();
+        let mut cancel_deadline: Option<tokio::time::Instant> = None;
         let idle_timeout = prompt_idle_timeout();
 
         loop {
@@ -579,6 +611,9 @@ impl AgentConnectionRunner {
                             )
                             .await;
                         }
+                        for tx in pending_cancel_acks.drain(..) {
+                            let _ = tx.send(true);
+                        }
                         break;
                     };
                     *self.last_activity.lock().await = Instant::now();
@@ -596,29 +631,83 @@ impl AgentConnectionRunner {
                         )
                         .await
                     {
+                        for tx in pending_cancel_acks.drain(..) {
+                            let _ = tx.send(true);
+                        }
                         break;
                     }
                 }
                 _ = async {
-                    if idle_timeout.is_some() {
-                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    if let Some(deadline) = cancel_deadline {
+                        tokio::time::sleep_until(deadline).await;
                     } else {
                         std::future::pending::<()>().await;
                     }
                 } => {
-                    let Some(idle_timeout) = idle_timeout else {
-                        continue;
-                    };
-                    if !turn_state.running_tool_calls.is_empty()
+                    self.cancel_pending_interactions(session_id).await;
+                    self.emit(
+                        Some(session_id),
+                        Some(prompt_id),
+                        AgentEvent::SessionInvalidated {
+                            reason: "cancel_unacknowledged".into(),
+                        },
+                    );
+                    self.emit(
+                        Some(session_id),
+                        Some(prompt_id),
+                        AgentEvent::Error {
+                            error: AgentErrorEvent {
+                                message: "Native engine did not acknowledge cancel in time; retiring connection.".to_string(),
+                                code: Some("cancel_unacknowledged".to_string()),
+                                raw: None,
+                            },
+                        },
+                    );
+                    *self.active_prompt.lock().await = None;
+                    for tx in pending_cancel_acks.drain(..) {
+                        let _ = tx.send(false);
+                    }
+                    self.emit_connection_status(
+                        AgentConnectionStatus::Failed,
+                        Some("agent session retired after cancel was not acknowledged".to_string()),
+                        Some(session_id),
+                    );
+                    disconnect_requested = true;
+                    break;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                    let blocked = !turn_state.running_tool_calls.is_empty()
                         || prompt_idle_watchdog_blocked(
                             self.has_pending_permission_for(session_id).await,
                             self.has_pending_elicitation_for(session_id).await,
                             self.has_running_terminal_for(session_id).await,
-                        )
-                    {
+                        );
+                    if blocked {
+                        *self.last_activity.lock().await = Instant::now();
+                        turn_state.silence_waiting_emitted = false;
                         continue;
                     }
                     let elapsed = self.last_activity.lock().await.elapsed();
+                    if cancel_deadline.is_none()
+                        && !turn_state.in_retry
+                        && !turn_state.silence_waiting_emitted
+                        && elapsed >= SILENT_WAIT_ADVISORY_THRESHOLD
+                    {
+                        turn_state.silence_waiting_emitted = true;
+                        self.emit(
+                            Some(session_id),
+                            Some(prompt_id),
+                            AgentEvent::RequestActivity {
+                                prompt_id,
+                                activity: crate::request_status::RequestActivity::phase(
+                                    crate::request_status::RequestPhase::WaitingModel,
+                                ),
+                            },
+                        );
+                    }
+                    let Some(idle_timeout) = idle_timeout else {
+                        continue;
+                    };
                     if elapsed < idle_timeout {
                         continue;
                     }
@@ -649,10 +738,38 @@ impl AgentConnectionRunner {
                         },
                     );
                     *self.active_prompt.lock().await = None;
+                    for tx in pending_cancel_acks.drain(..) {
+                        let _ = tx.send(false);
+                    }
+                    self.emit_connection_status(
+                        AgentConnectionStatus::Failed,
+                        Some("agent session retired after prompt idle timeout".to_string()),
+                        Some(session_id),
+                    );
+                    disconnect_requested = true;
                     break;
                 }
                 maybe_cmd = cmd_rx.recv() => {
                     let Some(cmd) = maybe_cmd else {
+                        self.cancel_pending_interactions(session_id).await;
+                        let _ = driver.interrupt(handle).await;
+                        if self.active_prompt.lock().await.take().is_some() {
+                            self.emit(
+                                Some(session_id),
+                                Some(prompt_id),
+                                AgentEvent::Error {
+                                    error: AgentErrorEvent {
+                                        message: "Agent connection closed before the turn completed."
+                                            .to_string(),
+                                        code: Some("connection_closed".to_string()),
+                                        raw: None,
+                                    },
+                                },
+                            );
+                        }
+                        for tx in pending_cancel_acks.drain(..) {
+                            let _ = tx.send(false);
+                        }
                         disconnect_requested = true;
                         break;
                     };
@@ -718,8 +835,14 @@ impl AgentConnectionRunner {
                         } => {
                             if cancel_session == session_id && cancel_prompt == prompt_id {
                                 self.cancel_pending_interactions(session_id).await;
-                                let ok = driver.interrupt(handle).await.is_ok();
-                                let _ = result_tx.send(ok);
+                                if driver.interrupt(handle).await.is_ok() {
+                                    pending_cancel_acks.push(result_tx);
+                                    cancel_deadline.get_or_insert_with(|| {
+                                        tokio::time::Instant::now() + CANCEL_ACKNOWLEDGEMENT_TIMEOUT
+                                    });
+                                } else {
+                                    let _ = result_tx.send(false);
+                                }
                             } else {
                                 let _ = result_tx.send(false);
                             }
@@ -773,7 +896,26 @@ impl AgentConnectionRunner {
                             let _ = result_tx.send(Ok(()));
                         }
                         AgentConnectionCommand::Disconnect => {
+                            self.cancel_pending_interactions(session_id).await;
                             let _ = driver.interrupt(handle).await;
+                            if self.active_prompt.lock().await.take().is_some() {
+                                self.emit(
+                                    Some(session_id),
+                                    Some(prompt_id),
+                                    AgentEvent::Error {
+                                        error: AgentErrorEvent {
+                                            message:
+                                                "Agent connection closed before the turn completed."
+                                                    .to_string(),
+                                            code: Some("connection_closed".to_string()),
+                                            raw: None,
+                                        },
+                                    },
+                                );
+                            }
+                            for tx in pending_cancel_acks.drain(..) {
+                                let _ = tx.send(false);
+                            }
                             disconnect_requested = true;
                             break;
                         }

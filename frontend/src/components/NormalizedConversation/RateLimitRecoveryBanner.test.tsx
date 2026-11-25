@@ -165,4 +165,156 @@ describe('RateLimitRecoveryBanner', () => {
       toastErrorSpy.mockRestore();
     }
   });
+
+  it('formats raw snake_case engine identifiers into human-readable labels', () => {
+    render(
+      <RateLimitRecoveryBanner
+        conversationId="conv-rate-engine"
+        rateLimit={{
+          isRateLimited: true,
+          engine: 'claude_code',
+          limitedAt: '2026-06-01T12:00:00.000Z',
+          resetAt: '2026-06-01T12:05:00.000Z',
+          autoResume: true,
+        }}
+      />
+    );
+
+    const titleEl = screen.getByTestId('rate-limit-banner-title');
+    expect(titleEl).toHaveTextContent('Claude Code');
+    expect(titleEl).not.toHaveTextContent('claude_code');
+  });
+
+  it('preserves active continuation prompt edits when rateLimit refreshes with new object references', () => {
+    const { rerender } = render(
+      <RateLimitRecoveryBanner
+        conversationId="conv-edit-1"
+        rateLimit={{
+          isRateLimited: true,
+          engine: 'Codex',
+          limitedAt: '2026-06-01T12:00:00.000Z',
+          resetAt: '2026-06-01T12:12:34.000Z',
+          autoResume: true,
+          continuationPrompt: 'Initial prompt',
+        }}
+      />
+    );
+
+    fireEvent.click(screen.getByTestId('rate-limit-edit-prompt-toggle'));
+    const input = screen.getByTestId(
+      'rate-limit-prompt-input'
+    ) as HTMLInputElement;
+    fireEvent.change(input, {
+      target: { value: 'Draft currently being typed' },
+    });
+
+    // Re-render with a new rateLimit object reference (same prompt)
+    rerender(
+      <RateLimitRecoveryBanner
+        conversationId="conv-edit-1"
+        rateLimit={{
+          isRateLimited: true,
+          engine: 'Codex',
+          limitedAt: '2026-06-01T12:00:00.000Z',
+          resetAt: '2026-06-01T12:12:30.000Z',
+          autoResume: true,
+          continuationPrompt: 'Initial prompt',
+        }}
+      />
+    );
+    expect(
+      (screen.getByTestId('rate-limit-prompt-input') as HTMLInputElement).value
+    ).toBe('Draft currently being typed');
+
+    // Re-render with a server-refreshed continuationPrompt while still editing
+    rerender(
+      <RateLimitRecoveryBanner
+        conversationId="conv-edit-1"
+        rateLimit={{
+          isRateLimited: true,
+          engine: 'Codex',
+          limitedAt: '2026-06-01T12:00:00.000Z',
+          resetAt: '2026-06-01T12:12:25.000Z',
+          autoResume: true,
+          continuationPrompt: 'Refreshed server prompt',
+        }}
+      />
+    );
+    expect(
+      (screen.getByTestId('rate-limit-prompt-input') as HTMLInputElement).value
+    ).toBe('Draft currently being typed');
+  });
+
+  it('does not roll back another conversation state when a previous conversation update rejects after switching', async () => {
+    const { toast } = await import('@/components/ui/toast');
+    const toastErrorSpy = vi
+      .spyOn(toast, 'error')
+      .mockImplementation(() => 'err-toast');
+    let rejectFirstUpdate: (error: Error) => void = () => {};
+    const onUpdateAutoResume = vi.fn().mockImplementation(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectFirstUpdate = reject;
+        })
+    );
+
+    try {
+      const { rerender } = render(
+        <RateLimitRecoveryBanner
+          conversationId="conv-a"
+          rateLimit={{
+            isRateLimited: true,
+            engine: 'Codex',
+            limitedAt: '2026-06-01T12:00:00.000Z',
+            resetAt: '2026-06-01T12:12:34.000Z',
+            autoResume: true,
+            continuationPrompt: 'Prompt A',
+          }}
+          onUpdateAutoResume={onUpdateAutoResume}
+        />
+      );
+
+      // Toggle auto-resume off on conv-a while request stays in flight
+      fireEvent.click(screen.getByTestId('rate-limit-auto-resume-switch'));
+
+      // Switch to conv-b with autoResume: false and its own prompt
+      rerender(
+        <RateLimitRecoveryBanner
+          conversationId="conv-b"
+          rateLimit={{
+            isRateLimited: true,
+            engine: 'Codex',
+            limitedAt: '2026-06-01T12:00:00.000Z',
+            resetAt: '2026-06-01T12:15:00.000Z',
+            autoResume: false,
+            continuationPrompt: 'Prompt B',
+          }}
+          onUpdateAutoResume={onUpdateAutoResume}
+        />
+      );
+
+      expect(
+        screen.getByTestId('rate-limit-auto-resume-switch')
+      ).toHaveAttribute('data-state', 'unchecked');
+
+      // Now reject conv-a's in-flight request
+      await act(async () => {
+        rejectFirstUpdate(new Error('conv-a failed'));
+        await Promise.resolve();
+      });
+
+      // conv-b must NOT be rolled back to conv-a's previous autoResume=true or prompt
+      expect(
+        screen.getByTestId('rate-limit-auto-resume-switch')
+      ).toHaveAttribute('data-state', 'unchecked');
+      fireEvent.click(screen.getByTestId('rate-limit-edit-prompt-toggle'));
+      expect(
+        (screen.getByTestId('rate-limit-prompt-input') as HTMLInputElement)
+          .value
+      ).toBe('Prompt B');
+      expect(toastErrorSpy).not.toHaveBeenCalled();
+    } finally {
+      toastErrorSpy.mockRestore();
+    }
+  });
 });

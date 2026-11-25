@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { AgentSessionControlsErrorCard } from '@/components/sessions/SessionCreationStatusCard';
 import {
@@ -15,6 +15,7 @@ import { agentsApi } from '@/features/agents/api';
 import {
   loadAgentSessionControlsCatalog,
   mergeCreateSessionControls,
+  normalizeAgentType,
   sessionControlsQueryKey,
   sessionControlsSchemaQueryKey,
 } from '@/features/agents/sessionControlsQuery';
@@ -32,10 +33,11 @@ export function MemberSessionConfigControls({
   onModeId: (modeId: string) => void;
   onValues: (values: Record<string, string>) => void;
 }) {
+  const normalizedAgentId = normalizeAgentType(agentId);
   const catalogQuery = useQuery({
     queryKey: sessionControlsQueryKey(agentId, null),
     queryFn: () => loadAgentSessionControlsCatalog(agentId),
-    enabled: Boolean(agentId),
+    enabled: Boolean(normalizedAgentId),
     staleTime: 60_000,
     gcTime: Infinity,
     retry: false,
@@ -49,34 +51,73 @@ export function MemberSessionConfigControls({
     retry: false,
   });
   const catalogFreshnessQuery = useQuery({
-    queryKey: ['agentCapabilityCatalogFreshness', agentId],
-    queryFn: () => agentsApi.capabilityCatalogFresh(agentId),
-    enabled: Boolean(agentId && catalogQuery.data),
+    queryKey: ['agentCapabilityCatalogFreshness', normalizedAgentId],
+    queryFn: () => agentsApi.capabilityCatalogFresh(normalizedAgentId),
+    enabled: Boolean(normalizedAgentId && catalogQuery.data),
     staleTime: 0,
     retry: false,
   });
+  const [refreshError, setRefreshError] = useState<unknown>(null);
   const backgroundRefreshAgent = useRef<string | null>(null);
+  const activeAgentRef = useRef(normalizedAgentId);
+  activeAgentRef.current = normalizedAgentId;
+
+  useEffect(() => {
+    backgroundRefreshAgent.current = null;
+    setRefreshError(null);
+  }, [normalizedAgentId]);
+
+  const needsUncachedDiscovery = Boolean(
+    normalizedAgentId &&
+      catalogQuery.isFetched &&
+      !catalogQuery.error &&
+      catalogQuery.data === null
+  );
+  const needsStaleRefresh = Boolean(
+    normalizedAgentId && catalogFreshnessQuery.data === false
+  );
+
   useEffect(() => {
     if (
-      !agentId ||
-      catalogFreshnessQuery.data !== false ||
-      backgroundRefreshAgent.current === agentId
+      !normalizedAgentId ||
+      (!needsUncachedDiscovery && !needsStaleRefresh) ||
+      backgroundRefreshAgent.current === normalizedAgentId
     ) {
       return;
     }
-    backgroundRefreshAgent.current = agentId;
+    backgroundRefreshAgent.current = normalizedAgentId;
+    const targetAgent = normalizedAgentId;
+    const isUncachedDiscovery = needsUncachedDiscovery;
     void agentsApi
-      .refreshCapabilityCatalog(agentId)
+      .refreshCapabilityCatalog(targetAgent)
       .then(async (refreshed) => {
-        if (!refreshed) return;
+        if (activeAgentRef.current !== targetAgent) return;
+        if (!refreshed) {
+          if (isUncachedDiscovery) {
+            setRefreshError(
+              new Error('Agent session controls discovery failed')
+            );
+          }
+          return;
+        }
+        setRefreshError(null);
         await catalogQuery.refetch();
         await catalogFreshnessQuery.refetch();
       })
-      .catch(() => undefined);
-  }, [agentId, catalogFreshnessQuery, catalogQuery]);
-  useEffect(() => {
-    backgroundRefreshAgent.current = null;
-  }, [agentId]);
+      .catch((error: unknown) => {
+        if (activeAgentRef.current !== targetAgent) return;
+        if (isUncachedDiscovery) {
+          setRefreshError(error);
+        }
+      });
+  }, [
+    catalogFreshnessQuery,
+    catalogQuery,
+    needsStaleRefresh,
+    needsUncachedDiscovery,
+    normalizedAgentId,
+  ]);
+
   const catalog = mergeCreateSessionControls([
     catalogQuery.data,
     schemaQuery.data,
@@ -111,13 +152,14 @@ export function MemberSessionConfigControls({
         ))
   );
 
-  if (!agentId) return null;
+  if (!normalizedAgentId) return null;
   if (!catalog || !hasControls) {
-    if (catalogQuery.error) {
+    const activeError = catalogQuery.error ?? refreshError;
+    if (activeError) {
       return (
         <AgentSessionControlsErrorCard
-          agentId={agentId.trim().toLowerCase()}
-          error={catalogQuery.error}
+          agentId={normalizedAgentId}
+          error={activeError}
         />
       );
     }

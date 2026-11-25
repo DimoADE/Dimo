@@ -258,13 +258,14 @@ export class DesktopToastManager {
     }
 
     this.toastWindow = win;
+    const wc = win.webContents;
     this.options.windows.registerAuxiliaryWebContents(
-      win.webContents,
+      wc,
       DESKTOP_TOAST_WINDOW_LABEL
     );
 
     win.on('closed', () => {
-      this.options.windows.unregisterAuxiliaryWebContents(win.webContents);
+      this.options.windows.unregisterAuxiliaryWebContents(wc);
       if (this.toastWindow === win) {
         this.toastWindow = null;
         this.queue.reset();

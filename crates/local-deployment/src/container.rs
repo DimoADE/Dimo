@@ -129,51 +129,57 @@ impl LocalContainerService {
             .is_some_and(|repo_path| repo_path == workspace_root)
     }
 
-    fn discover_workspace_dir_from_existing_worktree(
+    async fn discover_workspace_dir_from_existing_worktree(
         &self,
         repositories: &[Repo],
         branch_name: &str,
     ) -> Option<PathBuf> {
-        for repo in repositories {
-            let worktree_path = match self
-                .git()
-                .find_worktree_path_for_branch(&repo.path, branch_name)
-            {
-                Ok(path) => path,
-                Err(err) => {
-                    tracing::debug!(
-                        "Failed to discover worktree for branch '{}' in repo '{}': {}",
-                        branch_name,
-                        repo.name,
-                        err
-                    );
+        let git = self.git().clone();
+        let repos = repositories.to_vec();
+        let branch_name = branch_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            for repo in &repos {
+                let worktree_path =
+                    match git.find_worktree_path_for_branch(&repo.path, &branch_name) {
+                        Ok(path) => path,
+                        Err(err) => {
+                            tracing::debug!(
+                                "Failed to discover worktree for branch '{}' in repo '{}': {}",
+                                branch_name,
+                                repo.name,
+                                err
+                            );
+                            continue;
+                        }
+                    };
+
+                let Some(found_worktree_path) = worktree_path else {
                     continue;
+                };
+
+                let workspace_root = if found_worktree_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name == repo.name)
+                {
+                    found_worktree_path
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or(found_worktree_path.clone())
+                } else {
+                    found_worktree_path
+                };
+
+                if workspace_root.exists() {
+                    return Some(workspace_root);
                 }
-            };
-
-            let Some(found_worktree_path) = worktree_path else {
-                continue;
-            };
-
-            let workspace_root = if found_worktree_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name == repo.name)
-            {
-                found_worktree_path
-                    .parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or(found_worktree_path.clone())
-            } else {
-                found_worktree_path
-            };
-
-            if workspace_root.exists() {
-                return Some(workspace_root);
             }
-        }
 
-        None
+            None
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -251,11 +257,6 @@ impl LocalContainerService {
         map.remove(id)
     }
 
-    async fn add_exit_monitor_handle(&self, id: Uuid, handle: JoinHandle<()>) {
-        let mut map = self.exit_monitor_handles.write().await;
-        map.insert(id, handle);
-    }
-
     async fn take_exit_monitor_handle(&self, id: &Uuid) -> Option<JoinHandle<()>> {
         let mut map = self.exit_monitor_handles.write().await;
         map.remove(id)
@@ -321,7 +322,7 @@ impl LocalContainerService {
         path == repo_path || path.starts_with(&repo_path) || repo_path.starts_with(&path)
     }
 
-    fn is_registered_direct_worktree(
+    async fn is_registered_direct_worktree(
         &self,
         workspace: &Workspace,
         repositories: &[Repo],
@@ -331,9 +332,16 @@ impl LocalContainerService {
             return false;
         };
 
-        self.git
-            .is_worktree_path_for_branch(&repo.path, &workspace.branch, candidate_path)
-            .unwrap_or(false)
+        let git = self.git.clone();
+        let repo_path = repo.path.clone();
+        let branch = workspace.branch.clone();
+        let candidate_path = candidate_path.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            git.is_worktree_path_for_branch(&repo_path, &branch, &candidate_path)
+                .unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false)
     }
 
     async fn repair_workspace_storage_mode(
@@ -349,7 +357,10 @@ impl LocalContainerService {
             return Ok(());
         };
         let container_path = PathBuf::from(&container_ref);
-        if self.is_registered_direct_worktree(workspace, repositories, &container_path) {
+        if self
+            .is_registered_direct_worktree(workspace, repositories, &container_path)
+            .await
+        {
             return Ok(());
         }
         let Some(overlapping_repo) = repositories
@@ -366,7 +377,13 @@ impl LocalContainerService {
             overlapping_repo.path.display()
         );
 
-        let current_branch = self.git.get_current_branch(&overlapping_repo.path).ok();
+        let git = self.git.clone();
+        let overlapping_path = overlapping_repo.path.clone();
+        let current_branch =
+            tokio::task::spawn_blocking(move || git.get_current_branch(&overlapping_path).ok())
+                .await
+                .ok()
+                .flatten();
         if current_branch
             .as_deref()
             .is_some_and(|branch| branch.eq_ignore_ascii_case(&workspace.branch))
@@ -574,7 +591,12 @@ impl LocalContainerService {
 
         for repo in &ctx.repos {
             let repo_path = Self::workspace_repo_path(&ctx.workspace, &workspace_root, &repo.name);
-            let current_head = self.git().get_head_info(&repo_path).ok().map(|h| h.oid);
+            let git = self.git().clone();
+            let current_head =
+                tokio::task::spawn_blocking(move || git.get_head_info(&repo_path).ok().map(|h| h.oid))
+                    .await
+                    .ok()
+                    .flatten();
 
             let before_head = repo_states
                 .iter()
@@ -994,9 +1016,11 @@ impl LocalContainerService {
             self.add_cancellation_token(execution_id, cancel).await;
         }
 
-        let monitor_handle = self.spawn_exit_monitor(&execution_id, exit_signal);
-        self.add_exit_monitor_handle(execution_id, monitor_handle)
-            .await;
+        {
+            let mut handles = self.exit_monitor_handles.write().await;
+            let monitor_handle = self.spawn_exit_monitor(&execution_id, exit_signal);
+            handles.insert(execution_id, monitor_handle);
+        }
         Ok(())
     }
 }
@@ -1078,18 +1102,26 @@ impl ContainerService for LocalContainerService {
         if workspace_dir.as_os_str().is_empty() {
             return Ok(true);
         }
-        if !workspace_dir.exists() && !PathBuf::from(container_ref).exists() {
-            return Ok(true);
-        }
 
-        for repo in &repositories {
-            let worktree_path = Self::workspace_repo_path(workspace, &workspace_dir, &repo.name);
-            if worktree_path.exists() && !self.git().is_worktree_clean(&worktree_path)? {
-                return Ok(false);
+        let container_ref_path = PathBuf::from(container_ref);
+        let worktree_paths: Vec<PathBuf> = repositories
+            .iter()
+            .map(|repo| Self::workspace_repo_path(workspace, &workspace_dir, &repo.name))
+            .collect();
+        let git = self.git().clone();
+        tokio::task::spawn_blocking(move || {
+            if !workspace_dir.exists() && !container_ref_path.exists() {
+                return Ok(true);
             }
-        }
-
-        Ok(true)
+            for worktree_path in worktree_paths {
+                if worktree_path.exists() && !git.is_worktree_clean(&worktree_path)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })
+        .await
+        .map_err(|e| ContainerError::Other(anyhow!(e)))?
     }
 
     async fn start_execution_inner(
@@ -1155,7 +1187,11 @@ impl ContainerService for LocalContainerService {
             );
 
             let _ = self.take_cancellation_token(&execution_process.id).await;
-            let _ = self.take_exit_monitor_handle(&execution_process.id).await;
+            if let Some(monitor_handle) = self.take_exit_monitor_handle(&execution_process.id).await
+            {
+                monitor_handle.abort();
+                let _ = monitor_handle.await;
+            }
             self.finish_stopped_execution(&execution_process.id).await;
 
             return Ok(());
@@ -1163,25 +1199,33 @@ impl ContainerService for LocalContainerService {
 
         let child = child.expect("checked is_some above");
 
+        let mut monitor_handle = self.take_exit_monitor_handle(&execution_process.id).await;
+
         // Try graceful cancellation first, then force kill
         if let Some(cancel) = self.take_cancellation_token(&execution_process.id).await {
             cancel.cancel();
 
-            // Wait for exit monitor to finish gracefully
-            if let Some(monitor_handle) = self.take_exit_monitor_handle(&execution_process.id).await
-            {
-                match tokio::time::timeout(Duration::from_secs(5), monitor_handle).await {
+            // Wait for exit monitor to finish gracefully; abort on timeout so it cannot race.
+            if let Some(mut handle) = monitor_handle.take() {
+                match tokio::time::timeout(Duration::from_secs(5), &mut handle).await {
                     Ok(_) => {
                         tracing::debug!("Process {} exited gracefully", execution_process.id);
                     }
                     Err(_) => {
                         tracing::debug!(
-                            "Graceful shutdown timed out for process {}, force killing",
+                            "Graceful shutdown timed out for process {}, aborting monitor and force killing",
                             execution_process.id
                         );
+                        handle.abort();
+                        let _ = handle.await;
                     }
                 }
             }
+        } else if let Some(handle) = monitor_handle.take() {
+            // Script executions do not carry a cancellation token; abort the exit monitor
+            // before killing the process group so it cannot auto-commit or advance actions.
+            handle.abort();
+            let _ = handle.await;
         }
 
         {
@@ -1244,14 +1288,27 @@ impl ContainerService for LocalContainerService {
                 continue;
             };
 
-            let base_commit = match self
-                .git()
-                .get_base_commit(&repo.path, branch, target_branch)
+            let git = self.git().clone();
+            let repo_path_for_base = repo.path.clone();
+            let branch_for_base = branch.to_string();
+            let target_branch_for_base = target_branch.clone();
+            let base_commit = match tokio::task::spawn_blocking(move || {
+                git.get_base_commit(&repo_path_for_base, &branch_for_base, &target_branch_for_base)
+            })
+            .await
             {
-                Ok(c) => c,
-                Err(e) => {
+                Ok(Ok(c)) => c,
+                Ok(Err(e)) => {
                     tracing::warn!(
                         "Skipping diff stream for repo {}: failed to get base commit: {}",
+                        repo.name,
+                        e
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Skipping diff stream for repo {}: base commit task failed: {}",
                         repo.name,
                         e
                     );
@@ -1294,15 +1351,22 @@ impl ContainerService for LocalContainerService {
         let message = self.get_commit_message(ctx).await;
 
         let workspace_root = Self::normalized_workspace_base_dir(&ctx.workspace, &ctx.repos);
+        let container = self.clone();
+        let workspace = ctx.workspace.clone();
+        let repos = ctx.repos.clone();
 
-        let repos_with_changes =
-            self.check_repos_for_changes(&ctx.workspace, &workspace_root, &ctx.repos)?;
-        if repos_with_changes.is_empty() {
-            tracing::debug!("No changes to commit in any repository");
-            return Ok(false);
-        }
+        tokio::task::spawn_blocking(move || {
+            let repos_with_changes =
+                container.check_repos_for_changes(&workspace, &workspace_root, &repos)?;
+            if repos_with_changes.is_empty() {
+                tracing::debug!("No changes to commit in any repository");
+                return Ok(false);
+            }
 
-        Ok(self.commit_repos(repos_with_changes, &message))
+            Ok(container.commit_repos(repos_with_changes, &message))
+        })
+        .await
+        .map_err(|e| ContainerError::Other(anyhow!(e)))?
     }
 
     /// Copy files from the original project directory to the worktree.

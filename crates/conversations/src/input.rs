@@ -489,7 +489,15 @@ impl ConversationInputControl {
             .map(ConversationInputView::try_from)
             .collect::<Result<Vec<_>, _>>()?;
         let delayed = list_delayed_input_views(&self.pool, conversation_id).await?;
-        views.extend(delayed);
+        if !delayed.is_empty() {
+            let delayed_ids: std::collections::HashSet<Uuid> =
+                delayed.iter().map(|item| item.id).collect();
+            views.retain(|item| {
+                !(item.status == ConversationInputStatus::Cancelled
+                    && delayed_ids.contains(&item.id))
+            });
+            views.extend(delayed);
+        }
         Ok(views)
     }
 
@@ -556,9 +564,10 @@ impl ConversationInputControl {
             .bind(&now_stamp)
             .execute(&self.pool)
             .await?;
-            crate::collaboration::notify_delayed_input_changed();
+            // Cancel only the original queued record in `conversation_inputs` so we never
+            // hit `cancel_delayed_input_if_exists` and self-cancel the newly inserted row.
             if let Err(error) = self
-                .cancel(CancelConversationInput {
+                .cancel_queued_input(CancelConversationInput {
                     conversation_id: input.conversation_id,
                     input_id: input.input_id,
                     operation_id: input.operation_id,
@@ -566,12 +575,16 @@ impl ConversationInputControl {
                 })
                 .await
             {
-                let _ = sqlx::query("DELETE FROM conversation_delayed_inputs WHERE id = ?")
-                    .bind(delayed_id.to_string())
-                    .execute(&self.pool)
-                    .await;
+                let _ = sqlx::query(
+                    "DELETE FROM conversation_delayed_inputs WHERE id = ? AND operation_id = ?",
+                )
+                .bind(delayed_id.to_string())
+                .bind(delayed_op_id.to_string())
+                .execute(&self.pool)
+                .await;
                 return Err(error);
             }
+            crate::collaboration::notify_delayed_input_changed();
             return Ok(ConversationInputView {
                 id: delayed_id,
                 conversation_id: input.conversation_id,
@@ -645,6 +658,13 @@ impl ConversationInputControl {
         {
             return Ok(cancelled_delayed);
         }
+        self.cancel_queued_input(input).await
+    }
+
+    async fn cancel_queued_input(
+        &self,
+        input: CancelConversationInput,
+    ) -> Result<ConversationInputView, ConversationInputControlError> {
         let revision = input
             .expected_revision
             .checked_add(1)
@@ -676,7 +696,7 @@ impl ConversationInputControl {
                 continue;
             }
             match self
-                .cancel(CancelConversationInput {
+                .cancel_queued_input(CancelConversationInput {
                     conversation_id,
                     input_id: input.id,
                     operation_id: Uuid::new_v4(),
@@ -688,6 +708,28 @@ impl ConversationInputControl {
                 Err(ConversationInputControlError::StateConflict { .. }) => {}
                 Err(error) => return Err(error),
             }
+        }
+        Ok(cancelled)
+    }
+
+    /// Cancel every still-scheduled delayed input targeting `conversation_id`.
+    pub async fn cancel_scheduled_delayed(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<usize, ConversationInputControlError> {
+        let result = sqlx::query(
+            r#"UPDATE conversation_delayed_inputs
+               SET status = 'cancelled'
+               WHERE conversation_id = ?
+                 AND status = 'scheduled'
+                 AND COALESCE(json_extract(principal_json, '$.kind'), '') != 'collaboration_space_post'"#,
+        )
+        .bind(conversation_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        let cancelled = usize::try_from(result.rows_affected()).unwrap_or(0);
+        if cancelled > 0 {
+            crate::collaboration::notify_delayed_input_changed();
         }
         Ok(cancelled)
     }

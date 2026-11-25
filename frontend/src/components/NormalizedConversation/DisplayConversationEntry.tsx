@@ -99,14 +99,9 @@ function DisplayConversationEntry({
     () => ({
       taskAttemptId: taskAttempt?.id,
       taskId: task?.id ?? taskAttempt?.task_id,
-      workspacePath: taskAttempt?.container_ref,
+      workspacePath: containerRef,
     }),
-    [
-      task?.id,
-      taskAttempt?.container_ref,
-      taskAttempt?.id,
-      taskAttempt?.task_id,
-    ]
+    [containerRef, task?.id, taskAttempt?.id, taskAttempt?.task_id]
   );
 
   if (isProcessStart(entry)) {

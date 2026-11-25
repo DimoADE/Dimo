@@ -357,6 +357,41 @@ pub(super) fn normalize_sidecar_event(
             prompt_id,
             session_id,
         }),
+        "request_retrying" => Some(EngineEvent::RequestRetrying {
+            prompt_id,
+            session_id,
+            attempt: event
+                .get("attempt")
+                .and_then(Value::as_u64)
+                .and_then(|v| u32::try_from(v).ok()),
+            max_attempts: event
+                .get("maxAttempts")
+                .or_else(|| event.get("max_attempts"))
+                .or_else(|| event.get("max_retries"))
+                .and_then(Value::as_u64)
+                .and_then(|v| u32::try_from(v).ok()),
+            delay_ms: event
+                .get("delayMs")
+                .or_else(|| event.get("delay_ms"))
+                .or_else(|| event.get("retry_delay_ms"))
+                .and_then(Value::as_u64),
+            reason: str_opt(event, "reason")
+                .or_else(|| str_opt(event, "error"))
+                .or_else(|| str_opt(event, "message")),
+            code: event
+                .get("code")
+                .or_else(|| event.get("errorStatus"))
+                .or_else(|| event.get("error_status"))
+                .filter(|v| v.is_string() || v.is_number())
+                .map(|v| {
+                    v.as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| v.to_string())
+                })
+                .filter(|s| !s.is_empty()),
+        }),
         "rate_limits_updated" => {
             let raw = event.get("rateLimits")?;
             let limits = EngineRateLimits {
@@ -1131,5 +1166,35 @@ mod tests {
             found.canonicalize().expect("canonical found"),
             driver.canonicalize().expect("canonical driver")
         );
+    }
+
+    #[test]
+    fn normalize_sidecar_event_maps_request_retrying() {
+        let rl = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let cache = std::sync::Arc::new(std::sync::RwLock::new(None));
+        let payload = serde_json::json!({
+            "kind": "request_retrying",
+            "sessionId": "claude-sess-1",
+            "promptId": "prompt-1",
+            "attempt": 2,
+            "maxAttempts": 5,
+            "delayMs": 3000,
+            "reason": "overloaded_error",
+            "code": 529
+        });
+        let event = super::normalize_sidecar_event(&payload, &rl, &cache, true)
+            .expect("request_retrying should normalize");
+        assert!(matches!(
+            event,
+            crate::engine::EngineEvent::RequestRetrying {
+                prompt_id: Some(ref p),
+                session_id: Some(ref s),
+                attempt: Some(2),
+                max_attempts: Some(5),
+                delay_ms: Some(3000),
+                reason: Some(ref r),
+                code: Some(ref c),
+            } if p == "prompt-1" && s == "claude-sess-1" && r == "overloaded_error" && c == "529"
+        ));
     }
 }

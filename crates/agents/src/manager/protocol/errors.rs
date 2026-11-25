@@ -206,7 +206,7 @@ impl AirSessionFailure {
                 .message
                 .as_deref()
                 .or(self.title.as_deref())
-                .unwrap_or("Claude ended the turn without returning results for tool calls");
+                .unwrap_or("Agent ended the turn without returning results for tool calls");
             return format_incomplete_tool_call_message(raw);
         }
         let title = self
@@ -393,19 +393,18 @@ pub(in crate::manager) fn turn_failure_error_event(
             let message = match cause {
                 EmptyTurnCause::UnreadableUpdates => {
                     if stderr_text.is_empty() {
-                        "Agent 发送了无法识别的流式更新，导致本回合未显示任何有效输出。"
-                            .to_string()
+                        "Agent 发送了无法识别的流式更新，导致本回合未显示任何有效输出。".to_string()
                     } else {
                         format!(
                             "Agent 发送了无法识别的流式更新，导致本回合未显示任何有效输出。最近 stderr: {stderr_text}"
                         )
                     }
                 }
-                EmptyTurnCause::AgentStderr => format!(
-                    "Agent 未产生任何输出即结束了回合（StopReason::EndTurn）。最近 stderr: {stderr_text}"
-                ),
+                EmptyTurnCause::AgentStderr => {
+                    format!("Agent 未产生任何输出即结束了回合。最近 stderr: {stderr_text}")
+                }
                 EmptyTurnCause::SilentEndTurn => {
-                    "Agent 未产生任何输出即结束了回合（StopReason::EndTurn）。可能是认证失效、网络中断或上游服务异常。"
+                    "Agent 未产生任何输出即结束了回合。可能是认证失效、网络中断或上游服务异常。"
                         .to_string()
                 }
             };
@@ -419,10 +418,7 @@ pub(in crate::manager) fn turn_failure_error_event(
             let message = air_failure
                 .as_ref()
                 .map(AirSessionFailure::format_message)
-                .unwrap_or_else(|| {
-                    "模型拒绝了本次请求（StopReason::Refusal）：Agent 结束了回合但未生成回复。"
-                        .to_string()
-                });
+                .unwrap_or_else(|| "模型拒绝了本次请求，Agent 未生成回复。".to_string());
             Some(AgentErrorEvent {
                 message,
                 code: Some("turn_failed_refusal".to_string()),
@@ -433,10 +429,7 @@ pub(in crate::manager) fn turn_failure_error_event(
             let message = air_failure
                 .as_ref()
                 .map(AirSessionFailure::format_message)
-                .unwrap_or_else(|| {
-                    "已达到单轮最大输出 Token 限制（StopReason::MaxTokens），回复在完成前被截断。"
-                        .to_string()
-                });
+                .unwrap_or_else(|| "已达到单轮最大输出长度限制，回复在完成前被截断。".to_string());
             Some(AgentErrorEvent {
                 message,
                 code: Some("turn_failed_max_tokens".to_string()),
@@ -448,8 +441,7 @@ pub(in crate::manager) fn turn_failure_error_event(
                 .as_ref()
                 .map(AirSessionFailure::format_message)
                 .unwrap_or_else(|| {
-                    "已达到单轮最大模型请求次数限制（StopReason::MaxTurnRequests），Agent 已停止继续执行。"
-                        .to_string()
+                    "已达到单轮最大调用次数限制，Agent 已停止继续执行。".to_string()
                 });
             Some(AgentErrorEvent {
                 message,
@@ -468,12 +460,17 @@ pub(in crate::manager) fn turn_failure_error_event(
 }
 
 pub(in crate::manager) fn is_prompt_session_lost_error_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
     const MARKERS: &[&str] = &[
-        "Session not found",
         "session not found",
+        "no such session",
+        "unknown session",
+        "invalid session",
         "session has ended",
+        "failed to rebuild agent",
+        "agent connection was lost",
     ];
-    MARKERS.iter().any(|marker| message.contains(marker))
+    MARKERS.iter().any(|marker| lower.contains(marker))
 }
 
 fn format_acp_error_base_message(error: &acp::Error) -> String {
@@ -729,4 +726,39 @@ pub(in crate::manager) fn is_session_contention_error(message: &str) -> bool {
         "拒绝访问",
     ];
     MARKERS.iter().any(|marker| message.contains(marker))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_session_lost_error_matches_acp_and_native_agent_variants() {
+        for message in [
+            "Session not found: sess_123",
+            "no such session",
+            "Unknown session id",
+            "Invalid session handle",
+            "Session has ended",
+            "Failed to rebuild agent for session",
+            "Agent connection was lost before response",
+        ] {
+            assert!(
+                is_prompt_session_lost_error_message(message),
+                "expected session-lost match for: {message}"
+            );
+        }
+
+        for unrelated in [
+            "",
+            "rate limit exceeded",
+            "invalid model parameter",
+            "permission denied",
+        ] {
+            assert!(
+                !is_prompt_session_lost_error_message(unrelated),
+                "unexpected session-lost match for: {unrelated}"
+            );
+        }
+    }
 }

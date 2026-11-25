@@ -847,4 +847,168 @@ describe('useFollowUpSend', () => {
       })
     );
   });
+
+  it('preserves operationId for idempotent retry when creating a new session transitions sessionId to the created session', async () => {
+    createMock.mockResolvedValue({ id: 'sess-new', workspace_id: 'ws-1' });
+    sendTurnMock
+      .mockRejectedValueOnce(new Error('network timeout'))
+      .mockResolvedValueOnce({});
+
+    const queryClient = new QueryClient();
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+    const onSendFailure = vi.fn();
+    const onAfterSendCleanup = vi.fn();
+    const clearComments = vi.fn();
+
+    const { result, rerender } = renderHook(
+      ({
+        sessionId,
+        isNewSessionMode,
+      }: {
+        sessionId?: string;
+        isNewSessionMode: boolean;
+      }) =>
+        useFollowUpSend({
+          sessionId,
+          workspaceId: 'ws-1',
+          isNewSessionMode,
+          message: 'first turn on new session',
+          executorProfileId: { executor: 'codex' as const } as never,
+          conflictMarkdown: null,
+          reviewMarkdown: '',
+          clearComments,
+          onSendFailure,
+          onAfterSendCleanup,
+          onSelectSession: (nextId) => {
+            rerender({ sessionId: nextId, isNewSessionMode: false });
+          },
+        }),
+      {
+        wrapper,
+        initialProps: {
+          sessionId: undefined as string | undefined,
+          isNewSessionMode: true,
+        },
+      }
+    );
+
+    await act(async () => {
+      await result.current.onSendFollowUp();
+    });
+
+    expect(onSendFailure).toHaveBeenCalledWith('first turn on new session');
+    expect(onAfterSendCleanup).not.toHaveBeenCalled();
+
+    // Retry on the newly created session — must reuse the exact same operationId
+    await act(async () => {
+      await result.current.onSendFollowUp();
+    });
+
+    expect(sendTurnMock).toHaveBeenCalledTimes(2);
+    const firstOpId = sendTurnMock.mock.calls[0]?.[0]?.operationId;
+    const secondOpId = sendTurnMock.mock.calls[1]?.[0]?.operationId;
+    expect(firstOpId).toEqual(expect.any(String));
+    expect(secondOpId).toBe(firstOpId);
+    expect(onAfterSendCleanup).toHaveBeenCalledTimes(1);
+    expect(clearComments).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not clear or overwrite another session draft when user switches sessions while a new-session send is in flight', async () => {
+    createMock.mockResolvedValue({ id: 'sess-new', workspace_id: 'ws-1' });
+    let resolveTurn: (value: unknown) => void = () => {};
+    sendTurnMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveTurn = resolve;
+        })
+    );
+
+    const queryClient = new QueryClient();
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+    const clearComments = vi.fn();
+    const onAfterSendCleanup = vi.fn();
+    const onSendFailure = vi.fn();
+
+    const { result, rerender } = renderHook(
+      ({
+        sessionId,
+        isNewSessionMode,
+      }: {
+        sessionId?: string;
+        isNewSessionMode: boolean;
+      }) =>
+        useFollowUpSend({
+          sessionId,
+          workspaceId: 'ws-1',
+          isNewSessionMode,
+          message: 'created session prompt',
+          executorProfileId: { executor: 'codex' as const } as never,
+          conflictMarkdown: null,
+          reviewMarkdown: '',
+          clearComments,
+          onSendFailure,
+          onAfterSendCleanup,
+          onSelectSession: (nextId) => {
+            rerender({ sessionId: nextId, isNewSessionMode: false });
+          },
+        }),
+      {
+        wrapper,
+        initialProps: {
+          sessionId: undefined as string | undefined,
+          isNewSessionMode: true,
+        },
+      }
+    );
+
+    let sendPromise!: Promise<void>;
+    await act(async () => {
+      sendPromise = result.current.onSendFollowUp();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // User switches away to another session before the runtime turn resolves
+    rerender({ sessionId: 'sess-other', isNewSessionMode: false });
+
+    await act(async () => {
+      resolveTurn({});
+      await sendPromise;
+    });
+
+    expect(clearComments).not.toHaveBeenCalled();
+    expect(onAfterSendCleanup).not.toHaveBeenCalled();
+    expect(onSendFailure).not.toHaveBeenCalled();
+
+    // Also verify failure rollback & acceptedInput recovery do not contaminate sess-other
+    let rejectTurn: (error: Error) => void = () => {};
+    sendTurnMock.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectTurn = reject;
+        })
+    );
+    rerender({ sessionId: undefined, isNewSessionMode: true });
+
+    await act(async () => {
+      sendPromise = result.current.onSendFollowUp();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    rerender({ sessionId: 'sess-other', isNewSessionMode: false });
+
+    await act(async () => {
+      rejectTurn(new Error('network error'));
+      await sendPromise;
+    });
+
+    expect(onSendFailure).not.toHaveBeenCalled();
+    expect(onAfterSendCleanup).not.toHaveBeenCalled();
+    expect(result.current.followUpError).toBeNull();
+  });
 });

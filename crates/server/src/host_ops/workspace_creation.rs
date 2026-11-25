@@ -26,17 +26,23 @@ impl ServerApplicationDomains {
                 .await
                 .map_err(internal_error)?
             {
-                Some(repo) => match self
-                    .deployment
-                    .git()
-                    .resolve_workspace_branch(&repo.path, Some(&input.target_branch))
-                {
-                    Ok(target_branch) => validated_repos.push(CreateWorkspaceRepo {
-                        repo_id: repo.id,
-                        target_branch,
-                    }),
-                    Err(error) => validation_errors.push(format!("{}: {error}", repo.name)),
-                },
+                Some(repo) => {
+                    let git = self.deployment.git().clone();
+                    let repo_path = repo.path.clone();
+                    let target_branch = input.target_branch.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        git.resolve_workspace_branch(&repo_path, Some(&target_branch))
+                    })
+                    .await
+                    .map_err(internal_error)?
+                    {
+                        Ok(target_branch) => validated_repos.push(CreateWorkspaceRepo {
+                            repo_id: repo.id,
+                            target_branch,
+                        }),
+                        Err(error) => validation_errors.push(format!("{}: {error}", repo.name)),
+                    }
+                }
                 None => validation_errors.push(format!("Repository {} not found", input.repo_id)),
             }
         }

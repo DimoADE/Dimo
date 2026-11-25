@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
   type Context,
+  type CSSProperties,
   type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
@@ -38,6 +39,7 @@ import {
   type ImagePreviewPresentation,
 } from '@/contexts/ImagePreviewPresentationContext';
 import { AttachmentPreviewProvider } from '@/components/NormalizedConversation/attachments/AttachmentPreviewOverlay';
+import { useFloatingComposerInset } from '@/hooks/useFloatingComposerInset';
 import {
   resolveActiveSession,
   useWorkspaceSessions,
@@ -570,6 +572,21 @@ function KanbanSessionConversationContent({
     attempt.id,
     activeSession?.id ?? attempt.session?.id
   );
+  const isAtConversationBottomRef = useRef(isAtConversationBottom);
+  isAtConversationBottomRef.current = isAtConversationBottom;
+  const hasFloatingComposer = Boolean(
+    interactive && !shouldShowNewSessionPrompt && !isPluginModeTakeover
+  );
+  const handleFloatingComposerInsetChange = useCallback(() => {
+    if (isAtConversationBottomRef.current) {
+      logsRef.current?.scrollToBottom('auto');
+    }
+  }, []);
+  const { dockRef: composerDockRef, height: floatingComposerHeight } =
+    useFloatingComposerInset({
+      enabled: hasFloatingComposer,
+      onInsetChange: handleFloatingComposerInsetChange,
+    });
 
   return (
     <EntriesProvider runtimeKey={conversationKey}>
@@ -599,48 +616,65 @@ function KanbanSessionConversationContent({
                     taskId={taskId}
                   />
                 ) : (
-                  <div className="min-h-0 flex-1 overflow-hidden">
-                    <VirtualizedList
-                      ref={logsRef}
-                      attempt={activeAttempt}
-                      task={null}
-                      onAtBottomChange={setIsAtConversationBottom}
-                      widthMode={conversationWidthMode}
-                    />
+                  <div
+                    className="conversation-floating-stage relative flex min-h-0 flex-1 flex-col"
+                    data-floating-composer={
+                      hasFloatingComposer ? 'true' : undefined
+                    }
+                    style={
+                      hasFloatingComposer
+                        ? ({
+                            '--conv-floating-composer-height': `${floatingComposerHeight}px`,
+                          } as CSSProperties)
+                        : undefined
+                    }
+                  >
+                    <div className="min-h-0 flex-1 overflow-hidden">
+                      <VirtualizedList
+                        ref={logsRef}
+                        attempt={activeAttempt}
+                        task={null}
+                        onAtBottomChange={setIsAtConversationBottom}
+                        widthMode={conversationWidthMode}
+                      />
+                    </div>
+                    {hasFloatingComposer ? (
+                      <div
+                        ref={composerDockRef}
+                        className="conversation-floating-composer-dock pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col"
+                        data-testid="conversation-floating-composer-dock"
+                      >
+                        {!isAtConversationBottom ? (
+                          <div className="pointer-events-none relative z-20 h-0">
+                            <button
+                              type="button"
+                              className="tahoe-popover pointer-events-auto absolute left-1/2 top-0 inline-flex h-9 w-9 -translate-x-1/2 -translate-y-[calc(100%+8px)] items-center justify-center rounded-full text-foreground/80 transition-colors hover:text-foreground"
+                              aria-label={t(
+                                'sessionConversationView.backToBottom'
+                              )}
+                              title={t('sessionConversationView.backToBottom')}
+                              onClick={() => logsRef.current?.scrollToBottom()}
+                            >
+                              <ChevronDown className="h-4 w-4" />
+                            </button>
+                          </div>
+                        ) : null}
+                        <div className="shrink-0">
+                          <TaskFollowUpSection
+                            taskId={taskId}
+                            session={activeSession}
+                            workspace={activeAttempt}
+                            workspaceId={attempt.id}
+                            widthMode={conversationWidthMode}
+                            sessionState={sessionState}
+                            onSessionCreated={onSessionCreated}
+                            onSessionSelected={onSessionSelected}
+                          />
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 )}
-                {interactive &&
-                !shouldShowNewSessionPrompt &&
-                !isPluginModeTakeover &&
-                !isAtConversationBottom ? (
-                  <div className="pointer-events-none relative z-20 h-0">
-                    <button
-                      type="button"
-                      className="tahoe-popover pointer-events-auto absolute left-1/2 top-0 inline-flex h-9 w-9 -translate-x-1/2 -translate-y-[calc(100%+8px)] items-center justify-center rounded-full text-foreground/80 transition-colors hover:text-foreground"
-                      aria-label={t('sessionConversationView.backToBottom')}
-                      title={t('sessionConversationView.backToBottom')}
-                      onClick={() => logsRef.current?.scrollToBottom()}
-                    >
-                      <ChevronDown className="h-4 w-4" />
-                    </button>
-                  </div>
-                ) : null}
-                {interactive &&
-                !shouldShowNewSessionPrompt &&
-                !isPluginModeTakeover ? (
-                  <div className="shrink-0">
-                    <TaskFollowUpSection
-                      taskId={taskId}
-                      session={activeSession}
-                      workspace={activeAttempt}
-                      workspaceId={attempt.id}
-                      widthMode={conversationWidthMode}
-                      sessionState={sessionState}
-                      onSessionCreated={onSessionCreated}
-                      onSessionSelected={onSessionSelected}
-                    />
-                  </div>
-                ) : null}
               </div>
             </ActiveExecutorProfileProvider>
           </RetryUiProvider>

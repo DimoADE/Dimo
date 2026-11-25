@@ -4,6 +4,8 @@ import type { AgentSessionControlsSnapshot } from 'shared/types';
 import { backendListen } from '@/lib/backendTransport';
 import { agentsApi } from './api';
 import {
+  mergeCreateSessionControls,
+  normalizeAgentType,
   sessionControlsQueryKey,
   sessionControlsSchemaQueryKey,
 } from './sessionControlsQuery';
@@ -14,18 +16,47 @@ export type AgentCapabilityCatalogUpdatedEvent = {
   controls: AgentSessionControlsSnapshot;
 };
 
+function normalizeScopedInstance(
+  providerInstanceId?: string | null
+): string | null {
+  const trimmed = providerInstanceId?.trim() ?? '';
+  return trimmed.length > 0 && trimmed.toLowerCase() !== 'local'
+    ? trimmed
+    : null;
+}
+
 export function applyCapabilityCatalogUpdate(
   queryClient: QueryClient,
   event: AgentCapabilityCatalogUpdatedEvent
 ): void {
-  const scopedInstance = event.providerInstanceId?.trim() || null;
+  const normalizedAgent = normalizeAgentType(event.agentId);
+  if (!normalizedAgent) return;
+  const scopedInstance = normalizeScopedInstance(event.providerInstanceId);
   queryClient.setQueryData(
-    sessionControlsQueryKey(event.agentId, null, scopedInstance),
+    sessionControlsQueryKey(normalizedAgent, null, scopedInstance),
     event.controls
   );
-  queryClient.setQueryData(
-    sessionControlsSchemaQueryKey(event.agentId, scopedInstance),
-    event.controls
+  queryClient.setQueriesData<AgentSessionControlsSnapshot | null>(
+    {
+      predicate: (query) => {
+        const key = query.queryKey;
+        if (
+          key[0] !== 'agent-session-controls-catalog' ||
+          key[1] !== normalizedAgent
+        ) {
+          return false;
+        }
+        const keyInstance =
+          typeof key[3] === 'string' ? normalizeScopedInstance(key[3]) : null;
+        return keyInstance === scopedInstance;
+      },
+    },
+    () => event.controls
+  );
+  queryClient.setQueryData<AgentSessionControlsSnapshot | null>(
+    sessionControlsSchemaQueryKey(normalizedAgent, scopedInstance),
+    (existing) =>
+      mergeCreateSessionControls([event.controls, existing]) ?? event.controls
   );
 }
 
@@ -40,10 +71,8 @@ export function useAgentCapabilityCatalogSync(): void {
   useEffect(() => {
     let active = true;
     const receivedPushKeys = new Set<string>();
-    const cacheKeyFor = (
-      agentId: string,
-      providerInstanceId?: string | null
-    ) => `${agentId.trim().toLowerCase()}::${providerInstanceId?.trim() || ''}`;
+    const cacheKeyFor = (agentId: string, providerInstanceId?: string | null) =>
+      `${normalizeAgentType(agentId)}::${normalizeScopedInstance(providerInstanceId) ?? ''}`;
 
     let unlisten: (() => void) | undefined;
     void backendListen<AgentCapabilityCatalogUpdatedEvent>(

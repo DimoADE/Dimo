@@ -10,6 +10,7 @@ export type AgentType = AgentId;
 export type AgentConnectionStatus =
   | 'disconnected'
   | 'connecting'
+  | 'recovering'
   | 'ready'
   | 'failed';
 

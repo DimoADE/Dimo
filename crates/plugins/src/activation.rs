@@ -27,6 +27,7 @@ pub struct ActivationManager {
     active: RwLock<BTreeMap<String, Arc<WorkerHost>>>,
     draining: Arc<RwLock<BTreeMap<String, Vec<Arc<WorkerHost>>>>>,
     shared_node: Arc<SharedNodeWorkerHost>,
+    plugin_locks: std::sync::Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 #[derive(Clone)]
@@ -156,8 +157,26 @@ impl ActivationManager {
             .prepare_candidate(node_executable, package, grants, broker)
             .await?;
         let activation = prepared.activation().clone();
-        let _ = self.commit(prepared).await;
+        let _ = self.commit(prepared).await?;
         Ok(activation)
+    }
+
+    /// Acquires a per-`plugin_id` serialization lock shared between lazy
+    /// activation and lifecycle write operations (enable, disable, update,
+    /// uninstall, idle recycle).
+    pub(crate) async fn lock_plugin(&self, plugin_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = {
+            let mut locks = self
+                .plugin_locks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            Arc::clone(
+                locks
+                    .entry(plugin_id.to_owned())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+            )
+        };
+        lock.lock_owned().await
     }
 
     pub async fn prepare_candidate(
@@ -235,13 +254,32 @@ impl ActivationManager {
         })
     }
 
-    pub(crate) async fn commit(&self, prepared: PreparedActivation) -> Option<GenerationDrain> {
+    pub(crate) async fn commit(
+        &self,
+        prepared: PreparedActivation,
+    ) -> Result<Option<GenerationDrain>, WorkerHostError> {
         let plugin_id = prepared.plugin_id;
-        let previous = self
-            .active
-            .write()
-            .await
-            .insert(plugin_id.clone(), prepared.host);
+        let incoming_generation = prepared.host.activation().generation;
+        let previous = {
+            let mut active = self.active.write().await;
+            if let Some(existing) = active.get(&plugin_id) {
+                let existing_generation = existing.activation().generation;
+                let stale = incoming_generation < existing_generation
+                    || (incoming_generation == existing_generation
+                        && !existing.is_terminal().await);
+                if stale {
+                    drop(active);
+                    let _ = prepared.host.dispose("stale generation rejected").await;
+                    return Err(WorkerHostError::external(
+                        "stale_generation",
+                        format!(
+                            "refusing to overwrite generation {existing_generation} of plugin `{plugin_id}` with generation {incoming_generation}"
+                        ),
+                    ));
+                }
+            }
+            active.insert(plugin_id.clone(), prepared.host)
+        };
         if let Some(previous) = previous {
             let generation = previous.activation().generation;
             self.draining
@@ -267,12 +305,12 @@ impl ActivationManager {
                     }
                 }
             });
-            Some(GenerationDrain {
+            Ok(Some(GenerationDrain {
                 generation,
                 completion,
-            })
+            }))
         } else {
-            None
+            Ok(None)
         }
     }
 
@@ -342,5 +380,142 @@ impl ActivationManager {
         } else {
             Ok(false)
         }
+    }
+
+    pub(crate) async fn deactivate_if_terminal(
+        &self,
+        plugin_id: &str,
+    ) -> Result<bool, WorkerHostError> {
+        let host = self.active.read().await.get(plugin_id).cloned();
+        let Some(host) = host else {
+            return Ok(false);
+        };
+        if !host.is_terminal().await {
+            return Ok(false);
+        }
+        self.deactivate(plugin_id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    fn test_lightweight_package(id: &str) -> (tempfile::TempDir, PluginPackage) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("README.md"), "# Test Plugin").expect("write readme");
+        let pkg = PluginPackage::for_test(
+            id,
+            "Test Plugin",
+            "1.0.0",
+            crate::PluginSourceKind::Snapshot,
+            dir.path(),
+        );
+        (dir, pkg)
+    }
+
+    #[tokio::test]
+    async fn commit_requires_strictly_increasing_generation_for_live_hosts() {
+        let manager = ActivationManager::default();
+        let (_dir, pkg) = test_lightweight_package("dimo.gen-guard");
+        let broker: Arc<dyn CapabilityBroker> = Arc::new(crate::DenyCapabilityBroker);
+
+        let gen2 = manager
+            .prepare_lightweight_candidate_at(2, &pkg, &[], Arc::clone(&broker))
+            .expect("prepare gen 2");
+        assert!(manager.commit(gen2).await.expect("commit gen 2").is_none());
+        assert_eq!(
+            manager
+                .lease("dimo.gen-guard")
+                .await
+                .expect("lease gen 2")
+                .activation()
+                .generation,
+            2
+        );
+
+        // Stale older generation must be rejected without replacing gen 2.
+        let gen1 = manager
+            .prepare_lightweight_candidate_at(1, &pkg, &[], Arc::clone(&broker))
+            .expect("prepare stale gen 1");
+        let stale_err = manager
+            .commit(gen1)
+            .await
+            .err()
+            .expect("older generation must be rejected");
+        assert_eq!(stale_err.code(), "stale_generation");
+        assert_eq!(
+            manager
+                .lease("dimo.gen-guard")
+                .await
+                .expect("lease still gen 2")
+                .activation()
+                .generation,
+            2
+        );
+
+        // Duplicate live generation must also be rejected.
+        let dup_gen2 = manager
+            .prepare_lightweight_candidate_at(2, &pkg, &[], Arc::clone(&broker))
+            .expect("prepare duplicate gen 2");
+        let dup_err = manager
+            .commit(dup_gen2)
+            .await
+            .err()
+            .expect("equal live generation must be rejected");
+        assert_eq!(dup_err.code(), "stale_generation");
+
+        // Strictly newer generation succeeds and drains gen 2.
+        let gen3 = manager
+            .prepare_lightweight_candidate_at(3, &pkg, &[], broker)
+            .expect("prepare gen 3");
+        let drain = manager
+            .commit(gen3)
+            .await
+            .expect("commit gen 3")
+            .expect("replacing gen 2 yields drain");
+        assert_eq!(drain.generation, 2);
+        assert_eq!(
+            manager
+                .lease("dimo.gen-guard")
+                .await
+                .expect("lease gen 3")
+                .activation()
+                .generation,
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn per_plugin_lock_serializes_same_plugin_without_blocking_other_plugins() {
+        let manager = Arc::new(ActivationManager::default());
+        let guard_a = manager.lock_plugin("dimo.alpha").await;
+
+        // Different plugin acquires immediately while alpha is held.
+        let guard_b = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            manager.lock_plugin("dimo.beta"),
+        )
+        .await
+        .expect("different plugin must not be blocked");
+        drop(guard_b);
+
+        // Same plugin waits until guard_a is released.
+        let manager_clone = Arc::clone(&manager);
+        let waiter = tokio::spawn(async move {
+            let _g = manager_clone.lock_plugin("dimo.alpha").await;
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !waiter.is_finished(),
+            "second lock for same plugin must wait while first guard is held"
+        );
+        drop(guard_a);
+        tokio::time::timeout(std::time::Duration::from_millis(500), waiter)
+            .await
+            .expect("waiter should acquire after release")
+            .expect("waiter task ok");
     }
 }

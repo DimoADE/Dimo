@@ -430,6 +430,8 @@ export function useConversationRateLimitState(params: {
 
   const derivedRef = useRef(derived);
   derivedRef.current = derived;
+  const activeSessionIdRef = useRef(sessionId);
+  activeSessionIdRef.current = sessionId;
 
   useEffect(() => {
     if (!sessionId) return;
@@ -516,15 +518,16 @@ export function useConversationRateLimitState(params: {
       continuationPrompt: string;
     }) => {
       await conversationApi.updateRateLimitAutoResume(update);
-      if (!sessionId || update.conversationId !== sessionId) return;
+      const activeSessionId = activeSessionIdRef.current;
+      if (!activeSessionId || update.conversationId !== activeSessionId) return;
       setOverride((current) => {
         const base =
-          current?.sessionId === sessionId && current.status === 'active'
+          current?.sessionId === activeSessionId && current.status === 'active'
             ? current.state
             : derivedRef.current?.state;
         if (!base) return current;
         return {
-          sessionId,
+          sessionId: activeSessionId,
           status: 'active',
           derivedKey: derivedRef.current?.key ?? null,
           state: {
@@ -535,21 +538,19 @@ export function useConversationRateLimitState(params: {
         };
       });
     },
-    [sessionId]
+    []
   );
 
-  const handleCancelWait = useCallback(
-    async (conversationId: string) => {
-      await conversationApi.cancelRateLimitWait({ conversationId });
-      if (!sessionId || conversationId !== sessionId) return;
-      setOverride({
-        sessionId,
-        status: 'cleared',
-        derivedKey: derivedRef.current?.key ?? null,
-      });
-    },
-    [sessionId]
-  );
+  const handleCancelWait = useCallback(async (conversationId: string) => {
+    await conversationApi.cancelRateLimitWait({ conversationId });
+    const activeSessionId = activeSessionIdRef.current;
+    if (!activeSessionId || conversationId !== activeSessionId) return;
+    setOverride({
+      sessionId: activeSessionId,
+      status: 'cleared',
+      derivedKey: derivedRef.current?.key ?? null,
+    });
+  }, []);
 
   return {
     rateLimit,

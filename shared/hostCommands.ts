@@ -659,6 +659,7 @@ export const DESKTOP_SHELL_COMMANDS = [
   'start_create_host_tunnel',
   'take_pending_desktop_toast_activation',
   'take_pending_model_router_import',
+  'take_pending_open_files',
   'record_shell_crash',
   'update_web_service_config',
   'get_developer_mode',

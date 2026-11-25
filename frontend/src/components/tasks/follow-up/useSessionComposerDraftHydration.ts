@@ -25,6 +25,7 @@ export function useSessionComposerDraftHydration({
   isScratchLoading,
   scratchData,
   localMessage,
+  hasLocalImages = false,
   setLocalMessage,
   setAttachedImages,
   setSelectedMode,
@@ -42,6 +43,7 @@ export function useSessionComposerDraftHydration({
   isScratchLoading: boolean;
   scratchData: DraftFollowUpData | undefined;
   localMessage?: string;
+  hasLocalImages?: boolean;
   setLocalMessage: Dispatch<SetStateAction<string>>;
   setAttachedImages: Dispatch<SetStateAction<SessionComposerImageAttachment[]>>;
   /** Pending ACP session-mode state, seeded from a create-form preset. */
@@ -84,6 +86,7 @@ export function useSessionComposerDraftHydration({
       scratchId,
       scratchData,
       localMessage,
+      hasLocalImages,
       queuedMessageTexts,
     });
     hydratedScratchIdRef.current = hydration.hydratedScratchId;
@@ -94,8 +97,16 @@ export function useSessionComposerDraftHydration({
     suppressedEchoRef.current = null;
     setLocalMessage(hydration.message ?? '');
     setAttachedImages((prev) => {
-      prev.forEach(revokeComposerImagePreviewUrl);
-      return hydration.imagePaths.map(imageAttachmentFromPath);
+      const prevByPath = new Map(prev.map((image) => [image.path, image]));
+      const nextPaths = new Set(hydration.imagePaths);
+      for (const image of prev) {
+        if (!nextPaths.has(image.path)) {
+          revokeComposerImagePreviewUrl(image);
+        }
+      }
+      return hydration.imagePaths.map(
+        (path) => prevByPath.get(path) ?? imageAttachmentFromPath(path)
+      );
     });
     if (allowSessionControlsHydration) {
       if (hydration.modeOverride !== null) {
@@ -112,6 +123,7 @@ export function useSessionComposerDraftHydration({
     }
   }, [
     allowSessionControlsHydration,
+    hasLocalImages,
     isScratchLoading,
     localMessage,
     queuedMessageTexts,

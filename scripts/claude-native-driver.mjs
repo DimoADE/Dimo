@@ -837,9 +837,15 @@ export class ClaudeNativeSidecarServer {
           for (const event of normalized) {
             if (event.kind === 'rate_limits_updated') this.latestRateLimits = event.rateLimits;
             if (event.kind === 'turn_completed') {
-              const resolvedServedModel =
-                readString(event.served_model ?? event.servedModel) ?? servedModel ?? null;
-              terminalEvent = { ...event, served_model: resolvedServedModel };
+              if (!terminalEvent) {
+                const resolvedServedModel =
+                  readString(event.served_model ?? event.servedModel) ?? servedModel ?? null;
+                terminalEvent = { ...event, served_model: resolvedServedModel };
+              }
+            } else if (event.kind === 'turn_error') {
+              if (!terminalEvent) {
+                terminalEvent = event;
+              }
             } else {
               this.emitEvent(event);
             }
@@ -847,8 +853,16 @@ export class ClaudeNativeSidecarServer {
 
           if (message?.type === 'result') liveStream?.close();
         }
+        if (!terminalEvent && !turnState.interrupted) {
+          terminalEvent = {
+            kind: 'turn_error',
+            sessionId: currentSessionId,
+            promptId,
+            message: 'Claude query stream ended without a terminal result event',
+          };
+        }
       } catch (error) {
-        if (!turnState.interrupted) {
+        if (!turnState.interrupted && !terminalEvent) {
           terminalEvent = {
             kind: 'turn_error',
             sessionId: currentSessionId,
@@ -859,7 +873,7 @@ export class ClaudeNativeSidecarServer {
       } finally {
         liveStream?.close();
         if (this.activeTurn === turnState) this.activeTurn = null;
-        if (terminalEvent) this.emitEvent(terminalEvent);
+        if (terminalEvent && !turnState.interrupted) this.emitEvent(terminalEvent);
       }
     })();
 
@@ -943,6 +957,8 @@ export class ClaudeNativeSidecarServer {
       // ProcessTransport, which causes queryHandle.interrupt() to reject with "Operation aborted".
     }
 
+    await turn.completionPromise?.catch(() => undefined);
+
     this.emitEvent({
       kind: 'turn_interrupted',
       promptId: turn.promptId,
@@ -950,7 +966,6 @@ export class ClaudeNativeSidecarServer {
       reason: readString(params.reason) ?? 'user_interrupted',
     });
 
-    await turn.completionPromise?.catch(() => undefined);
     return { interrupted: true, promptId: turn.promptId, sessionId: turn.sessionId };
   }
 

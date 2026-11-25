@@ -356,6 +356,7 @@ export function parkEntryWindowRows(
     optimisticBaselineUserRowIds: {},
     lastSequence: 0n,
     loadedLastSequence: 0n,
+    loadedLiveSequence: 0n,
     olderCursor: trimmed ? null : entry.olderCursor,
     loadedToStart: trimmed ? false : entry.loadedToStart,
     prefixHash: trimmed ? null : entry.prefixHash,

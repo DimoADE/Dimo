@@ -358,6 +358,31 @@ impl SqlitePluginRegistry {
         let candidate = candidate.ok_or_else(|| {
             PluginError::registry("candidate generation is missing or no longer publishable")
         })?;
+        let installed_exists: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM plugin_installations_v4 WHERE plugin_id = ? LIMIT 1",
+        )
+        .bind(plugin_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(registry_error)?;
+        if installed_exists.is_none() {
+            return Err(PluginError::not_found(plugin_id));
+        }
+        let newer_active: Option<i64> = sqlx::query_scalar(
+            "SELECT generation_id FROM plugin_generations_v4
+             WHERE plugin_id = ? AND state IN ('active','active_degraded') AND generation_id > ?
+             LIMIT 1",
+        )
+        .bind(plugin_id)
+        .bind(generation)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(registry_error)?;
+        if let Some(newer_id) = newer_active {
+            return Err(PluginError::registry(format!(
+                "refusing to publish stale generation {generation} for `{plugin_id}` while newer generation {newer_id} is active"
+            )));
+        }
         sqlx::query(
             "UPDATE plugin_generations_v4 SET state = 'draining'
              WHERE plugin_id = ? AND state IN ('active','active_degraded')",
@@ -533,7 +558,7 @@ impl SqlitePluginRegistry {
     ) -> Result<(), PluginError> {
         sqlx::query(
             "UPDATE plugin_generations_v4 SET state = 'retired'
-             WHERE plugin_id = ? AND state IN ('active','active_degraded','draining')",
+             WHERE plugin_id = ? AND state IN ('active','active_degraded','draining','candidate')",
         )
         .bind(plugin_id)
         .execute(&self.pool)
@@ -585,7 +610,7 @@ impl SqlitePluginRegistry {
         }
         sqlx::query(
             "UPDATE plugin_generations_v4 SET state = 'retired'
-             WHERE plugin_id = ? AND state IN ('active','active_degraded','draining')",
+             WHERE plugin_id = ? AND state IN ('active','active_degraded','draining','candidate')",
         )
         .bind(plugin_id)
         .execute(&self.pool)

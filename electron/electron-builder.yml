@@ -86,6 +86,95 @@ mac:
   extendInfo:
     NSMicrophoneUsageDescription: Dimo requires microphone access for voice input and audio features.
     NSCameraUsageDescription: Dimo requires camera access for video calls and media features.
+    CFBundleDocumentTypes:
+      - CFBundleTypeName: Dimo Previewable Document
+        CFBundleTypeRole: Viewer
+        LSHandlerRank: Alternate
+        LSItemContentTypes:
+          - public.text
+          - public.plain-text
+          - public.source-code
+          - public.yaml
+          - public.json
+          - public.xml
+          - public.html
+          - public.image
+          - com.adobe.pdf
+          - public.mpeg-4
+          - org.openxmlformats.wordprocessingml.document
+          - org.openxmlformats.spreadsheetml.sheet
+          - org.openxmlformats.presentationml.presentation
+        CFBundleTypeExtensions:
+          - md
+          - mdx
+          - markdown
+          - html
+          - htm
+          - yaml
+          - yml
+          - toml
+          - json
+          - xml
+          - ini
+          - conf
+          - cfg
+          - env
+          - properties
+          - csv
+          - log
+          - txt
+          - lock
+          - sql
+          - graphql
+          - ts
+          - tsx
+          - js
+          - jsx
+          - mjs
+          - cjs
+          - css
+          - scss
+          - sass
+          - less
+          - vue
+          - svelte
+          - rs
+          - py
+          - go
+          - java
+          - kt
+          - swift
+          - dart
+          - c
+          - h
+          - cpp
+          - hpp
+          - cs
+          - rb
+          - php
+          - lua
+          - sh
+          - bash
+          - zsh
+          - ps1
+          - png
+          - jpg
+          - jpeg
+          - gif
+          - svg
+          - webp
+          - avif
+          - bmp
+          - heic
+          - heif
+          - tif
+          - tiff
+          - ico
+          - pdf
+          - mp4
+          - docx
+          - xlsx
+          - pptx
   artifactName: Dimo-${version}-darwin-${arch}.${ext}
   target:
     - dmg
@@ -109,6 +198,28 @@ linux:
   icon: build/icons/128x128@2x.png
   category: Development
   maintainer: Dimo <support@dimo.dev>
+  mimeTypes:
+    - text/plain
+    - text/markdown
+    - text/html
+    - text/css
+    - text/xml
+    - text/csv
+    - application/json
+    - application/yaml
+    - application/x-yaml
+    - application/toml
+    - application/pdf
+    - image/png
+    - image/jpeg
+    - image/gif
+    - image/svg+xml
+    - image/webp
+    - image/bmp
+    - video/mp4
+    - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+    - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+    - application/vnd.openxmlformats-officedocument.presentationml.presentation
   artifactName: Dimo-${version}-linux-${arch}.${ext}
   target:
     - AppImage

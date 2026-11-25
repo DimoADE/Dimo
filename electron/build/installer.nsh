@@ -7,10 +7,12 @@ Var pid
 !macro stopStagedSidecars
   ; Stop only sidecar/MCP helper processes running inside $INSTDIR so upgrades
   ; and uninstalls release file locks without killing unrelated headless
-  ; `dimo serve` daemons running elsewhere on the machine.
+  ; `dimo serve` daemons running elsewhere on the machine. Wait briefly for
+  ; termination so Win32 file/directory handles on $INSTDIR close before
+  ; uninstallOldVersion or CopyFiles runs.
   ${if} "$INSTDIR" != ""
     System::Call 'Kernel32::SetEnvironmentVariable(t "DIMO_NSIS_INSTDIR", t "$INSTDIR")'
-    nsExec::ExecToLog `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$root = $$env:DIMO_NSIS_INSTDIR; if ($$root) { $$prefix = $$root.TrimEnd('\') + '\'; $$targets = @('dimo-server.exe', 'dimo-mcp.exe'); Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue | Where-Object { $$_.Name -and ($$targets -contains $$_.Name.ToLowerInvariant()) -and $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$prefix, [System.StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue } }"`
+    nsExec::ExecToLog `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$root = $$env:DIMO_NSIS_INSTDIR; if ($$root) { $$prefix = $$root.TrimEnd('\') + '\'; $$targets = @('dimo-server.exe', 'dimo-mcp.exe'); $$pids = @(Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue | Where-Object { $$_.Name -and ($$targets -contains $$_.Name.ToLowerInvariant()) -and $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$prefix, [System.StringComparison]::OrdinalIgnoreCase) } | Select-Object -ExpandProperty ProcessId); if ($$pids.Count -gt 0) { Stop-Process -Id $$pids -Force -ErrorAction SilentlyContinue; Wait-Process -Id $$pids -Timeout 5 -ErrorAction SilentlyContinue } }"`
     System::Call 'Kernel32::SetEnvironmentVariable(t "DIMO_NSIS_INSTDIR", i 0)'
   ${endIf}
 !macroend

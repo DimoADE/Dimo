@@ -109,8 +109,9 @@ const bootstrap = ipcRenderer.sendSync(
 
 const isLocalDesktopWindow = isLocalDesktopWindowLabel(bootstrap.windowLabel);
 
-let currentBackend: ElectronBackendConnectionInfo | undefined =
-  extractBackendConnectionInfo(bootstrap.backend);
+let currentBackend: ElectronBackendConnectionInfo | undefined = isLocalDesktopWindow
+  ? extractBackendConnectionInfo(bootstrap.backend)
+  : undefined;
 let currentCapabilities: CachedServerCapabilities | null = isLocalDesktopWindow
   ? extractCachedCapabilities(bootstrap.capabilities)
   : null;
@@ -164,12 +165,12 @@ ipcRenderer.on(
       message.event === SIDECAR_READY_EVENT ||
       message.event === SIDECAR_RESTARTED_EVENT
     ) {
-      const nextBackend = extractBackendConnectionInfo(message.payload);
-      if (nextBackend) {
-        currentBackend = nextBackend;
-        currentSidecarStatus = 'running';
-      }
       if (isLocalDesktopWindow) {
+        const nextBackend = extractBackendConnectionInfo(message.payload);
+        if (nextBackend) {
+          currentBackend = nextBackend;
+          currentSidecarStatus = 'running';
+        }
         const nextCapabilities = extractCachedCapabilities(message.payload);
         if (nextCapabilities) {
           currentCapabilities = nextCapabilities;

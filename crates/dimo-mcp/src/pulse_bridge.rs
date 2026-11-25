@@ -213,15 +213,40 @@ async fn host_event_emit<C: HostCommandCaller>(
         .get("payload")
         .cloned()
         .unwrap_or_else(|| json!({}));
+    let root_event_id = crate::pulse::extract_trace_root_event_id(arguments, meta);
+    let parent_run_id = crate::pulse::extract_trace_parent_run_id(arguments, meta);
+
+    let mut input = Map::new();
+    input.insert("eventType".into(), json!(event_type));
+    input.insert("threadKey".into(), json!(thread_key));
+    input.insert("sourceInstanceId".into(), json!(source_instance_id));
+    input.insert("deliveryId".into(), json!(delivery_id));
+    if hop_count > 0 || root_event_id.is_some() || parent_run_id.is_some() {
+        if hop_count > 0 {
+            input.insert("hopCount".into(), json!(hop_count));
+        }
+        if let Some(ref root_id) = root_event_id {
+            input.insert("rootEventId".into(), json!(root_id));
+        }
+        if let Some(ref run_id) = parent_run_id {
+            input.insert("parentRunId".into(), json!(run_id));
+        }
+        let mut trace = Map::new();
+        if hop_count > 0 {
+            trace.insert("hopCount".into(), json!(hop_count));
+        }
+        if let Some(ref root_id) = root_event_id {
+            trace.insert("rootEventId".into(), json!(root_id));
+        }
+        if let Some(ref run_id) = parent_run_id {
+            trace.insert("parentRunId".into(), json!(run_id));
+        }
+        input.insert("trace".into(), Value::Object(trace));
+    }
+    input.insert("payload".into(), payload);
 
     let host_args = json!({
-        "input": {
-            "eventType": event_type,
-            "threadKey": thread_key,
-            "sourceInstanceId": source_instance_id,
-            "deliveryId": delivery_id,
-            "payload": payload,
-        }
+        "input": Value::Object(input),
     });
 
     match caller
@@ -690,5 +715,83 @@ pub(crate) fn normalize_sample_event_envelope(raw: &Value) -> Value {
 fn rename_alias(map: &mut Map<String, Value>, snake: &str, camel: &str) {
     if let Some(val) = map.remove(snake) {
         map.entry(camel.to_string()).or_insert(val);
+    }
+}
+
+#[cfg(test)]
+mod bridge_trace_tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    struct CaptureCaller {
+        captured: Mutex<Vec<(String, Value)>>,
+    }
+
+    impl HostCommandCaller for CaptureCaller {
+        fn call_host_command<'a>(
+            &'a self,
+            command: &'a str,
+            _operation_id: &'a str,
+            args: &'a Value,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Value, HostCallError>> + Send + 'a>,
+        > {
+            self.captured
+                .lock()
+                .unwrap()
+                .push((command.to_string(), args.clone()));
+            Box::pin(async { Ok(json!({ "ok": true })) })
+        }
+    }
+
+    #[tokio::test]
+    async fn host_event_emit_forwards_hop_count_and_trace_lineage() {
+        let caller = CaptureCaller {
+            captured: Mutex::new(Vec::new()),
+        };
+        let args = json!({
+            "event_type": "ci.step.done",
+            "thread_key": "pr:42",
+            "payload": { "ok": true }
+        });
+        let meta = json!({
+            "parent_hop_count": 2,
+            "root_event_id": "evt_root_abc",
+            "parent_run_id": "run_parent_99"
+        });
+        let result =
+            execute_host_pulse_tool(&caller, "pulse_event_emit", &args, Some(&meta), None)
+                .await
+                .expect("tool executes");
+        assert_eq!(result["ok"], json!(true));
+
+        let calls = caller.captured.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "pulse_event_emit");
+        let input = &calls[0].1["input"];
+        assert_eq!(input["hopCount"], json!(3));
+        assert_eq!(input["rootEventId"], json!("evt_root_abc"));
+        assert_eq!(input["parentRunId"], json!("run_parent_99"));
+        assert_eq!(input["trace"]["hopCount"], json!(3));
+        assert_eq!(input["trace"]["rootEventId"], json!("evt_root_abc"));
+        assert_eq!(input["trace"]["parentRunId"], json!("run_parent_99"));
+    }
+
+    #[tokio::test]
+    async fn host_event_emit_rejects_u64_overflow_hop_count_before_calling_host() {
+        let caller = CaptureCaller {
+            captured: Mutex::new(Vec::new()),
+        };
+        let args = json!({
+            "event_type": "ci.step.done",
+            "hopCount": (1u64 << 32)
+        });
+        let result = execute_host_pulse_tool(&caller, "pulse_event_emit", &args, None, None)
+            .await
+            .expect("returns structured error");
+        assert_eq!(result["isError"], json!(true));
+        assert_eq!(result["error_code"], json!("hop_limit_exceeded"));
+        assert!(caller.captured.lock().unwrap().is_empty());
     }
 }

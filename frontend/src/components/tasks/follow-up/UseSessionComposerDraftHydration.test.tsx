@@ -200,4 +200,89 @@ describe('useSessionComposerDraftHydration', () => {
 
     expect(deleteScratch).not.toHaveBeenCalled();
   });
+
+  it('does not clobber or revoke a locally pasted image when scratch finishes loading', () => {
+    const revokeSpy = vi
+      .spyOn(URL, 'revokeObjectURL')
+      .mockImplementation(() => {});
+    const pastedImage: SessionComposerImageAttachment = {
+      id: 'pasted-1',
+      name: 'pasted.png',
+      path: '.vibe-images/pasted.png',
+      previewUrl: 'blob:pasted-1',
+    };
+
+    const { result, rerender } = renderHook(
+      (props: {
+        isScratchLoading: boolean;
+        scratchData: DraftFollowUpData | undefined;
+      }) => {
+        const [message, setMessage] = useState('');
+        const [images, setImages] = useState<SessionComposerImageAttachment[]>([
+          pastedImage,
+        ]);
+        const [, setSelectedMode] = useState<string | null>(null);
+        const [, setSelectedConfigValues] = useState<Record<string, string>>(
+          {}
+        );
+        useSessionComposerDraftHydration({
+          scratchId: 'session-paste-race',
+          isScratchLoading: props.isScratchLoading,
+          scratchData: props.scratchData,
+          localMessage: message,
+          hasLocalImages: images.length > 0,
+          setLocalMessage: setMessage,
+          setAttachedImages: setImages,
+          setSelectedMode,
+          setSelectedConfigValues,
+          cancelDebouncedSave: vi.fn(),
+          deleteScratch: vi.fn(),
+        });
+
+        return { message, images };
+      },
+      {
+        initialProps: {
+          isScratchLoading: true,
+          scratchData: undefined as DraftFollowUpData | undefined,
+        },
+      }
+    );
+
+    rerender({
+      isScratchLoading: false,
+      scratchData: draftData,
+    });
+
+    expect(result.current.images).toEqual([pastedImage]);
+    expect(revokeSpy).not.toHaveBeenCalled();
+    revokeSpy.mockRestore();
+  });
+
+  it('retains existing blob previewUrl when hydrated draft references the same image path', () => {
+    const revokeSpy = vi
+      .spyOn(URL, 'revokeObjectURL')
+      .mockImplementation(() => {});
+    const existingImage: SessionComposerImageAttachment = {
+      id: 'local-one',
+      name: 'one.png',
+      path: '.vibe-images/one.png',
+      previewUrl: 'blob:keep-me',
+    };
+
+    const { result } = renderDraftHydrationHook({
+      scratchId: 'session-same-path',
+      isScratchLoading: false,
+      scratchData: {
+        ...draftData,
+        images: ['.vibe-images/one.png', '.vibe-images/two.png'],
+      },
+      initialImages: [existingImage],
+    });
+
+    expect(result.current.images[0]).toEqual(existingImage);
+    expect(result.current.images[1]?.path).toBe('.vibe-images/two.png');
+    expect(revokeSpy).not.toHaveBeenCalledWith('blob:keep-me');
+    revokeSpy.mockRestore();
+  });
 });

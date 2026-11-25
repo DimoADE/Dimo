@@ -75,6 +75,9 @@ pub(crate) fn should_commit_and_consider_next(
     run_reason: &ExecutionProcessRunReason,
     exit_code: Option<i64>,
 ) -> bool {
+    if matches!(status, ExecutionProcessStatus::Killed) {
+        return false;
+    }
     let success = matches!(status, ExecutionProcessStatus::Completed) && exit_code == Some(0);
     let cleanup_done = matches!(run_reason, ExecutionProcessRunReason::CleanupScript)
         && !matches!(status, ExecutionProcessStatus::Running);
@@ -263,6 +266,16 @@ mod tests {
             &ExecutionProcessStatus::Running,
             &ExecutionProcessRunReason::CleanupScript,
             None,
+        ));
+        assert!(!should_commit_and_consider_next(
+            &ExecutionProcessStatus::Killed,
+            &ExecutionProcessRunReason::CleanupScript,
+            None,
+        ));
+        assert!(!should_commit_and_consider_next(
+            &ExecutionProcessStatus::Killed,
+            &ExecutionProcessRunReason::CleanupScript,
+            Some(0),
         ));
     }
 

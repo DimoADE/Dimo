@@ -866,15 +866,25 @@ impl WorkflowCore {
                 candidate.attempt,
                 &envelope.event_id,
             );
-            let run_view = self
+            match self
                 .resume_waiting_step(ResumeWaitingWorkflowStep {
                     run_id: candidate.run_id,
-                    step_id: candidate.step_id,
+                    step_id: candidate.step_id.clone(),
                     event: envelope.clone(),
                     operation_id,
                 })
-                .await?;
-            resumed.push(run_view);
+                .await
+            {
+                Ok(run_view) => resumed.push(run_view),
+                Err(WorkflowError::Conflict(reason)) => {
+                    eprintln!(
+                        "workflows: skipping wait_for_event candidate run={} step={} event={} due to conflict: {}",
+                        candidate.run_id, candidate.step_id, envelope.event_id, reason
+                    );
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
         }
         Ok(resumed)
     }
@@ -1083,4 +1093,309 @@ fn derive_saga_operation_id(
 fn digest_json(value: &impl serde::Serialize) -> Result<String, WorkflowError> {
     let bytes = serde_json::to_vec(value)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+#[cfg(test)]
+mod saga_fanout_tests {
+    use std::{collections::BTreeMap, str::FromStr};
+
+    use chrono::{Duration, Utc};
+    use sqlx::{
+        SqlitePool,
+        sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    };
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::{
+        BotConversationScope, BotMailboxPolicy, BotStepSpec, CompletionPolicy, EventActor,
+        EventEnvelope, EventSourceKind, EventSourceMeta, EventTrace, EventTrustLevel,
+        WORKFLOW_DEFINITION_VERSION, WaitForEventStepSpec, WorkflowDefinition, WorkflowPolicy,
+        WorkflowStep, WorkflowStepSpec, normalize_definition,
+    };
+
+    async fn setup_test_core() -> (WorkflowCore, WorkflowStore, SqlitePool) {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .foreign_keys(false);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::migrate!("../db/migrations").run(&pool).await.unwrap();
+        sqlx::query("PRAGMA foreign_keys = OFF")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let store = WorkflowStore::new(pool.clone());
+        (WorkflowCore::new(store.clone()), store, pool)
+    }
+
+    fn parallel_wait_definition(name: &str, timeout_seconds: Option<u32>) -> WorkflowDefinition {
+        normalize_definition(WorkflowDefinition {
+            format_version: WORKFLOW_DEFINITION_VERSION,
+            name: name.to_string(),
+            description: None,
+            input_schema: Some(serde_json::json!({ "type": "object" })),
+            steps: vec![
+                WorkflowStep {
+                    id: "branch_work".to_string(),
+                    depends_on: Vec::new(),
+                    phase: Some("work".to_string()),
+                    input_bindings: BTreeMap::new(),
+                    spec: WorkflowStepSpec::Bot(BotStepSpec {
+                        member_id: "bot-worker".to_string(),
+                        conversation_scope: BotConversationScope::FixedPrimary,
+                        mailbox_policy: BotMailboxPolicy::FifoSerial,
+                        prompt_template: "keep working".to_string(),
+                        completion: CompletionPolicy::Automatic,
+                        output_schema: None,
+                    }),
+                },
+                WorkflowStep {
+                    id: "branch_wait".to_string(),
+                    depends_on: Vec::new(),
+                    phase: Some("wait".to_string()),
+                    input_bindings: BTreeMap::new(),
+                    spec: WorkflowStepSpec::WaitForEvent(WaitForEventStepSpec {
+                        event_types: vec!["deploy.approved".to_string()],
+                        thread_key_pointer: Some("/threadKey".to_string()),
+                        filter: None,
+                        timeout_seconds,
+                    }),
+                },
+            ],
+            policy: WorkflowPolicy::default(),
+        })
+        .unwrap()
+    }
+
+    fn single_wait_definition(name: &str, timeout_seconds: Option<u32>) -> WorkflowDefinition {
+        normalize_definition(WorkflowDefinition {
+            format_version: WORKFLOW_DEFINITION_VERSION,
+            name: name.to_string(),
+            description: None,
+            input_schema: Some(serde_json::json!({ "type": "object" })),
+            steps: vec![WorkflowStep {
+                id: "wait_gate".to_string(),
+                depends_on: Vec::new(),
+                phase: Some("wait".to_string()),
+                input_bindings: BTreeMap::new(),
+                spec: WorkflowStepSpec::WaitForEvent(WaitForEventStepSpec {
+                    event_types: vec!["deploy.approved".to_string()],
+                    thread_key_pointer: Some("/threadKey".to_string()),
+                    filter: None,
+                    timeout_seconds,
+                }),
+            }],
+            policy: WorkflowPolicy::default(),
+        })
+        .unwrap()
+    }
+
+    fn deploy_approved_event(id: &str, thread_key: &str) -> EventEnvelope {
+        EventEnvelope {
+            event_id: id.to_string(),
+            delivery_id: format!("deliv-{id}"),
+            source: EventSourceMeta {
+                kind: EventSourceKind::Feishu,
+                instance_id: "feishu-main".to_string(),
+                trust_level: EventTrustLevel::VerifiedExternal,
+            },
+            event_type: "deploy.approved".to_string(),
+            occurred_at: Utc::now().to_rfc3339(),
+            actor: EventActor {
+                id: "user-1".to_string(),
+                display_name: Some("Reviewer".to_string()),
+                roles: Vec::new(),
+                is_bot: false,
+                is_self: false,
+            },
+            thread_key: Some(thread_key.to_string()),
+            correlations: Vec::new(),
+            reply_channels: Vec::new(),
+            trace: EventTrace {
+                root_event_id: id.to_string(),
+                parent_run_id: None,
+                hop_count: 0,
+            },
+            payload: serde_json::json!({ "approved": true }),
+        }
+    }
+
+    async fn start_run(
+        core: &WorkflowCore,
+        store: &WorkflowStore,
+        version_id: Uuid,
+        thread_key: &str,
+    ) -> WorkflowRunView {
+        let run = core
+            .start(StartWorkflow {
+                definition_version_id: version_id,
+                workspace_id: Uuid::new_v4(),
+                input: serde_json::json!({ "threadKey": thread_key }),
+                policy_override: None,
+                debug_step_id: None,
+                operation_id: Uuid::new_v4(),
+                principal: serde_json::json!({ "id": "tester" }),
+            })
+            .await
+            .unwrap();
+        store.enable_dispatch(run.id).await.unwrap();
+        store.run(run.id).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn parallel_wait_for_event_wakes_while_run_is_running_and_skips_paused_or_canceled() {
+        let (core, store, _pool) = setup_test_core().await;
+        let version = core
+            .publish(PublishWorkflow {
+                definition_id: None,
+                definition: parallel_wait_definition("parallel-wake", Some(60)),
+                source_path: None,
+                operation_id: Uuid::new_v4(),
+                principal: serde_json::json!({ "id": "tester" }),
+            })
+            .await
+            .unwrap();
+
+        let active_run = start_run(&core, &store, version.id, "ops:parallel-1").await;
+        let paused_run = start_run(&core, &store, version.id, "ops:parallel-1").await;
+        let canceled_run = start_run(&core, &store, version.id, "ops:parallel-1").await;
+
+        // Rebuilding projections replays StepWaitingEvent(branch_wait) followed by
+        // StepReady(branch_work), leaving run.status = 'running' while branch_wait is suspended.
+        store.rebuild_run_projection(active_run.id).await.unwrap();
+        store.rebuild_run_projection(paused_run.id).await.unwrap();
+        let active_run = store.run(active_run.id).await.unwrap();
+        assert_eq!(
+            active_run.status, "running",
+            "parallel branch with ready work puts run.status = running while WaitForEvent is suspended"
+        );
+
+        core.request_pause(PauseWorkflowRun {
+            run_id: paused_run.id,
+            reason: Some("maintenance".to_string()),
+            operation_id: Uuid::new_v4(),
+            principal: serde_json::json!({ "id": "tester" }),
+        })
+        .await
+        .unwrap();
+        core.cancel(canceled_run.id, Uuid::new_v4(), Some("obsolete"))
+            .await
+            .unwrap();
+
+        let waiting = store.waiting_event_steps().await.unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].run_id, active_run.id);
+        assert_eq!(waiting[0].step_id, "branch_wait");
+
+        let resumed = core
+            .dispatch_event_to_waiting_runs(
+                &deploy_approved_event("evt-parallel-1", "ops:parallel-1"),
+                Uuid::new_v4(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(resumed[0].id, active_run.id);
+        let steps = store.steps(active_run.id).await.unwrap();
+        let wait_step = steps
+            .iter()
+            .find(|step| step.step_id == "branch_wait")
+            .expect("branch_wait step");
+        assert_eq!(wait_step.status, "completed");
+    }
+
+    #[tokio::test]
+    async fn parallel_wait_for_event_expires_while_run_is_running_and_ignores_paused_run() {
+        let (core, store, _pool) = setup_test_core().await;
+        let version = core
+            .publish(PublishWorkflow {
+                definition_id: None,
+                definition: parallel_wait_definition("parallel-timeout", Some(30)),
+                source_path: None,
+                operation_id: Uuid::new_v4(),
+                principal: serde_json::json!({ "id": "tester" }),
+            })
+            .await
+            .unwrap();
+
+        let active_run = start_run(&core, &store, version.id, "ops:timeout-1").await;
+        let paused_run = start_run(&core, &store, version.id, "ops:timeout-1").await;
+        store.rebuild_run_projection(active_run.id).await.unwrap();
+        store.rebuild_run_projection(paused_run.id).await.unwrap();
+        let active_run = store.run(active_run.id).await.unwrap();
+        assert_eq!(active_run.status, "running");
+
+        core.request_pause(PauseWorkflowRun {
+            run_id: paused_run.id,
+            reason: Some("hold".to_string()),
+            operation_id: Uuid::new_v4(),
+            principal: serde_json::json!({ "id": "tester" }),
+        })
+        .await
+        .unwrap();
+
+        let expired = core
+            .expire_timed_out_waiting_steps(Utc::now() + Duration::seconds(120))
+            .await
+            .unwrap();
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].id, active_run.id);
+        let steps = store.steps(active_run.id).await.unwrap();
+        let wait_step = steps
+            .iter()
+            .find(|step| step.step_id == "branch_wait")
+            .expect("branch_wait step");
+        assert_eq!(wait_step.status, "failed");
+    }
+
+    #[tokio::test]
+    async fn dispatch_event_fanout_continues_past_conflict_on_earlier_candidate() {
+        let (core, store, pool) = setup_test_core().await;
+        let version = core
+            .publish(PublishWorkflow {
+                definition_id: None,
+                definition: single_wait_definition("fanout-conflict", Some(300)),
+                source_path: None,
+                operation_id: Uuid::new_v4(),
+                principal: serde_json::json!({ "id": "tester" }),
+            })
+            .await
+            .unwrap();
+
+        let first_run = start_run(&core, &store, version.id, "ops:fanout-1").await;
+        let second_run = start_run(&core, &store, version.id, "ops:fanout-1").await;
+
+        // Expire the first run's WaitForEvent deadline so resume_waiting_step returns Conflict,
+        // while the second run remains valid and must still be resumed in the same fan-out pass.
+        let past_deadline = (Utc::now() - Duration::seconds(60)).to_rfc3339();
+        sqlx::query(
+            "UPDATE workflow_step_runs
+             SET execution_evidence_json = ?
+             WHERE run_id = ? AND step_id = 'wait_gate'",
+        )
+        .bind(serde_json::json!({ "timeoutAt": past_deadline }).to_string())
+        .bind(first_run.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let resumed = core
+            .dispatch_event_to_waiting_runs(
+                &deploy_approved_event("evt-fanout-1", "ops:fanout-1"),
+                Uuid::new_v4(),
+            )
+            .await
+            .expect("conflict on first candidate must not abort remaining runs");
+
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(resumed[0].id, second_run.id);
+        assert_eq!(resumed[0].status, "completed");
+
+        let untouched_first = store.run(first_run.id).await.unwrap();
+        assert_eq!(untouched_first.status, "waiting");
+    }
 }

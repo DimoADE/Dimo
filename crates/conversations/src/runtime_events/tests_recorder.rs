@@ -991,3 +991,54 @@ async fn late_cancelled_prompt_finished_does_not_cancel_next_queued_turn() {
         .expect("turn 2 exists");
     assert_eq!(turn_2_record.status, "running");
 }
+
+#[test]
+fn should_drain_queued_inputs_stops_on_fatal_turn_failures_and_continues_on_completion() {
+    use agents::conversation::ConversationError;
+
+    assert!(super::should_drain_queued_inputs_after_terminal(
+        &ConversationEvent::TurnCompleted {
+            stop_reason: Some("end_turn".into()),
+        }
+    ));
+    assert!(super::should_drain_queued_inputs_after_terminal(
+        &ConversationEvent::TurnCancelled { reason: None }
+    ));
+
+    for fatal_code in [
+        "connection_closed",
+        "agent_connection_lost",
+        "auth_required",
+        "session_unavailable",
+        "rate_limited",
+        "quota_exceeded",
+        "agent_not_installed",
+    ] {
+        assert!(
+            !super::should_drain_queued_inputs_after_terminal(&ConversationEvent::TurnFailed {
+                error: ConversationError::new("failed", Some(fatal_code.into()), None),
+            }),
+            "expected fatal error code {fatal_code} to suppress queue auto-drain"
+        );
+    }
+
+    assert!(!super::should_drain_queued_inputs_after_terminal(
+        &ConversationEvent::TurnFailed {
+            error: ConversationError::new(
+                "Agent connection closed before the turn completed.",
+                None,
+                None,
+            ),
+        }
+    ));
+
+    assert!(super::should_drain_queued_inputs_after_terminal(
+        &ConversationEvent::TurnFailed {
+            error: ConversationError::new(
+                "tool execution returned non-zero exit code",
+                Some("tool_error".into()),
+                None,
+            ),
+        }
+    ));
+}

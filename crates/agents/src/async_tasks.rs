@@ -1,13 +1,9 @@
-//! AIR `asyncTasks` (`async_task_spawned`, `async_task_progress`,
-//! `async_task_state_update`, and Grok `workflow_updated`) state projection and
-//! `_session/async_task/stop` helpers.
+//! Background async task (such as Grok `workflow_updated`) state projection
+//! and `_session/async_task/stop` helpers.
 
-use api_types::AgentKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use ts_rs::TS;
-
-use crate::air_contract::{legacy_or_air, speaks_air_contract};
 
 pub const ASYNC_TASK_STOP_METHOD: &str = "_session/async_task/stop";
 
@@ -193,87 +189,6 @@ fn parse_usage(obj: &Map<String, Value>) -> Option<AsyncTaskUsage> {
     }
 }
 
-/// Parse an AIR `async_task_spawned`, `async_task_progress`, or
-/// `async_task_state_update` sessionUpdate object.
-pub fn parse_async_task_session_update(
-    agent_kind: Option<AgentKind>,
-    update: &Value,
-) -> Option<AsyncTaskDelta> {
-    if !agent_kind.is_none_or(speaks_air_contract) {
-        return None;
-    }
-    let obj = update.as_object()?;
-    let session_update = obj.get("sessionUpdate").and_then(Value::as_str)?;
-    if !matches!(
-        session_update,
-        "async_task_spawned" | "async_task_progress" | "async_task_state_update"
-    ) {
-        return None;
-    }
-    let meta = obj.get("_meta").and_then(Value::as_object);
-    let payload = legacy_or_air(meta, "asyncTasks")
-        .and_then(Value::as_object)
-        .unwrap_or(obj);
-
-    let id = non_empty_str(payload, "taskId")
-        .or_else(|| non_empty_str(payload, "asyncTaskId"))
-        .or_else(|| non_empty_str(obj, "taskId"))
-        .or_else(|| non_empty_str(obj, "asyncTaskId"))?;
-
-    let spawned = session_update == "async_task_spawned";
-    let task_type = non_empty_str(payload, "taskType")
-        .or_else(|| non_empty_str(payload, "type"))
-        .or_else(|| non_empty_str(obj, "taskType"));
-    let name = non_empty_str(payload, "description")
-        .or_else(|| non_empty_str(payload, "summary"))
-        .or_else(|| non_empty_str(payload, "title"))
-        .or_else(|| non_empty_str(payload, "name"))
-        .or_else(|| non_empty_str(obj, "description"))
-        .or_else(|| non_empty_str(obj, "summary"))
-        .or_else(|| non_empty_str(obj, "title"))
-        .or_else(|| non_empty_str(obj, "name"));
-    let state = non_empty_str(payload, "state")
-        .or_else(|| non_empty_str(payload, "status"))
-        .or_else(|| non_empty_str(obj, "state"))
-        .or_else(|| non_empty_str(obj, "status"))
-        .map(|raw| match raw.as_str() {
-            "in_progress" | "active" => "running".to_string(),
-            "cancelled" | "canceled" | "killed" => "stopped".to_string(),
-            other => other.to_string(),
-        })
-        .or_else(|| spawned.then(|| "running".to_string()));
-    let can_stop = payload
-        .get("canStop")
-        .or_else(|| obj.get("canStop"))
-        .and_then(Value::as_bool)
-        .or_else(|| spawned.then_some(true));
-    let phase = non_empty_str(payload, "phase").or_else(|| non_empty_str(obj, "phase"));
-    let current_agent =
-        non_empty_str(payload, "currentAgent").or_else(|| non_empty_str(obj, "currentAgent"));
-    let last_tool_name =
-        non_empty_str(payload, "lastToolName").or_else(|| non_empty_str(obj, "lastToolName"));
-    let output_file_path =
-        non_empty_str(payload, "outputFilePath").or_else(|| non_empty_str(obj, "outputFilePath"));
-    let tool_call_id =
-        non_empty_str(payload, "toolCallId").or_else(|| non_empty_str(obj, "toolCallId"));
-    let usage = parse_usage(payload).or_else(|| parse_usage(obj));
-
-    Some(AsyncTaskDelta {
-        id,
-        spawned,
-        task_type,
-        name,
-        state,
-        can_stop,
-        phase,
-        current_agent,
-        last_tool_name,
-        output_file_path,
-        tool_call_id,
-        usage,
-    })
-}
-
 /// Parse Grok's `workflow_updated` extension notification into an `AsyncTaskDelta`.
 /// Grok does not expose `_session/async_task/stop`, so `can_stop` is `Some(false)`.
 pub fn parse_grok_workflow_updated(params: &Value) -> Option<(Option<String>, AsyncTaskDelta)> {
@@ -331,19 +246,28 @@ mod tests {
 
     use super::*;
 
+    fn delta(id: &str, spawned: bool) -> AsyncTaskDelta {
+        AsyncTaskDelta {
+            id: id.to_string(),
+            spawned,
+            task_type: None,
+            name: None,
+            state: None,
+            can_stop: None,
+            phase: None,
+            current_agent: None,
+            last_tool_name: None,
+            output_file_path: None,
+            tool_call_id: None,
+            usage: None,
+        }
+    }
+
     #[test]
     fn non_spawn_delta_for_unknown_task_is_dropped() {
         let mut tasks = Vec::new();
-        let progress = parse_async_task_session_update(
-            Some(AgentKind::ClaudeCode),
-            &json!({
-                "sessionUpdate": "async_task_progress",
-                "taskId": "task-1",
-                "summary": "Halfway done"
-            }),
-        )
-        .expect("parsed progress delta");
-        assert!(!progress.spawned);
+        let mut progress = delta("task-1", false);
+        progress.name = Some("Halfway done".to_string());
         assert!(!apply_async_task_delta(&mut tasks, &progress));
         assert!(tasks.is_empty());
     }
@@ -351,36 +275,26 @@ mod tests {
     #[test]
     fn spawned_task_merges_partial_progress_and_retains_terminal_entry_for_late_updates() {
         let mut tasks = Vec::new();
-        let spawned = parse_async_task_session_update(
-            Some(AgentKind::ClaudeCode),
-            &json!({
-                "sessionUpdate": "async_task_spawned",
-                "taskId": "bg-1",
-                "taskType": "shell",
-                "description": "npm run watch",
-                "canStop": true,
-                "toolCallId": "toolu_bash_1",
-                "outputFilePath": "/tmp/bg-1.log"
-            }),
-        )
-        .expect("spawned delta");
+        let mut spawned = delta("bg-1", true);
+        spawned.task_type = Some("shell".to_string());
+        spawned.name = Some("npm run watch".to_string());
+        spawned.state = Some("running".to_string());
+        spawned.can_stop = Some(true);
+        spawned.tool_call_id = Some("toolu_bash_1".to_string());
+        spawned.output_file_path = Some("/tmp/bg-1.log".to_string());
         assert!(apply_async_task_delta(&mut tasks, &spawned));
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].state, "running");
         assert!(tasks[0].can_stop);
         assert_eq!(tasks[0].name.as_deref(), Some("npm run watch"));
 
-        // Progress omits description/outputFilePath/canStop; existing values must remain:
-        let progress = parse_async_task_session_update(
-            Some(AgentKind::ClaudeCode),
-            &json!({
-                "sessionUpdate": "async_task_progress",
-                "taskId": "bg-1",
-                "phase": "building",
-                "usage": { "totalTokens": 1200, "toolUses": 3 }
-            }),
-        )
-        .expect("progress delta");
+        let mut progress = delta("bg-1", false);
+        progress.phase = Some("building".to_string());
+        progress.usage = Some(AsyncTaskUsage {
+            total_tokens: Some(1200),
+            tool_uses: Some(3),
+            duration_ms: None,
+        });
         assert!(apply_async_task_delta(&mut tasks, &progress));
         assert_eq!(tasks[0].name.as_deref(), Some("npm run watch"));
         assert_eq!(tasks[0].output_file_path.as_deref(), Some("/tmp/bg-1.log"));
@@ -390,29 +304,14 @@ mod tests {
             Some(1200)
         );
 
-        // State update to stopped keeps entry in table so late completed correction lands:
-        let stopped = parse_async_task_session_update(
-            Some(AgentKind::ClaudeCode),
-            &json!({
-                "sessionUpdate": "async_task_state_update",
-                "taskId": "bg-1",
-                "state": "stopped"
-            }),
-        )
-        .expect("stopped delta");
+        let mut stopped = delta("bg-1", false);
+        stopped.state = Some("stopped".to_string());
         assert!(apply_async_task_delta(&mut tasks, &stopped));
         assert!(async_task_state_is_terminal(&tasks[0].state));
 
-        let completed = parse_async_task_session_update(
-            Some(AgentKind::ClaudeCode),
-            &json!({
-                "sessionUpdate": "async_task_state_update",
-                "taskId": "bg-1",
-                "state": "completed",
-                "outputFilePath": "/tmp/bg-1-final.log"
-            }),
-        )
-        .expect("completed delta");
+        let mut completed = delta("bg-1", false);
+        completed.state = Some("completed".to_string());
+        completed.output_file_path = Some("/tmp/bg-1-final.log".to_string());
         assert!(apply_async_task_delta(&mut tasks, &completed));
         assert_eq!(tasks[0].state, "completed");
         assert_eq!(

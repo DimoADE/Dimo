@@ -703,9 +703,27 @@ export function conversationStoreReducer(
                 liveRows,
                 entry.liveText
               );
+        const currentTurnSettled =
+          entry.currentTurnId != null &&
+          (Boolean(
+            entry.settledAssistantRowIds[`${entry.currentTurnId}:assistant`]
+          ) ||
+            rows.some(
+              (row) =>
+                (row.row_id === `${entry.currentTurnId}:assistant` &&
+                  isTerminalMessageRow(row)) ||
+                (row.row_id === 'status:agent-request' &&
+                  row.row.kind === 'session_notice' &&
+                  row.row.notice.request_status?.turn_id ===
+                    entry.currentTurnId &&
+                  ['completed', 'cancelled', 'failed'].includes(
+                    row.row.notice.request_status.activity.phase
+                  ))
+            ));
         return {
           ...entry,
           error: null,
+          currentTurnId: currentTurnSettled ? null : entry.currentTurnId,
           windowRows,
           liveRows,
           rows,
@@ -1130,8 +1148,28 @@ function applyRowOpBatch(
   }
 
   const lastSequence = toBigInt(batch.last_sequence);
+  let detail = entry.detail;
+  const inFlightTurnId = detail?.in_flight_user_turn_id ?? null;
+  if (
+    detail &&
+    inFlightTurnId &&
+    currentTurnId !== inFlightTurnId &&
+    (settledAssistantRowIds[`${inFlightTurnId}:assistant`] ||
+      rows.some(
+        (row) =>
+          (row.row_id === `${inFlightTurnId}:assistant` ||
+            row.row_id === `${inFlightTurnId}:user`) &&
+          isTerminalMessageRow(row)
+      ))
+  ) {
+    detail = {
+      ...detail,
+      in_flight_user_turn_id: null,
+    };
+  }
   return {
     ...entry,
+    detail,
     windowRows,
     liveRows,
     rows,

@@ -392,12 +392,15 @@ impl ServerApplicationDomains {
     }
 
     pub(super) async fn plugin_surface_open(&self, args: Value) -> Result<Value, ApplicationError> {
-        let request: plugins::AppSurfaceOpenRequest = parse(args)?;
+        let mut request: plugins::AppSurfaceOpenRequest = parse(args)?;
         if let Some(path) = request.artifact_path.as_deref() {
             let path = path
                 .to_str()
                 .ok_or_else(|| ApplicationError::bad_request("artifact path is invalid"))?;
-            self.ensure_registered_repo_file(path).await?;
+            let resolved = self.existing_local_file(path).await?;
+            let writable = self.is_within_write_sandbox(&resolved).await?;
+            request.artifact_path = Some(resolved);
+            request.read_only = !writable;
         }
         serialize(
             self.app_surfaces
@@ -693,8 +696,8 @@ impl ServerApplicationDomains {
         args: Value,
     ) -> Result<Value, ApplicationError> {
         let args: PluginFilePreviewArgs = parse(args)?;
-        self.ensure_registered_repo_file(&args.file_path).await?;
-        let extension = std::path::Path::new(&args.file_path)
+        let resolved_path = self.existing_local_file(&args.file_path).await?;
+        let extension = resolved_path
             .extension()
             .and_then(|value| value.to_str())
             .map(str::to_ascii_lowercase);
@@ -742,7 +745,7 @@ impl ServerApplicationDomains {
             self.capability_broker.clone(),
         )
         .open(plugins::PluginPreviewRequest {
-            file_path: args.file_path,
+            file_path: resolved_path.to_string_lossy().into_owned(),
             media_type,
             plugin_id: resolved.plugin_id.clone(),
             plugin_version: plugin.version.clone(),
@@ -794,35 +797,6 @@ impl ServerApplicationDomains {
                 "errorMessage": error,
             })),
         }
-    }
-
-    pub(super) async fn ensure_registered_repo_file(
-        &self,
-        file_path: &str,
-    ) -> Result<(), ApplicationError> {
-        let requested = tokio::fs::canonicalize(file_path)
-            .await
-            .map_err(|_| ApplicationError::not_found("preview file was not found"))?;
-        if !requested.is_file() {
-            return Err(ApplicationError::bad_request(
-                "preview target must be a regular file",
-            ));
-        }
-        let roots = sqlx::query_scalar::<_, String>("SELECT path FROM repos")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(internal_error)?;
-        for root in roots {
-            let Ok(root) = tokio::fs::canonicalize(root).await else {
-                continue;
-            };
-            if requested != root && requested.starts_with(root) {
-                return Ok(());
-            }
-        }
-        Err(ApplicationError::forbidden(
-            "preview file is outside every registered repository",
-        ))
     }
 
     pub(super) async fn plugin_close_file_preview(

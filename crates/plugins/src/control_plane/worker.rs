@@ -66,6 +66,7 @@ impl PluginControlPlane {
     /// `activation_lease` starts the Worker again.
     pub async fn recycle_idle_workers(&self, max_idle: std::time::Duration) {
         for plugin_id in self.activations.running_plugin_ids().await {
+            let _plugin_guard = self.activations.lock_plugin(&plugin_id).await;
             let plugin = match self.registry.plugin(&plugin_id).await {
                 Ok(Some(plugin)) => plugin,
                 Ok(None) => continue,
@@ -106,7 +107,28 @@ impl PluginControlPlane {
         }
     }
 
+    pub(super) async fn verify_plugin_commit_eligible(
+        &self,
+        plugin_id: &str,
+        expected_generation: u64,
+    ) -> bool {
+        let Ok(Some(plugin)) = self.registry.plugin(plugin_id).await else {
+            return false;
+        };
+        if plugin.activation != PluginActivation::Enabled {
+            return false;
+        }
+        matches!(
+            self.registry.active_generation(plugin_id).await,
+            Ok(Some(active_gen)) if active_gen == expected_generation
+        )
+    }
+
     async fn resolve_worker_restore(&self) -> Option<WorkerRestore> {
+        if let Some(restore) = self.worker_restore.read().await.clone() {
+            return Some(restore);
+        }
+        let _restore_guard = self.lazy_activation_lock.lock().await;
         if let Some(restore) = self.worker_restore.read().await.clone() {
             return Some(restore);
         }
@@ -147,7 +169,7 @@ impl PluginControlPlane {
         {
             return Some(lease);
         }
-        let _guard = self.lazy_activation_lock.lock().await;
+        let _plugin_guard = self.activations.lock_plugin(plugin_id).await;
         if let Some(lease) = self.activations.lease(plugin_id).await
             && !lease.is_terminal().await
         {
@@ -170,7 +192,27 @@ impl PluginControlPlane {
                 .activations
                 .prepare_lightweight_candidate_at(generation, &plugin.package, &grants, broker)
                 .ok()?;
-            let drain = self.activations.commit(candidate).await;
+            if !self
+                .verify_plugin_commit_eligible(plugin_id, generation)
+                .await
+            {
+                let _ = candidate
+                    .discard("plugin disabled or uninstalled before commit")
+                    .await;
+                return None;
+            }
+            let drain = match self.activations.commit(candidate).await {
+                Ok(drain) => drain,
+                Err(error) => {
+                    tracing::warn!(
+                        plugin_id = %plugin_id,
+                        code = %error.code(),
+                        %error,
+                        "on-demand lightweight plugin activation rejected"
+                    );
+                    return None;
+                }
+            };
             self.retire_after_drain(plugin_id.to_owned(), drain);
             return self.activations.lease(plugin_id).await;
         }
@@ -219,7 +261,27 @@ impl PluginControlPlane {
                 return None;
             }
         };
-        let drain = self.activations.commit(candidate).await;
+        if !self
+            .verify_plugin_commit_eligible(plugin_id, generation)
+            .await
+        {
+            let _ = candidate
+                .discard("plugin disabled or uninstalled before commit")
+                .await;
+            return None;
+        }
+        let drain = match self.activations.commit(candidate).await {
+            Ok(drain) => drain,
+            Err(error) => {
+                tracing::warn!(
+                    plugin_id = %plugin_id,
+                    code = %error.code(),
+                    %error,
+                    "on-demand plugin Worker commit rejected"
+                );
+                return None;
+            }
+        };
         self.retire_after_drain(plugin_id.to_owned(), drain);
         let lease = self.activations.lease(plugin_id).await?;
         self.host_services
@@ -254,7 +316,11 @@ impl PluginControlPlane {
                 continue;
             }
             if plugin.entrypoints.worker.is_none() {
+                let _plugin_guard = self.activations.lock_plugin(plugin.id()).await;
                 if let Some(generation) = self.registry.active_generation(plugin.id()).await?
+                    && self
+                        .verify_plugin_commit_eligible(plugin.id(), generation)
+                        .await
                     && self
                         .activations
                         .lease(plugin.id())
@@ -267,8 +333,8 @@ impl PluginControlPlane {
                         &grants,
                         broker.clone(),
                     )
+                    && let Ok(drain) = self.activations.commit(candidate).await
                 {
-                    let drain = self.activations.commit(candidate).await;
                     self.retire_after_drain(plugin.id().to_owned(), drain);
                 }
                 continue;
@@ -320,10 +386,17 @@ impl PluginControlPlane {
                 continue;
             }
             let grants = candidate_capability_grants(&plugin.package, &[], &[])?;
+            let _plugin_guard = self.activations.lock_plugin(plugin.id()).await;
             let generation = match self.registry.active_generation(plugin.id()).await? {
                 Some(generation) => generation,
                 None => continue,
             };
+            if !self
+                .verify_plugin_commit_eligible(plugin.id(), generation)
+                .await
+            {
+                continue;
+            }
             let restored = async {
                 self.ensure_plugin_dependencies(&plugin.package).await?;
                 self.ensure_runtime_readiness(plugin.id(), &plugin.package)
@@ -351,9 +424,19 @@ impl PluginControlPlane {
                                 broker.clone(),
                             )
                             .await?;
-                        let drain = self.activations.commit(candidate).await;
-                        self.retire_after_drain(plugin.id().to_owned(), drain);
-                        self.activations.lease(plugin.id()).await
+                        if !self
+                            .verify_plugin_commit_eligible(plugin.id(), generation)
+                            .await
+                        {
+                            let _ = candidate
+                                .discard("plugin disabled or uninstalled before commit")
+                                .await;
+                            None
+                        } else {
+                            let drain = self.activations.commit(candidate).await?;
+                            self.retire_after_drain(plugin.id().to_owned(), drain);
+                            self.activations.lease(plugin.id()).await
+                        }
                     };
                     if let Some(lease) = lease {
                         self.host_services
@@ -377,6 +460,7 @@ impl PluginControlPlane {
     }
 
     pub async fn deactivate_worker(&self, plugin_id: &str) -> Result<bool, WorkerHostError> {
+        let _plugin_guard = self.activations.lock_plugin(plugin_id).await;
         self.host_services.stop(plugin_id);
         self.activations.deactivate(plugin_id).await
     }

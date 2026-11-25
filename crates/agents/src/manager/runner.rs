@@ -24,7 +24,6 @@ pub mod throttle;
 pub(crate) use acp_spawn::prepare_native_engine_launch_env;
 pub(in crate::manager) use env::*;
 pub(in crate::manager) use jsonl::*;
-pub(crate) use native_controls::can_fallback_launch_lock_to_acp;
 pub(in crate::manager) use probe::*;
 pub(in crate::manager) use process::*;
 pub use throttle::LeadingEdgeThrottle;
@@ -74,7 +73,7 @@ pub(in crate::manager) struct AgentConnectionRunner {
     /// controls and before the first `SessionModes` / `SessionConfigOptions` event.
     pub(in crate::manager) preferred_controls:
         Arc<RwLock<HashMap<AgentSessionId, crate::SessionControlPreferences>>>,
-    pub(in crate::manager) status: Arc<Mutex<AgentConnectionStatus>>,
+    pub(in crate::manager) status: Arc<std::sync::Mutex<AgentConnectionStatus>>,
     pub(in crate::manager) handshake_started: Instant,
     pub(in crate::manager) live_conn: Arc<Mutex<Option<ConnectionTo<Agent>>>>,
     pub(in crate::manager) grok_catalog: Arc<Mutex<Option<GrokModelCatalog>>>,
@@ -310,7 +309,7 @@ impl AgentConnectionRunner {
             pending_session_id: Arc::new(Mutex::new(None)),
             replay_hydrate: Arc::new(Mutex::new(None)),
             preferred_controls: Arc::new(RwLock::new(HashMap::new())),
-            status: Arc::new(Mutex::new(AgentConnectionStatus::Connecting)),
+            status: Arc::new(std::sync::Mutex::new(AgentConnectionStatus::Connecting)),
             handshake_started: Instant::now(),
             live_conn: Arc::new(Mutex::new(None)),
             grok_catalog: Arc::new(Mutex::new(None)),
@@ -500,32 +499,10 @@ impl AgentConnectionRunner {
             .get("DIMO_ENGINE_MODE")
             .cloned()
             .or_else(|| std::env::var("DIMO_ENGINE_MODE").ok());
-        let force_native = mode_env
-            .as_deref()
-            .is_some_and(|v| v.trim().eq_ignore_ascii_case("native"));
 
         let outcome = if let Some(driver) = self.resolve_native_engine_driver(mode_env.as_deref()) {
-            let engine_id = driver.engine_id().to_string();
-            match self
-                .run_native(&mut cmd_rx, Arc::clone(&ready), driver)
+            self.run_native(&mut cmd_rx, Arc::clone(&ready), driver)
                 .await
-            {
-                Ok(()) => Ok(()),
-                Err(error)
-                    if !force_native
-                        && ready.lock().await.is_some()
-                        && self.can_fallback_to_acp_adapter(mode_env.as_deref()) =>
-                {
-                    tracing::warn!(
-                        agent_id = %self.snapshot.agent_id,
-                        engine = %engine_id,
-                        %error,
-                        "native engine pre-handshake startup failed; falling back to ACP adapter"
-                    );
-                    self.run_acp(cmd_rx, Arc::clone(&ready)).await
-                }
-                Err(error) => Err(error),
-            }
         } else {
             self.run_acp(cmd_rx, Arc::clone(&ready)).await
         };
@@ -681,9 +658,7 @@ impl AgentConnectionRunner {
             );
         }
         let now = Utc::now();
-        if let Ok(mut current) = self.status.try_lock() {
-            *current = status;
-        }
+        *self.status.lock().unwrap_or_else(|e| e.into_inner()) = status;
         self.emit(
             session_id,
             None,

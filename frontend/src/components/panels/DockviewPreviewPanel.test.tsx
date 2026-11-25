@@ -20,6 +20,10 @@ import {
 const api = vi.hoisted(() => ({
   resolveFileOpener: vi.fn(),
   revealInFileManager: vi.fn(),
+  searchFiles: vi.fn(),
+}));
+const projectContextMock = vi.hoisted(() => ({
+  projectId: undefined as string | undefined,
 }));
 const saveFile = vi.hoisted(() => ({ mutate: vi.fn() }));
 const queryClientMock = vi.hoisted(() => ({ invalidateQueries: vi.fn() }));
@@ -31,6 +35,10 @@ const fileContent = vi.hoisted(() => ({
   data: '# Preview title' as string | undefined,
   isLoading: false,
   error: null as Error | null,
+  byPath: null as Record<
+    string,
+    { data: string | undefined; isLoading: boolean; error: Error | null }
+  > | null,
 }));
 const binaryAsset = vi.hoisted(() => ({
   assetUrl: null as string | null,
@@ -40,6 +48,24 @@ const binaryAsset = vi.hoisted(() => ({
   isLoading: false,
   error: null as Error | null,
 }));
+
+vi.mock('@/contexts/ProjectContext', () => ({
+  useOptionalProject: () =>
+    projectContextMock.projectId
+      ? { projectId: projectContextMock.projectId }
+      : null,
+}));
+
+vi.mock('@/lib/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/api')>();
+  return {
+    ...actual,
+    projectsApi: {
+      ...actual.projectsApi,
+      searchFiles: api.searchFiles,
+    },
+  };
+});
 
 vi.mock('@/lib/api/plugins', () => ({
   pluginControlApi: { resolveFileOpener: api.resolveFileOpener },
@@ -160,7 +186,8 @@ vi.mock('@/hooks/useFileContent', async (importOriginal) => {
     await importOriginal<typeof import('@/hooks/useFileContent')>();
   return {
     ...actual,
-    useFileContent: () => fileContent,
+    useFileContent: (path: string | null) =>
+      path && fileContent.byPath?.[path] ? fileContent.byPath[path] : fileContent,
     useFileAtHead: () => ({
       data: null,
       isLoading: false,
@@ -266,12 +293,15 @@ describe('DockviewPreviewPanel', () => {
     HTMLElement.prototype.scrollIntoView = vi.fn();
     api.resolveFileOpener.mockReset().mockResolvedValue(null);
     api.revealInFileManager.mockReset().mockResolvedValue(undefined);
+    api.searchFiles.mockReset().mockResolvedValue([]);
+    projectContextMock.projectId = undefined;
     queryClientMock.invalidateQueries.mockReset();
     platform.isTauriDesktopShell.mockReturnValue(true);
     platform.isMac.mockReturnValue(false);
     fileContent.data = '# Preview title';
     fileContent.isLoading = false;
     fileContent.error = null;
+    fileContent.byPath = null;
     binaryAsset.assetUrl = null;
     binaryAsset.mimeType = null;
     binaryAsset.sizeBytes = null;
@@ -711,5 +741,72 @@ describe('DockviewPreviewPanel', () => {
 
     unmount();
     expect(isPreviewPanelDirty(panelId)).toBe(false);
+  });
+
+  it('recovers from a missing relative path via one-shot workspace file search fallback', async () => {
+    projectContextMock.projectId = 'project-1';
+    fileContent.byPath = {
+      '/workspace/生财航海/AI助理/高手领航2-小志同学.md': {
+        data: undefined,
+        isLoading: false,
+        error: new Error(
+          'File not found: /workspace/生财航海/AI助理/高手领航2-小志同学.md'
+        ),
+      },
+      '/workspace/知识库/生财航海/AI助理/高手领航2-小志同学.md': {
+        data: '# Recovered Note',
+        isLoading: false,
+        error: null,
+      },
+    };
+    api.searchFiles.mockResolvedValue([
+      {
+        path: '知识库/生财航海/AI助理/高手领航2-小志同学.md',
+        is_file: true,
+        match_type: 'FileName',
+        score: BigInt(10),
+      },
+    ]);
+
+    render(
+      <DockviewPreviewPanel
+        {...panelProps('生财航海/AI助理/高手领航2-小志同学.md')}
+      />
+    );
+
+    const editor = await screen.findByTestId('astryx-rich-text-editor');
+    expect(editor).toHaveAttribute('data-value', '# Recovered Note');
+    expect(api.searchFiles).toHaveBeenCalledTimes(1);
+    expect(api.searchFiles).toHaveBeenCalledWith(
+      'project-1',
+      '高手领航2-小志同学.md'
+    );
+  });
+
+  it('shows the file preview error without looping when fallback search finds no unambiguous match', async () => {
+    projectContextMock.projectId = 'project-1';
+    fileContent.error = new Error('File not found: /workspace/missing.md');
+    fileContent.data = undefined;
+    api.searchFiles.mockResolvedValue([
+      {
+        path: 'a/missing.md',
+        is_file: true,
+        match_type: 'FileName',
+        score: BigInt(10),
+      },
+      {
+        path: 'b/missing.md',
+        is_file: true,
+        match_type: 'FileName',
+        score: BigInt(5),
+      },
+    ]);
+
+    render(<DockviewPreviewPanel {...panelProps('missing.md')} />);
+
+    expect(
+      await screen.findByText('File not found: /workspace/missing.md')
+    ).toBeVisible();
+    expect(api.searchFiles).toHaveBeenCalledTimes(1);
   });
 });

@@ -276,6 +276,8 @@ export class ElectronBrowserController {
   private readonly hookedSessions = new WeakSet<Session>();
   private readonly webRequestHookedSessions = new WeakSet<Session>();
   private readonly sessionPartitions = new WeakMap<Session, string>();
+  private readonly baseHookedWebContents = new WeakSet<WebContents>();
+  private readonly baseWebContentsCleanups = new Map<number, () => void>();
   private readonly reservedDownloadPaths = new Set<string>();
   private readonly approvedNavigations = new Set<string>();
   private readonly onEvent: (payload: Record<string, unknown>) => void;
@@ -335,6 +337,9 @@ export class ElectronBrowserController {
         if (guestContents.session) {
           this.ensureSessionHooks(guestContents.session);
         }
+        // Always install base popup/navigation/cleanup hooks on every browser
+        // webview immediately, even when >=2 pending tabs share the partition.
+        this.ensureBaseWebContentsHooks(guestContents);
         if (!this.tabIdByWebContentsId.has(guestContents.id)) {
           const matchedEntry = this.findUnambiguousPendingTabForSession(
             guestContents.session
@@ -547,13 +552,182 @@ export class ElectronBrowserController {
     }
   }
 
-  private clearApprovedNavigationsForTab(tabId: string): void {
-    const prefix = `${tabId}\0`;
+  private clearApprovedNavigationsForPrefix(prefix: string): void {
     for (const key of Array.from(this.approvedNavigations)) {
       if (key.startsWith(prefix)) {
         this.approvedNavigations.delete(key);
       }
     }
+  }
+
+  private clearApprovedNavigationsForTab(tabId: string): void {
+    this.clearApprovedNavigationsForPrefix(`${tabId}\0`);
+  }
+
+  private resolveProfileIdForSession(sess: Session | undefined): string {
+    const partition = sess ? this.sessionPartitions.get(sess) : undefined;
+    if (!partition) {
+      return 'default';
+    }
+    if (partition.startsWith(EPHEMERAL_PARTITION_PREFIX)) {
+      return 'ephemeral';
+    }
+    if (partition.startsWith(PERSISTENT_PARTITION_PREFIX)) {
+      return partition.slice(PERSISTENT_PARTITION_PREFIX.length) || 'default';
+    }
+    return 'default';
+  }
+
+  private ensureBaseWebContentsHooks(wc: WebContents): void {
+    if (this.baseHookedWebContents.has(wc)) {
+      return;
+    }
+    this.baseHookedWebContents.add(wc);
+
+    const resolveContext = (): { tabId: string; profileId: string } => {
+      const boundTabId = this.tabIdByWebContentsId.get(wc.id);
+      const entry = boundTabId ? this.tabs.get(boundTabId) : undefined;
+      const tabId =
+        entry?.tabId ??
+        (wc.session ? this.resolveFallbackTabIdForSession(wc.session) : '');
+      const profileId =
+        entry?.profileId ?? this.resolveProfileIdForSession(wc.session);
+      return { tabId, profileId };
+    };
+
+    const enforceNavigationFallback = (event: Electron.Event, url: string) => {
+      const { tabId } = resolveContext();
+      if (!isAllowedBrowserUrl(url)) {
+        event.preventDefault();
+        this.onEvent({
+          kind: 'navigation.blocked',
+          tabId,
+          url,
+        });
+        return;
+      }
+      // When session.webRequest.onBeforeRequest is active, async policy checks
+      // run at the network layer so POST form submissions and 3xx redirects are
+      // never downgraded to GET via loadURL().
+      if (
+        !this.checkNavigation ||
+        url === 'about:blank' ||
+        this.webRequestHookedSessions.has(wc.session)
+      ) {
+        return;
+      }
+      const approvalKey = `${tabId || `wc:${wc.id}`}\0${url}`;
+      if (this.approvedNavigations.delete(approvalKey)) {
+        return;
+      }
+      event.preventDefault();
+      void this.checkNavigation(url)
+        .then((policy) => {
+          if (wc.isDestroyed()) {
+            return;
+          }
+          if (policy.preferSystem) {
+            void shell.openExternal(url).catch(() => undefined);
+            return;
+          }
+          if (!policy.allowed) {
+            this.onEvent({
+              kind: 'navigation.blocked',
+              tabId: resolveContext().tabId,
+              url,
+            });
+            return;
+          }
+          this.addApprovedNavigation(approvalKey);
+          void wc.loadURL(url).catch(() => {
+            this.approvedNavigations.delete(approvalKey);
+          });
+        })
+        .catch(() => {
+          if (!wc.isDestroyed()) {
+            this.addApprovedNavigation(approvalKey);
+            void wc.loadURL(url).catch(() => {
+              this.approvedNavigations.delete(approvalKey);
+            });
+          }
+        });
+    };
+
+    const onWillNavigate = (event: Electron.Event, url: string) => {
+      enforceNavigationFallback(event, url);
+    };
+
+    const onWillRedirect = (event: Electron.Event, url: string) => {
+      enforceNavigationFallback(event, url);
+    };
+
+    wc.setWindowOpenHandler(({ url }) => {
+      const { tabId, profileId } = resolveContext();
+      if (!isAllowedBrowserUrl(url)) {
+        this.onEvent({
+          kind: 'popup.denied',
+          tabId,
+          url,
+        });
+        return { action: 'deny' };
+      }
+      const openInTab = () => {
+        const latest = resolveContext();
+        const newTabId = crypto.randomUUID();
+        this.onEvent({
+          kind: 'tab.open',
+          tabId: newTabId,
+          sourceTabId: latest.tabId || tabId,
+          url,
+          profileId: latest.profileId || profileId,
+        });
+      };
+      if (!this.checkNavigation || url === 'about:blank') {
+        openInTab();
+        return { action: 'deny' };
+      }
+      void this.checkNavigation(url)
+        .then((policy) => {
+          if (policy.preferSystem) {
+            void shell.openExternal(url).catch(() => undefined);
+            return;
+          }
+          if (!policy.allowed) {
+            this.onEvent({
+              kind: 'popup.denied',
+              tabId: resolveContext().tabId || tabId,
+              url,
+            });
+            return;
+          }
+          openInTab();
+        })
+        .catch(() => {
+          openInTab();
+        });
+      return { action: 'deny' };
+    });
+
+    const onBaseDestroyed = () => {
+      this.baseWebContentsCleanups.delete(wc.id);
+      this.baseHookedWebContents.delete(wc);
+      this.clearApprovedNavigationsForPrefix(`wc:${wc.id}\0`);
+    };
+
+    wc.on('will-navigate', onWillNavigate);
+    wc.on('will-redirect', onWillRedirect);
+    wc.once('destroyed', onBaseDestroyed);
+
+    this.baseWebContentsCleanups.set(wc.id, () => {
+      this.baseWebContentsCleanups.delete(wc.id);
+      this.baseHookedWebContents.delete(wc);
+      this.clearApprovedNavigationsForPrefix(`wc:${wc.id}\0`);
+      if (!wc.isDestroyed()) {
+        wc.removeListener('will-navigate', onWillNavigate);
+        wc.removeListener('will-redirect', onWillRedirect);
+        wc.removeListener('destroyed', onBaseDestroyed);
+      }
+    });
   }
 
   private closeEntry(entry: TabState): void {
@@ -578,6 +752,10 @@ export class ElectronBrowserController {
     for (const entry of this.tabs.values()) {
       this.closeEntry(entry);
     }
+    for (const cleanup of Array.from(this.baseWebContentsCleanups.values())) {
+      cleanup();
+    }
+    this.baseWebContentsCleanups.clear();
     this.tabs.clear();
     this.tabIdByWebContentsId.clear();
     this.reservedDownloadPaths.clear();
@@ -593,6 +771,7 @@ export class ElectronBrowserController {
     entry.webContentsId = wc.id;
     this.tabIdByWebContentsId.set(wc.id, entry.tabId);
     this.ensureSessionHooks(wc.session);
+    this.ensureBaseWebContentsHooks(wc);
 
     const onStartLoading = () => {
       const current = wc.isDestroyed() ? entry.url : wc.getURL() || entry.url;
@@ -725,71 +904,6 @@ export class ElectronBrowserController {
       });
     };
 
-    const enforceNavigationFallback = (event: Electron.Event, url: string) => {
-      if (!isAllowedBrowserUrl(url)) {
-        event.preventDefault();
-        this.onEvent({
-          kind: 'navigation.blocked',
-          tabId: entry.tabId,
-          url,
-        });
-        return;
-      }
-      // When session.webRequest.onBeforeRequest is active, async policy checks
-      // run at the network layer so POST form submissions and 3xx redirects are
-      // never downgraded to GET via loadURL().
-      if (
-        !this.checkNavigation ||
-        url === 'about:blank' ||
-        this.webRequestHookedSessions.has(wc.session)
-      ) {
-        return;
-      }
-      const approvalKey = `${entry.tabId}\0${url}`;
-      if (this.approvedNavigations.delete(approvalKey)) {
-        return;
-      }
-      event.preventDefault();
-      void this.checkNavigation(url)
-        .then((policy) => {
-          if (wc.isDestroyed()) {
-            return;
-          }
-          if (policy.preferSystem) {
-            void shell.openExternal(url).catch(() => undefined);
-            return;
-          }
-          if (!policy.allowed) {
-            this.onEvent({
-              kind: 'navigation.blocked',
-              tabId: entry.tabId,
-              url,
-            });
-            return;
-          }
-          this.addApprovedNavigation(approvalKey);
-          void wc.loadURL(url).catch(() => {
-            this.approvedNavigations.delete(approvalKey);
-          });
-        })
-        .catch(() => {
-          if (!wc.isDestroyed()) {
-            this.addApprovedNavigation(approvalKey);
-            void wc.loadURL(url).catch(() => {
-              this.approvedNavigations.delete(approvalKey);
-            });
-          }
-        });
-    };
-
-    const onWillNavigate = (event: Electron.Event, url: string) => {
-      enforceNavigationFallback(event, url);
-    };
-
-    const onWillRedirect = (event: Electron.Event, url: string) => {
-      enforceNavigationFallback(event, url);
-    };
-
     const onDestroyed = () => {
       this.tabIdByWebContentsId.delete(wc.id);
       if (entry.webContentsId === wc.id) {
@@ -797,51 +911,6 @@ export class ElectronBrowserController {
         entry.cleanupListeners = null;
       }
     };
-
-    wc.setWindowOpenHandler(({ url }) => {
-      if (!isAllowedBrowserUrl(url)) {
-        this.onEvent({
-          kind: 'popup.denied',
-          tabId: entry.tabId,
-          url,
-        });
-        return { action: 'deny' };
-      }
-      const openInTab = () => {
-        const newTabId = crypto.randomUUID();
-        this.onEvent({
-          kind: 'tab.open',
-          tabId: newTabId,
-          sourceTabId: entry.tabId,
-          url,
-          profileId: entry.profileId,
-        });
-      };
-      if (!this.checkNavigation || url === 'about:blank') {
-        openInTab();
-        return { action: 'deny' };
-      }
-      void this.checkNavigation(url)
-        .then((policy) => {
-          if (policy.preferSystem) {
-            void shell.openExternal(url).catch(() => undefined);
-            return;
-          }
-          if (!policy.allowed) {
-            this.onEvent({
-              kind: 'popup.denied',
-              tabId: entry.tabId,
-              url,
-            });
-            return;
-          }
-          openInTab();
-        })
-        .catch(() => {
-          openInTab();
-        });
-      return { action: 'deny' };
-    });
 
     const onCertificateError = (
       event: Electron.Event,
@@ -874,8 +943,6 @@ export class ElectronBrowserController {
       });
     };
 
-    wc.on('will-navigate', onWillNavigate);
-    wc.on('will-redirect', onWillRedirect);
     wc.on('did-start-loading', onStartLoading);
     wc.on('did-stop-loading', onStopLoading);
     wc.on('did-navigate', onNavigate);
@@ -891,8 +958,6 @@ export class ElectronBrowserController {
     entry.cleanupListeners = () => {
       this.tabIdByWebContentsId.delete(wc.id);
       if (!wc.isDestroyed()) {
-        wc.removeListener('will-navigate', onWillNavigate);
-        wc.removeListener('will-redirect', onWillRedirect);
         wc.removeListener('did-start-loading', onStartLoading);
         wc.removeListener('did-stop-loading', onStopLoading);
         wc.removeListener('did-navigate', onNavigate);

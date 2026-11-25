@@ -27,6 +27,7 @@ const RELAY_REJECTION_PREFIX: &str = "relay rejected control session: ";
 const MAX_UPGRADE_HEADER_BYTES: usize = 8192;
 const MUX_CHUNK_MAX_BYTES: usize = 32 * 1024;
 const MUX_CHANNEL_CAPACITY: usize = 512;
+const CTRL_OUTBOUND_CHANNEL_CAPACITY: usize = 512;
 const CONTROL_HANDSHAKE_TIMEOUT: Duration =
     Duration::from_millis(RELAY_HEARTBEAT_INTERVAL_MS + 5_000);
 const CONTROL_IDLE_TIMEOUT: Duration = Duration::from_millis(RELAY_CONTROL_TIMEOUT_MS);
@@ -40,6 +41,7 @@ struct RelayRuntime {
     state: Arc<Mutex<RelayState>>,
 }
 
+static RELAY_LIFECYCLE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static RELAY: LazyLock<Mutex<Option<RelayRuntime>>> = LazyLock::new(|| Mutex::new(None));
 
 struct QuickTunnelRuntime {
@@ -47,6 +49,7 @@ struct QuickTunnelRuntime {
     handle: JoinHandle<()>,
 }
 
+static QUICK_TUNNEL_LIFECYCLE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static QUICK_TUNNEL: LazyLock<Mutex<Option<QuickTunnelRuntime>>> =
     LazyLock::new(|| Mutex::new(None));
 
@@ -205,6 +208,7 @@ pub(super) async fn ensure_quick_tunnel(local_port: u16) {
     if cfg!(test) {
         return;
     }
+    let _lifecycle = QUICK_TUNNEL_LIFECYCLE.lock().await;
     {
         let guard = QUICK_TUNNEL.lock().await;
         if let Some(runtime) = guard.as_ref()
@@ -214,17 +218,28 @@ pub(super) async fn ensure_quick_tunnel(local_port: u16) {
             return;
         }
     }
-    stop_quick_tunnel().await;
+    stop_quick_tunnel_locked().await;
     {
         let mut state = QUICK_TUNNEL_STATE.lock().await;
         state.status = "connecting".to_string();
         state.error = None;
     }
     let handle = tokio::spawn(run_quick_tunnel_supervisor(local_port));
-    *QUICK_TUNNEL.lock().await = Some(QuickTunnelRuntime { local_port, handle });
+    if let Some(previous) = QUICK_TUNNEL
+        .lock()
+        .await
+        .replace(QuickTunnelRuntime { local_port, handle })
+    {
+        previous.handle.abort();
+    }
 }
 
 pub async fn stop_quick_tunnel() {
+    let _lifecycle = QUICK_TUNNEL_LIFECYCLE.lock().await;
+    stop_quick_tunnel_locked().await;
+}
+
+async fn stop_quick_tunnel_locked() {
     if let Some(runtime) = QUICK_TUNNEL.lock().await.take() {
         runtime.handle.abort();
     }
@@ -408,10 +423,13 @@ async fn run_quick_tunnel_supervisor(local_port: u16) {
 }
 
 pub(super) async fn start_relay(host: String, port: u16, token: String, local_port: u16) {
+    let _lifecycle = RELAY_LIFECYCLE.lock().await;
     let key = format!("{host}:{port}:{token}");
     {
         let current = RELAY.lock().await;
-        if let Some(runtime) = current.as_ref() {
+        if let Some(runtime) = current.as_ref()
+            && !runtime.handle.is_finished()
+        {
             let state = runtime.state.lock().await;
             if state.connected_key.as_deref() == Some(key.as_str())
                 && (state.status == "connected" || state.status == "connecting")
@@ -420,17 +438,24 @@ pub(super) async fn start_relay(host: String, port: u16, token: String, local_po
             }
         }
     }
-    stop_relay().await;
+    stop_relay_locked().await;
     let state = Arc::new(Mutex::new(RelayState {
         status: "connecting".to_string(),
         error: None,
         connected_key: Some(key.clone()),
     }));
     let handle = tokio::spawn(run_relay(host, port, token, local_port, key, state.clone()));
-    *RELAY.lock().await = Some(RelayRuntime { handle, state });
+    if let Some(previous) = RELAY.lock().await.replace(RelayRuntime { handle, state }) {
+        previous.handle.abort();
+    }
 }
 
 pub async fn stop_relay() {
+    let _lifecycle = RELAY_LIFECYCLE.lock().await;
+    stop_relay_locked().await;
+}
+
+async fn stop_relay_locked() {
     if let Some(runtime) = RELAY.lock().await.take() {
         runtime.handle.abort();
     }
@@ -460,13 +485,37 @@ async fn run_relay(
     }
 }
 
-fn send_mux_close(ctrl_tx: &mpsc::UnboundedSender<String>, host_id: &str, conn_id: &str) {
+fn try_send_mux_close(ctrl_tx: &mpsc::Sender<String>, host_id: &str, conn_id: &str) {
     if let Ok(frame) = serde_json::to_string(&RelayControlClientFrame::MuxClose {
         host_id: host_id.to_string(),
         conn_id: conn_id.to_string(),
     }) {
-        let _ = ctrl_tx.send(format!("{frame}\n"));
+        let line = format!("{frame}\n");
+        if let Err(mpsc::error::TrySendError::Full(line)) = ctrl_tx.try_send(line) {
+            let tx = ctrl_tx.clone();
+            tokio::spawn(async move {
+                let _ = tx.send(line).await;
+            });
+        }
     }
+}
+
+async fn send_mux_close(ctrl_tx: &mpsc::Sender<String>, host_id: &str, conn_id: &str) {
+    if let Ok(frame) = serde_json::to_string(&RelayControlClientFrame::MuxClose {
+        host_id: host_id.to_string(),
+        conn_id: conn_id.to_string(),
+    }) {
+        let _ = ctrl_tx.send(format!("{frame}\n")).await;
+    }
+}
+
+fn is_valid_relay_http_path(path: &str) -> bool {
+    path.starts_with('/')
+        && !path.starts_with("//")
+        && !path.starts_with("/\\")
+        && !path
+            .bytes()
+            .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
 }
 
 async fn remove_mux_conn_if_current(
@@ -494,7 +543,7 @@ async fn run_mux_local_bridge(
     mut rx: mpsc::Receiver<Vec<u8>>,
     weak_tx: mpsc::WeakSender<Vec<u8>>,
     mux_conns: MuxConnMap,
-    ctrl_tx: mpsc::UnboundedSender<String>,
+    ctrl_tx: mpsc::Sender<String>,
 ) {
     let local = match TcpStream::connect(("127.0.0.1", local_port)).await {
         Ok(stream) => {
@@ -503,7 +552,7 @@ async fn run_mux_local_bridge(
         }
         Err(_) => {
             remove_mux_conn_if_current(&mux_conns, &conn_id, &weak_tx).await;
-            send_mux_close(&ctrl_tx, &host_id, &conn_id);
+            send_mux_close(&ctrl_tx, &host_id, &conn_id).await;
             return;
         }
     };
@@ -511,7 +560,7 @@ async fn run_mux_local_bridge(
     let (mut local_reader, mut local_writer) = local.into_split();
     if local_writer.write_all(&raw_req).await.is_err() {
         remove_mux_conn_if_current(&mux_conns, &conn_id, &weak_tx).await;
-        send_mux_close(&ctrl_tx, &host_id, &conn_id);
+        send_mux_close(&ctrl_tx, &host_id, &conn_id).await;
         return;
     }
 
@@ -537,14 +586,14 @@ async fn run_mux_local_bridge(
                     }) else {
                         break;
                     };
-                    if ctrl_tx.send(format!("{frame}\n")).is_err() {
+                    if ctrl_tx.send(format!("{frame}\n")).await.is_err() {
                         break;
                     }
                 }
             }
         }
         if remove_mux_conn_if_current(&mux_conns, &conn_id, &weak_tx).await {
-            send_mux_close(&ctrl_tx, &host_id, &conn_id);
+            send_mux_close(&ctrl_tx, &host_id, &conn_id).await;
         }
     };
 
@@ -670,7 +719,7 @@ where
         }
     }
 
-    let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel::<String>();
+    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<String>(CTRL_OUTBOUND_CHANNEL_CAPACITY);
     let (write_err_tx, mut write_err_rx) = oneshot::channel::<String>();
     let writer_task = tokio::spawn(async move {
         while let Some(first) = ctrl_rx.recv().await {
@@ -766,8 +815,14 @@ where
             };
             match frame {
                 RelayControlServerFrame::Ping { ts } => {
-                    if let Ok(pong) = serde_json::to_string(&RelayControlClientFrame::Pong { ts }) {
-                        let _ = ctrl_tx.send(format!("{pong}\n"));
+                    if let Ok(pong) = serde_json::to_string(&RelayControlClientFrame::Pong { ts })
+                        && let Err(mpsc::error::TrySendError::Full(msg)) =
+                            ctrl_tx.try_send(format!("{pong}\n"))
+                    {
+                        let tx = ctrl_tx.clone();
+                        tokio::spawn(async move {
+                            let _ = tx.send(msg).await;
+                        });
                     }
                     while mux_tasks.try_join_next().is_some() {}
                 }
@@ -809,7 +864,7 @@ where
                     }
                     while mux_tasks.try_join_next().is_some() {}
                     let Ok(raw_req) = BASE64.decode(raw_req_b64) else {
-                        send_mux_close(&ctrl_tx, host_id, &conn_id);
+                        try_send_mux_close(&ctrl_tx, host_id, &conn_id);
                         continue;
                     };
                     let (tx, rx) = mpsc::channel::<Vec<u8>>(MUX_CHANNEL_CAPACITY);
@@ -841,14 +896,11 @@ where
                         continue;
                     }
                     let sender = mux_conns.lock().await.get(&conn_id).cloned();
-                    if let Some(tx) = sender {
-                        match tokio::time::timeout(Duration::from_secs(10), tx.send(bytes)).await {
-                            Ok(Ok(())) => {}
-                            Ok(Err(_)) | Err(_) => {
-                                mux_conns.lock().await.remove(&conn_id);
-                                send_mux_close(&ctrl_tx, host_id, &conn_id);
-                            }
-                        }
+                    if let Some(tx) = sender
+                        && tx.try_send(bytes).is_err()
+                    {
+                        mux_conns.lock().await.remove(&conn_id);
+                        try_send_mux_close(&ctrl_tx, host_id, &conn_id);
                     }
                 }
                 RelayControlServerFrame::MuxClose { conn_id } => {
@@ -870,30 +922,35 @@ where
                     let ctrl_tx = ctrl_tx.clone();
                     let host_id = host_id.to_string();
                     tokio::spawn(async move {
-                        let url = format!("http://127.0.0.1:{local_port}{path}");
-                        let m = reqwest::Method::from_bytes(method.as_bytes())
-                            .unwrap_or(reqwest::Method::GET);
-                        let mut req = client.request(m, &url);
-                        for (k, v) in headers {
-                            req = req.header(&k, &v);
-                        }
-                        let body = BASE64.decode(body_b64).unwrap_or_default();
-                        if !body.is_empty() {
-                            req = req.body(body);
-                        }
-                        let (status, out_headers, resp_bytes) = match req.send().await {
-                            Ok(resp) => {
-                                let status = resp.status().as_u16();
-                                let mut hdrs = Vec::new();
-                                for (k, v) in resp.headers() {
-                                    if let Ok(s) = v.to_str() {
-                                        hdrs.push((k.as_str().to_string(), s.to_string()));
-                                    }
-                                }
-                                let bytes = resp.bytes().await.unwrap_or_default().to_vec();
-                                (status, hdrs, bytes)
+                        let (status, out_headers, resp_bytes) = if !is_valid_relay_http_path(&path)
+                        {
+                            (400, Vec::new(), Vec::new())
+                        } else {
+                            let url = format!("http://127.0.0.1:{local_port}{path}");
+                            let m = reqwest::Method::from_bytes(method.as_bytes())
+                                .unwrap_or(reqwest::Method::GET);
+                            let mut req = client.request(m, &url);
+                            for (k, v) in headers {
+                                req = req.header(&k, &v);
                             }
-                            Err(_) => (502, Vec::new(), Vec::new()),
+                            let body = BASE64.decode(body_b64).unwrap_or_default();
+                            if !body.is_empty() {
+                                req = req.body(body);
+                            }
+                            match req.send().await {
+                                Ok(resp) => {
+                                    let status = resp.status().as_u16();
+                                    let mut hdrs = Vec::new();
+                                    for (k, v) in resp.headers() {
+                                        if let Ok(s) = v.to_str() {
+                                            hdrs.push((k.as_str().to_string(), s.to_string()));
+                                        }
+                                    }
+                                    let bytes = resp.bytes().await.unwrap_or_default().to_vec();
+                                    (status, hdrs, bytes)
+                                }
+                                Err(_) => (502, Vec::new(), Vec::new()),
+                            }
                         };
                         if let Ok(res_frame) =
                             serde_json::to_string(&RelayControlClientFrame::HttpRes {
@@ -904,7 +961,7 @@ where
                                 body_b64: BASE64.encode(&resp_bytes),
                             })
                         {
-                            let _ = ctrl_tx.send(format!("{res_frame}\n"));
+                            let _ = ctrl_tx.send(format!("{res_frame}\n")).await;
                         }
                     });
                 }
@@ -1033,9 +1090,10 @@ mod tests {
     };
 
     use super::{
-        MUX_CHUNK_MAX_BYTES, MuxConnMap, RELAY_REJECTION_PREFIX, RelayControlClientFrame,
-        RelayControlServerFrame, RelayState, maintain_control_on_stream,
-        perform_http_tunnel_upgrade, run_mux_local_bridge,
+        MUX_CHANNEL_CAPACITY, MUX_CHUNK_MAX_BYTES, MuxConnMap, RELAY, RELAY_REJECTION_PREFIX,
+        RelayControlClientFrame, RelayControlServerFrame, RelayState, is_valid_relay_http_path,
+        maintain_control_on_stream, perform_http_tunnel_upgrade, run_mux_local_bridge, start_relay,
+        stop_relay,
     };
 
     #[tokio::test]
@@ -1155,7 +1213,7 @@ mod tests {
             .await
             .insert("conn-1".to_string(), tx.clone());
 
-        let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel::<String>();
+        let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<String>(64);
         let bridge = tokio::spawn(run_mux_local_bridge(
             local_port,
             "host-abc".to_string(),
@@ -1391,5 +1449,215 @@ mod tests {
             "unexpected error: {err}"
         );
         server_task.abort();
+    }
+
+    #[test]
+    fn relay_http_path_validator_blocks_ssrf_and_control_chars() {
+        assert!(is_valid_relay_http_path("/"));
+        assert!(is_valid_relay_http_path("/api/v1/health?ok=1"));
+        assert!(!is_valid_relay_http_path(""));
+        assert!(!is_valid_relay_http_path("@169.254.169.254/latest/meta-data"));
+        assert!(!is_valid_relay_http_path(":80@evil.example/path"));
+        assert!(!is_valid_relay_http_path("//evil.example/path"));
+        assert!(!is_valid_relay_http_path("/\\evil.example/path"));
+        assert!(!is_valid_relay_http_path("http://evil.example/path"));
+        assert!(!is_valid_relay_http_path("/api/test\r\nHost: evil.example"));
+        assert!(!is_valid_relay_http_path("/api/test with space"));
+    }
+
+    #[tokio::test]
+    async fn maintain_control_rejects_ssrf_http_req_path_with_400() {
+        let (client, server) = tokio::io::duplex(8192);
+        let (server_read, mut server_write) = tokio::io::split(server);
+        let server_task = tokio::spawn(async move {
+            let mut lines = BufReader::new(server_read).lines();
+            let _ = lines.next_line().await.expect("read handshake");
+            let req = serde_json::to_string(&RelayControlServerFrame::HttpReq {
+                host_id: "host-test".to_string(),
+                id: "req-ssrf".to_string(),
+                method: "GET".to_string(),
+                path: "@127.0.0.1:9/secret".to_string(),
+                headers: Vec::new(),
+                body_b64: String::new(),
+            })
+            .expect("serialize http req");
+            server_write
+                .write_all(format!("OK host-test\n{req}\n").as_bytes())
+                .await
+                .expect("write ok + req");
+            server_write.flush().await.expect("flush");
+
+            let resp_line = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+                .await
+                .expect("expected prompt 400 HttpRes")
+                .expect("read line")
+                .expect("frame present");
+            let frame: RelayControlClientFrame =
+                serde_json::from_str(resp_line.trim()).expect("valid client frame");
+            match frame {
+                RelayControlClientFrame::HttpRes {
+                    host_id,
+                    id,
+                    status,
+                    ..
+                } => {
+                    assert_eq!(host_id, "host-test");
+                    assert_eq!(id, "req-ssrf");
+                    assert_eq!(status, 400);
+                }
+                other => panic!("expected HttpRes 400, got {other:?}"),
+            }
+        });
+
+        let state = Arc::new(Mutex::new(RelayState {
+            status: "connecting".to_string(),
+            error: None,
+            connected_key: None,
+        }));
+        let _ = maintain_control_on_stream(
+            client,
+            "127.0.0.1",
+            17891,
+            "tok-1",
+            "host-test",
+            17891,
+            "key-1",
+            &state,
+            Duration::from_secs(2),
+            Duration::from_secs(5),
+            false,
+        )
+        .await;
+        server_task.await.expect("server verified 400 response");
+    }
+
+    #[tokio::test]
+    async fn mux_data_backpressure_fast_closes_slow_stream_without_blocking_ping() {
+        // Accept a local connection and never read from it so writes back up.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind");
+        let local_port = listener.local_addr().expect("addr").port();
+        let _stalled_peer = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.expect("accept");
+            tokio::time::sleep(Duration::from_secs(10)).await;
+        });
+
+        let (client, server) = tokio::io::duplex(256 * 1024);
+        let (server_read, mut server_write) = tokio::io::split(server);
+
+        let server_task = tokio::spawn(async move {
+            let mut lines = BufReader::new(server_read).lines();
+            let _ = lines.next_line().await.expect("handshake");
+            server_write
+                .write_all(b"OK host-test\n")
+                .await
+                .expect("write ok");
+
+            let open = serde_json::to_string(&RelayControlServerFrame::MuxOpen {
+                host_id: "host-test".to_string(),
+                conn_id: "slow-conn".to_string(),
+                raw_req_b64: BASE64.encode(b"GET / HTTP/1.1\r\n\r\n"),
+            })
+            .expect("serialize MuxOpen");
+            server_write
+                .write_all(format!("{open}\n").as_bytes())
+                .await
+                .expect("write MuxOpen");
+
+            // Flood enough large chunks to overflow both the TCP send buffer and MUX_CHANNEL_CAPACITY.
+            let chunk = BASE64.encode(vec![b'x'; 16 * 1024]);
+            let data = serde_json::to_string(&RelayControlServerFrame::MuxData {
+                conn_id: "slow-conn".to_string(),
+                data_b64: chunk,
+            })
+            .expect("serialize MuxData");
+            let data_line = format!("{data}\n");
+            for _ in 0..(MUX_CHANNEL_CAPACITY + 256) {
+                server_write
+                    .write_all(data_line.as_bytes())
+                    .await
+                    .expect("write MuxData");
+            }
+
+            let ping = serde_json::to_string(&RelayControlServerFrame::Ping { ts: 777 })
+                .expect("serialize Ping");
+            server_write
+                .write_all(format!("{ping}\n").as_bytes())
+                .await
+                .expect("write Ping");
+            server_write.flush().await.expect("flush");
+
+            // Both MuxClose (for the stalled stream) and Pong must arrive promptly (< 2s, not 10s).
+            let mut saw_close = false;
+            let mut saw_pong = false;
+            let deadline = tokio::time::timeout(Duration::from_secs(2), async {
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let frame: RelayControlClientFrame =
+                        serde_json::from_str(line.trim()).expect("valid client frame");
+                    match frame {
+                        RelayControlClientFrame::MuxClose { conn_id, .. }
+                            if conn_id == "slow-conn" =>
+                        {
+                            saw_close = true;
+                        }
+                        RelayControlClientFrame::Pong { ts: 777 } => {
+                            saw_pong = true;
+                        }
+                        _ => {}
+                    }
+                    if saw_close && saw_pong {
+                        break;
+                    }
+                }
+            })
+            .await;
+            assert!(
+                deadline.is_ok() && saw_close && saw_pong,
+                "expected prompt MuxClose ({saw_close}) and Pong ({saw_pong}) without 10s HOL block"
+            );
+        });
+
+        let state = Arc::new(Mutex::new(RelayState {
+            status: "connecting".to_string(),
+            error: None,
+            connected_key: None,
+        }));
+        let _ = maintain_control_on_stream(
+            client,
+            "127.0.0.1",
+            17891,
+            "tok-1",
+            "host-test",
+            local_port,
+            "key-1",
+            &state,
+            Duration::from_secs(2),
+            Duration::from_secs(5),
+            false,
+        )
+        .await;
+        server_task.await.expect("server assertions passed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_start_relay_leaves_single_runtime_and_stops_cleanly() {
+        let port = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("ephemeral port")
+            .local_addr()
+            .expect("addr")
+            .port();
+        tokio::join!(
+            start_relay("127.0.0.1".to_string(), port, "tok-a".to_string(), 17891),
+            start_relay("127.0.0.1".to_string(), port, "tok-a".to_string(), 17891),
+            start_relay("127.0.0.1".to_string(), port, "tok-b".to_string(), 17891),
+        );
+        {
+            let guard = RELAY.lock().await;
+            assert!(guard.is_some());
+        }
+        stop_relay().await;
+        assert!(RELAY.lock().await.is_none());
     }
 }

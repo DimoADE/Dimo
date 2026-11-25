@@ -569,6 +569,7 @@ export function TaskFollowUpSection({
     isScratchLoading: isScratchLoading || isQueueStatusPending,
     scratchData,
     localMessage,
+    hasLocalImages: attachedImages.length > 0,
     setLocalMessage,
     setAttachedImages,
     setSelectedMode,
@@ -1297,7 +1298,10 @@ export function TaskFollowUpSection({
         {/* Scrollable priority area (review comments, git conflicts, rate limit) */}
         <div className="min-h-0 overflow-y-auto px-3">
           <div
-            className={cn('mx-auto w-full space-y-2', composerMaxWidthClass)}
+            className={cn(
+              'pointer-events-auto mx-auto w-full space-y-2',
+              composerMaxWidthClass
+            )}
           >
             <ReviewCommentsPreview reviewMarkdown={reviewMarkdown} />
 
@@ -1314,6 +1318,7 @@ export function TaskFollowUpSection({
 
             {activeRateLimit ? (
               <RateLimitRecoveryBanner
+                key={activeRateLimit.conversationId}
                 conversationId={activeRateLimit.conversationId}
                 rateLimit={activeRateLimit.state}
                 onUpdateAutoResume={activeRateLimit.onUpdateAutoResume}

@@ -540,6 +540,17 @@ where
                 "principal lacks conversation.write",
             ));
         }
+        if let Err(error) = self
+            .execution
+            .close_conversation(conversation_id, Some("Conversation archived".to_string()))
+            .await
+        {
+            tracing::warn!(
+                %conversation_id,
+                error = %error,
+                "best-effort runtime teardown before archiving conversation failed"
+            );
+        }
         self.conversations.archive(conversation_id).await
     }
 
@@ -566,6 +577,17 @@ where
             return Err(ApplicationError::forbidden(
                 "principal lacks conversation.write",
             ));
+        }
+        if let Err(error) = self
+            .execution
+            .close_conversation(conversation_id, Some("Conversation deleted".to_string()))
+            .await
+        {
+            tracing::warn!(
+                %conversation_id,
+                error = %error,
+                "best-effort runtime teardown before deleting conversation failed"
+            );
         }
         self.conversations.delete(conversation_id).await
     }

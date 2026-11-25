@@ -1,5 +1,10 @@
 #[cfg(not(feature = "qa-mode"))]
 use std::collections::HashSet;
+#[cfg(not(feature = "qa-mode"))]
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -10,8 +15,6 @@ use std::{
 use ignore::WalkBuilder;
 use serde::Serialize;
 use thiserror::Error;
-#[cfg(not(feature = "qa-mode"))]
-use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 use utils::path::normalize_windows_extended_path_prefix;
 
@@ -173,39 +176,44 @@ impl FilesystemService {
         hard_timeout_ms: u64,
         max_depth: Option<usize>,
     ) -> Result<Vec<DirectoryEntry>, FilesystemError> {
-        let cancel_token = CancellationToken::new();
-        let cancel_after_delay = cancel_token.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)).await;
-            cancel_after_delay.cancel();
-        });
-        let service = self.clone();
-        let cancel_for_scan = cancel_token.clone();
-        let mut scan_handle = tokio::spawn(async move {
-            service
-                .list_git_repos_inner(paths, max_depth, Some(&cancel_for_scan))
-                .await
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let cancel_for_scan = Arc::clone(&cancel_flag);
+        let mut scan_handle = tokio::task::spawn_blocking(move || {
+            Self::list_git_repos_inner(paths, max_depth, Some(cancel_for_scan))
         });
 
+        let soft_timeout = tokio::time::sleep(std::time::Duration::from_millis(timeout_ms));
         let hard_timeout = tokio::time::sleep(std::time::Duration::from_millis(hard_timeout_ms));
+        tokio::pin!(soft_timeout);
         tokio::pin!(hard_timeout);
 
-        tokio::select! {
-            res = &mut scan_handle => {
-                match res {
-                    Ok(Ok(repos)) => Ok(repos),
-                    Ok(Err(err)) => Err(err),
-                    Err(join_err) => Err(FilesystemError::Io(
-                        std::io::Error::other(join_err.to_string())))
+        let mut soft_fired = false;
+        loop {
+            tokio::select! {
+                res = &mut scan_handle => {
+                    return match res {
+                        Ok(Ok(repos)) => Ok(repos),
+                        Ok(Err(err)) => Err(err),
+                        Err(join_err) => Err(FilesystemError::Io(
+                            std::io::Error::other(join_err.to_string()),
+                        )),
+                    };
                 }
+                _ = &mut soft_timeout, if !soft_fired => {
+                    soft_fired = true;
+                    cancel_flag.store(true, Ordering::Relaxed);
                 }
-            _ = &mut hard_timeout => {
-                scan_handle.abort();
-                tracing::warn!("list_git_repos_with_timeout: hard timeout reached after {}ms", hard_timeout_ms);
-                Err(FilesystemError::Io(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "Operation forcibly terminated due to hard timeout",
-                )))
+                _ = &mut hard_timeout => {
+                    cancel_flag.store(true, Ordering::Relaxed);
+                    tracing::warn!(
+                        "list_git_repos_with_timeout: hard timeout reached after {}ms",
+                        hard_timeout_ms
+                    );
+                    return Err(FilesystemError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "Operation forcibly terminated due to hard timeout",
+                    )));
+                }
             }
         }
     }
@@ -266,7 +274,7 @@ impl FilesystemService {
     fn scan_git_repos_under_root(
         root: &Path,
         max_depth: Option<usize>,
-        cancel: Option<&CancellationToken>,
+        cancel: Option<&Arc<AtomicBool>>,
         skip_dirs: &HashSet<String>,
         dimo_temp_dir: &Path,
         seen_repo_paths: &mut HashSet<PathBuf>,
@@ -282,10 +290,10 @@ impl FilesystemService {
                 let dimo_temp_dir = dimo_temp_dir.to_path_buf();
                 let skip_dirs = skip_dirs.clone();
                 move |entry| {
-                    if let Some(token) = cancel.as_ref()
-                        && token.is_cancelled()
+                    if let Some(flag) = cancel.as_ref()
+                        && flag.load(Ordering::Relaxed)
                     {
-                        tracing::debug!("Cancellation token triggered");
+                        tracing::debug!("Cancellation flag triggered");
                         return false;
                     }
 
@@ -310,65 +318,71 @@ impl FilesystemService {
             })
             .max_depth(max_depth);
 
-        walker_builder
-            .build()
-            .filter_map(|entry| {
-                let entry = entry.ok()?;
-                if cancel.is_some_and(|token| token.is_cancelled()) {
-                    return None;
-                }
+        let mut repos = Vec::new();
+        for entry in walker_builder.build() {
+            if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                break;
+            }
+            let Ok(entry) = entry else {
+                continue;
+            };
 
-                let path = entry.path();
-                if !path.join(".git").exists() {
-                    return None;
-                }
+            let path = entry.path();
+            if !path.join(".git").exists() {
+                continue;
+            }
 
-                let repo = git2::Repository::open(path).ok()?;
-                let workdir = repo.workdir()?;
-                let normalized_path = utils::path::normalize_macos_private_alias(workdir);
-                let canonical_path = normalized_path.canonicalize().unwrap_or(normalized_path);
-                let canonical_path = normalize_windows_extended_path_prefix(canonical_path);
-                let name = canonical_path.file_name()?.to_str()?;
-                if !seen_repo_paths.insert(canonical_path.clone()) {
-                    return None;
-                }
+            let Ok(repo) = git2::Repository::open(path) else {
+                continue;
+            };
+            let Some(workdir) = repo.workdir() else {
+                continue;
+            };
+            let normalized_path = utils::path::normalize_macos_private_alias(workdir);
+            let canonical_path = normalized_path.canonicalize().unwrap_or(normalized_path);
+            let canonical_path = normalize_windows_extended_path_prefix(canonical_path);
+            let Some(name) = canonical_path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !seen_repo_paths.insert(canonical_path.clone()) {
+                continue;
+            }
 
-                let metadata = fs::metadata(&canonical_path).ok();
-                let last_modified = metadata
-                    .as_ref()
-                    .and_then(|m| m.modified().ok())
-                    .map(|t| t.elapsed().unwrap_or_default().as_secs());
-                let created_at_ms = metadata
-                    .as_ref()
-                    .and_then(|m| m.created().ok())
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as u64);
-                let modified_at_ms = metadata
-                    .as_ref()
-                    .and_then(|m| m.modified().ok())
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as u64);
+            let metadata = fs::metadata(&canonical_path).ok();
+            let last_modified = metadata
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .map(|t| t.elapsed().unwrap_or_default().as_secs());
+            let created_at_ms = metadata
+                .as_ref()
+                .and_then(|m| m.created().ok())
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64);
+            let modified_at_ms = metadata
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64);
 
-                Some(DirectoryEntry {
-                    name: name.to_string(),
-                    path: canonical_path,
-                    is_directory: true,
-                    is_git_repo: true,
-                    last_modified,
-                    size_bytes: None,
-                    created_at_ms,
-                    modified_at_ms,
-                })
-            })
-            .collect()
+            repos.push(DirectoryEntry {
+                name: name.to_string(),
+                path: canonical_path,
+                is_directory: true,
+                is_git_repo: true,
+                last_modified,
+                size_bytes: None,
+                created_at_ms,
+                modified_at_ms,
+            });
+        }
+        repos
     }
 
     #[cfg(not(feature = "qa-mode"))]
-    async fn list_git_repos_inner(
-        &self,
+    fn list_git_repos_inner(
         paths: Vec<PathBuf>,
         max_depth: Option<usize>,
-        cancel: Option<&CancellationToken>,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Result<Vec<DirectoryEntry>, FilesystemError> {
         let skip_dirs = Self::get_directories_to_skip();
         let dimo_temp_dir = utils::path::get_dimo_temp_dir();
@@ -376,7 +390,7 @@ impl FilesystemService {
         let mut git_repos = Vec::new();
 
         for root in paths {
-            if cancel.is_some_and(|token| token.is_cancelled()) {
+            if cancel.as_ref().is_some_and(|flag| flag.load(Ordering::Relaxed)) {
                 break;
             }
 
@@ -387,7 +401,7 @@ impl FilesystemService {
             git_repos.extend(Self::scan_git_repos_under_root(
                 &root,
                 max_depth,
-                cancel,
+                cancel.as_ref(),
                 &skip_dirs,
                 &dimo_temp_dir,
                 &mut seen_repo_paths,
@@ -536,5 +550,54 @@ mod tests {
         assert_eq!(file_entry.size_bytes, Some(11));
         assert!(file_entry.modified_at_ms.is_some());
         assert!(file_entry.last_modified.is_some());
+    }
+
+    #[cfg(not(feature = "qa-mode"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_git_repos_runs_off_runtime_thread_and_respects_cancel_flag() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let repo_dir = temp.path().join("sample-repo");
+        git2::Repository::init(&repo_dir).expect("init git repo");
+
+        // Pre-cancelled flag stops the blocking walk immediately without yielding repos.
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let skipped = FilesystemService::list_git_repos_inner(
+            vec![temp.path().to_path_buf()],
+            Some(4),
+            Some(cancelled),
+        )
+        .expect("cancelled scan returns Ok");
+        assert!(
+            skipped.is_empty(),
+            "pre-cancelled scan must exit before discovering repos"
+        );
+
+        // Normal scan discovers the repo without starving a concurrent task on a single-thread runtime.
+        let service = FilesystemService::new();
+        let ticked = Arc::new(AtomicBool::new(false));
+        let ticked_clone = Arc::clone(&ticked);
+        let ticker = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            ticked_clone.store(true, Ordering::Relaxed);
+        });
+
+        let repos = service
+            .list_git_repos(
+                Some(temp.path().to_string_lossy().into_owned()),
+                5_000,
+                10_000,
+                Some(4),
+            )
+            .await
+            .expect("list_git_repos");
+        ticker.await.expect("ticker finished");
+        assert!(ticked.load(Ordering::Relaxed));
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].name, "sample-repo");
     }
 }

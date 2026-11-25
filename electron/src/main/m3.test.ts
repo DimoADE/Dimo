@@ -10,11 +10,17 @@ const createdWindows: Array<{
   options: Record<string, unknown>;
   emitter: EventEmitter;
   webContentsEmitter: EventEmitter;
+  callLog: string[];
   destroy: ReturnType<typeof vi.fn>;
   hide: ReturnType<typeof vi.fn>;
   show: ReturnType<typeof vi.fn>;
   showInactive: ReturnType<typeof vi.fn>;
+  restore: ReturnType<typeof vi.fn>;
+  moveTop: ReturnType<typeof vi.fn>;
   focus: ReturnType<typeof vi.fn>;
+  setAlwaysOnTop: ReturnType<typeof vi.fn>;
+  setMinimizedState: (value: boolean, revealAsMinimized?: boolean) => void;
+  setAlwaysOnTopState: (value: boolean) => void;
   setBounds: ReturnType<typeof vi.fn>;
   setIgnoreMouseEvents: ReturnType<typeof vi.fn>;
   setZoomFactor: ReturnType<typeof vi.fn>;
@@ -28,8 +34,12 @@ vi.mock('electron', () => {
   const BrowserWindowMock = vi.fn((options: Record<string, unknown>) => {
     const emitter = new EventEmitter();
     const webContentsEmitter = new EventEmitter();
+    const callLog: string[] = [];
     let destroyed = false;
     let visible = false;
+    let minimized = false;
+    let minimizedAfterShow = false;
+    let alwaysOnTop = false;
     const setZoomFactor = vi.fn();
     const reload = vi.fn();
     const reloadIgnoringCache = vi.fn();
@@ -43,27 +53,58 @@ vi.mock('electron', () => {
     });
     const hide = vi.fn(() => {
       visible = false;
+      callLog.push('hide');
+    });
+    const restore = vi.fn(() => {
+      minimized = false;
+      minimizedAfterShow = false;
+      callLog.push('restore');
     });
     const show = vi.fn(() => {
       visible = true;
+      if (minimizedAfterShow) {
+        minimized = true;
+      }
+      callLog.push('show');
       emitter.emit('show');
     });
     const showInactive = vi.fn(() => {
       visible = true;
+      callLog.push('showInactive');
       emitter.emit('show');
     });
-    const focus = vi.fn();
+    const moveTop = vi.fn(() => {
+      callLog.push('moveTop');
+    });
+    const focus = vi.fn(() => {
+      callLog.push('focus');
+    });
+    const setAlwaysOnTop = vi.fn((flag: boolean) => {
+      alwaysOnTop = flag;
+      callLog.push(`setAlwaysOnTop:${String(flag)}`);
+    });
     const setBounds = vi.fn();
     const setIgnoreMouseEvents = vi.fn();
     const record = {
       options,
       emitter,
       webContentsEmitter,
+      callLog,
       destroy,
       hide,
       show,
       showInactive,
+      restore,
+      moveTop,
       focus,
+      setAlwaysOnTop,
+      setMinimizedState: (value: boolean, revealAsMinimized = false) => {
+        minimized = value;
+        minimizedAfterShow = revealAsMinimized;
+      },
+      setAlwaysOnTopState: (value: boolean) => {
+        alwaysOnTop = value;
+      },
       setBounds,
       setIgnoreMouseEvents,
       setZoomFactor,
@@ -79,13 +120,16 @@ vi.mock('electron', () => {
       emit: (ev: string, ...args: unknown[]) => emitter.emit(ev, ...args),
       isDestroyed: () => destroyed,
       isVisible: () => visible,
-      isMinimized: () => false,
+      isMinimized: () => minimized,
       isFocused: () => false,
-      restore: vi.fn(),
+      isAlwaysOnTop: () => alwaysOnTop,
+      restore,
       show,
       showInactive,
       hide,
+      moveTop,
       focus,
+      setAlwaysOnTop,
       destroy,
       setTitle: vi.fn(),
       getTitle: () => String(options.title ?? ''),
@@ -974,6 +1018,160 @@ describe('WindowManager remediation behaviors (hidden settings exit, zoom sync, 
     mainRecord.webContentsEmitter.emit('context-menu', {}, { x: 10, y: 20 });
     expect(Menu.buildFromTemplate).toHaveBeenCalledTimes(1);
     expect(menuPopupMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('promotes windows to the front on Windows first-click activation and restores hidden-minimized state', () => {
+    createdWindows.length = 0;
+    const manager = new WindowManager({
+      preloadPath: '/preload.js',
+      platform: 'win32',
+    });
+
+    const mainWin = manager.createMainWindow();
+    const record = createdWindows[0];
+    record.callLog.length = 0;
+
+    // Simulate a tray-hidden window that reveals in minimized state when shown
+    record.setMinimizedState(false, true);
+    manager.showMainWindow();
+
+    expect(record.callLog).toEqual([
+      'setAlwaysOnTop:true',
+      'show',
+      'restore',
+      'moveTop',
+      'focus',
+      'setAlwaysOnTop:false',
+    ]);
+
+    // Preserve alwaysOnTop when the window was already pinned
+    record.callLog.length = 0;
+    record.setAlwaysOnTopState(true);
+    manager.revealWindow('main');
+    expect(record.callLog).toEqual(['show', 'moveTop', 'focus']);
+
+    // Cold-start focusWindow also promotes above foreground lock on win32
+    record.callLog.length = 0;
+    record.setAlwaysOnTopState(false);
+    manager.focusWindow(mainWin);
+    expect(record.callLog).toEqual([
+      'setAlwaysOnTop:true',
+      'moveTop',
+      'focus',
+      'setAlwaysOnTop:false',
+    ]);
+  });
+
+  it('does not toggle alwaysOnTop on macOS when showing the main window', () => {
+    createdWindows.length = 0;
+    const manager = new WindowManager({
+      preloadPath: '/preload.js',
+      platform: 'darwin',
+    });
+
+    manager.createMainWindow();
+    const record = createdWindows[0];
+    record.callLog.length = 0;
+
+    manager.showMainWindow();
+    expect(record.callLog).toEqual(['show', 'moveTop', 'focus']);
+    expect(record.setAlwaysOnTop).not.toHaveBeenCalled();
+  });
+
+  it('broadcastLocalEvent delivers sidecar events only to local desktop windows and excludes remote host-* and auxiliary toast windows', () => {
+    createdWindows.length = 0;
+    const manager = new WindowManager({ preloadPath: '/preload.js' });
+
+    const mainWin = manager.createMainWindow();
+    const settingsWin = manager.openSettingsWindow('main');
+    const remoteLabel = manager.openOrFocusHostWindow({
+      id: 'remote-1',
+      name: 'Remote Box',
+    });
+    const remoteWin = manager.getWindow(remoteLabel)!;
+    const remoteSettingsWin = manager.openSettingsWindow(remoteLabel);
+    const toastWc = {
+      id: 999,
+      isDestroyed: () => false,
+      send: vi.fn(),
+    } as unknown as Electron.WebContents;
+    manager.registerAuxiliaryWebContents(toastWc, 'desktop-toast');
+
+    const payload = {
+      baseUrl: 'http://127.0.0.1:41234',
+      token: 'local-secret',
+    };
+    manager.broadcastLocalEvent('sidecar-restarted', payload);
+
+    expect(mainWin.webContents.send).toHaveBeenCalledWith(
+      'dimo:events:message',
+      { event: 'sidecar-restarted', payload }
+    );
+    expect(settingsWin.webContents.send).toHaveBeenCalledWith(
+      'dimo:events:message',
+      { event: 'sidecar-restarted', payload }
+    );
+    expect(remoteWin.webContents.send).not.toHaveBeenCalled();
+    expect(remoteSettingsWin.webContents.send).not.toHaveBeenCalled();
+    expect(toastWc.send).not.toHaveBeenCalled();
+  });
+
+  it('DesktopToastManager unregisters cached webContents on closed without reading destroyed win.webContents getter', async () => {
+    const { BrowserWindow } = await import('electron');
+    const emitter = new EventEmitter();
+    let destroyed = false;
+    const fakeWc = {
+      id: 888,
+      isDestroyed: () => destroyed,
+      send: vi.fn(),
+    };
+    vi.mocked(BrowserWindow).mockImplementationOnce(() => {
+      const fakeWin = {
+        on: (ev: string, cb: (...args: unknown[]) => void) => emitter.on(ev, cb),
+        once: (ev: string, cb: (...args: unknown[]) => void) =>
+          emitter.once(ev, cb),
+        isDestroyed: () => destroyed,
+        isVisible: () => false,
+        showInactive: vi.fn(),
+        hide: vi.fn(),
+        setBounds: vi.fn(),
+        setIgnoreMouseEvents: vi.fn(),
+        setVisibleOnAllWorkspaces: vi.fn(),
+        loadURL: vi.fn().mockResolvedValue(undefined),
+        destroy: vi.fn(() => {
+          destroyed = true;
+          emitter.emit('closed');
+        }),
+        get webContents() {
+          if (destroyed) {
+            throw new TypeError('Object has been destroyed');
+          }
+          return fakeWc;
+        },
+      };
+      return fakeWin as unknown as Electron.BrowserWindow;
+    });
+
+    const windows = new WindowManager({ preloadPath: '/preload.js' });
+    const unregisterSpy = vi.spyOn(windows, 'unregisterAuxiliaryWebContents');
+    const toast = new DesktopToastManager({
+      preloadPath: '/preload.js',
+      windows,
+      platform: 'win32',
+    });
+
+    toast.show({
+      projectId: 'p1',
+      workspaceId: 'w1',
+      sessionId: 's1',
+      title: 'Closed test',
+      description: 'Should not throw on destroyed BrowserWindow',
+      kind: 'info',
+      durationMs: 4000,
+    });
+
+    expect(() => toast.destroy()).not.toThrow();
+    expect(unregisterSpy).toHaveBeenCalledWith(fakeWc);
   });
 });
 

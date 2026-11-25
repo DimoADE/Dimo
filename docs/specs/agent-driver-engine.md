@@ -67,7 +67,7 @@ Dimo **MUST** 保持唯一的运行时控制面与领域接缝，禁止出现“
    - 认证提取、默认模式/思考强度、可用命令、工具分类与 `_meta` 包装、问题回答结构编码、默认模型解析、别名等价校验、进程池缓存失效**必须**全部下沉为 `NativeEngineDriver` Trait 行为或由 `EngineCapabilities` 声明。
 3. **注册表驱动路由（MUST）**：
    - 运行时引擎选择**必须**经由 `EngineRegistry`（`crates/agents/src/engine/registry.rs`）按 `agent_id`、Profile 策略与 `DIMO_ENGINE_MODE`（`acp` / `native` 灰度开关）完成解析；
-   - 原生启动在握手前失败时，仅当存在明确的独立 ACP 适配器二进制且未强制 `native` 时，才允许回退至 `run_acp`；独立 `claude` / `codex` CLI 严禁被误当成 ACP stdio 服务启动。
+   - 原生引擎启动失败直接上报错误，不再做握手前自动回退至旧 ACP 适配器；仅当显式设置 `DIMO_ENGINE_MODE=acp`（如契约/E2E 回归测试）时才直接路由到通用 `run_acp`。
 4. **废弃旧执行器路径（MUST NOT）**：**禁止**在 `crates/executors/` 中新增任何编码 Agent 特性或协议适配；该 crate 保持冻结状态并由架构门禁阻断回归。
 
 ---

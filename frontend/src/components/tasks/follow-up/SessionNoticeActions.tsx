@@ -26,8 +26,10 @@ export function SessionNoticeActions({
         onClick={() => {
           void navigator.clipboard
             .writeText(action.command)
-            .then(() => toast.success(action.label))
-            .catch(() => toast.error(action.command));
+            .then(() =>
+              toast.success(t('conversation:statusDock.copiedCommand'))
+            )
+            .catch(() => toast.error(t('conversation:statusDock.copyFailed')));
         }}
       >
         {action.label}

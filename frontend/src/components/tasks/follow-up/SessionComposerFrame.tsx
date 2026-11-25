@@ -80,7 +80,7 @@ export function SessionComposerFrame({
     <div className="shrink-0 px-3 pb-2.5 pt-1.5">
       <div
         className={cn(
-          'agent-question-composer-stack relative z-10 mx-auto w-full',
+          'agent-question-composer-stack pointer-events-auto relative z-10 mx-auto w-full',
           widthClassName
         )}
         data-testid="session-composer-stack"

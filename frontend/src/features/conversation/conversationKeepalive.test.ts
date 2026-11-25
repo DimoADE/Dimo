@@ -63,4 +63,45 @@ describe('conversation keepalive', () => {
 
     expect(watch).toHaveBeenCalledWith(false);
   });
+
+  it('serializes rapid release and remount so final watch state stays true', async () => {
+    const calls: boolean[] = [];
+    const resolvers: Array<() => void> = [];
+    const setWatch = vi.fn((watch: boolean) => {
+      calls.push(watch);
+      return new Promise<void>((resolve) => {
+        resolvers.push(resolve);
+      });
+    });
+
+    const releaseFirst = retainConversationKeepalive('conv-race', setWatch);
+    expect(calls).toEqual([true]);
+
+    // Unmount and immediately remount while the initial watch=true RPC is still in flight.
+    releaseFirst();
+    const releaseSecond = retainConversationKeepalive('conv-race', setWatch);
+    expect(calls).toEqual([true]);
+
+    resolvers.shift()?.();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Since desired settled back to true before drain resumed, no spurious false RPC is emitted.
+    expect(calls).toEqual([true]);
+
+    // Now unmount for real while idle, then remount while false is in flight.
+    releaseSecond();
+    expect(calls).toEqual([true, false]);
+    const releaseThird = retainConversationKeepalive('conv-race', setWatch);
+    expect(calls).toEqual([true, false]);
+
+    resolvers.shift()?.();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(calls).toEqual([true, false, true]);
+    resolvers.shift()?.();
+    await Promise.resolve();
+    releaseThird();
+  });
 });

@@ -182,6 +182,7 @@ async fn a_structure_tab_opens_through_the_shared_host() {
                 token: "0123456789abcdef0123456789abcdef".to_owned(),
             },
             artifact_path: None,
+            read_only: false,
         })
         .await
         .expect("app.tab must open a Worker session");
@@ -280,6 +281,7 @@ async fn a_status_remote_opens_a_worker_session() {
                 token: "0123456789abcdef0123456789abcdef".to_owned(),
             },
             artifact_path: None,
+            read_only: false,
         })
         .await
         .expect("a status item with a remote must open a Worker session");
@@ -309,6 +311,7 @@ async fn a_status_remote_opens_a_worker_session() {
                 token: "abcdef0123456789abcdef0123456789".to_owned(),
             },
             artifact_path: None,
+            read_only: false,
         })
         .await
         .expect_err("a status item without a remote is a click handler, not a session");
@@ -353,6 +356,7 @@ async fn published_surface_opens_invokes_and_revokes_through_the_shared_host() {
         .open(AppSurfaceOpenRequest {
             identity: identity.clone(),
             artifact_path: None,
+            read_only: false,
         })
         .await
         .unwrap();
@@ -421,6 +425,7 @@ async fn host_issued_surface_token_expires() {
                 token: "0123456789abcdef0123456789abcdef".to_owned(),
             },
             artifact_path: None,
+            read_only: false,
         })
         .await
         .unwrap();
@@ -482,11 +487,13 @@ async fn artifact_editor_surface_reads_writes_and_detects_external_changes() {
                 token: "0123456789abcdef0123456789abcdef".to_owned(),
             },
             artifact_path: Some(diagram.clone()),
+            read_only: false,
         })
         .await
         .unwrap();
     assert_eq!(document.context["slot"], "artifact.editor");
     assert_eq!(document.context["artifact"]["name"], "architecture.drawio");
+    assert_eq!(document.context["artifact"]["readOnly"], false);
     let identity = AppSurfaceIdentity {
         plugin_id: "tests.surface".to_owned(),
         surface_id: "dashboard".to_owned(),
@@ -545,6 +552,99 @@ async fn artifact_editor_surface_reads_writes_and_detects_external_changes() {
     assert_eq!(
         error.to_string(),
         "Artifact changed outside this editor; reload before saving"
+    );
+}
+
+#[tokio::test]
+async fn read_only_artifact_editor_surface_allows_read_and_rejects_write() {
+    let Some(node) = node_executable() else {
+        return;
+    };
+    let root = tempfile::tempdir().unwrap();
+    write_editor_package(root.path());
+    let outside = tempfile::tempdir().unwrap();
+    let diagram = outside.path().join("external.drawio");
+    std::fs::write(&diagram, "<mxfile><diagram>readonly</diagram></mxfile>").unwrap();
+    let package = PluginPackage::inspect(root.path(), PluginSourceKind::DeveloperLink).unwrap();
+    let control = Arc::new(PluginControlPlane::new(Arc::new(
+        InMemoryPluginRegistry::default(),
+    )));
+    control
+        .import(package, ConflictDecision::Reject)
+        .await
+        .unwrap();
+    control
+        .activate_and_enable(&node, "tests.surface", &[], Arc::new(DenyCapabilityBroker))
+        .await
+        .unwrap();
+    let surface = control
+        .contributions()
+        .await
+        .unwrap()
+        .items
+        .into_iter()
+        .find(|item| item.id == "dashboard")
+        .unwrap();
+    let host = PluginAppSurfaceHost::new(control);
+    let document = host
+        .open(AppSurfaceOpenRequest {
+            identity: AppSurfaceIdentity {
+                plugin_id: "tests.surface".to_owned(),
+                surface_id: "dashboard".to_owned(),
+                generation: surface.generation,
+                token: "0123456789abcdef0123456789abcdef".to_owned(),
+            },
+            artifact_path: Some(diagram.clone()),
+            read_only: true,
+        })
+        .await
+        .unwrap();
+    assert_eq!(document.context["slot"], "artifact.editor");
+    assert_eq!(document.context["artifact"]["name"], "external.drawio");
+    assert_eq!(document.context["artifact"]["readOnly"], true);
+    let identity = AppSurfaceIdentity {
+        plugin_id: "tests.surface".to_owned(),
+        surface_id: "dashboard".to_owned(),
+        generation: surface.generation,
+        token: document.token,
+    };
+
+    let opened = host
+        .invoke(AppSurfaceInvocation {
+            identity: identity.clone(),
+            request_id: "read-1".to_owned(),
+            sequence: 1,
+            method: "artifact.readText".to_owned(),
+            params: json!(null),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        opened["content"],
+        "<mxfile><diagram>readonly</diagram></mxfile>"
+    );
+
+    let write_error = host
+        .invoke(AppSurfaceInvocation {
+            identity,
+            request_id: "write-readonly".to_owned(),
+            sequence: 2,
+            method: "artifact.writeText".to_owned(),
+            params: json!({
+                "content": "<mxfile><diagram>mutated</diagram></mxfile>",
+                "expectedRevision": opened["revision"],
+            }),
+        })
+        .await
+        .expect_err("read-only artifact preview must reject writeText");
+    assert_eq!(write_error.kind(), plugins::AppSurfaceErrorKind::BadRequest);
+    assert_eq!(
+        write_error.to_string(),
+        "Artifact is open in read-only preview mode"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&diagram).unwrap(),
+        "<mxfile><diagram>readonly</diagram></mxfile>"
     );
 }
 
@@ -612,6 +712,7 @@ for await (const line of createInterface({ input: process.stdin, crlfDelay: Infi
         .open(AppSurfaceOpenRequest {
             identity: identity.clone(),
             artifact_path: None,
+            read_only: false,
         })
         .await
         .unwrap();

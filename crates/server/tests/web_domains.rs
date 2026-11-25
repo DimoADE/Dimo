@@ -458,11 +458,36 @@ async fn file_mutations_and_workflow_sources_are_confined_to_sandbox_roots() {
         StatusCode::FORBIDDEN
     );
 
+    let outside_doc = outside_dir.path().join("notes.docx");
+    std::fs::write(&outside_doc, b"PK\x03\x04").expect("seed outside docx");
+
+    assert_eq!(
+        call_status(
+            app.clone(),
+            "plugin_open_file_preview",
+            serde_json::json!({ "filePath": outside_doc }),
+        )
+        .await,
+        StatusCode::OK
+    );
+
     assert_eq!(
         call_status(
             app.clone(),
             "workflow_source_read",
             serde_json::json!({ "path": outside_wf }),
+        )
+        .await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call_status(
+            app.clone(),
+            "workflow_source_write",
+            serde_json::json!({
+                "path": outside_wf,
+                "content": "{\"id\":\"x\",\"name\":\"x\",\"steps\":[]}",
+            }),
         )
         .await,
         StatusCode::FORBIDDEN

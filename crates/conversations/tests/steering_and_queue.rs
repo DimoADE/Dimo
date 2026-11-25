@@ -740,3 +740,158 @@ async fn set_session_mode_and_config_before_first_bind_persist_selection_and_emi
         "expected session_config_options_updated in {event_kinds:?}"
     );
 }
+
+#[tokio::test]
+async fn reload_session_controls_does_not_drop_live_connection_during_active_turn() {
+    let fx = SteeringFixture::new(Some("native")).await;
+    let pool = &fx.ctx.deployment.db().pool;
+    let session_id = agents::AgentSessionId(fx.conversation);
+
+    // Start a turn that stays running on the live connection.
+    let (started, _) = fx
+        .service
+        .start_turn(fx.start_input("hold turn open"))
+        .await
+        .expect("start active turn");
+    assert_eq!(started.status, "running");
+
+    let live_conn_before = fx
+        .ctx
+        .agent_runtime
+        .live_connection_id(session_id)
+        .await
+        .expect("live connection for active turn");
+
+    // A queued or manual `reload: true` request arriving while the turn is running
+    // must NOT drop the healthy connection and fail the turn with connection_closed.
+    fx.service
+        .ensure_session_controls_with_reload(fx.conversation, true)
+        .await
+        .expect("reload during active turn returns live controls");
+
+    let live_conn_after = fx
+        .ctx
+        .agent_runtime
+        .live_connection_id(session_id)
+        .await
+        .expect("connection must still be live");
+    assert_eq!(
+        live_conn_after, live_conn_before,
+        "reload must not replace a healthy connection while a turn is actively running"
+    );
+
+    let turn_after = ConversationTurnRecord::find_by_id(pool, started.turn_id)
+        .await
+        .expect("load turn")
+        .expect("turn exists");
+    assert_eq!(
+        turn_after.status, "running",
+        "active turn must remain running after reload attempt"
+    );
+
+    let failed_events: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM conversation_events WHERE conversation_id = ? AND event_kind = 'turn_failed'",
+    )
+    .bind(fx.conversation)
+    .fetch_one(pool)
+    .await
+    .expect("count turn_failed events");
+    assert_eq!(failed_events, 0, "reload must not emit turn_failed");
+
+    // Once the turn is cancelled/settled, `reload: true` must still drop and replace the connection.
+    fx.service
+        .cancel_turn(fx.conversation, None)
+        .await
+        .expect("cancel active turn");
+
+    fx.service
+        .ensure_session_controls_with_reload(fx.conversation, true)
+        .await
+        .expect("reload after turn settles");
+
+    let live_conn_reloaded = fx
+        .ctx
+        .agent_runtime
+        .live_connection_id(session_id)
+        .await
+        .expect("new connection after idle reload");
+    assert_ne!(
+        live_conn_reloaded, live_conn_before,
+        "reload must still replace the connection once no turn is active"
+    );
+}
+
+#[tokio::test]
+async fn lazy_bind_after_idle_close_persists_connecting_status_for_conversation() {
+    let fx = SteeringFixture::new(Some("native")).await;
+    let pool = &fx.ctx.deployment.db().pool;
+    let session_id = agents::AgentSessionId(fx.conversation);
+
+    let (first, _) = fx
+        .service
+        .start_turn(fx.start_input("first turn"))
+        .await
+        .expect("start first turn");
+    fx.service
+        .cancel_turn(fx.conversation, None)
+        .await
+        .expect("settle first turn");
+    let first_conn = fx
+        .ctx
+        .agent_runtime
+        .live_connection_id(session_id)
+        .await
+        .expect("first connection");
+
+    // Simulate idle sweep closing the connection before the next turn.
+    fx.ctx
+        .agent_runtime
+        .disconnect(first_conn)
+        .await
+        .expect("disconnect idle connection");
+
+    let seq_before: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(sequence), 0) FROM conversation_events WHERE conversation_id = ?",
+    )
+    .bind(fx.conversation)
+    .fetch_one(pool)
+    .await
+    .expect("query max sequence");
+
+    let (second, _) = fx
+        .service
+        .start_turn(fx.start_input("second turn after idle"))
+        .await
+        .expect("start second turn");
+    assert_ne!(second.turn_id, first.turn_id);
+
+    // Wait briefly for the async runtime_events persistence task to flush.
+    let mut saw_connecting = false;
+    for _ in 0..40 {
+        let payloads: Vec<String> = sqlx::query_scalar(
+            "SELECT normalized_json FROM conversation_events WHERE conversation_id = ? AND sequence > ? AND event_kind = 'agent_connection_status_changed' ORDER BY sequence ASC",
+        )
+        .bind(fx.conversation)
+        .bind(seq_before)
+        .fetch_all(pool)
+        .await
+        .expect("query connection status events");
+        if payloads
+            .iter()
+            .any(|json| json.contains("\"status\":\"connecting\""))
+        {
+            saw_connecting = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        saw_connecting,
+        "lazy bind after idle disconnect must persist a session-scoped connecting status event"
+    );
+
+    fx.service
+        .cancel_turn(fx.conversation, None)
+        .await
+        .expect("cleanup second turn");
+}

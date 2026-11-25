@@ -1113,3 +1113,123 @@ async fn muse_compact_accepted_and_noop_terminate_and_unloaded_permission_mode_s
     drop(app);
     mock_peer.await.expect("mock peer finished cleanly");
 }
+
+#[tokio::test]
+async fn muse_tracker_evicts_terminal_items_turn_items_and_closed_full_access_sessions() {
+    let tracker = Arc::new(Mutex::new(MuseNotificationTracker::default()));
+    let rate_limits = Arc::new(RwLock::new(None));
+
+    // 1. Terminal item/completed evicts entries immediately.
+    let _ = normalize_muse_notification(
+        "item/started",
+        &json!({
+            "sessionId": "s-a",
+            "turnId": "t-1",
+            "item": { "itemId": "tool-1", "kind": "toolCall", "toolName": "Bash", "revision": 1 }
+        }),
+        &tracker,
+        &rate_limits,
+    );
+    assert_eq!(tracker.lock().unwrap().tracked_item_count(), 1);
+    let _ = normalize_muse_notification(
+        "item/completed",
+        &json!({
+            "sessionId": "s-a",
+            "turnId": "t-1",
+            "item": {
+                "itemId": "tool-1",
+                "kind": "toolCall",
+                "toolName": "Bash",
+                "status": "completed",
+                "revision": 2,
+                "visibleOutput": "ok"
+            }
+        }),
+        &tracker,
+        &rate_limits,
+    );
+    assert_eq!(
+        tracker.lock().unwrap().tracked_item_count(),
+        0,
+        "terminal item must be evicted immediately"
+    );
+
+    // 2. turn/completed evicts remaining items only for that session, preserving sibling sessions.
+    let _ = normalize_muse_notification(
+        "item/delta",
+        &json!({
+            "sessionId": "s-a",
+            "turnId": "t-1",
+            "itemId": "msg-a",
+            "kind": "assistantMessage",
+            "delta": "hello from a"
+        }),
+        &tracker,
+        &rate_limits,
+    );
+    let _ = normalize_muse_notification(
+        "item/delta",
+        &json!({
+            "sessionId": "s-b",
+            "turnId": "t-2",
+            "itemId": "msg-b",
+            "kind": "assistantMessage",
+            "delta": "hello from b"
+        }),
+        &tracker,
+        &rate_limits,
+    );
+    assert_eq!(tracker.lock().unwrap().tracked_item_count(), 2);
+
+    let _ = normalize_muse_notification(
+        "turn/completed",
+        &json!({ "sessionId": "s-a", "turnId": "t-1", "terminal": "completed" }),
+        &tracker,
+        &rate_limits,
+    );
+    assert_eq!(
+        tracker.lock().unwrap().tracked_item_count(),
+        1,
+        "turn/completed must evict s-a items while keeping s-b in-flight items"
+    );
+
+    let _ = normalize_muse_notification(
+        "turn/completed",
+        &json!({ "sessionId": "s-b", "turnId": "t-2", "terminal": "completed" }),
+        &tracker,
+        &rate_limits,
+    );
+    assert_eq!(tracker.lock().unwrap().tracked_item_count(), 0);
+
+    // 3. Shutting down a handle removes its session ID from full_access_sessions on a shared server.
+    let (client_io, _server_io) = tokio::io::duplex(4 * 1024);
+    let (client_read, client_write) = tokio::io::split(client_io);
+    let spec = test_start_spec();
+    let server = MuseServer::connect_over_io_with_stderr(
+        spec.workspace_id,
+        true,
+        client_read,
+        client_write,
+        None,
+        None,
+        Arc::new(StderrTail::new()),
+    );
+    let driver = MuseNativeDriver::new();
+    let h1 = driver.bind_existing_server(spec.clone(), Arc::clone(&server), Some("sess-fa-1".into()));
+    let h2 = driver.bind_existing_server(spec, Arc::clone(&server), Some("sess-fa-2".into()));
+    server.set_session_full_access("sess-fa-1", true);
+    server.set_session_full_access("sess-fa-2", true);
+    assert_eq!(server.tracker_counts_for_test().1, 2);
+
+    driver.shutdown(h1).await.expect("shutdown h1");
+    assert!(server.is_alive(), "h2 still keeps pooled server alive");
+    assert_eq!(
+        server.tracker_counts_for_test().1,
+        1,
+        "shutting down h1 must remove sess-fa-1 from full_access_sessions"
+    );
+
+    driver.shutdown(h2).await.expect("shutdown h2");
+    assert!(!server.is_alive());
+    assert_eq!(server.tracker_counts_for_test().1, 0);
+}

@@ -345,7 +345,7 @@ fn codex_driver_accepts_model_id_filters_foreign_models_unless_custom_base_url()
 }
 
 #[test]
-fn codex_error_with_will_retry_emits_non_terminal_hook_event_and_fatal_emits_turn_error() {
+fn codex_error_with_will_retry_emits_request_retrying_and_fatal_emits_turn_error() {
     let rl = Arc::new(RwLock::new(None));
     let comp = Arc::new(RwLock::new(HashMap::new()));
 
@@ -355,7 +355,10 @@ fn codex_error_with_will_retry_emits_non_terminal_hook_event_and_fatal_emits_tur
             "threadId": "thr-1",
             "turnId": "turn-1",
             "willRetry": true,
-            "error": { "message": "429 rate limited, retrying in 2s" }
+            "error": {
+                "message": "429 rate limited, retrying in 2s",
+                "httpStatusCode": 429
+            }
         }),
         &rl,
         &comp,
@@ -363,20 +366,35 @@ fn codex_error_with_will_retry_emits_non_terminal_hook_event_and_fatal_emits_tur
     assert_eq!(retry_top.len(), 1);
     assert!(matches!(
         &retry_top[0],
-        EngineEvent::HookEvent { hook_name, session_id: Some(sid), .. }
-            if hook_name == "codex/retry" && sid == "thr-1"
+        EngineEvent::RequestRetrying {
+            session_id: Some(sid),
+            delay_ms: Some(2000),
+            code: Some(code),
+            reason: Some(reason),
+            ..
+        } if sid == "thr-1" && code == "429" && reason.contains("429 rate limited")
     ));
 
-    let retry_nested = normalize_codex_notification(
+    let retry_reconnecting = normalize_codex_notification(
         "error",
         &json!({
             "threadId": "thr-1",
-            "error": { "message": "transient overload", "willRetry": true }
+            "error": {
+                "message": "Reconnecting... 2/5",
+                "willRetry": true
+            }
         }),
         &rl,
         &comp,
     );
-    assert!(matches!(&retry_nested[0], EngineEvent::HookEvent { .. }));
+    assert!(matches!(
+        &retry_reconnecting[0],
+        EngineEvent::RequestRetrying {
+            attempt: Some(2),
+            max_attempts: Some(5),
+            ..
+        }
+    ));
 
     let fatal = normalize_codex_notification(
         "error",
@@ -1101,9 +1119,8 @@ async fn codex_probe_models_for_provider_reuses_alive_pooled_server_across_works
     app.handshake().await.expect("handshake succeeds");
     let pool_key = CodexServerCacheKey::from_spec(&pooled_spec);
     global_codex_servers()
-        .write()
-        .await
-        .insert(pool_key.clone(), Arc::clone(&app));
+        .insert_for_test(pool_key.clone(), Arc::clone(&app))
+        .await;
 
     let mut probe_spec = pooled_spec.clone();
     probe_spec.workspace_id = Uuid::new_v4();
@@ -1113,11 +1130,44 @@ async fn codex_probe_models_for_provider_reuses_alive_pooled_server_across_works
         .await
         .expect("probe should reuse alive pooled server without spawning");
 
-    global_codex_servers().write().await.remove(&pool_key);
+    global_codex_servers().remove_for_test(&pool_key).await;
     let _ = app.shutdown().await;
 
     let models = probed.expect("native driver returns Some(models)");
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].id, "gpt-5.4-pooled");
     mock_peer.await.expect("mock peer finished cleanly");
+}
+
+#[tokio::test]
+async fn codex_driver_shutdown_evicts_and_stops_server_despite_transient_arc_clone() {
+    let (client_io, _server_io) = tokio::io::duplex(4 * 1024);
+    let (client_read, client_write) = tokio::io::split(client_io);
+
+    let mut spec = test_start_spec();
+    spec.provider_instance_id = Some(format!("shutdown-race-{}", Uuid::new_v4()));
+    let app = CodexAppServer::connect_over_io(spec.workspace_id, client_read, client_write, None);
+    let pool_key = CodexServerCacheKey::from_spec(&spec);
+    global_codex_servers()
+        .insert_for_test(pool_key.clone(), Arc::clone(&app))
+        .await;
+
+    let driver = CodexNativeDriver::new();
+    let handle = driver.bind_existing_server(spec.clone(), Arc::clone(&app), None);
+    // Simulate a background read_rate_limits probe holding an extra Arc clone.
+    let _bg_probe_clone = Arc::clone(&app);
+    assert!(Arc::strong_count(&app) >= 4);
+    assert_eq!(app.active_handles(), 1);
+
+    driver.shutdown(handle).await.expect("shutdown succeeds");
+
+    assert_eq!(app.active_handles(), 0);
+    assert!(
+        !app.is_alive(),
+        "server must shut down when business handle count reaches 0 despite transient Arc clones"
+    );
+    assert!(
+        global_codex_servers().remove_for_test(&pool_key).await.is_none(),
+        "evicted server must be removed from global_codex_servers"
+    );
 }

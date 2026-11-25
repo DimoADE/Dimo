@@ -163,44 +163,7 @@ fn current_select_option_value(options: &[AcpSessionConfigOption], key: &str) ->
     (!val.is_empty()).then(|| val.to_string())
 }
 
-pub(crate) fn can_fallback_launch_lock_to_acp(
-    launch_lock: &SessionLaunchLock,
-    mode_env: Option<&str>,
-) -> bool {
-    let explicit_acp = mode_env.is_some_and(|v| {
-        let trimmed = v.trim();
-        trimmed.eq_ignore_ascii_case("acp") || trimmed.eq_ignore_ascii_case("acp-fallback")
-    });
-    let locked = &launch_lock.absolute_acp_program;
-    let stem = locked
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let has_acp_arg = launch_lock
-        .args
-        .iter()
-        .any(|arg| arg.eq_ignore_ascii_case("acp"));
-    let is_acp_adapter_binary = stem.ends_with("-acp") || stem.ends_with("_acp") || has_acp_arg;
-
-    if !is_acp_adapter_binary {
-        return false;
-    }
-    if explicit_acp {
-        return true;
-    }
-    let resolved = crate::prefer_path_launch_program(locked);
-    crate::launch_program_available(&resolved)
-}
-
 impl AgentConnectionRunner {
-    /// Checks whether a failed pre-handshake `run_native` attempt may safely fall back to
-    /// `run_acp`. Standalone `claude` and `codex` CLIs are NOT ACP stdio servers and must
-    /// never be spawned via `run_acp` when native startup fails (`[F1]`).
-    pub(in crate::manager) fn can_fallback_to_acp_adapter(&self, mode_env: Option<&str>) -> bool {
-        can_fallback_launch_lock_to_acp(&self.snapshot.launch_lock, mode_env)
-    }
-
     fn merged_native_env(&self) -> HashMap<String, String> {
         let mut merged_env: HashMap<String, String> = self
             .snapshot
@@ -422,9 +385,10 @@ impl AgentConnectionRunner {
                 if val.is_empty() {
                     continue;
                 }
-                let allow_custom = item.key == "model";
-                if update_select_option_value(&mut raw_options, &item.key, val, allow_custom) {
-                    asserted.insert(item.key.clone(), val.to_string());
+                let canonical_key = canonical_native_config_key(&item.key);
+                let allow_custom = canonical_key == "model";
+                if update_select_option_value(&mut raw_options, canonical_key, val, allow_custom) {
+                    asserted.insert(canonical_key.to_string(), val.to_string());
                 }
             }
         }
@@ -497,9 +461,14 @@ impl AgentConnectionRunner {
         session_id: AgentSessionId,
         mode_id: String,
     ) -> AgentSessionControlsSnapshot {
-        let normalized = driver
-            .normalize_mode(&mode_id)
-            .unwrap_or_else(|| mode_id.clone());
+        let Some(normalized) = driver.normalize_mode(&mode_id) else {
+            tracing::warn!(
+                %session_id,
+                mode = %mode_id,
+                "rejected unrecognized native session mode"
+            );
+            return self.session_controls_snapshot(session_id).await;
+        };
         let yolo_mode_id = driver.capabilities().modes.yolo_mode_id;
         {
             let mut auto_guard = self.auto_approve_mode.lock().await;
@@ -520,11 +489,21 @@ impl AgentConnectionRunner {
         {
             let mut controls = self.session_controls.write().await;
             let entry = controls.entry(session_id).or_default();
+            let updated = entry.config_options.is_empty()
+                || update_select_option_value(
+                    &mut entry.config_options,
+                    "mode",
+                    &normalized,
+                    false,
+                );
+            if !updated {
+                drop(controls);
+                return self.session_controls_snapshot(session_id).await;
+            }
             if let Some(ref mut mode_state) = entry.modes {
                 mode_state.current_mode_id =
                     acp::schema::v1::SessionModeId::new(normalized.clone());
             }
-            update_select_option_value(&mut entry.config_options, "mode", &normalized, false);
             entry
                 .asserted_config_values
                 .insert("mode".to_string(), normalized.clone());
@@ -575,34 +554,55 @@ impl AgentConnectionRunner {
                 .await;
         }
 
+        let canonical_key = canonical_native_config_key(&key).to_string();
+        let mut accepted = false;
         if let Some(val_str) = value.as_str().map(str::trim).filter(|s| !s.is_empty()) {
             let mut controls = self.session_controls.write().await;
             let entry = controls.entry(session_id).or_default();
-            let allow_custom = key == "model";
-            update_select_option_value(&mut entry.config_options, &key, val_str, allow_custom);
-            entry
-                .asserted_config_values
-                .insert(key.clone(), val_str.to_string());
-            entry.drift_retry_counts.remove(&key);
-            if key == "model" {
-                entry.last_model_id = Some(val_str.to_string());
+            let allow_custom = canonical_key == "model";
+            accepted = entry.config_options.is_empty()
+                || update_select_option_value(
+                    &mut entry.config_options,
+                    &canonical_key,
+                    val_str,
+                    allow_custom,
+                );
+            if accepted {
+                entry
+                    .asserted_config_values
+                    .insert(canonical_key.clone(), val_str.to_string());
+                entry.drift_retry_counts.remove(&canonical_key);
+                if canonical_key == "model" {
+                    entry.last_model_id = Some(val_str.to_string());
+                }
+                drop(controls);
+                let mut prefs = self.preferred_controls.write().await;
+                let entry = prefs.entry(session_id).or_default();
+                if let Some(existing) = entry
+                    .config
+                    .iter_mut()
+                    .find(|item| canonical_native_config_key(&item.key) == canonical_key)
+                {
+                    existing.key = canonical_key.clone();
+                    existing.value = val_str.to_string();
+                } else {
+                    entry.config.push(AgentSessionConfigOverride {
+                        key: canonical_key.clone(),
+                        value: val_str.to_string(),
+                    });
+                }
             }
-            drop(controls);
-            let mut prefs = self.preferred_controls.write().await;
-            let entry = prefs.entry(session_id).or_default();
-            if let Some(existing) = entry.config.iter_mut().find(|item| item.key == key) {
-                existing.value = val_str.to_string();
-            } else {
-                entry.config.push(AgentSessionConfigOverride {
-                    key: key.clone(),
-                    value: val_str.to_string(),
-                });
-            }
+        }
+        if !accepted {
+            return self.session_controls_snapshot(session_id).await;
         }
         self.emit(
             Some(session_id),
             None,
-            AgentEvent::ConfigChanged { key, value },
+            AgentEvent::ConfigChanged {
+                key: canonical_key,
+                value,
+            },
         );
         let snapshot = self.session_controls_snapshot(session_id).await;
         {
@@ -691,19 +691,30 @@ impl AgentConnectionRunner {
             }
         }
         let yolo = *self.auto_approve_mode.lock().await == AgentAutoApproveMode::Yolo;
-        let preferred_model = self
-            .preferred_controls
-            .read()
-            .await
-            .get(&session_id)
-            .and_then(|prefs| {
-                prefs
-                    .config
+        let (preferred_model, preferred_effort, preferred_mode) = {
+            let prefs_guard = self.preferred_controls.read().await;
+            let prefs = prefs_guard.get(&session_id);
+            let model = prefs.and_then(|p| {
+                p.config
                     .iter()
                     .find(|o| o.key == "model")
                     .map(|o| o.value.trim().to_string())
                     .filter(|s| !s.is_empty())
             });
+            let effort = prefs.and_then(|p| {
+                p.config
+                    .iter()
+                    .find(|o| canonical_native_config_key(&o.key) == "effort")
+                    .map(|o| o.value.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            });
+            let mode = prefs
+                .and_then(|p| p.mode.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            (model, effort, mode)
+        };
         let controls_guard = self.session_controls.read().await;
         let stored = controls_guard.get(&session_id);
 
@@ -733,7 +744,7 @@ impl AgentConnectionRunner {
 
         let effort = config_overrides
             .iter()
-            .find(|o| o.key == "effort")
+            .find(|o| canonical_native_config_key(&o.key) == "effort")
             .map(|o| o.value.trim().to_string())
             .filter(|s| !s.is_empty())
             .or_else(|| {
@@ -743,13 +754,13 @@ impl AgentConnectionRunner {
                         .cloned()
                         .or_else(|| current_select_option_value(&s.config_options, "effort"))
                 })
-            });
+            })
+            .or(preferred_effort);
 
         let raw_mode = explicit_mode
             .or_else(|| stored.and_then(|s| s.asserted_config_values.get("mode").cloned()))
-            .or_else(|| {
-                stored.and_then(|s| current_select_option_value(&s.config_options, "mode"))
-            });
+            .or_else(|| stored.and_then(|s| current_select_option_value(&s.config_options, "mode")))
+            .or(preferred_mode);
 
         let normalized_mode = raw_mode
             .as_deref()
@@ -762,6 +773,13 @@ impl AgentConnectionRunner {
             normalized_mode.or_else(|| yolo.then(|| driver.capabilities().modes.yolo_mode_id));
 
         (model, effort, effective_mode)
+    }
+}
+
+fn canonical_native_config_key(key: &str) -> &str {
+    match key.trim() {
+        "reasoning_effort" | "thought_level" | "reasoning" | "thinking" => "effort",
+        other => other,
     }
 }
 
@@ -861,5 +879,21 @@ mod tests {
             auto_approve_mode_for_launch(&codex_id, &env),
             AgentAutoApproveMode::Yolo
         );
+    }
+
+    #[test]
+    fn canonical_native_config_key_normalizes_effort_aliases() {
+        for alias in [
+            "reasoning_effort",
+            "thought_level",
+            "reasoning",
+            "thinking",
+            " reasoning_effort ",
+            "effort",
+        ] {
+            assert_eq!(canonical_native_config_key(alias), "effort");
+        }
+        assert_eq!(canonical_native_config_key("model"), "model");
+        assert_eq!(canonical_native_config_key("mode"), "mode");
     }
 }

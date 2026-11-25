@@ -47,7 +47,9 @@
 !insertmacro DIMO_STR DIMO_PROGRESS_UNINSTALL "正在移除文件…" "Removing files…"
 !insertmacro DIMO_STR DIMO_EXTRACT_FAILED "应用文件解压失败" "Failed to extract application files"
 !insertmacro DIMO_STR DIMO_COPY_FAILED "无法写入安装目录" "Unable to write to installation folder"
+!insertmacro DIMO_STR DIMO_UNINSTALL_FAILED "无法卸载现有版本" "Failed to uninstall existing version"
 !insertmacro DIMO_STR DIMO_ERROR_HINT "请关闭占用程序或检查磁盘空间后重试 · 错误代码" "Close conflicting apps or check disk space and retry · Error code"
 !insertmacro DIMO_STR DIMO_PATH_INVALID "请选择有效的本地安装文件夹路径。" "Please choose a valid local installation folder path."
+!insertmacro DIMO_STR DIMO_PATH_NOT_EMPTY "所选文件夹非空，请选择空文件夹或新建 ${PRODUCT_NAME} 子文件夹。" "The selected folder is not empty. Please choose an empty folder or a new ${PRODUCT_NAME} subfolder."
 
 !endif

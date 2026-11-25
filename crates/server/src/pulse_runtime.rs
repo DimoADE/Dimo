@@ -1228,12 +1228,21 @@ fn build_emitted_envelope(
     {
         let mut envelope = decode_args::<EventEnvelope>(payload)?;
         if !matches!(principal, Principal::LocalDesktop) {
+            let original_event_id = envelope.event_id.clone();
             let fresh_event_id = uuid::Uuid::new_v4().to_string();
             envelope.event_id = fresh_event_id.clone();
+            let preserved_root_id = if envelope.trace.root_event_id.trim().is_empty()
+                || (envelope.trace.hop_count == 0
+                    && envelope.trace.root_event_id == original_event_id)
+            {
+                fresh_event_id
+            } else {
+                envelope.trace.root_event_id.clone()
+            };
             envelope.trace = EventTrace {
-                root_event_id: fresh_event_id,
-                parent_run_id: None,
-                hop_count: 0,
+                root_event_id: preserved_root_id,
+                parent_run_id: envelope.trace.parent_run_id.clone(),
+                hop_count: envelope.trace.hop_count,
             };
             if let Principal::Remote { subject, .. } = principal {
                 envelope.actor.id = subject.clone();
@@ -1286,7 +1295,46 @@ fn build_emitted_envelope(
         }
     };
 
-    CustomSdkEventNormalizer::normalize(
+    let trace_obj = payload.get("trace").and_then(Value::as_object);
+    let root_event_id = payload
+        .get("rootEventId")
+        .or_else(|| payload.get("root_event_id"))
+        .or_else(|| {
+            trace_obj.and_then(|t| t.get("rootEventId").or_else(|| t.get("root_event_id")))
+        })
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let parent_run_id = payload
+        .get("parentRunId")
+        .or_else(|| payload.get("parent_run_id"))
+        .or_else(|| {
+            trace_obj.and_then(|t| t.get("parentRunId").or_else(|| t.get("parent_run_id")))
+        })
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let explicit_hop_count = payload
+        .get("hopCount")
+        .or_else(|| payload.get("hop_count"))
+        .or_else(|| trace_obj.and_then(|t| t.get("hopCount").or_else(|| t.get("hop_count"))))
+        .and_then(Value::as_u64)
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
+    let parent_hop_count = payload
+        .get("parentHopCount")
+        .or_else(|| payload.get("parent_hop_count"))
+        .and_then(Value::as_u64)
+        .map(|v| u32::try_from(v).unwrap_or(u32::MAX));
+    let effective_hop_count = match (parent_hop_count, explicit_hop_count) {
+        (Some(parent), Some(explicit)) => parent.saturating_add(1).max(explicit),
+        (Some(parent), None) => parent.saturating_add(1),
+        (None, Some(explicit)) => explicit,
+        (None, None) => u32::from(root_event_id.is_some() || parent_run_id.is_some()),
+    };
+
+    let mut envelope = CustomSdkEventNormalizer::normalize(
         CustomSdkEventInput {
             instance_id,
             event_type,
@@ -1302,12 +1350,19 @@ fn build_emitted_envelope(
             correlations: Vec::new(),
             reply_channels: Vec::new(),
             parent_envelope: None,
-            parent_run_id: None,
+            parent_run_id: parent_run_id.clone(),
             payload: payload.get("payload").cloned().unwrap_or_else(|| json!({})),
         },
         now,
     )
-    .map_err(|err| ApplicationError::bad_request(err.to_string()))
+    .map_err(|err| ApplicationError::bad_request(err.to_string()))?;
+
+    if let Some(root_id) = root_event_id {
+        envelope.trace.root_event_id = root_id;
+    }
+    envelope.trace.parent_run_id = parent_run_id;
+    envelope.trace.hop_count = effective_hop_count;
+    Ok(envelope)
 }
 
 pub(crate) async fn ensure_sdk_source_exists(
@@ -1361,5 +1416,77 @@ pub(crate) fn map_pulse_error(err: PulseError) -> ApplicationError {
         }
         PulseError::Temporal(temp_err) => ApplicationError::bad_request(temp_err.to_string()),
         PulseError::NotFound(entity) => ApplicationError::not_found(entity),
+    }
+}
+
+#[cfg(test)]
+mod trace_propagation_tests {
+    use super::*;
+
+    #[test]
+    fn build_emitted_envelope_preserves_and_increments_sdk_trace_chain() {
+        let now = Utc::now();
+        let payload = json!({
+            "eventType": "ci.followup",
+            "sourceInstanceId": "dimo-mcp",
+            "hopCount": 3,
+            "rootEventId": "evt_root_1",
+            "parentRunId": "run_parent_7",
+            "payload": { "step": "lint" }
+        });
+        let env = build_emitted_envelope(&Principal::LocalDesktop, &payload, now)
+            .expect("sdk envelope builds");
+        assert_eq!(env.trace.hop_count, 3);
+        assert_eq!(env.trace.root_event_id, "evt_root_1");
+        assert_eq!(env.trace.parent_run_id.as_deref(), Some("run_parent_7"));
+
+        let parent_only = json!({
+            "eventType": "ci.followup",
+            "parentHopCount": 2,
+            "rootEventId": "evt_root_2",
+            "payload": {}
+        });
+        let child = build_emitted_envelope(&Principal::LocalDesktop, &parent_only, now)
+            .expect("parent hop increments");
+        assert_eq!(child.trace.hop_count, 3);
+        assert_eq!(child.trace.root_event_id, "evt_root_2");
+
+        let overflow = json!({
+            "eventType": "ci.overflow",
+            "hopCount": (1u64 << 32),
+            "payload": {}
+        });
+        let clamped = build_emitted_envelope(&Principal::LocalDesktop, &overflow, now)
+            .expect("overflow clamps to u32::MAX");
+        assert_eq!(clamped.trace.hop_count, u32::MAX);
+    }
+
+    #[test]
+    fn build_emitted_envelope_remote_preserves_non_zero_trace_chain() {
+        let now = Utc::now();
+        let principal = Principal::remote("pulse-sdk:agent-1", [String::from("automation.write")]);
+        let payload = json!({
+            "eventId": "evt-forged-id",
+            "deliveryId": "dlv-1",
+            "source": {
+                "kind": "sdk_custom",
+                "instanceId": "agent-1",
+                "trustLevel": "trusted_internal"
+            },
+            "eventType": "sdk.chained",
+            "occurredAt": now.to_rfc3339(),
+            "actor": { "id": "agent-1", "isBot": true, "isSelf": false },
+            "trace": {
+                "rootEventId": "evt-original-root",
+                "parentRunId": "run-5",
+                "hopCount": 4
+            },
+            "payload": {}
+        });
+        let env = build_emitted_envelope(&principal, &payload, now).expect("remote envelope builds");
+        assert_ne!(env.event_id, "evt-forged-id");
+        assert_eq!(env.trace.root_event_id, "evt-original-root");
+        assert_eq!(env.trace.parent_run_id.as_deref(), Some("run-5"));
+        assert_eq!(env.trace.hop_count, 4);
     }
 }

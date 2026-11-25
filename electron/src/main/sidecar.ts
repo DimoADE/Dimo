@@ -77,6 +77,10 @@ export function serverBinaryFilename(
   return platform === 'win32' ? 'dimo-server.exe' : 'dimo-server';
 }
 
+function hasChildExited(child: ChildProcess): boolean {
+  return child.exitCode != null || child.signalCode != null;
+}
+
 export function resolveSidecarStdio(
   platform: NodeJS.Platform = process.platform
 ): ['ignore' | 'pipe', 'pipe', 'pipe'] {
@@ -431,6 +435,11 @@ export class SidecarManager {
   private startPromise: Promise<ElectronBackendConnectionInfo> | null = null;
   private shutdownPromise: Promise<void> | null = null;
   private restartTimer: NodeJS.Timeout | null = null;
+  private restartDeferred: {
+    promise: Promise<ElectronBackendConnectionInfo>;
+    resolve: (conn: ElectronBackendConnectionInfo) => void;
+    reject: (error: Error) => void;
+  } | null = null;
   private restartTimestamps: number[] = [];
   private lastStartOptions: SidecarStartOptions | null = null;
   private logger: Pick<Console, 'info' | 'warn' | 'error'> = console;
@@ -489,12 +498,15 @@ export class SidecarManager {
   }
 
   isRunning(): boolean {
-    return this.child !== null && this.child.exitCode === null;
+    return this.child !== null && !hasChildExited(this.child);
   }
 
   async start(
     options: SidecarStartOptions
   ): Promise<ElectronBackendConnectionInfo> {
+    if (this.shuttingDown) {
+      throw new Error('dimo-server sidecar is shutting down');
+    }
     if (this.connection && this.isRunning()) {
       return this.connection;
     }
@@ -518,8 +530,9 @@ export class SidecarManager {
     options: SidecarStartOptions
   ): Promise<ElectronBackendConnectionInfo> {
     this.logger = options.logger ?? console;
-    this.shuttingDown = false;
-    this.shutdownPromise = null;
+    if (this.shuttingDown) {
+      throw new Error('dimo-server sidecar is shutting down');
+    }
 
     const binaryPath = resolveSidecarBinaryPath({
       explicitPath: options.binaryPath,
@@ -712,15 +725,24 @@ export class SidecarManager {
       throw error;
     });
 
-    if (this.child !== child || child.exitCode !== null || this.shuttingDown) {
-      if (this.shuttingDown && child.exitCode === null) {
+    if (this.child !== child || hasChildExited(child) || this.shuttingDown) {
+      const superseded = this.child !== child;
+      stderrReader?.close();
+      if (!hasChildExited(child)) {
         await this.forceKillChild(child);
       }
-      return {
-        baseUrl: `http://127.0.0.1:${ready.port}`,
-        token,
-        dataDir: options.dataDir ?? ready.data_dir,
-      };
+      if (this.child === child) {
+        this.child = null;
+      }
+      if (this.shuttingDown) {
+        throw new Error('dimo-server sidecar is shutting down');
+      }
+      if (superseded) {
+        throw new Error('dimo-server sidecar instance was superseded before ready');
+      }
+      throw new Error(
+        `dimo-server exited immediately after ready (code=${child.exitCode}, signal=${child.signalCode})`
+      );
     }
 
     this.clearCapabilitiesCache();
@@ -735,6 +757,46 @@ export class SidecarManager {
       `[electron:sidecar] ready at ${this.connection.baseUrl} (pid=${ready.pid})`
     );
     return this.connection;
+  }
+
+  private ensureRestartPromise(): void {
+    if (this.restartDeferred) {
+      return;
+    }
+    let resolve!: (conn: ElectronBackendConnectionInfo) => void;
+    let reject!: (error: Error) => void;
+    const promise = new Promise<ElectronBackendConnectionInfo>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    // Prevent unhandled rejection when no caller is currently awaiting waitForReady()/start().
+    promise.catch(() => undefined);
+    this.restartDeferred = { promise, resolve, reject };
+    this.startPromise = promise;
+  }
+
+  private resolveRestartPromise(conn: ElectronBackendConnectionInfo): void {
+    const deferred = this.restartDeferred;
+    if (!deferred) {
+      return;
+    }
+    this.restartDeferred = null;
+    if (this.startPromise === deferred.promise) {
+      this.startPromise = null;
+    }
+    deferred.resolve(conn);
+  }
+
+  private rejectRestartPromise(error: Error): void {
+    const deferred = this.restartDeferred;
+    if (!deferred) {
+      return;
+    }
+    this.restartDeferred = null;
+    if (this.startPromise === deferred.promise) {
+      this.startPromise = null;
+    }
+    deferred.reject(error);
   }
 
   private handleUnexpectedExit(
@@ -758,6 +820,7 @@ export class SidecarManager {
       const restartDelayMs = baseDelayMs * 2 ** (attempt - 1);
       this.restartTimestamps.push(now);
       this.restarting = true;
+      this.ensureRestartPromise();
 
       opts.onUnexpectedExit?.({
         code,
@@ -790,11 +853,15 @@ export class SidecarManager {
     maxAttempts: number,
     delayMs: number
   ): void {
-    this.cancelPendingRestart();
+    this.clearRestartTimer();
+    this.ensureRestartPromise();
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
       if (this.shuttingDown || !this.lastStartOptions) {
         this.restarting = false;
+        this.rejectRestartPromise(
+          new Error('dimo-server sidecar is shutting down')
+        );
         return;
       }
 
@@ -806,14 +873,22 @@ export class SidecarManager {
       void this.spawnAndAwaitReady(opts)
         .then((conn) => {
           if (this.shuttingDown) {
+            this.restarting = false;
+            this.rejectRestartPromise(
+              new Error('dimo-server sidecar is shutting down')
+            );
             return;
           }
           this.restarting = false;
+          this.resolveRestartPromise(conn);
           opts.onRestarted?.(conn, attempt);
         })
         .catch((err) => {
           if (this.shuttingDown) {
             this.restarting = false;
+            this.rejectRestartPromise(
+              new Error('dimo-server sidecar is shutting down')
+            );
             return;
           }
           const error = err instanceof Error ? err : new Error(String(err));
@@ -837,6 +912,7 @@ export class SidecarManager {
             this.scheduleRestart(nextAttempt, maxAttempts, nextDelayMs);
           } else {
             this.restarting = false;
+            this.rejectRestartPromise(error);
             opts.onRestartFailed?.(error, attempt, true);
           }
         });
@@ -844,11 +920,16 @@ export class SidecarManager {
     this.restartTimer.unref?.();
   }
 
-  private cancelPendingRestart(): void {
+  private clearRestartTimer(): void {
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
     }
+  }
+
+  private cancelPendingRestart(): void {
+    this.clearRestartTimer();
+    this.rejectRestartPromise(new Error('dimo-server sidecar is shutting down'));
   }
 
   private async withAbortTimeout<T>(
@@ -1272,15 +1353,25 @@ export class SidecarManager {
   private async performShutdown(): Promise<void> {
     const child = this.child;
     const conn = this.connection;
-    if (!child || child.exitCode !== null) {
+    if (!child || hasChildExited(child)) {
       this.child = null;
       this.connection = null;
       this.readyInfo = null;
       return;
     }
 
+    if (!conn && !child.stdin) {
+      await this.forceKillChild(child);
+      if (this.child === child) {
+        this.child = null;
+      }
+      this.connection = null;
+      this.readyInfo = null;
+      return;
+    }
+
     const exitPromise = new Promise<void>((resolve) => {
-      if (child.exitCode !== null) {
+      if (hasChildExited(child)) {
         resolve();
         return;
       }
@@ -1317,7 +1408,7 @@ export class SidecarManager {
       }),
     ]);
 
-    if (!exitedCleanly && child.exitCode === null) {
+    if (!exitedCleanly && !hasChildExited(child)) {
       this.logger.warn(
         '[electron:sidecar] dimo-server did not exit within grace period; terminating'
       );
@@ -1330,11 +1421,11 @@ export class SidecarManager {
   }
 
   private async forceKillChild(child: ChildProcess): Promise<void> {
-    if (child.exitCode !== null) {
+    if (hasChildExited(child)) {
       return;
     }
     const exitPromise = new Promise<void>((resolve) => {
-      if (child.exitCode !== null) {
+      if (hasChildExited(child)) {
         resolve();
         return;
       }
@@ -1369,7 +1460,7 @@ export class SidecarManager {
             timer.unref?.();
           }),
         ]);
-        if (!exited && child.exitCode === null) {
+        if (!exited && !hasChildExited(child)) {
           signalUnixChild('SIGKILL');
         }
       }

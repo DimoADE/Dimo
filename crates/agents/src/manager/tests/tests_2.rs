@@ -611,6 +611,79 @@ async fn sweep_idle_keeps_hot_group_sessions_past_default_timeout() {
     );
 }
 
+#[tokio::test]
+async fn sweep_idle_skips_connections_with_pending_session_or_running_async_tasks() {
+    let (event_tx, _event_rx) = manager_event_channel();
+    let manager = AgentConnectionManager::new_with_driver(event_tx, false);
+    let pending_conn = ready_connection(&manager).await;
+    let async_task_conn = ready_connection(&manager).await;
+    let idle_conn = ready_connection(&manager).await;
+    let session_pending = AgentSessionId::new();
+    let session_async = AgentSessionId::new();
+    let session_idle = AgentSessionId::new();
+    manager
+        .bind_known_acp_session(async_task_conn, session_async, "acp-async".into())
+        .await;
+    manager
+        .bind_known_acp_session(idle_conn, session_idle, "acp-idle".into())
+        .await;
+
+    {
+        let conns = manager.connections.lock().await;
+        if let Some(conn) = conns.get(&pending_conn) {
+            *conn.pending_session_id.lock().await = Some(session_pending);
+        }
+        if let Some(conn) = conns.get(&async_task_conn) {
+            let mut controls = conn.session_controls.write().await;
+            controls
+                .entry(session_async)
+                .or_default()
+                .async_tasks
+                .push(crate::AsyncTaskRecord {
+                    id: "task-1".to_string(),
+                    task_type: Some("subagent".to_string()),
+                    name: Some("background".to_string()),
+                    state: "running".to_string(),
+                    can_stop: true,
+                    phase: None,
+                    current_agent: None,
+                    last_tool_name: None,
+                    output_file_path: None,
+                    tool_call_id: None,
+                    usage: None,
+                });
+        }
+    }
+
+    let idle = Duration::from_secs(180);
+    for conn in [pending_conn, async_task_conn, idle_conn] {
+        manager
+            .set_last_activity_elapsed(conn, Duration::from_secs(300))
+            .await;
+    }
+
+    assert_eq!(
+        manager.sweep_idle(idle).await,
+        1,
+        "only the truly idle connection should be swept; pending_session_id and running async_tasks must be exempt"
+    );
+
+    // Clearing pending_session_id and settling async_tasks allows subsequent sweep.
+    {
+        let conns = manager.connections.lock().await;
+        if let Some(conn) = conns.get(&pending_conn) {
+            *conn.pending_session_id.lock().await = None;
+        }
+        if let Some(conn) = conns.get(&async_task_conn) {
+            let mut controls = conn.session_controls.write().await;
+            if let Some(entry) = controls.get_mut(&session_async) {
+                entry.async_tasks[0].state = "completed".to_string();
+            }
+        }
+    }
+    assert_eq!(manager.sweep_idle(idle).await, 2);
+}
+
 #[test]
 fn handshake_timeout_uses_default_for_missing_or_invalid_env() {
     assert_eq!(

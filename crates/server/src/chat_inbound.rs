@@ -17,6 +17,7 @@ use services::services::chat_delivery::{feishu_tenant_token, http_client, load_c
 use sqlx::SqlitePool;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 #[path = "chat_inbound_commands.rs"]
@@ -200,10 +201,28 @@ fn is_paused(channel_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+struct RunningChannel {
+    signature: String,
+    shutdown: Arc<AtomicBool>,
+    cancel: CancellationToken,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl RunningChannel {
+    async fn stop(self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        self.cancel.cancel();
+        if let Some(handle) = self.handle {
+            handle.abort();
+            let _ = handle.await;
+        }
+    }
+}
+
 /// Start Telegram / Feishu / QQ inbound loops against the current Host.
 pub fn start_chat_inbound(pool: SqlitePool, conversations: ConversationContext) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut running: HashMap<String, (String, Arc<AtomicBool>)> = HashMap::new();
+        let mut running: HashMap<String, RunningChannel> = HashMap::new();
         let mut last_daily_report = String::new();
         loop {
             if let Ok(targets) = inbound_targets().await {
@@ -211,25 +230,49 @@ pub fn start_chat_inbound(pool: SqlitePool, conversations: ConversationContext) 
                     .iter()
                     .map(|target| target.channel_id.clone())
                     .collect::<HashSet<_>>();
-                running.retain(|id, (_, flag)| {
-                    if desired.contains(id) {
-                        true
-                    } else {
-                        flag.store(true, Ordering::Relaxed);
-                        false
+                let removed_ids = running
+                    .keys()
+                    .filter(|id| !desired.contains(*id))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for id in removed_ids {
+                    if let Some(channel) = running.remove(&id) {
+                        channel.stop().await;
+                        set_connection_state(&id, "disconnected");
                     }
-                });
+                }
                 for target in targets {
                     let restart = running
                         .get(&target.channel_id)
-                        .is_none_or(|(signature, _)| signature != &target.signature);
+                        .is_none_or(|channel| {
+                            channel.signature != target.signature
+                                || channel
+                                    .handle
+                                    .as_ref()
+                                    .is_some_and(JoinHandle::is_finished)
+                        });
                     if restart {
-                        if let Some((_, flag)) = running.remove(&target.channel_id) {
-                            flag.store(true, Ordering::Relaxed);
+                        if let Some(previous) = running.remove(&target.channel_id) {
+                            previous.stop().await;
                         }
-                        let flag = Arc::new(AtomicBool::new(false));
-                        spawn_receiver(pool.clone(), conversations.clone(), &target, flag.clone());
-                        running.insert(target.channel_id, (target.signature, flag));
+                        let shutdown = Arc::new(AtomicBool::new(false));
+                        let cancel = CancellationToken::new();
+                        let handle = spawn_receiver(
+                            pool.clone(),
+                            conversations.clone(),
+                            &target,
+                            shutdown.clone(),
+                            cancel.clone(),
+                        );
+                        running.insert(
+                            target.channel_id,
+                            RunningChannel {
+                                signature: target.signature,
+                                shutdown,
+                                cancel,
+                                handle,
+                            },
+                        );
                     }
                 }
             }
@@ -447,47 +490,71 @@ async fn load_store() -> Result<ChatChannelStore, String> {
     }
 }
 
+const TELEGRAM_ERROR_BACKOFF_INITIAL: Duration = Duration::from_secs(2);
+const TELEGRAM_ERROR_BACKOFF_MAX: Duration = Duration::from_secs(60);
+
+fn next_telegram_error_backoff(current: Duration) -> Duration {
+    current.saturating_mul(2).min(TELEGRAM_ERROR_BACKOFF_MAX)
+}
+
+fn parse_telegram_updates(status_ok: bool, body: &Value) -> Option<&Vec<Value>> {
+    if !status_ok {
+        return None;
+    }
+    if body.get("ok").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    body.get("result").and_then(Value::as_array)
+}
+
 fn spawn_receiver(
     pool: SqlitePool,
     conversations: ConversationContext,
     target: &InboundTarget,
     shutdown: Arc<AtomicBool>,
-) {
+    cancel: CancellationToken,
+) -> Option<JoinHandle<()>> {
     match target.kind.as_str() {
-        "telegram" => spawn_telegram_loop(
+        "telegram" => Some(spawn_telegram_loop(
             pool,
             conversations,
             target.channel_id.clone(),
             target.token.clone(),
             target.config.clone(),
             shutdown,
-        ),
-        "qq" => spawn_qq_loop(
+            cancel,
+        )),
+        "qq" => Some(spawn_qq_loop(
             pool,
             conversations,
             target.channel_id.clone(),
             target.config.clone(),
             target.token.clone(),
             shutdown,
-        ),
-        "weixin" => crate::weixin_ilink::spawn_weixin_ilink_loop(
+            cancel,
+        )),
+        "weixin" => {
+            crate::weixin_ilink::spawn_weixin_ilink_loop(
+                pool,
+                conversations,
+                target.channel_id.clone(),
+                target.token.clone(),
+                config_str(&target.config, "base_url"),
+                target.config.clone(),
+                shutdown,
+            );
+            None
+        }
+        "feishu" => Some(spawn_feishu_loop(
             pool,
             conversations,
             target.channel_id.clone(),
-            target.token.clone(),
-            config_str(&target.config, "base_url"),
-            target.config.clone(),
-            shutdown,
-        ),
-        "feishu" => spawn_feishu_loop(
-            pool,
-            conversations,
-            target.channel_id.clone(),
             target.config.clone(),
             target.token.clone(),
             shutdown,
-        ),
-        _ => {}
+            cancel,
+        )),
+        _ => None,
     }
 }
 
@@ -498,34 +565,43 @@ fn spawn_telegram_loop(
     bot_token: String,
     config: Value,
     shutdown: Arc<AtomicBool>,
-) {
+    cancel: CancellationToken,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let client = http_client();
         let mut offset: i64 = 0;
+        let mut error_backoff = TELEGRAM_ERROR_BACKOFF_INITIAL;
         set_connection_state(&channel_id, "connecting");
-        while !shutdown.load(Ordering::Relaxed) {
+        while !cancel.is_cancelled() && !shutdown.load(Ordering::Relaxed) {
             let url = format!(
                 "https://api.telegram.org/bot{bot_token}/getUpdates?timeout=25&offset={offset}"
             );
-            let body = match client.get(&url).send().await {
-                Ok(response) => {
-                    let payload = response.json::<Value>().await.unwrap_or(Value::Null);
-                    if payload.get("ok").and_then(Value::as_bool) == Some(true) {
-                        set_connection_state(&channel_id, "connected");
-                    } else {
-                        set_connection_state(&channel_id, "error");
-                    }
-                    payload
-                }
-                Err(_) => {
-                    set_connection_state(&channel_id, "error");
-                    tokio::time::sleep(Duration::from_secs(3)).await;
-                    continue;
-                }
+            let response = tokio::select! {
+                _ = cancel.cancelled() => break,
+                res = client.get(&url).send() => res,
             };
-            let Some(updates) = body.get("result").and_then(Value::as_array) else {
+            let (status_ok, body) = match response {
+                Ok(response) => {
+                    let status_ok = response.status().is_success();
+                    let payload = tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        res = response.json::<Value>() => res.unwrap_or(Value::Null),
+                    };
+                    (status_ok, payload)
+                }
+                Err(_) => (false, Value::Null),
+            };
+            let Some(updates) = parse_telegram_updates(status_ok, &body) else {
+                set_connection_state(&channel_id, "error");
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = tokio::time::sleep(error_backoff) => {}
+                }
+                error_backoff = next_telegram_error_backoff(error_backoff);
                 continue;
             };
+            error_backoff = TELEGRAM_ERROR_BACKOFF_INITIAL;
+            set_connection_state(&channel_id, "connected");
             for update in updates {
                 if let Some(update_id) = update.get("update_id").and_then(Value::as_i64) {
                     offset = update_id + 1;
@@ -586,7 +662,7 @@ fn spawn_telegram_loop(
             }
         }
         set_connection_state(&channel_id, "disconnected");
-    });
+    })
 }
 
 fn qq_ws_url(config: &Value) -> String {
@@ -611,24 +687,36 @@ fn spawn_qq_loop(
     config: Value,
     token: String,
     shutdown: Arc<AtomicBool>,
-) {
+    cancel: CancellationToken,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let ws_base = qq_ws_url(&config);
         let base_url = config_str(&config, "base_url");
         set_connection_state(&channel_id, "connecting");
-        while !shutdown.load(Ordering::Relaxed) {
+        while !cancel.is_cancelled() && !shutdown.load(Ordering::Relaxed) {
             let url = if token.trim().is_empty() {
                 ws_base.clone()
             } else {
                 let sep = if ws_base.contains('?') { '&' } else { '?' };
                 format!("{ws_base}{sep}access_token={token}")
             };
-            match tokio_tungstenite::connect_async(&url).await {
+            let connected = tokio::select! {
+                _ = cancel.cancelled() => break,
+                res = tokio_tungstenite::connect_async(&url) => res,
+            };
+            match connected {
                 Ok((stream, _)) => {
                     set_connection_state(&channel_id, "connected");
                     let (mut write, mut read) = stream.split();
-                    while !shutdown.load(Ordering::Relaxed) {
-                        match read.next().await {
+                    while !cancel.is_cancelled() && !shutdown.load(Ordering::Relaxed) {
+                        let next_msg = tokio::select! {
+                            _ = cancel.cancelled() => {
+                                let _ = write.close().await;
+                                break;
+                            }
+                            msg = read.next() => msg,
+                        };
+                        match next_msg {
                             Some(Ok(tungstenite::Message::Text(text))) => {
                                 if let Ok(event) = serde_json::from_str::<Value>(text.as_str()) {
                                     handle_qq_event(
@@ -657,13 +745,16 @@ fn spawn_qq_loop(
                     set_connection_state(&channel_id, "error");
                 }
             }
-            if shutdown.load(Ordering::Relaxed) {
+            if cancel.is_cancelled() || shutdown.load(Ordering::Relaxed) {
                 break;
             }
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+            }
         }
         set_connection_state(&channel_id, "disconnected");
-    });
+    })
 }
 
 async fn handle_qq_event(
@@ -761,28 +852,47 @@ fn spawn_feishu_loop(
     config: Value,
     app_secret: String,
     shutdown: Arc<AtomicBool>,
-) {
+    cancel: CancellationToken,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
         let app_id = config_str(&config, "app_id");
         set_connection_state(&channel_id, "connecting");
-        while !shutdown.load(Ordering::Relaxed) {
-            let ws_url = match feishu_ws_url(&app_id, &app_secret).await {
+        while !cancel.is_cancelled() && !shutdown.load(Ordering::Relaxed) {
+            let ws_url_res = tokio::select! {
+                _ = cancel.cancelled() => break,
+                res = feishu_ws_url(&app_id, &app_secret) => res,
+            };
+            let ws_url = match ws_url_res {
                 Ok(url) => url,
                 Err(error) => {
                     tracing::warn!(channel_id = %channel_id, %error, "Feishu ws endpoint failed");
                     set_connection_state(&channel_id, "error");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    }
                     continue;
                 }
             };
-            match tokio_tungstenite::connect_async(&ws_url).await {
+            let connected = tokio::select! {
+                _ = cancel.cancelled() => break,
+                res = tokio_tungstenite::connect_async(&ws_url) => res,
+            };
+            match connected {
                 Ok((stream, _)) => {
                     set_connection_state(&channel_id, "connected");
                     let (mut write, mut read) = stream.split();
                     let mut partials: HashMap<String, (i32, HashMap<i32, Vec<u8>>)> =
                         HashMap::new();
-                    while !shutdown.load(Ordering::Relaxed) {
-                        match read.next().await {
+                    while !cancel.is_cancelled() && !shutdown.load(Ordering::Relaxed) {
+                        let next_msg = tokio::select! {
+                            _ = cancel.cancelled() => {
+                                let _ = write.close().await;
+                                break;
+                            }
+                            msg = read.next() => msg,
+                        };
+                        match next_msg {
                             Some(Ok(tungstenite::Message::Binary(data))) => {
                                 let Ok(frame) = LarkFrame::decode(data.as_ref()) else {
                                     continue;
@@ -869,13 +979,16 @@ fn spawn_feishu_loop(
                     set_connection_state(&channel_id, "error");
                 }
             }
-            if shutdown.load(Ordering::Relaxed) {
+            if cancel.is_cancelled() || shutdown.load(Ordering::Relaxed) {
                 break;
             }
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+            }
         }
         set_connection_state(&channel_id, "disconnected");
-    });
+    })
 }
 
 async fn handle_feishu_event(
@@ -1012,5 +1125,96 @@ async fn handle_feishu_event(
             }))
             .send()
             .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn telegram_error_parsing_and_exponential_backoff() {
+        assert!(parse_telegram_updates(false, &json!({ "ok": true, "result": [] })).is_none());
+        assert!(parse_telegram_updates(true, &json!({ "ok": false, "description": "Unauthorized" })).is_none());
+        assert!(parse_telegram_updates(true, &json!({ "ok": true })).is_none());
+        assert!(parse_telegram_updates(true, &json!({ "result": [] })).is_none());
+        let ok_payload = json!({ "ok": true, "result": [{ "update_id": 1 }] });
+        let updates =
+            parse_telegram_updates(true, &ok_payload).expect("valid ok=true result array");
+        assert_eq!(updates.len(), 1);
+
+        let mut backoff = TELEGRAM_ERROR_BACKOFF_INITIAL;
+        assert_eq!(backoff, Duration::from_secs(2));
+        backoff = next_telegram_error_backoff(backoff);
+        assert_eq!(backoff, Duration::from_secs(4));
+        backoff = next_telegram_error_backoff(backoff);
+        assert_eq!(backoff, Duration::from_secs(8));
+        backoff = next_telegram_error_backoff(backoff);
+        assert_eq!(backoff, Duration::from_secs(16));
+        backoff = next_telegram_error_backoff(backoff);
+        assert_eq!(backoff, Duration::from_secs(32));
+        backoff = next_telegram_error_backoff(backoff);
+        assert_eq!(backoff, Duration::from_secs(60));
+        backoff = next_telegram_error_backoff(backoff);
+        assert_eq!(backoff, Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn running_channel_stop_cancels_and_terminates_blocked_websocket_task() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept");
+            let mut ws = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("accept ws");
+            // Wait until the client disconnects / closes.
+            while let Some(Ok(_)) = ws.next().await {}
+        });
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+        let shutdown_clone = shutdown.clone();
+        let (connected_tx, connected_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let handle = tokio::spawn(async move {
+            let (stream, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}"))
+                .await
+                .expect("connect ws");
+            let _ = connected_tx.send(());
+            let (mut write, mut read) = stream.split();
+            while !cancel_clone.is_cancelled() && !shutdown_clone.load(Ordering::Relaxed) {
+                let msg = tokio::select! {
+                    _ = cancel_clone.cancelled() => {
+                        let _ = write.close().await;
+                        break;
+                    }
+                    msg = read.next() => msg,
+                };
+                if msg.is_none() {
+                    break;
+                }
+            }
+        });
+
+        connected_rx.await.expect("client connected");
+        let running = RunningChannel {
+            signature: "sig-1".to_string(),
+            shutdown: shutdown.clone(),
+            cancel: cancel.clone(),
+            handle: Some(handle),
+        };
+        tokio::time::timeout(Duration::from_secs(2), running.stop())
+            .await
+            .expect("stop must terminate blocked ws task promptly");
+        assert!(shutdown.load(Ordering::Relaxed));
+        assert!(cancel.is_cancelled());
+        tokio::time::timeout(Duration::from_secs(2), server_task)
+            .await
+            .expect("server must observe client disconnect promptly")
+            .expect("server task clean");
     }
 }

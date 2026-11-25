@@ -210,6 +210,7 @@ describe('registerIpcHandlers Host RPC proxy & bootstrap capabilities', () => {
     const proxyHostCommand = vi.fn();
     const fetchCapabilities = vi.fn();
     const getCachedCapabilities = vi.fn(() => cachedCaps);
+    const broadcastEvent = vi.fn();
 
     const context = {
       appVersion: '0.5.4',
@@ -220,6 +221,7 @@ describe('registerIpcHandlers Host RPC proxy & bootstrap capabilities', () => {
         getAllowedAppOrigin: () => 'dimo://app',
         isDeveloperModeEnabled: () => false,
         isDevSession: () => false,
+        broadcastEvent,
       },
       sidecar: {
         getConnectionOrNull: () => ({
@@ -251,6 +253,7 @@ describe('registerIpcHandlers Host RPC proxy & bootstrap capabilities', () => {
       proxyHostCommand,
       fetchCapabilities,
       getCachedCapabilities,
+      broadcastEvent,
     };
   }
 
@@ -419,5 +422,90 @@ describe('registerIpcHandlers Host RPC proxy & bootstrap capabilities', () => {
     ).resolves.toEqual(expected);
 
     expect(fetchCapabilities).toHaveBeenCalledWith({ forceRefresh: true });
+  });
+
+  it('omits local sidecar backend from BOOTSTRAP_SYNC for remote host-* and unregistered windows while keeping it for local windows', () => {
+    const { mainSender, settingsSender, remoteSender } = setupIpcHarness(null);
+    const bootstrapHandler = onHandlers.get(IPC_CHANNELS.BOOTSTRAP_SYNC)!;
+
+    const mainEvent = { sender: mainSender, returnValue: undefined as unknown };
+    bootstrapHandler(mainEvent);
+    expect((mainEvent.returnValue as BootstrapPayload).backend).toEqual({
+      baseUrl: 'http://127.0.0.1:41234',
+      token: 'secret-token',
+      dataDir: '/tmp/dimo',
+    });
+
+    const settingsEvent = {
+      sender: settingsSender,
+      returnValue: undefined as unknown,
+    };
+    bootstrapHandler(settingsEvent);
+    expect((settingsEvent.returnValue as BootstrapPayload).backend).toEqual({
+      baseUrl: 'http://127.0.0.1:41234',
+      token: 'secret-token',
+      dataDir: '/tmp/dimo',
+    });
+
+    const remoteEvent = {
+      sender: remoteSender,
+      returnValue: undefined as unknown,
+    };
+    bootstrapHandler(remoteEvent);
+    expect((remoteEvent.returnValue as BootstrapPayload).backend).toBeNull();
+
+    const unknownEvent = {
+      sender: createFakeSender(998),
+      returnValue: undefined as unknown,
+    };
+    bootstrapHandler(unknownEvent);
+    expect((unknownEvent.returnValue as BootstrapPayload).backend).toBeNull();
+  });
+
+  it('blocks renderer EVENTS_EMIT from spoofing main-process-only lifecycle events while allowing normal events', async () => {
+    const { mainSender, remoteSender, broadcastEvent } = setupIpcHarness(null);
+    const emitHandler = handleHandlers.get(IPC_CHANNELS.EVENTS_EMIT)!;
+
+    for (const blockedEvent of [
+      'sidecar-ready',
+      'sidecar-restarted',
+      'sidecar-exited',
+      'sidecar-custom-spoof',
+      'gpu-mode-changed',
+      'developer-mode-changed',
+      'system-power-resumed',
+    ]) {
+      await expect(
+        Promise.resolve().then(() =>
+          emitHandler(
+            createInvokeEvent({ sender: remoteSender }),
+            blockedEvent,
+            { baseUrl: 'http://attacker.invalid', token: 'evil' }
+          )
+        )
+      ).rejects.toThrow(/restricted to the main process/i);
+
+      await expect(
+        Promise.resolve().then(() =>
+          emitHandler(
+            createInvokeEvent({ sender: mainSender }),
+            blockedEvent,
+            {}
+          )
+        )
+      ).rejects.toThrow(/restricted to the main process/i);
+    }
+
+    expect(broadcastEvent).not.toHaveBeenCalled();
+
+    // Normal cross-window renderer events continue to work unchanged.
+    await emitHandler(
+      createInvokeEvent({ sender: mainSender }),
+      'theme-changed',
+      { theme: 'dark' }
+    );
+    expect(broadcastEvent).toHaveBeenCalledWith('theme-changed', {
+      theme: 'dark',
+    });
   });
 });

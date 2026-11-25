@@ -95,7 +95,9 @@ impl ProjectionFold {
             ConversationEvent::TurnCompleted { .. } => {
                 RequestActivity::phase(RequestPhase::Completed)
             }
-            ConversationEvent::TurnFailed { .. } => RequestActivity::phase(RequestPhase::Failed),
+            ConversationEvent::TurnFailed { .. } | ConversationEvent::TurnBlocked { .. } => {
+                RequestActivity::phase(RequestPhase::Failed)
+            }
             ConversationEvent::TurnCancelled { .. } => {
                 RequestActivity::phase(RequestPhase::Cancelled)
             }
@@ -139,6 +141,13 @@ impl ProjectionFold {
                 return;
             }
         }
+        let preserved_since = previous
+            .filter(|prev| {
+                prev.turn_id == turn_id
+                    && prev.activity.phase == RequestPhase::WaitingAgent
+                    && activity.phase == RequestPhase::WaitingModel
+            })
+            .map(|prev| prev.since);
         upsert_stable_notice(
             &mut self.side_rows,
             REQUEST_STATUS_ROW_ID,
@@ -151,7 +160,7 @@ impl ProjectionFold {
                     prompt_id: record.prompt_id.clone(),
                     connection_id: record.connection_id.clone(),
                     activity,
-                    since: record.created_at,
+                    since: preserved_since.unwrap_or(record.created_at),
                 }),
                 ..Default::default()
             },
@@ -243,6 +252,50 @@ mod tests {
         ]);
         assert_eq!(status.turn_id, b);
         assert_eq!(status.activity.phase, RequestPhase::Submitting);
+    }
+
+    #[test]
+    fn waiting_agent_to_waiting_model_preserves_since_timestamp() {
+        let conversation = Uuid::new_v4();
+        let turn = Uuid::new_v4();
+        let t0 = chrono::DateTime::parse_from_rfc3339("2026-11-25T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let t15 = t0 + chrono::Duration::seconds(15);
+
+        let mut r1 = diagnostic_record(
+            conversation,
+            1,
+            &ConversationEvent::RequestActivityChanged {
+                activity: RequestActivity::phase(RequestPhase::WaitingAgent),
+            },
+        );
+        r1.turn_id = Some(turn);
+        r1.prompt_id = Some(turn.to_string());
+        r1.created_at = t0;
+
+        let mut r2 = diagnostic_record(
+            conversation,
+            2,
+            &ConversationEvent::RequestActivityChanged {
+                activity: RequestActivity::phase(RequestPhase::WaitingModel),
+            },
+        );
+        r2.turn_id = Some(turn);
+        r2.prompt_id = Some(turn.to_string());
+        r2.created_at = t15;
+
+        let timeline = ConversationProjector::project_records(conversation, &[r1, r2]).unwrap();
+        let status = timeline
+            .rows
+            .into_iter()
+            .find_map(|row| match row.row {
+                ConversationTimelineRow::SessionNotice { notice } => notice.request_status,
+                _ => None,
+            })
+            .expect("request status row");
+        assert_eq!(status.activity.phase, RequestPhase::WaitingModel);
+        assert_eq!(status.since, t0);
     }
 
     #[test]
