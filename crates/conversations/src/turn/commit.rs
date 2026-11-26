@@ -58,33 +58,48 @@ impl ConversationSessionService {
 
         let preparation_lock = crate::continuation::preparation_lock(input.conversation_id);
         let pool = &self.ctx.deployment.db().pool;
+        let session_workspace_id =
+            db::models::session::Session::find_by_id(pool, input.conversation_id)
+                .await?
+                .map(|session| session.workspace_id);
+        if session_workspace_id.is_some_and(|ws_id| ws_id != input.workspace_id)
+            && Workspace::find_by_id(pool, input.workspace_id)
+                .await?
+                .is_none()
+        {
+            return Err(ConversationServiceError::NotFound(format!(
+                "Workspace {} not found",
+                input.workspace_id
+            )));
+        }
+        let effective_workspace_id = session_workspace_id.unwrap_or(input.workspace_id);
         let execution_workspace_id = crate::isolated_workspace::execution_workspace_id(
             &self.ctx,
             input.conversation_id,
-            input.workspace_id,
+            effective_workspace_id,
         )
         .await
         .map_err(|error| ConversationServiceError::Internal(error.message))?;
         let workspace = match Workspace::find_by_id(pool, execution_workspace_id).await? {
             Some(workspace) => workspace,
-            None if execution_workspace_id != input.workspace_id => {
-                Workspace::find_by_id(pool, input.workspace_id)
+            None if execution_workspace_id != effective_workspace_id => {
+                Workspace::find_by_id(pool, effective_workspace_id)
                     .await?
                     .ok_or_else(|| {
                         ConversationServiceError::NotFound(format!(
                             "Workspace {} not found",
-                            input.workspace_id
+                            effective_workspace_id
                         ))
                     })?
             }
             None => {
                 return Err(ConversationServiceError::NotFound(format!(
                     "Workspace {} not found",
-                    input.workspace_id
+                    effective_workspace_id
                 )));
             }
         };
-        let mut workspace_ids = vec![input.workspace_id, workspace.id];
+        let mut workspace_ids = vec![effective_workspace_id, workspace.id];
         workspace_ids.sort_unstable();
         workspace_ids.dedup();
         let mut _workspace_permits = Vec::new();
@@ -316,29 +331,34 @@ impl ConversationSessionService {
             .as_deref()
             .unwrap_or(&input.text)
             .to_string();
+        let effective_workspace_id =
+            db::models::session::Session::find_by_id(pool, input.conversation_id)
+                .await?
+                .map(|session| session.workspace_id)
+                .unwrap_or(input.workspace_id);
         let execution_workspace_id = crate::isolated_workspace::execution_workspace_id(
             &self.ctx,
             input.conversation_id,
-            input.workspace_id,
+            effective_workspace_id,
         )
         .await
         .map_err(|error| ConversationServiceError::Internal(error.message))?;
         let workspace = match Workspace::find_by_id(pool, execution_workspace_id).await? {
             Some(workspace) => workspace,
-            None if execution_workspace_id != input.workspace_id => {
-                Workspace::find_by_id(pool, input.workspace_id)
+            None if execution_workspace_id != effective_workspace_id => {
+                Workspace::find_by_id(pool, effective_workspace_id)
                     .await?
                     .ok_or_else(|| {
                         ConversationServiceError::NotFound(format!(
                             "Workspace {} not found",
-                            input.workspace_id
+                            effective_workspace_id
                         ))
                     })?
             }
             None => {
                 return Err(ConversationServiceError::NotFound(format!(
                     "Workspace {} not found",
-                    input.workspace_id
+                    effective_workspace_id
                 )));
             }
         };
@@ -392,7 +412,7 @@ impl ConversationSessionService {
 
         let before_turn_ctx = BeforeTurnContext {
             conversation_id: input.conversation_id,
-            workspace_id: input.workspace_id,
+            workspace_id: workspace.id,
             agent_id: input.agent_id.clone(),
             text: input.text.clone(),
             display_text: display_text.clone(),

@@ -221,7 +221,9 @@
     "durationMs": "{{count}} ms",
     "durationSeconds": "{{count}}s",
     "durationMinutes": "{{count}} min",
+    "preparing": "Preparing",
     "running": "Running",
+    "waitingForInput": "Waiting for input",
     "cancel": "Cancel delegation",
     "canceling": "Canceling…",
     "cancelFailed": "Could not cancel: {{error}}",
@@ -370,6 +372,7 @@
     "defaultDirectory": "Default directory",
     "worktree": "Worktree",
     "branchLabel": "Branch: {{branch}}",
+    "switchBranchLabel": "Switch branch: {{branch}}",
     "permissionLabel": "Permission mode: {{mode}}",
     "switchWorkspaceLabel": "Switch workspace: {{workspace}}",
     "workspaceSwitchFailed": "Failed to switch workspace"

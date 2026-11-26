@@ -178,19 +178,16 @@ impl ConversationRelationControl {
         parent_conversation_id: Uuid,
         target_conversation_id: Uuid,
     ) -> Result<Option<DbConversationSummary>, sqlx::Error> {
-        let (Some(parent), Some(target)) = (
+        let (Some(_parent), Some(target)) = (
             DbConversationSummary::find_by_id(&self.pool, parent_conversation_id).await?,
             DbConversationSummary::find_by_id(&self.pool, target_conversation_id).await?,
         ) else {
             return Ok(None);
         };
-        if parent.workspace_id != target.workspace_id {
-            return Ok(None);
-        }
-        let in_scope = target_conversation_id == parent_conversation_id
-            || self
-                .is_descendant(parent_conversation_id, target_conversation_id)
-                .await?;
+        let is_descendant = self
+            .is_descendant(parent_conversation_id, target_conversation_id)
+            .await?;
+        let in_scope = target_conversation_id == parent_conversation_id || is_descendant;
         Ok(in_scope.then_some(target))
     }
 

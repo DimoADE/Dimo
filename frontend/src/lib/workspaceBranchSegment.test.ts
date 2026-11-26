@@ -65,7 +65,7 @@ describe('orderWorkspacesForSelector', () => {
 });
 
 describe('buildBranchSegment', () => {
-  it('lists checkout targets in the project directory with the current branch first', () => {
+  it('lists local branches in the project directory with current, available, then occupied', () => {
     const entries = buildBranchSegment({
       branches: [
         branch({ name: 'feat/other' }),
@@ -80,16 +80,18 @@ describe('buildBranchSegment', () => {
       inWorktree: false,
       currentDirectoryBranch: 'dev',
       mainDirectoryBranch: 'dev',
-      projectRootWorkspaceId: 'root',
+      mainDirectoryLabel: 'Main directory',
+      occupiedByBranch: new Map([['feat/worktree', 'Worktree']]),
     });
 
     expect(entries).toEqual([
-      { name: 'dev', role: 'current', workspaceId: null },
-      { name: 'feat/other', role: 'available', workspaceId: null },
+      { name: 'dev', role: 'current', occupiedBy: null },
+      { name: 'feat/other', role: 'available', occupiedBy: null },
+      { name: 'feat/worktree', role: 'occupied', occupiedBy: 'Worktree' },
     ]);
   });
 
-  it('pins the main directory branch first after opening a worktree', () => {
+  it('marks main directory and other worktree branches as occupied when inside a worktree', () => {
     const entries = buildBranchSegment({
       branches: [
         branch({ name: 'dev', is_current: true }),
@@ -108,13 +110,18 @@ describe('buildBranchSegment', () => {
       inWorktree: true,
       currentDirectoryBranch: 'feat/next',
       mainDirectoryBranch: 'dev',
-      projectRootWorkspaceId: 'root',
+      mainDirectoryLabel: 'Main directory',
+      occupiedByBranch: new Map([
+        ['dev', 'Main directory'],
+        ['feat/other-wt', 'wt-other'],
+      ]),
     });
 
     expect(entries).toEqual([
-      { name: 'dev', role: 'main-directory', workspaceId: 'root' },
-      { name: 'feat/next', role: 'current', workspaceId: null },
-      { name: 'free/local', role: 'available', workspaceId: null },
+      { name: 'feat/next', role: 'current', occupiedBy: null },
+      { name: 'free/local', role: 'available', occupiedBy: null },
+      { name: 'dev', role: 'occupied', occupiedBy: 'Main directory' },
+      { name: 'feat/other-wt', role: 'occupied', occupiedBy: 'wt-other' },
     ]);
   });
 });

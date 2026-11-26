@@ -827,6 +827,27 @@ pub fn derive_session_display_name(
         .unwrap_or_else(|| format!("新会话{fallback_number}"))
 }
 
+/// Format the display title for a forked conversation as `"（分叉）{base}"`.
+///
+/// Prefers the source session's explicit name, falling back to its first user
+/// prompt and finally `"会话"`. Avoids stacking duplicate `"（分叉）"` / `"(分叉)"`
+/// prefixes when forking an already-forked conversation.
+pub fn format_forked_session_title(
+    session_name: Option<&str>,
+    first_prompt: Option<&str>,
+) -> String {
+    let base = session_name
+        .and_then(sanitize_agent_session_title)
+        .or_else(|| first_prompt.and_then(first_prompt_session_name))
+        .unwrap_or_else(|| "会话".to_string());
+    let trimmed = base.trim();
+    if trimmed.starts_with("（分叉）") || trimmed.starts_with("(分叉)") {
+        trimmed.to_string()
+    } else {
+        format!("（分叉）{trimmed}")
+    }
+}
+
 fn strip_host_history_title_prefix(title: &str) -> &str {
     let Some(rest) = strip_ascii_prefix_ignore_case(title, HOST_HISTORY_TITLE_PREFIX) else {
         return title;
@@ -1275,5 +1296,30 @@ mod tests {
             prompt,
             "Previous conversation:\nUser: first question\nAssistant: first answer\n"
         );
+    }
+
+    #[test]
+    fn format_forked_session_title_prefixes_and_deduplicates() {
+        assert_eq!(
+            format_forked_session_title(Some("修复登录问题"), None),
+            "（分叉）修复登录问题"
+        );
+        assert_eq!(
+            format_forked_session_title(None, Some("  帮我解决以下问题\n第二行")),
+            "（分叉）帮我解决以下问题 第二行"
+        );
+        assert_eq!(
+            format_forked_session_title(Some("   "), Some("首句提示词")),
+            "（分叉）首句提示词"
+        );
+        assert_eq!(
+            format_forked_session_title(Some("（分叉）已分叉会话"), None),
+            "（分叉）已分叉会话"
+        );
+        assert_eq!(
+            format_forked_session_title(Some("(分叉)已分叉会话"), None),
+            "(分叉)已分叉会话"
+        );
+        assert_eq!(format_forked_session_title(None, None), "（分叉）会话");
     }
 }

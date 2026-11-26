@@ -9,6 +9,10 @@
   "history": "历史",
   "close": "关闭",
   "more": "更多",
+  "add": "添加",
+  "remove": "移除",
+  "reconnect": "重连",
+  "refresh": "刷新",
   "reset": "恢复默认",
   "settingsChanged": "设置已修改，保存后生效。",
   "contextMenu": {

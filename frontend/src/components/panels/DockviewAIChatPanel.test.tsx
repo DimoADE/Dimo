@@ -476,4 +476,53 @@ describe('DockviewAIChatPanel', () => {
       screen.queryByTestId('conversation-view-idle-1')
     ).not.toBeInTheDocument();
   });
+
+  it('follows live session workspace changes and updates panel parameters without reverting', () => {
+    kanbanSessionsStore.setSessions([
+      {
+        id: 'session-switch',
+        name: 'Switchable',
+        executor: 'codex',
+        taskId: 'task-root',
+        workspace: { id: 'ws-root' },
+      } as never,
+    ]);
+
+    const tab = createPanelApi('ai-chat:session-switch', {
+      isVisible: true,
+      isActive: true,
+    });
+    renderChatPanel(tab, {
+      sessionId: 'session-switch',
+      workspaceId: 'ws-root',
+    });
+
+    expect(screen.getByTestId('branch-header-ws-root')).toBeInTheDocument();
+    setActiveWorktreeMock.mockClear();
+
+    act(() => {
+      kanbanSessionsStore.setSessions([
+        {
+          id: 'session-switch',
+          name: 'Switchable',
+          executor: 'codex',
+          taskId: 'task-wt',
+          workspace: { id: 'ws-wt' },
+        } as never,
+      ]);
+    });
+
+    expect(screen.getByTestId('branch-header-ws-wt')).toBeInTheDocument();
+    expect(tab.updateParametersSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'session-switch',
+        workspaceId: 'ws-wt',
+      })
+    );
+    expect(setActiveWorktreeMock).toHaveBeenCalledWith('ws-wt', 'task-wt');
+    expect(replaceRightSessionMock).toHaveBeenLastCalledWith({
+      sessionId: 'session-switch',
+      workspaceId: 'ws-wt',
+    });
+  });
 });

@@ -221,7 +221,9 @@
     "durationMs": "耗时 {{count}} 毫秒",
     "durationSeconds": "耗时 {{count}} 秒",
     "durationMinutes": "耗时 {{count}} 分钟",
+    "preparing": "准备中",
     "running": "运行中",
+    "waitingForInput": "等待输入",
     "cancel": "取消委派",
     "canceling": "正在取消…",
     "cancelFailed": "无法取消：{{error}}",
@@ -370,6 +372,7 @@
     "defaultDirectory": "默认目录",
     "worktree": "Worktree",
     "branchLabel": "分支：{{branch}}",
+    "switchBranchLabel": "切换分支：{{branch}}",
     "permissionLabel": "权限模式：{{mode}}",
     "switchWorkspaceLabel": "切换工作区：{{workspace}}",
     "workspaceSwitchFailed": "切换工作区失败"

@@ -788,16 +788,37 @@ impl ServerApplicationDomains {
         .await
         .map_err(internal_error)?;
 
-        let base = summary
-            .title
-            .as_deref()
-            .filter(|title| !title.trim().is_empty())
-            .unwrap_or("会话");
-        if let Err(error) =
-            DbConversationSummary::set_title(&self.pool, new_id, &format!("{base}（分叉）")).await
+        let mut first_prompt = db::models::session::Session::find_by_id(&self.pool, source_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|session| session.initial_prompt);
+        if first_prompt.as_deref().map(str::trim).is_none_or(str::is_empty) {
+            first_prompt = ConversationTurnRecord::find_by_ordinal(&self.pool, source_id, 1)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|turn| turn.text_preview);
+        }
+        let fork_title = conversations::format_forked_session_title(
+            summary.title.as_deref(),
+            first_prompt.as_deref(),
+        );
+        if let Err(error) = DbConversationSummary::set_title(&self.pool, new_id, &fork_title).await
         {
             tracing::warn!(%error, conversation_id = %new_id, "forked conversation title was not updated");
         }
+
+        let source_after_turn_id = until_turn_id.or_else(|| latest_turn.as_ref().map(|t| t.id));
+        let emit_changed = || {
+            self.events.emit(
+                "workspace-sessions-changed",
+                conversations::WorkspaceSessionsChanged {
+                    workspace_id: summary.workspace_id,
+                    conversation_id: new_id,
+                },
+            );
+        };
 
         if let (Some(source_agent), Some(target_agent)) =
             (source_agent_id.as_ref(), resolved_target_agent_id.as_ref())
@@ -831,21 +852,47 @@ impl ServerApplicationDomains {
                         .filter(|m| !m.is_empty())
                         .map(str::to_string);
                 }
-                conversations::ConversationSessionService::new(self.conversations.clone())
-                    .append_fork_handoff_notice(
-                        new_id,
-                        child_last_turn.id,
-                        source_agent,
-                        target_agent,
-                        source_model.as_deref(),
-                    )
+                let service =
+                    conversations::ConversationSessionService::new(self.conversations.clone());
+                let handoff_tokens = service
+                    .compute_fork_handoff_tokens(new_id, target_agent)
                     .await;
+                service
+                    .append_fork_handoff_notice_entry(conversations::ForkHandoffNoticeParams {
+                        conversation_id: new_id,
+                        after_turn_id: child_last_turn.id,
+                        from_agent: source_agent,
+                        to_agent: target_agent,
+                        from_model: source_model.as_deref(),
+                        handoff_tokens,
+                        linked_conversation_id: Some(source_id),
+                        linked_workspace_id: Some(summary.workspace_id),
+                        fork_role: Some("child"),
+                    })
+                    .await;
+                if let Some(source_turn_id) = source_after_turn_id {
+                    service
+                        .append_fork_handoff_notice_entry(conversations::ForkHandoffNoticeParams {
+                            conversation_id: source_id,
+                            after_turn_id: source_turn_id,
+                            from_agent: source_agent,
+                            to_agent: target_agent,
+                            from_model: source_model.as_deref(),
+                            handoff_tokens,
+                            linked_conversation_id: Some(new_id),
+                            linked_workspace_id: Some(summary.workspace_id),
+                            fork_role: Some("source"),
+                        })
+                        .await;
+                }
             }
+            emit_changed();
             return Ok(ConversationForkResult::with_agent_context(
                 imported, source_id,
             ));
         }
 
+        emit_changed();
         Ok(ConversationForkResult::history_only(
             imported,
             source_id,

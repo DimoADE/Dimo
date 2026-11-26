@@ -57,6 +57,34 @@ pub fn continuation_key_instance_id(key: &str) -> Option<&str> {
     }
 }
 
+fn normalize_working_dir_for_compare(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let normalized =
+        utils::path::normalize_windows_extended_path_prefix(std::path::Path::new(trimmed));
+    let mut text = normalized.to_string_lossy().replace('\\', "/");
+    while text.len() > 1 && text.ends_with('/') {
+        if text.len() == 3 && text.as_bytes()[1] == b':' {
+            break;
+        }
+        text.pop();
+    }
+    #[cfg(windows)]
+    {
+        text.to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        text
+    }
+}
+
+pub(crate) fn working_dirs_equal(left: &str, right: &str) -> bool {
+    normalize_working_dir_for_compare(left) == normalize_working_dir_for_compare(right)
+}
+
 pub(crate) fn binding_matches_target_instance(
     binding: &ConversationAgentBindingRecord,
     agent_id: &agents::AgentId,
@@ -139,27 +167,36 @@ impl ConversationSessionService {
         } else {
             false
         };
+        let working_dir_switched = if let Some(binding) = source.as_ref() {
+            !binding.working_dir.trim().is_empty()
+                && !working_dirs_equal(&binding.working_dir, &prepared.working_dir)
+        } else {
+            false
+        };
         let switching = portable_without_native
             || if let Some(binding) = source.as_ref() {
                 let instance_switched = match binding.continuation_key.as_deref() {
-                    Some(existing_key) if !binding.working_dir.is_empty() => {
-                        existing_key != target_key.as_str()
-                    }
                     Some(existing_key) => {
                         continuation_key_instance_id(existing_key) != effective_instance.as_deref()
                     }
                     None => effective_instance.is_some() && binding.acp_session_id.is_some(),
                 };
-                binding.agent_id != input.agent_id || instance_switched
+                binding.agent_id != input.agent_id || working_dir_switched || instance_switched
             } else if let Some(latest) =
                 ConversationAgentBindingRecord::latest_for_conversation(pool, input.conversation_id)
                     .await?
             {
+                let latest_dir_switched = !latest.working_dir.trim().is_empty()
+                    && !working_dirs_equal(&latest.working_dir, &prepared.working_dir);
+                let latest_instance_switched = latest
+                    .continuation_key
+                    .as_deref()
+                    .is_some_and(|existing_key| {
+                        continuation_key_instance_id(existing_key) != effective_instance.as_deref()
+                    });
                 latest.agent_id != input.agent_id
-                    || latest
-                        .continuation_key
-                        .as_deref()
-                        .is_some_and(|existing_key| existing_key != target_key.as_str())
+                    || latest_dir_switched
+                    || latest_instance_switched
             } else {
                 session
                     .agent_id
@@ -229,7 +266,10 @@ impl ConversationSessionService {
                     "Turn was cancelled during history preparation".into(),
                 ));
             }
-            let selection = if input.continuation_policy == Some(ContinuationPolicy::Portable) {
+            let use_portable_handoff =
+                input.continuation_policy == Some(ContinuationPolicy::Portable)
+                    || (working_dir_switched && !fresh);
+            let selection = if use_portable_handoff {
                 let _ = crate::ensure_legacy_jsonl_migrated_on_pool(pool, input.conversation_id)
                     .await?;
                 let current_bytes = serde_json::to_vec(&prepared.agent_blocks)
@@ -300,7 +340,7 @@ impl ConversationSessionService {
                 .prepare_session(EnsureAgentSessionInput {
                     agent_id: input.agent_id.clone(),
                     launch_lock: settings.launch_lock,
-                    workspace_id: input.workspace_id,
+                    workspace_id: session.workspace_id,
                     working_dir: prepared.working_dir.clone().into(),
                     additional_directories: prepared.additional_directories.clone(),
                     session_id: AgentSessionId(input.conversation_id),
@@ -397,7 +437,7 @@ impl ConversationSessionService {
                 .resume_session(ResumeAgentSessionInput {
                     agent_id: input.agent_id.clone(),
                     launch_lock: settings.launch_lock,
-                    workspace_id: input.workspace_id,
+                    workspace_id: session.workspace_id,
                     working_dir: prepared.working_dir.clone().into(),
                     additional_directories: prepared.additional_directories.clone(),
                     session_id: AgentSessionId(input.conversation_id),

@@ -8,7 +8,7 @@ import {
 } from './ComposerContextFooter';
 
 describe('ComposerContextFooter', () => {
-  it('shows default directory on the left, branch and permission mode on the right', () => {
+  it('shows directory and branch together on the left and permission mode on the right', () => {
     render(
       <ComposerContextFooter
         useWorktree={false}
@@ -32,10 +32,16 @@ describe('ComposerContextFooter', () => {
 
     const branch = screen.getByTestId('composer-footer-branch');
     expect(branch).toHaveTextContent('master');
+    expect(directory.closest('.composer-cockpit-footer-left')).toBe(
+      branch.closest('.composer-cockpit-footer-left')
+    );
 
     const permission = screen.getByTestId('composer-footer-permission');
     expect(permission).toHaveTextContent('Full Access');
     expect(permission).toHaveAttribute('data-permission-unrestricted', 'true');
+    expect(
+      permission.closest('.composer-cockpit-footer-right')
+    ).toBeInTheDocument();
   });
 
   it('shows Worktree when running in a worktree workspace and omits empty branch', () => {
@@ -195,7 +201,7 @@ describe('ComposerContextFooter', () => {
     ).not.toBeInTheDocument();
   });
 
-  it('opens workspace selector on directory click and switches workspace or branch', async () => {
+  it('opens workspace dropdown on directory click and branch dropdown on branch click independently', async () => {
     const user = userEvent.setup();
     const onSelectWorkspace = vi.fn();
     const onSelectBranch = vi.fn();
@@ -251,9 +257,11 @@ describe('ComposerContextFooter', () => {
             },
           ],
           branches: [
-            { name: 'master', role: 'current', workspaceId: null },
-            { name: 'develop', role: 'available', workspaceId: null },
+            { name: 'master', role: 'current', occupiedBy: null },
+            { name: 'develop', role: 'available', occupiedBy: null },
+            { name: 'feat/ui', role: 'occupied', occupiedBy: 'Worktree' },
           ],
+          activeDirectoryLabel: 'Dimo',
           canSwitchBranch: true,
           canEnsureDefaultDirectory: false,
           defaultDirectoryLabel: 'Dimo',
@@ -271,19 +279,55 @@ describe('ComposerContextFooter', () => {
     expect(directoryButton).toHaveTextContent('Dimo');
 
     await user.click(directoryButton);
+    expect(
+      screen.queryByTestId('composer-workspace-switcher-mode')
+    ).not.toBeInTheDocument();
     await user.click(await screen.findByText('feat/ui'));
     expect(onSelectWorkspace).toHaveBeenCalledWith(wtWorkspace);
 
-    await user.click(directoryButton);
-    await user.click(
-      await screen.findByRole('radio', { name: /Branch|分支/i })
+    const branchButton = screen.getByTestId('composer-footer-branch');
+    expect(branchButton.tagName).toBe('BUTTON');
+    expect(branchButton).toHaveTextContent('master');
+
+    await user.click(branchButton);
+    const occupiedItem = (await screen.findByText('feat/ui')).closest(
+      '[role="menuitem"]'
     );
+    expect(occupiedItem).toHaveAttribute('aria-disabled', 'true');
     await user.click(await screen.findByText('develop'));
     expect(onSelectBranch).toHaveBeenCalledWith({
       name: 'develop',
       role: 'available',
-      workspaceId: null,
+      occupiedBy: null,
     });
+  });
+
+  it('displays active worktree label on left trigger when workspaceSwitcher provides it', () => {
+    render(
+      <ComposerContextFooter
+        useWorktree
+        projectName="Dimo"
+        workspacePath="/repo/.worktrees/feat-ui"
+        branchName="feat/ui"
+        workspaceSwitcher={{
+          workspaces: [],
+          branches: [],
+          activeDirectoryLabel: 'feat/ui',
+          canSwitchBranch: true,
+          canEnsureDefaultDirectory: true,
+          defaultDirectoryLabel: 'Dimo',
+          defaultDirectoryBranch: 'master',
+          isSwitching: false,
+          disabled: false,
+          onSelectWorkspace: vi.fn(),
+          onSelectDefaultDirectory: vi.fn(),
+          onSelectBranch: vi.fn(),
+        }}
+      />
+    );
+
+    const directoryButton = screen.getByTestId('composer-footer-directory');
+    expect(directoryButton).toHaveTextContent('feat/ui');
   });
 
   it('detects unrestricted permission modes across agents', () => {

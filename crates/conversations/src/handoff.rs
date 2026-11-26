@@ -25,10 +25,12 @@ pub(crate) async fn plan(
     source: Option<Uuid>,
     selection: Option<&HistorySelection>,
 ) -> Result<(), sqlx::Error> {
-    let policy = match input.continuation_policy {
-        Some(ContinuationPolicy::Portable) => "portable",
-        _ => "fresh",
-    };
+    let policy =
+        if input.continuation_policy == Some(ContinuationPolicy::Portable) || selection.is_some() {
+            "portable"
+        } else {
+            "fresh"
+        };
     let payload = selection.map(|s| s.prompt.as_str()).unwrap_or("");
     let selection_json =
         serde_json::to_string(&selection).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
@@ -1107,15 +1109,12 @@ impl crate::ConversationSessionService {
         Ok(confirmation)
     }
 
-    pub async fn append_fork_handoff_notice(
+    pub async fn compute_fork_handoff_tokens(
         &self,
         conversation_id: Uuid,
-        after_turn_id: Uuid,
-        from_agent: &agents::AgentId,
         to_agent: &agents::AgentId,
-        from_model: Option<&str>,
-    ) {
-        let handoff_tokens = match DeterministicHandoffService::build_handoff_context(
+    ) -> Option<usize> {
+        match DeterministicHandoffService::build_handoff_context(
             &self.ctx.deployment.db().pool,
             conversation_id,
             to_agent.as_str(),
@@ -1133,20 +1132,26 @@ impl crate::ConversationSessionService {
                 );
                 None
             }
-        };
+        }
+    }
+
+    pub async fn append_fork_handoff_notice_entry(&self, params: ForkHandoffNoticeParams<'_>) {
         let payload = serde_json::json!({
             "kind": "agent_handoff",
             "handoffKind": "fork",
-            "afterTurnId": after_turn_id,
-            "fromAgent": from_agent.as_str(),
-            "toAgent": to_agent.as_str(),
-            "fromModel": from_model,
-            "handoffTokens": handoff_tokens,
+            "afterTurnId": params.after_turn_id,
+            "fromAgent": params.from_agent.as_str(),
+            "toAgent": params.to_agent.as_str(),
+            "fromModel": params.from_model,
+            "handoffTokens": params.handoff_tokens,
             "continuationPolicy": "portable",
+            "linkedConversationId": params.linked_conversation_id,
+            "linkedWorkspaceId": params.linked_workspace_id,
+            "forkRole": params.fork_role,
         });
         if let Err(error) = self
             .append_event(
-                conversation_id,
+                params.conversation_id,
                 None,
                 "host",
                 ConversationEvent::RawDiagnosticRecorded {
@@ -1158,12 +1163,52 @@ impl crate::ConversationSessionService {
             .await
         {
             tracing::warn!(
-                %conversation_id,
+                conversation_id = %params.conversation_id,
                 %error,
                 "failed to append fork handoff timeline event"
             );
         }
     }
+
+    pub async fn append_fork_handoff_notice(
+        &self,
+        conversation_id: Uuid,
+        after_turn_id: Uuid,
+        from_agent: &agents::AgentId,
+        to_agent: &agents::AgentId,
+        from_model: Option<&str>,
+    ) {
+        let handoff_tokens = self
+            .compute_fork_handoff_tokens(conversation_id, to_agent)
+            .await;
+        self.append_fork_handoff_notice_entry(ForkHandoffNoticeParams {
+            conversation_id,
+            after_turn_id,
+            from_agent,
+            to_agent,
+            from_model,
+            handoff_tokens,
+            linked_conversation_id: None,
+            linked_workspace_id: None,
+            fork_role: None,
+        })
+        .await;
+    }
+}
+
+/// Parameters for persisting a fork handoff timeline notice on either the source
+/// or child conversation.
+#[derive(Debug, Clone)]
+pub struct ForkHandoffNoticeParams<'a> {
+    pub conversation_id: Uuid,
+    pub after_turn_id: Uuid,
+    pub from_agent: &'a agents::AgentId,
+    pub to_agent: &'a agents::AgentId,
+    pub from_model: Option<&'a str>,
+    pub handoff_tokens: Option<usize>,
+    pub linked_conversation_id: Option<Uuid>,
+    pub linked_workspace_id: Option<Uuid>,
+    pub fork_role: Option<&'a str>,
 }
 
 #[cfg(test)]

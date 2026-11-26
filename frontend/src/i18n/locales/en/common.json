@@ -9,6 +9,10 @@
   "history": "History",
   "close": "Close",
   "more": "More",
+  "add": "Add",
+  "remove": "Remove",
+  "reconnect": "Reconnect",
+  "refresh": "Refresh",
   "reset": "Reset to default",
   "settingsChanged": "Settings changed. They take effect after saving.",
   "contextMenu": {

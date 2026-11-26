@@ -4,6 +4,7 @@ import type { AgentKind } from 'shared/types';
 export type PendingForkHandoff = {
   id: number;
   sessionId: string;
+  afterTurnId: string | null;
   fromAgent: AgentKind | string;
   toAgent: AgentKind | string;
   fromModelLabel: string | null;
@@ -22,6 +23,7 @@ function notifyListeners() {
 
 export function beginPendingForkHandoff(input: {
   sessionId: string;
+  afterTurnId?: string | null;
   fromAgent: AgentKind | string;
   toAgent: AgentKind | string;
   fromModelLabel?: string | null;
@@ -32,6 +34,7 @@ export function beginPendingForkHandoff(input: {
   currentPendingFork = {
     id,
     sessionId: input.sessionId,
+    afterTurnId: input.afterTurnId ?? null,
     fromAgent: input.fromAgent,
     toAgent: input.toAgent,
     fromModelLabel: input.fromModelLabel ?? null,

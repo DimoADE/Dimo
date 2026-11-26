@@ -12,12 +12,23 @@ export function getComposerWorkspaceId({
   routeWorkspaceId,
   workspaceIdProp,
   sessionWorkspaceId,
+  preferSessionWorkspace = false,
 }: {
   activeWorktreeId: string | null | undefined;
   routeWorkspaceId: string | null | undefined;
   workspaceIdProp: string | null | undefined;
   sessionWorkspaceId: string | null | undefined;
+  preferSessionWorkspace?: boolean;
 }): string | null {
+  if (preferSessionWorkspace) {
+    return (
+      sessionWorkspaceId ??
+      workspaceIdProp ??
+      activeWorktreeId ??
+      routeWorkspaceId ??
+      null
+    );
+  }
   return (
     activeWorktreeId ??
     routeWorkspaceId ??

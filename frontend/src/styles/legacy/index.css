@@ -8751,7 +8751,7 @@ html.dark {
     display: inline-flex;
     min-width: 0;
     align-items: center;
-    gap: 6px;
+    gap: 14px;
     white-space: nowrap;
   }
 

@@ -2104,6 +2104,78 @@ async fn turn_blocked_marks_request_status_failed_and_recovery_clears_connect_er
     );
 }
 
+#[tokio::test]
+async fn multiple_fork_handoff_notices_after_same_turn_do_not_overwrite() {
+    let pool = setup_pool().await;
+    let (conversation_id, turn_id) = seed_turn(&pool).await;
+    let child_a = Uuid::new_v4();
+    let child_b = Uuid::new_v4();
+    let workspace_id = Uuid::new_v4();
+
+    append_event(
+        &pool,
+        conversation_id,
+        Some(turn_id),
+        "user",
+        ConversationEvent::UserTurnCreated {
+            blocks: vec![ConversationInputBlock::Text {
+                text: "hello".into(),
+            }],
+            workflow_refs: Vec::new(),
+        },
+        None,
+    )
+    .await;
+    for (child_id, to_agent) in [(child_a, "codex"), (child_b, "claude_code")] {
+        append_event(
+            &pool,
+            conversation_id,
+            None,
+            "host",
+            ConversationEvent::RawDiagnosticRecorded {
+                label: "agent_handoff".into(),
+                payload: Some(serde_json::json!({
+                    "kind": "agent_handoff",
+                    "handoffKind": "fork",
+                    "afterTurnId": turn_id,
+                    "fromAgent": "antigravity",
+                    "toAgent": to_agent,
+                    "handoffTokens": 123,
+                    "continuationPolicy": "portable",
+                    "linkedConversationId": child_id,
+                    "linkedWorkspaceId": workspace_id,
+                    "forkRole": "source",
+                })),
+            },
+            None,
+        )
+        .await;
+    }
+
+    let timeline = ConversationProjector::project(&pool, conversation_id)
+        .await
+        .expect("project multi-fork timeline");
+    let fork_rows: Vec<_> = timeline
+        .rows
+        .iter()
+        .filter(|row| row.row_id.starts_with(&format!("host-note:agent-handoff:after:{turn_id}:fork:")))
+        .collect();
+    assert_eq!(fork_rows.len(), 2);
+    let messages: Vec<serde_json::Value> = fork_rows
+        .iter()
+        .map(|row| match &row.row {
+            ConversationTimelineRow::SessionNotice { notice } => {
+                serde_json::from_str(notice.message.as_deref().unwrap()).unwrap()
+            }
+            other => panic!("unexpected row: {other:?}"),
+        })
+        .collect();
+    assert_eq!(messages[0]["linkedConversationId"], child_a.to_string());
+    assert_eq!(messages[0]["forkRole"], "source");
+    assert_eq!(messages[1]["linkedConversationId"], child_b.to_string());
+    assert_eq!(messages[1]["toAgent"], "claude_code");
+}
+
 #[path = "rows_tests_interactions.rs"]
 mod interactions;
 

@@ -931,10 +931,6 @@ fn agent_handoff_notice(
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let row_id = match after_turn_id {
-        Some(turn_id) => format!("host-note:agent-handoff:after:{turn_id}"),
-        None => format!("host-note:agent-handoff:seq:{sequence}"),
-    };
     let handoff_kind = payload
         .get("handoffKind")
         .or_else(|| payload.get("handoff_kind"))
@@ -942,6 +938,31 @@ fn agent_handoff_notice(
         .map(str::trim)
         .filter(|s| *s == "fork")
         .unwrap_or("switch");
+    let linked_conversation_id = payload
+        .get("linkedConversationId")
+        .or_else(|| payload.get("linked_conversation_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let linked_workspace_id = payload
+        .get("linkedWorkspaceId")
+        .or_else(|| payload.get("linked_workspace_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let fork_role = payload
+        .get("forkRole")
+        .or_else(|| payload.get("fork_role"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| matches!(*s, "source" | "child"));
+    let row_id = match (handoff_kind, after_turn_id, linked_conversation_id) {
+        ("fork", Some(turn_id), Some(linked_id)) => {
+            format!("host-note:agent-handoff:after:{turn_id}:fork:{linked_id}")
+        }
+        (_, Some(turn_id), _) => format!("host-note:agent-handoff:after:{turn_id}"),
+        (_, None, _) => format!("host-note:agent-handoff:seq:{sequence}"),
+    };
     if handoff_kind != "fork" && normalize_agent_key(from_agent) == normalize_agent_key(to_agent) {
         return Some(AgentHandoffRowAction::Remove { row_id });
     }
@@ -979,6 +1000,9 @@ fn agent_handoff_notice(
         "toModel": to_model,
         "handoffTokens": handoff_tokens,
         "continuationPolicy": continuation_policy,
+        "linkedConversationId": linked_conversation_id,
+        "linkedWorkspaceId": linked_workspace_id,
+        "forkRole": fork_role,
     });
     Some(AgentHandoffRowAction::Upsert {
         row_id: row_id.clone(),

@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { useContext, useEffect, useRef, useState } from 'react';
+import { QueryClientContext } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import {
   Archive,
@@ -20,6 +21,7 @@ import {
   endPendingForkHandoff,
 } from '@/features/conversation/pendingForkStore';
 import { useOptionalKanbanSessionContext } from '@/contexts/KanbanSessionContext';
+import { useOptionalPanelActionsContext } from '@/contexts/PanelActionsContext';
 import type { ExecutorProfileId } from 'shared/types';
 import { AgentIcon } from '@/components/agents/AgentIcon';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -88,6 +90,8 @@ export function SessionHubListItem({
 }: SessionHubListItemProps) {
   const { t } = useTranslation(['tasks', 'common']);
   const kanbanSessions = useOptionalKanbanSessionContext();
+  const panelActions = useOptionalPanelActionsContext();
+  const queryClient = useContext(QueryClientContext);
   const hoverDetails = useSessionCardHoverDetails(session, session.fullName);
   const agentKey = sessionListAgentKey(session);
   const isKanbanBoardMode = displayMode === 'kanban-board';
@@ -218,6 +222,9 @@ export function SessionHubListItem({
         } else {
           toast.success(t('hubListItem.forkSuccess'));
         }
+        void queryClient?.invalidateQueries({
+          queryKey: ['workspaceSessions', session.workspace.id],
+        });
         if (kanbanSessions?.placeForkedChild) {
           kanbanSessions.placeForkedChild(
             {
@@ -232,6 +239,12 @@ export function SessionHubListItem({
             workspaceId: session.workspace.id,
           });
         }
+        panelActions?.openSessionTab({
+          sessionId: result.conversationId,
+          workspaceId: session.workspace.id,
+          agentId: targetAgentId,
+          activate: true,
+        });
       })
       .catch((error) =>
         toast.error(t('hubListItem.forkFailed', { error: String(error) }))

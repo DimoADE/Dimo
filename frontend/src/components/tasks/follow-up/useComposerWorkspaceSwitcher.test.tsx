@@ -8,12 +8,21 @@ import { useComposerWorkspaceSwitcher } from './useComposerWorkspaceSwitcher';
 
 const mockUpdateWorkspace = vi.fn();
 const mockEnsureProjectWorkspace = vi.fn();
+const mockGetGitStatus = vi.fn();
+const mockStash = vi.fn();
 const mockCheckoutBranch = vi.fn();
+const mockConfirmDialogShow = vi.fn();
 const mockSetActiveWorktree = vi.fn();
 const mockReplaceRightSession = vi.fn();
 const mockOpenSessionTab = vi.fn();
 const mockToastError = vi.fn();
 const mockWorktrees = vi.fn();
+
+vi.mock('@/components/dialogs/shared/ConfirmDialog', () => ({
+  ConfirmDialog: {
+    show: (...args: unknown[]) => mockConfirmDialogShow(...args),
+  },
+}));
 
 vi.mock('@/hooks/useProjectWorktrees', () => ({
   useProjectWorktrees: (projectId?: string) => ({
@@ -56,6 +65,14 @@ vi.mock('@/lib/api', () => ({
     }) => mockEnsureProjectWorkspace(data),
   },
   attemptsApi: {
+    getGitStatus: (workspaceId: string, repoId: string) =>
+      mockGetGitStatus(workspaceId, repoId),
+    stash: (
+      workspaceId: string,
+      repoId: string,
+      message: string | null,
+      includeUntracked: boolean
+    ) => mockStash(workspaceId, repoId, message, includeUntracked),
     checkoutBranch: (workspaceId: string, repoId: string, branchName: string) =>
       mockCheckoutBranch(workspaceId, repoId, branchName),
   },
@@ -294,5 +311,136 @@ describe('useComposerWorkspaceSwitcher', () => {
 
     expect(result.current).toBeNull();
     expect(mockWorktrees).toHaveBeenCalledWith(undefined);
+  });
+
+  it('checks out an available branch directly without dialog when the working tree is clean', async () => {
+    mockGetGitStatus.mockResolvedValue({
+      branch_name: 'master',
+      staged_files: [],
+      unstaged_files: [],
+      total_additions: 0,
+      total_deletions: 0,
+    });
+    mockCheckoutBranch.mockResolvedValue(undefined);
+    const { wrapper } = makeWrapper();
+
+    const { result } = renderHook(
+      () =>
+        useComposerWorkspaceSwitcher({
+          projectId: 'proj-1',
+          projectName: 'Dimo',
+          session: SESSION,
+          sessionId: SESSION.id,
+          workspace: ROOT_WORKSPACE,
+          workspaceId: ROOT_WORKSPACE.id,
+          primaryRepo: {
+            id: 'repo-1',
+            name: 'dimo',
+            path: '/repo/dimo',
+            default_target_branch: 'master',
+          },
+          primaryRepoBranches: [],
+          workspaceRepoNames: [{ name: 'dimo', path: '/repo/dimo' }],
+          mainDirectoryBranch: 'master',
+          currentBranchName: 'master',
+        }),
+      { wrapper }
+    );
+
+    expect(result.current?.activeDirectoryLabel).toBe('Dimo');
+
+    await act(async () => {
+      await result.current?.onSelectBranch?.({
+        name: 'develop',
+        role: 'available',
+        occupiedBy: null,
+      });
+    });
+
+    expect(mockGetGitStatus).toHaveBeenCalledWith('ws-root', 'repo-1');
+    expect(mockConfirmDialogShow).not.toHaveBeenCalled();
+    expect(mockStash).not.toHaveBeenCalled();
+    expect(mockCheckoutBranch).toHaveBeenCalledWith(
+      'ws-root',
+      'repo-1',
+      'develop'
+    );
+  });
+
+  it('prompts to stash all changes when working tree is dirty and respects cancel vs confirm', async () => {
+    mockGetGitStatus.mockResolvedValue({
+      branch_name: 'feat/ui',
+      staged_files: [],
+      unstaged_files: [{ path: 'src/a.ts', status: 'M' }],
+      total_additions: 1,
+      total_deletions: 0,
+    });
+    mockStash.mockResolvedValue(true);
+    mockCheckoutBranch.mockResolvedValue(undefined);
+    const { wrapper } = makeWrapper();
+
+    const { result } = renderHook(
+      () =>
+        useComposerWorkspaceSwitcher({
+          projectId: 'proj-1',
+          projectName: 'Dimo',
+          session: { ...SESSION, workspace_id: WT_WORKSPACE.id },
+          sessionId: SESSION.id,
+          workspace: WT_WORKSPACE,
+          workspaceId: WT_WORKSPACE.id,
+          primaryRepo: {
+            id: 'repo-1',
+            name: 'dimo',
+            path: '/repo/dimo',
+            default_target_branch: 'master',
+          },
+          primaryRepoBranches: [],
+          workspaceRepoNames: [{ name: 'dimo', path: '/repo/dimo' }],
+          mainDirectoryBranch: 'master',
+          currentBranchName: 'feat/ui',
+        }),
+      { wrapper }
+    );
+
+    expect(result.current?.activeDirectoryLabel).toBe('feat/ui');
+
+    // Occupied branch is ignored completely
+    await act(async () => {
+      await result.current?.onSelectBranch?.({
+        name: 'master',
+        role: 'occupied',
+        occupiedBy: 'Main directory',
+      });
+    });
+    expect(mockGetGitStatus).not.toHaveBeenCalled();
+
+    // User cancels dirty checkout
+    mockConfirmDialogShow.mockResolvedValueOnce('canceled');
+    await act(async () => {
+      await result.current?.onSelectBranch?.({
+        name: 'develop',
+        role: 'available',
+        occupiedBy: null,
+      });
+    });
+    expect(mockConfirmDialogShow).toHaveBeenCalledTimes(1);
+    expect(mockStash).not.toHaveBeenCalled();
+    expect(mockCheckoutBranch).not.toHaveBeenCalled();
+
+    // User confirms stash-all & checkout
+    mockConfirmDialogShow.mockResolvedValueOnce('confirmed');
+    await act(async () => {
+      await result.current?.onSelectBranch?.({
+        name: 'develop',
+        role: 'available',
+        occupiedBy: null,
+      });
+    });
+    expect(mockStash).toHaveBeenCalledWith('ws-wt', 'repo-1', null, true);
+    expect(mockCheckoutBranch).toHaveBeenCalledWith(
+      'ws-wt',
+      'repo-1',
+      'develop'
+    );
   });
 });

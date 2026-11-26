@@ -338,7 +338,7 @@ impl ConversationSessionService {
                 queued_input_claim: None,
                 operation_id: None,
                 collaboration_origin: None,
-                provider_instance_id: None,
+                provider_instance_id: session.provider_instance_id,
             },
             crate::commit_reminder::USER_ORIGIN,
         )

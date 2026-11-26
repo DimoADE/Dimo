@@ -1016,8 +1016,8 @@ impl ConversationSessionService {
         );
         if active_binding_any_agent.as_ref().is_some_and(|binding| {
             binding.resume_allowed
-                && !binding.working_dir.is_empty()
-                && binding.working_dir != working_dir
+                && !binding.working_dir.trim().is_empty()
+                && !super::continuation::working_dirs_equal(&binding.working_dir, &working_dir)
         }) && conversation_has_recorded_turns(pool, conversation_id).await?
         {
             // Pending cross-workspace handoff boundary: keep `sessions.active_agent_binding_id`

@@ -176,14 +176,15 @@ export function TaskFollowUpSection({
   const { workspaceId: routeWorkspaceId } = useParams<{
     workspaceId?: string;
   }>();
+  const { selectSession, isNewSessionMode } = sessionState;
   const workspaceId = getComposerWorkspaceId({
     activeWorktreeId,
     routeWorkspaceId,
     workspaceIdProp,
     sessionWorkspaceId: session?.workspace_id,
+    preferSessionWorkspace: !isNewSessionMode,
   });
   const workspaceIdValue = workspaceId ?? undefined;
-  const { selectSession, isNewSessionMode } = sessionState;
   const isAwaitingNewSessionConfirmation = false;
   const sessionId = getComposerSessionId({
     isNewSessionMode,

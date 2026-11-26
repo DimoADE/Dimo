@@ -27,7 +27,9 @@ import {
   beginPendingForkHandoff,
   endPendingForkHandoff,
 } from '@/features/conversation/pendingForkStore';
+import { QueryClientContext } from '@tanstack/react-query';
 import { useOptionalKanbanSessionContext } from '@/contexts/KanbanSessionContext';
+import { useOptionalPanelActionsContext } from '@/contexts/PanelActionsContext';
 import { CollaborationSessionTitle } from '@/features/collaboration/CollaborationSessionTitle';
 import { collaborationSessionMenuAction } from '@/features/collaboration/sessionCollaboration';
 import type { KanbanProjectSessionRecord } from '@/hooks/useKanbanProjectSessions';
@@ -113,6 +115,8 @@ export function WorkspaceSessionRow({
   const resolvedMarker =
     canvasSessionListMarker(session.id, canvasSlotIds) ?? marker ?? null;
   const kanbanSessions = useOptionalKanbanSessionContext();
+  const panelActions = useOptionalPanelActionsContext();
+  const queryClient = useContext(QueryClientContext);
   const title = sessionListTitle(session);
   const hoverDetails = useSessionCardHoverDetails(session, title);
   const tone = workspaceSessionStatusTone(session);
@@ -217,6 +221,9 @@ export function WorkspaceSessionRow({
         } else {
           toast.success(t('tasks:hubListItem.forkSuccess'));
         }
+        void queryClient?.invalidateQueries({
+          queryKey: ['workspaceSessions', session.workspace.id],
+        });
         if (kanbanSessions?.placeForkedChild) {
           kanbanSessions.placeForkedChild(
             {
@@ -231,6 +238,12 @@ export function WorkspaceSessionRow({
             workspaceId: session.workspace.id,
           });
         }
+        panelActions?.openSessionTab({
+          sessionId: result.conversationId,
+          workspaceId: session.workspace.id,
+          agentId: targetAgentId,
+          activate: true,
+        });
       })
       .catch((error) =>
         toast.error(

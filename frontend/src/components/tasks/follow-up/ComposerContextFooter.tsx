@@ -1,8 +1,4 @@
 import {
-  SegmentedControl,
-  SegmentedControlItem,
-} from '@astryxdesign/core/SegmentedControl';
-import {
   Check,
   ChevronDown,
   Copy,
@@ -43,10 +39,11 @@ import {
 import { compactSessionControlLabel } from './sessionControlLabels';
 import type { ComposerWorkspaceSwitcherConfig } from './useComposerWorkspaceSwitcher';
 
-type SwitcherMode = 'workspace' | 'branch';
-
 const MAIN_DIRECTORY_CHIP_CLASS =
   'shrink-0 rounded-full bg-[hsl(var(--success)/0.12)] px-1.5 py-0.5 text-[10px] text-[hsl(var(--success))]';
+
+const OCCUPIED_BRANCH_CHIP_CLASS =
+  'shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground';
 
 const WORKSPACE_COPY_BUTTON_CLASS =
   'pointer-events-none absolute inset-y-0 z-[1] inline-flex items-center bg-accent pl-3 text-muted-foreground opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 hover:text-foreground';
@@ -256,7 +253,7 @@ export function ComposerContextFooter({
     () => isDangerousPermissionsMode(activeModeId)
   );
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
-  const [switcherMode, setSwitcherMode] = useState<SwitcherMode>('workspace');
+  const [branchMenuOpen, setBranchMenuOpen] = useState(false);
   const [copiedWorkspaceId, setCopiedWorkspaceId] = useState<string | null>(
     null
   );
@@ -296,9 +293,12 @@ export function ComposerContextFooter({
     ]
   );
 
-  const directoryLabel = useWorktree
-    ? t('conversation:composerContext.worktree')
-    : projectName?.trim() || t('conversation:composerContext.defaultDirectory');
+  const directoryLabel =
+    workspaceSwitcher?.activeDirectoryLabel?.trim() ||
+    (useWorktree
+      ? t('conversation:composerContext.worktree')
+      : projectName?.trim() ||
+        t('conversation:composerContext.defaultDirectory'));
   const normalizedBranch = branchName?.trim() || null;
   const DirectoryIcon = useWorktree ? FolderGit2 : Folder;
   const PermissionIcon = permissionControl?.unrestricted ? ShieldOff : Shield;
@@ -308,9 +308,15 @@ export function ComposerContextFooter({
       workspaceSwitcher &&
       !workspaceSwitcher.disabled &&
       (workspaceSwitcher.workspaces.length > 0 ||
-        workspaceSwitcher.canEnsureDefaultDirectory ||
-        (workspaceSwitcher.canSwitchBranch &&
-          workspaceSwitcher.branches.length > 0))
+        workspaceSwitcher.canEnsureDefaultDirectory)
+  );
+
+  const canSwitchBranch = Boolean(
+    !disabled &&
+      workspaceSwitcher &&
+      !workspaceSwitcher.disabled &&
+      workspaceSwitcher.canSwitchBranch &&
+      workspaceSwitcher.onSelectBranch
   );
 
   const canSelectPermission = Boolean(
@@ -325,13 +331,6 @@ export function ComposerContextFooter({
           onSelectConfigOption &&
           permissionControl.choices.length > 1))
   );
-
-  const handleWorkspaceMenuOpenChange = useCallback((next: boolean) => {
-    setWorkspaceMenuOpen(next);
-    if (next) {
-      setSwitcherMode('workspace');
-    }
-  }, []);
 
   const handleCopyWorkspacePath = useCallback(
     async (
@@ -377,85 +376,48 @@ export function ComposerContextFooter({
       role="region"
       aria-label={t('conversation:composerContext.regionLabel')}
     >
-      {canSwitchWorkspace && workspaceSwitcher ? (
-        <DropdownMenu
-          modal={false}
-          open={workspaceMenuOpen}
-          onOpenChange={handleWorkspaceMenuOpenChange}
-        >
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              className="composer-cockpit-footer-trigger composer-cockpit-footer-directory"
-              data-testid="composer-footer-directory"
-              data-directory-kind={useWorktree ? 'worktree' : 'default'}
-              disabled={workspaceSwitcher.isSwitching}
-              aria-label={t(
-                'conversation:composerContext.switchWorkspaceLabel',
-                { workspace: directoryLabel }
-              )}
-              title={workspacePath || directoryLabel}
-            >
-              <DirectoryIcon
-                className="h-3.5 w-3.5 shrink-0 opacity-80"
-                aria-hidden="true"
-              />
-              <span className="truncate">{directoryLabel}</span>
-              <ChevronDown
-                className="h-3 w-3 shrink-0 opacity-65"
-                aria-hidden="true"
-              />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent
-            side="top"
-            align="start"
-            sideOffset={8}
-            className="w-64 overflow-hidden p-0"
+      <div className="composer-cockpit-footer-left">
+        {canSwitchWorkspace && workspaceSwitcher ? (
+          <DropdownMenu
+            modal={false}
+            open={workspaceMenuOpen}
+            onOpenChange={setWorkspaceMenuOpen}
           >
-            {workspaceSwitcher.canSwitchBranch ? (
-              <div
-                className="border-b border-border/60 p-2"
-                onPointerDown={(event) => event.stopPropagation()}
-                onKeyDown={(event) => event.stopPropagation()}
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                className="composer-cockpit-footer-trigger composer-cockpit-footer-directory"
+                data-testid="composer-footer-directory"
+                data-directory-kind={useWorktree ? 'worktree' : 'default'}
+                disabled={workspaceSwitcher.isSwitching}
+                aria-label={t(
+                  'conversation:composerContext.switchWorkspaceLabel',
+                  { workspace: directoryLabel }
+                )}
+                title={workspacePath || directoryLabel}
               >
-                <SegmentedControl
-                  className="w-full [&_.astryx-segmented-control-item]:!text-[0.625rem]"
-                  layout="fill"
-                  size="sm"
-                  value={switcherMode}
-                  onChange={(value) => {
-                    if (value === 'workspace' || value === 'branch') {
-                      setSwitcherMode(value);
-                    }
-                  }}
-                  label={t('panels:worktreeSelector.modeLabel')}
-                  data-testid="composer-workspace-switcher-mode"
-                >
-                  <SegmentedControlItem
-                    value="workspace"
-                    label={t('panels:worktreeSelector.modeWorkspace')}
-                    icon={
-                      <FolderGit2 aria-hidden="true" className="size-full" />
-                    }
-                  />
-                  <SegmentedControlItem
-                    value="branch"
-                    label={t('panels:worktreeSelector.modeBranch')}
-                    icon={
-                      <GitBranch aria-hidden="true" className="size-full" />
-                    }
-                  />
-                </SegmentedControl>
-              </div>
-            ) : null}
-
-            <div
-              className="max-h-72 overflow-y-auto overscroll-contain p-1"
-              data-testid="composer-workspace-switcher-list"
+                <DirectoryIcon
+                  className="h-3.5 w-3.5 shrink-0 opacity-80"
+                  aria-hidden="true"
+                />
+                <span className="truncate">{directoryLabel}</span>
+                <ChevronDown
+                  className="h-3 w-3 shrink-0 opacity-65"
+                  aria-hidden="true"
+                />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              side="top"
+              align="start"
+              sideOffset={8}
+              className="w-64 overflow-hidden p-0"
             >
-              {switcherMode === 'workspace' ? (
-                workspaceSwitcher.workspaces.length > 0 ||
+              <div
+                className="max-h-72 overflow-y-auto overscroll-contain p-1"
+                data-testid="composer-workspace-switcher-list"
+              >
+                {workspaceSwitcher.workspaces.length > 0 ||
                 workspaceSwitcher.canEnsureDefaultDirectory ? (
                   <>
                     {workspaceSwitcher.canEnsureDefaultDirectory &&
@@ -565,75 +527,148 @@ export function ComposerContextFooter({
                   <p className="px-2 py-1.5 text-xs text-muted-foreground">
                     {t('panels:worktreeSelector.emptyWorkspaces')}
                   </p>
-                )
-              ) : workspaceSwitcher.branches.length > 0 ? (
-                workspaceSwitcher.branches.map((entry) => (
-                  <DropdownMenuItem
-                    key={`${entry.role}:${entry.name}`}
-                    className="gap-2"
-                    onSelect={(event) => {
-                      event.preventDefault();
-                      setWorkspaceMenuOpen(false);
-                      void workspaceSwitcher.onSelectBranch?.(entry);
-                    }}
-                  >
-                    <span className="min-w-0 flex-1 truncate font-mono text-xs">
-                      {entry.name}
-                    </span>
-                    {entry.role === 'main-directory' ? (
-                      <span className={MAIN_DIRECTORY_CHIP_CLASS}>
-                        {t('panels:worktreeSelector.mainDirectory')}
-                      </span>
-                    ) : null}
-                    <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
-                      {entry.role === 'current' ? (
-                        <Check aria-hidden="true" className="h-3.5 w-3.5" />
-                      ) : null}
-                    </span>
-                  </DropdownMenuItem>
-                ))
-              ) : (
-                <p className="px-2 py-1.5 text-xs text-muted-foreground">
-                  {t('panels:worktreeSelector.emptyBranches')}
-                </p>
-              )}
-            </div>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      ) : (
-        <div
-          className="composer-cockpit-footer-left"
-          data-testid="composer-footer-directory"
-          data-directory-kind={useWorktree ? 'worktree' : 'default'}
-          title={workspacePath || directoryLabel}
-        >
-          <DirectoryIcon
-            className="h-3.5 w-3.5 shrink-0 opacity-80"
-            aria-hidden="true"
-          />
-          <span className="truncate">{directoryLabel}</span>
-        </div>
-      )}
-
-      <div className="composer-cockpit-footer-right">
-        {normalizedBranch ? (
-          <span
-            className="composer-cockpit-footer-item composer-cockpit-footer-branch"
-            data-testid="composer-footer-branch"
-            title={t('conversation:composerContext.branchLabel', {
-              branch: normalizedBranch,
-            })}
+                )}
+              </div>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : (
+          <div
+            className="composer-cockpit-footer-item composer-cockpit-footer-directory"
+            data-testid="composer-footer-directory"
+            data-directory-kind={useWorktree ? 'worktree' : 'default'}
+            title={workspacePath || directoryLabel}
           >
-            <GitBranch
+            <DirectoryIcon
               className="h-3.5 w-3.5 shrink-0 opacity-80"
               aria-hidden="true"
             />
-            <span className="truncate">{normalizedBranch}</span>
-          </span>
-        ) : null}
+            <span className="truncate">{directoryLabel}</span>
+          </div>
+        )}
 
-        {permissionControl ? (
-          canSelectPermission ? (
+        {normalizedBranch ? (
+          canSwitchBranch && workspaceSwitcher ? (
+            <DropdownMenu
+              modal={false}
+              open={branchMenuOpen}
+              onOpenChange={setBranchMenuOpen}
+            >
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="composer-cockpit-footer-trigger composer-cockpit-footer-branch"
+                  data-testid="composer-footer-branch"
+                  disabled={workspaceSwitcher.isSwitching}
+                  aria-label={t(
+                    'conversation:composerContext.switchBranchLabel',
+                    { branch: normalizedBranch }
+                  )}
+                  title={t('conversation:composerContext.switchBranchLabel', {
+                    branch: normalizedBranch,
+                  })}
+                >
+                  <GitBranch
+                    className="h-3.5 w-3.5 shrink-0 opacity-80"
+                    aria-hidden="true"
+                  />
+                  <span className="truncate">{normalizedBranch}</span>
+                  <ChevronDown
+                    className="h-3 w-3 shrink-0 opacity-65"
+                    aria-hidden="true"
+                  />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                side="top"
+                align="start"
+                sideOffset={8}
+                className="w-64 overflow-hidden p-0"
+              >
+                <div
+                  className="max-h-72 overflow-y-auto overscroll-contain p-1"
+                  data-testid="composer-branch-switcher-list"
+                >
+                  {workspaceSwitcher.branches.length > 0 ? (
+                    workspaceSwitcher.branches.map((entry) => {
+                      const isOccupied = entry.role === 'occupied';
+                      const isCurrent = entry.role === 'current';
+                      return (
+                        <DropdownMenuItem
+                          key={`${entry.role}:${entry.name}`}
+                          disabled={isOccupied}
+                          className={cn(
+                            'gap-2',
+                            isOccupied && 'opacity-55 cursor-not-allowed'
+                          )}
+                          onSelect={(event) => {
+                            event.preventDefault();
+                            if (isOccupied) return;
+                            setBranchMenuOpen(false);
+                            if (!isCurrent) {
+                              void workspaceSwitcher.onSelectBranch?.(entry);
+                            }
+                          }}
+                        >
+                          <GitBranch
+                            className="h-3.5 w-3.5 shrink-0 opacity-70"
+                            aria-hidden="true"
+                          />
+                          <span className="min-w-0 flex-1 truncate font-mono text-xs">
+                            {entry.name}
+                          </span>
+                          {isOccupied ? (
+                            <span className={OCCUPIED_BRANCH_CHIP_CLASS}>
+                              {entry.occupiedBy
+                                ? t(
+                                    'panels:worktreeSelector.branchOccupiedBy',
+                                    { location: entry.occupiedBy }
+                                  )
+                                : t(
+                                    'panels:worktreeSelector.branchOccupiedFallback'
+                                  )}
+                            </span>
+                          ) : (
+                            <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
+                              {isCurrent ? (
+                                <Check
+                                  aria-hidden="true"
+                                  className="h-3.5 w-3.5"
+                                />
+                              ) : null}
+                            </span>
+                          )}
+                        </DropdownMenuItem>
+                      );
+                    })
+                  ) : (
+                    <p className="px-2 py-1.5 text-xs text-muted-foreground">
+                      {t('panels:worktreeSelector.emptyBranches')}
+                    </p>
+                  )}
+                </div>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : (
+            <span
+              className="composer-cockpit-footer-item composer-cockpit-footer-branch"
+              data-testid="composer-footer-branch"
+              title={t('conversation:composerContext.branchLabel', {
+                branch: normalizedBranch,
+              })}
+            >
+              <GitBranch
+                className="h-3.5 w-3.5 shrink-0 opacity-80"
+                aria-hidden="true"
+              />
+              <span className="truncate">{normalizedBranch}</span>
+            </span>
+          )
+        ) : null}
+      </div>
+
+      {permissionControl ? (
+        <div className="composer-cockpit-footer-right">
+          {canSelectPermission ? (
             <DropdownMenu modal={false}>
               <DropdownMenuTrigger asChild>
                 <button
@@ -737,9 +772,9 @@ export function ComposerContextFooter({
               />
               <span className="truncate">{permissionControl.activeLabel}</span>
             </span>
-          )
-        ) : null}
-      </div>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }

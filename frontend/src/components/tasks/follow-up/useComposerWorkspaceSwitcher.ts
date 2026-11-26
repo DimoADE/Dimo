@@ -39,6 +39,7 @@ export interface ComposerWorkspaceOption {
 export interface ComposerWorkspaceSwitcherConfig {
   workspaces: ComposerWorkspaceOption[];
   branches: BranchSegmentEntry[];
+  activeDirectoryLabel: string;
   canSwitchBranch: boolean;
   canEnsureDefaultDirectory: boolean;
   defaultDirectoryLabel: string;
@@ -132,6 +133,7 @@ export function useComposerWorkspaceSwitcher({
 
   const defaultDirectoryLabel =
     projectName?.trim() || t('conversation:composerContext.defaultDirectory');
+  const mainDirectoryChipLabel = t('panels:worktreeSelector.mainDirectory');
 
   const workspaceOptions = useMemo<ComposerWorkspaceOption[]>(
     () =>
@@ -165,6 +167,56 @@ export function useComposerWorkspaceSwitcher({
     ]
   );
 
+  const activeDirectoryLabel = useMemo(() => {
+    const selected = workspaceOptions.find((option) => option.isSelected);
+    if (selected) {
+      return selected.label;
+    }
+    if (inWorktree) {
+      return (
+        activeWorkspace?.branch?.trim() ||
+        activeWorkspace?.name?.trim() ||
+        t('conversation:composerContext.worktree')
+      );
+    }
+    return defaultDirectoryLabel;
+  }, [
+    activeWorkspace?.branch,
+    activeWorkspace?.name,
+    defaultDirectoryLabel,
+    inWorktree,
+    t,
+    workspaceOptions,
+  ]);
+
+  const occupiedByBranch = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const option of workspaceOptions) {
+      if (option.id === currentWorkspaceId) continue;
+      const key = option.branchLabel?.trim().toLowerCase();
+      if (!key || map.has(key)) continue;
+      const holderLabel = option.isWorktree
+        ? option.workspace.name?.trim() ||
+          t('conversation:composerContext.worktree')
+        : mainDirectoryChipLabel;
+      map.set(key, holderLabel);
+    }
+    if (inWorktree && mainDirectoryBranch) {
+      const mainKey = mainDirectoryBranch.trim().toLowerCase();
+      if (mainKey && !map.has(mainKey)) {
+        map.set(mainKey, mainDirectoryChipLabel);
+      }
+    }
+    return map;
+  }, [
+    currentWorkspaceId,
+    inWorktree,
+    mainDirectoryBranch,
+    mainDirectoryChipLabel,
+    t,
+    workspaceOptions,
+  ]);
+
   const branchEntries = useMemo(
     () =>
       buildBranchSegment({
@@ -172,14 +224,16 @@ export function useComposerWorkspaceSwitcher({
         inWorktree,
         currentDirectoryBranch: currentBranchName,
         mainDirectoryBranch,
-        projectRootWorkspaceId: projectRootWorkspace?.id ?? null,
+        mainDirectoryLabel: mainDirectoryChipLabel,
+        occupiedByBranch,
       }),
     [
       currentBranchName,
       inWorktree,
       mainDirectoryBranch,
+      mainDirectoryChipLabel,
+      occupiedByBranch,
       primaryRepoBranches,
-      projectRootWorkspace?.id,
     ]
   );
 
@@ -403,15 +457,33 @@ export function useComposerWorkspaceSwitcher({
       switchLockRef.current = true;
       setIsSwitching(true);
       try {
-        const result = await ConfirmDialog.show({
-          title: t('panels:worktreeSelector.branchSwitchTitle'),
-          message: t('panels:worktreeSelector.branchSwitchMessage'),
-          confirmText: t('panels:worktreeSelector.branchSwitchConfirm'),
-          cancelText: t('panels:worktreeSelector.branchSwitchCancel'),
-          variant: 'info',
-        });
-        if (result !== 'confirmed') {
-          return;
+        const gitStatus = await attemptsApi.getGitStatus(
+          currentWorkspaceId,
+          primaryRepo.id
+        );
+        const isDirty =
+          gitStatus.staged_files.length > 0 ||
+          gitStatus.unstaged_files.length > 0;
+
+        if (isDirty) {
+          const result = await ConfirmDialog.show({
+            title: t('panels:worktreeSelector.branchDirtySwitchTitle'),
+            message: t('panels:worktreeSelector.branchDirtySwitchMessage', {
+              branch: branchName,
+            }),
+            confirmText: t('panels:worktreeSelector.branchDirtySwitchConfirm'),
+            cancelText: t('panels:worktreeSelector.branchDirtySwitchCancel'),
+            variant: 'info',
+          });
+          if (result !== 'confirmed') {
+            return;
+          }
+          await attemptsApi.stash(
+            currentWorkspaceId,
+            primaryRepo.id,
+            null,
+            true
+          );
         }
 
         const previousBranch = currentBranchName;
@@ -531,29 +603,12 @@ export function useComposerWorkspaceSwitcher({
 
   const handleSelectBranch = useCallback(
     async (entry: BranchSegmentEntry) => {
-      if (entry.role === 'current') {
-        return;
-      }
-      if (entry.role === 'main-directory') {
-        const target =
-          selectorWorkspaces.find((item) => item.id === entry.workspaceId) ??
-          projectRootWorkspace;
-        if (target) {
-          await handleSelectWorkspace(target);
-          return;
-        }
-        await handleSelectDefaultDirectory(entry.name);
+      if (entry.role !== 'available') {
         return;
       }
       await handleCheckoutBranch(entry.name);
     },
-    [
-      handleCheckoutBranch,
-      handleSelectDefaultDirectory,
-      handleSelectWorkspace,
-      projectRootWorkspace,
-      selectorWorkspaces,
-    ]
+    [handleCheckoutBranch]
   );
 
   const canSwitchBranch = Boolean(primaryRepo?.id && currentWorkspaceId);
@@ -570,6 +625,7 @@ export function useComposerWorkspaceSwitcher({
   return {
     workspaces: workspaceOptions,
     branches: branchEntries,
+    activeDirectoryLabel,
     canSwitchBranch,
     canEnsureDefaultDirectory,
     defaultDirectoryLabel,

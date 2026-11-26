@@ -53,6 +53,9 @@ function WorkspaceSessionTabContent({
     () => sessions.find((item) => item.id === sessionId) ?? null,
     [sessionId, sessions]
   );
+  const effectiveWorkspaceId = matchingSession?.workspace?.id ?? workspaceId;
+  const worktreeRef = useRef(worktree);
+  worktreeRef.current = worktree;
   const isSessionKeepAlivePinned = Boolean(
     matchingSession?.isRunning ||
       matchingSession?.status === 'inprogress' ||
@@ -74,22 +77,33 @@ function WorkspaceSessionTabContent({
     const nextAgentId = sessionListAgentKey(matchingSession);
     const currentParams =
       (panelApi.getParameters?.() as SessionTabPanelParams | undefined) ?? {};
-    if (nextAgentId && currentParams.agentId !== nextAgentId) {
+    const agentChanged = Boolean(
+      nextAgentId && currentParams.agentId !== nextAgentId
+    );
+    const workspaceChanged = currentParams.workspaceId !== effectiveWorkspaceId;
+    if (agentChanged || workspaceChanged) {
       panelApi.updateParameters({
         ...currentParams,
         sessionId,
-        workspaceId,
-        agentId: nextAgentId,
+        workspaceId: effectiveWorkspaceId,
+        ...(nextAgentId ? { agentId: nextAgentId } : {}),
       });
     }
-  }, [matchingSession, panelApi, sessionId, workspaceId]);
+  }, [effectiveWorkspaceId, matchingSession, panelApi, sessionId]);
 
   useEffect(() => {
     const syncActiveSession = () => {
-      kanbanSession?.replaceRightSession({ sessionId, workspaceId });
-      if (worktree && worktree.activeWorktreeId !== workspaceId) {
-        worktree.setActiveWorktree(
-          workspaceId,
+      kanbanSession?.replaceRightSession({
+        sessionId,
+        workspaceId: effectiveWorkspaceId,
+      });
+      const currentWorktree = worktreeRef.current;
+      if (
+        currentWorktree &&
+        currentWorktree.activeWorktreeId !== effectiveWorkspaceId
+      ) {
+        currentWorktree.setActiveWorktree(
+          effectiveWorkspaceId,
           matchingSession?.taskId ?? null
         );
       }
@@ -106,12 +120,11 @@ function WorkspaceSessionTabContent({
     });
     return () => disposable?.dispose();
   }, [
+    effectiveWorkspaceId,
     kanbanSession,
     matchingSession?.taskId,
     panelApi,
     sessionId,
-    workspaceId,
-    worktree,
   ]);
 
   const handleSessionCreated = useCallback(
@@ -147,12 +160,12 @@ function WorkspaceSessionTabContent({
       data-session-id={sessionId}
     >
       {isGitProject && isVisible ? (
-        <BranchInfoHeader workspaceId={workspaceId} />
+        <BranchInfoHeader workspaceId={effectiveWorkspaceId} />
       ) : null}
       <div className="right-panel-conversation-region relative flex-1 min-h-0 overflow-hidden">
         {shouldKeepMounted ? (
           <KanbanSessionConversationView
-            workspaceId={workspaceId}
+            workspaceId={effectiveWorkspaceId}
             sessionId={sessionId}
             embedded
             interactive

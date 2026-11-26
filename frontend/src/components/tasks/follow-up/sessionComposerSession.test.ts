@@ -53,6 +53,27 @@ describe('session composer session helpers', () => {
     ).toBeNull();
   });
 
+  it('prioritizes session workspace over global worktree when preferSessionWorkspace is enabled', () => {
+    expect(
+      getComposerWorkspaceId({
+        activeWorktreeId: 'stale-worktree',
+        routeWorkspaceId: 'route',
+        workspaceIdProp: 'prop',
+        sessionWorkspaceId: 'session-wt',
+        preferSessionWorkspace: true,
+      })
+    ).toBe('session-wt');
+    expect(
+      getComposerWorkspaceId({
+        activeWorktreeId: 'stale-worktree',
+        routeWorkspaceId: 'route',
+        workspaceIdProp: 'prop-wt',
+        sessionWorkspaceId: null,
+        preferSessionWorkspace: true,
+      })
+    ).toBe('prop-wt');
+  });
+
   it('suppresses the active session id while creating a new session', () => {
     expect(
       getComposerSessionId({ isNewSessionMode: true, sessionId: 's1' })

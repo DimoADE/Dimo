@@ -96,7 +96,9 @@
     "fresh": "Fresh context",
     "handoff": "Handoff",
     "forkHandoff": "Fork Handoff",
-    "forking": "Forking to new session"
+    "forking": "Forking to new session",
+    "openForkedSession": "Open forked session",
+    "openSourceFork": "Open source session"
   },
   "followUpSend": {
     "sessionScopedSlashCommandError": "This / command must run in an existing session and cannot be triggered by creating a new session.",
@@ -150,14 +152,35 @@
     "description": "Enter connection code",
     "hostLabel": "Host",
     "tokenLabel": "Connection code",
-    "tokenPlaceholder": "8-character connection code",
+    "tokenPlaceholder": "8-char code or pairing string",
     "showToken": "Show connection code",
     "hideToken": "Hide connection code",
     "connect": "Connect",
     "connecting": "Connecting…",
     "hostMismatch": "This page is the Web UI. Keep the Host address above.",
     "notAHost": "This address is not a Dimo Host. Use the Host URL from Settings → Remote connection.",
-    "authFailed": "Could not connect to this Host. Check the Host address and connection code."
+    "authFailed": "Could not connect to this Host. Check the Host address and connection code.",
+    "savedHosts": "Saved Hosts",
+    "removeSavedHost": "Remove {{name}}",
+    "savedHostRemoved": "Removed {{name}}",
+    "accountHosts": "My Account Hosts",
+    "accountSignInPrompt": "Sign in to your Dimo account for 1-click Host access",
+    "accountSignIn": "Sign in with Dimo",
+    "accountSignOut": "Sign out",
+    "accountRefresh": "Refresh",
+    "accountNoOnlineHosts": "No online Hosts found under this account.",
+    "accountApproveInBrowser": "Approve sign-in in your browser",
+    "accountOpenVerifyPage": "Open page",
+    "accountCancelSignIn": "Cancel",
+    "oneClickConnect": "Connect",
+    "offline": "Offline",
+    "orManualConnect": "Or connect manually",
+    "pairingDetected": "Endpoints detected from pairing code",
+    "rememberHost": "Remember this Host for automatic reconnect",
+    "noReachableEndpoints": "This Host has no reachable endpoints published.",
+    "endpointUnreachable": "Could not reach any endpoint for this Host.",
+    "e2eeRequired": "Encrypted connection required for relay Host: {{reason}}",
+    "switchHostFailed": "Failed to switch to {{name}}: {{reason}}"
   },
   "kanbanSessions": {
     "sessionFallback": "New session"

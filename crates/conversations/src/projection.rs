@@ -700,7 +700,8 @@ impl ProjectionFold {
         if let Some(turn_id) = self.side_row_turns.get(&row.row_id).copied() {
             return Some(turn_id);
         }
-        if let Some(turn_id_str) = row.row_id.strip_prefix("host-note:agent-handoff:after:")
+        if let Some(rest) = row.row_id.strip_prefix("host-note:agent-handoff:after:")
+            && let Some(turn_id_str) = rest.split(':').next()
             && let Ok(turn_id) = Uuid::parse_str(turn_id_str)
         {
             return Some(turn_id);

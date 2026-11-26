@@ -19,9 +19,13 @@ import {
   type TimelineQuestion,
 } from '@/components/NormalizedConversation/TurnActivity';
 import { mergeQuestionRequestWithToolUse } from '@/components/tasks/follow-up/agentQuestionModel';
-import { TimelineAgentHandoffRow } from '@/components/NormalizedConversation/ContextHandoffDivider';
+import {
+  InlinePendingForkDivider,
+  TimelineAgentHandoffRow,
+} from '@/components/NormalizedConversation/ContextHandoffDivider';
 import { AgentRuntimeStatus } from '@/components/tasks/follow-up/AgentRuntimeStatus';
 import type { InlineStreamRuntimeStatus } from '@/features/conversation/inlineRuntimeStatus';
+import type { PendingForkHandoff } from '@/features/conversation/pendingForkStore';
 import {
   isDurableHostNote,
   parseAgentHandoffNotice,
@@ -51,6 +55,7 @@ export function InlineTimelineSideRow({
   dismissedQuestionIds,
   onDismissQuestion,
   onRespondQuestion,
+  onOpenConversation,
   responding,
 }: {
   entry: TimelineRow;
@@ -61,6 +66,11 @@ export function InlineTimelineSideRow({
     questionId: string,
     response: AgentElicitationResponse
   ) => void | Promise<unknown>;
+  onOpenConversation?: (
+    conversationId: string,
+    workspaceId?: string | null,
+    agentId?: string | null
+  ) => void;
   responding: boolean;
 }) {
   const row = entry.row;
@@ -109,7 +119,12 @@ export function InlineTimelineSideRow({
   if (row.kind === 'session_notice') {
     const handoff = parseAgentHandoffNotice(entry);
     if (handoff) {
-      return <TimelineAgentHandoffRow handoff={handoff} />;
+      return (
+        <TimelineAgentHandoffRow
+          handoff={handoff}
+          onOpenConversation={onOpenConversation}
+        />
+      );
     }
     if (isDurableHostNote(entry)) {
       return (
@@ -147,6 +162,11 @@ export interface TimelineVirtualRowItemProps {
   dismissedQuestionIds: ReadonlySet<string>;
   onDismissQuestion: (questionId: string) => void;
   onOpenChild: (childConversationId: string) => void;
+  onOpenConversation?: (
+    conversationId: string,
+    workspaceId?: string | null,
+    agentId?: string | null
+  ) => void;
   contextCompact: ContextCompactPresentation | null;
   hasTurnError: boolean;
   userOrdinal: number;
@@ -174,6 +194,7 @@ export interface TimelineVirtualRowItemProps {
     turnId?: string,
     targetAgentId?: string
   ) => Promise<void> | void;
+  inlinePendingFork?: PendingForkHandoff | null;
   liveStatsFallback: TurnStatsData | null;
   streamingLiveStatus: {
     hideStatus: boolean;
@@ -206,6 +227,7 @@ export const TimelineVirtualRowItem = memo(function TimelineVirtualRowItem({
   dismissedQuestionIds,
   onDismissQuestion,
   onOpenChild,
+  onOpenConversation,
   contextCompact,
   hasTurnError,
   userOrdinal,
@@ -220,6 +242,7 @@ export const TimelineVirtualRowItem = memo(function TimelineVirtualRowItem({
   jumpTarget,
   onJumpToVirtualIndex,
   onForkFromTurn,
+  inlinePendingFork = null,
   liveStatsFallback,
   streamingLiveStatus,
   suppressStreamingStatus = false,
@@ -332,6 +355,7 @@ export const TimelineVirtualRowItem = memo(function TimelineVirtualRowItem({
           dismissedQuestionIds={dismissedQuestionIds}
           onDismissQuestion={onDismissQuestion}
           onRespondQuestion={onRespondQuestion}
+          onOpenConversation={onOpenConversation}
           responding={isRespondingQuestion}
         />
       ) : null}
@@ -391,6 +415,9 @@ export const TimelineVirtualRowItem = memo(function TimelineVirtualRowItem({
           forkDisabled={assistantStats.forkDisabled}
           forkDisabledReason={assistantStats.forkDisabledReason}
         />
+      ) : null}
+      {row?.turn.role === 'assistant' && isLastSlice && inlinePendingFork ? (
+        <InlinePendingForkDivider pendingFork={inlinePendingFork} />
       ) : null}
     </div>
   );

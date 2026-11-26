@@ -46,9 +46,10 @@ pub use commit::{
 };
 pub use continuation::continuation_key_instance_id;
 pub use queue::{
-    CreateDelegatedConversation, CreateForkConversation, CreateWorkflowConversation,
-    ForkVisibleConversation, create_delegated_conversation, create_fork_conversation,
-    create_workflow_conversation, fork_visible_conversation,
+    CreateDelegatedConversation, CreateForkConversation, CreateOrchestratedConversation,
+    CreateWorkflowConversation, ForkVisibleConversation, create_delegated_conversation,
+    create_fork_conversation, create_orchestrated_conversation, create_workflow_conversation,
+    fork_visible_conversation,
 };
 pub use restart_continuation::{RESTART_CONTINUATION_ORIGIN, RESTART_CONTINUATION_PROMPT};
 pub use start::{

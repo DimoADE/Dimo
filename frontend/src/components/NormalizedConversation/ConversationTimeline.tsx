@@ -5,11 +5,13 @@ import {
 import {
   forwardRef,
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from 'react';
+import { QueryClientContext } from '@tanstack/react-query';
 import { ConversationTimelineSkeleton } from '@/components/logs/ConversationTimelineSkeleton';
 import { ConversationFindBar } from '@/components/NormalizedConversation/conversation/ConversationFindBar';
 import { useTranslation } from 'react-i18next';
@@ -60,6 +62,7 @@ import { buildForkTargetSubmenu } from '@/features/conversation/ForkTargetMenu';
 import {
   beginPendingForkHandoff,
   endPendingForkHandoff,
+  usePendingForkHandoff,
 } from '@/features/conversation/pendingForkStore';
 import { ConversationChildrenSummary } from '@/features/conversation/ConversationChildrenSummary';
 import { PiProjectTrustBanner } from '@/features/conversation/PiProjectTrustBanner';
@@ -91,6 +94,7 @@ import { WorkflowRunCard } from '@/features/workflow/WorkflowRunCard';
 import { useOptionalConversationStatus } from '@/contexts/ConversationStatusContext';
 import { useSessionSurfaceChrome } from '@/contexts/SessionSurfaceChromeContext';
 import { useOptionalKanbanSessionContext } from '@/contexts/KanbanSessionContext';
+import { useOptionalPanelActionsContext } from '@/contexts/PanelActionsContext';
 import {
   resolveResendExecutorProfile,
   useActiveExecutorProfile,
@@ -214,6 +218,9 @@ const AgentTimelineConversation = forwardRef<
     active: surfaceActive,
   });
   const kanbanSessions = useOptionalKanbanSessionContext();
+  const panelActions = useOptionalPanelActionsContext();
+  const queryClient = useContext(QueryClientContext);
+  const pendingFork = usePendingForkHandoff(sessionId);
   const selectableAgents = useSelectableAgents();
   const forkAgents = useMemo(
     () => selectableAgents.filter(isEnabledInstalledAgent),
@@ -521,58 +528,61 @@ const AgentTimelineConversation = forwardRef<
     return null;
   }, [timeline]);
 
+  const handleOpenLinkedConversation = useCallback(
+    (targetId: string, targetWorkspaceId?: string | null, agentId?: string | null) => {
+      panelActions?.openSessionTab({
+        sessionId: targetId,
+        workspaceId: targetWorkspaceId ?? attempt.id,
+        agentId: agentId ?? undefined,
+        activate: true,
+      });
+    },
+    [attempt.id, panelActions]
+  );
+
   const handleForkFromTurn = useCallback(
     async (turnId?: string, targetAgentId?: string) => {
       if (!sessionId) return;
       const fromAgent =
-        attempt.session?.agent_id ??
-        attempt.session?.executor ??
-        targetAgentId ??
-        'claude_code';
+        attempt.session?.agent_id ?? attempt.session?.executor ?? targetAgentId ?? 'claude_code';
       const toAgent = targetAgentId ?? fromAgent;
+      const turnModel = turnId
+        ? timeline.find((r) => r.turn.role === 'assistant' && dimoTurnIdFromTimelineRowId(r.turn.id) === turnId)?.turn.model
+        : null;
+      const fallbackModel = timeline.reduce<string | null>(
+        (acc, r) => (r.turn.role === 'assistant' && r.turn.model ? r.turn.model : acc),
+        null
+      );
       const pendingId = beginPendingForkHandoff({
         sessionId,
+        afterTurnId: turnId ?? null,
         fromAgent,
         toAgent,
+        fromModelLabel: turnModel ?? fallbackModel,
       });
       try {
-        const result = await conversationApi.fork(
-          sessionId,
-          turnId,
-          targetAgentId
-        );
+        const result = await conversationApi.fork(sessionId, turnId, targetAgentId);
         if (result.continuity === 'history_only') {
-          toast.warning(
-            t('tasks:hubListItem.forkHistoryOnly', {
-              reason: result.continuityNote,
-            })
-          );
+          toast.warning(t('tasks:hubListItem.forkHistoryOnly', { reason: result.continuityNote }));
         }
+        void queryClient?.invalidateQueries({ queryKey: ['workspaceSessions', attempt.id] });
         kanbanSessions?.placeForkedChild(
-          {
-            sessionId: result.conversationId,
-            workspaceId: attempt.id,
-          },
+          { sessionId: result.conversationId, workspaceId: attempt.id },
           sessionId
         );
+        panelActions?.openSessionTab({
+          sessionId: result.conversationId,
+          workspaceId: attempt.id,
+          agentId: toAgent,
+          activate: true,
+        });
       } catch (error) {
-        toast.error(
-          t('tasks:hubListItem.forkFailed', {
-            error: getErrorMessage(error),
-          })
-        );
+        toast.error(t('tasks:hubListItem.forkFailed', { error: getErrorMessage(error) }));
       } finally {
         endPendingForkHandoff(pendingId);
       }
     },
-    [
-      attempt.id,
-      attempt.session?.agent_id,
-      attempt.session?.executor,
-      kanbanSessions,
-      sessionId,
-      t,
-    ]
+    [attempt.id, attempt.session?.agent_id, attempt.session?.executor, kanbanSessions, panelActions, queryClient, sessionId, t, timeline]
   );
   // The Nth user turn maps to the Nth checkpoint ordinal (see G-R1).
   const userOrdinalByKey = useMemo(() => {
@@ -1276,6 +1286,7 @@ const AgentTimelineConversation = forwardRef<
                                 dismissedQuestionIds={dismissedQuestionIds}
                                 onDismissQuestion={handleDismissQuestion}
                                 onOpenChild={handleOpenChild}
+                                onOpenConversation={handleOpenLinkedConversation}
                                 contextCompact={
                                   row
                                     ? (contextCompactByRowKey.get(row.key) ??
@@ -1311,6 +1322,12 @@ const AgentTimelineConversation = forwardRef<
                                 jumpTarget={jumpTarget}
                                 onJumpToVirtualIndex={handleJumpToVirtualIndex}
                                 onForkFromTurn={handleForkFromTurn}
+                                inlinePendingFork={
+                                  pendingFork?.afterTurnId &&
+                                  turnId === pendingFork.afterTurnId
+                                    ? pendingFork
+                                    : null
+                                }
                                 liveStatsFallback={
                                   row?.key === lastAssistantKey &&
                                   !isStreamingStatsRow
@@ -1351,6 +1368,7 @@ const AgentTimelineConversation = forwardRef<
                       hasMessages={timeline.length > 0}
                       fallbackFromModel={liveStats.model}
                       sessionConfigOptions={conversationSessionConfigOptions}
+                      suppressPendingFork={Boolean(pendingFork?.afterTurnId)}
                       suppressedByInlineHandoff={(() => {
                         const tailItem =
                           timelineItems[timelineItems.length - 1];

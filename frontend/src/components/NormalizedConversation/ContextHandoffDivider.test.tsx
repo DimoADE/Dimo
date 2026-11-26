@@ -13,6 +13,7 @@ import {
 import {
   ContextHandoffDivider,
   ConversationTailHandoff,
+  InlinePendingForkDivider,
   TimelineAgentHandoffRow,
   formatHandoffModelLabel,
   formatHandoffTokens,
@@ -257,5 +258,85 @@ describe('ContextHandoffDivider', () => {
     expect(
       screen.queryByTestId('context-handoff-divider')
     ).not.toBeInTheDocument();
+  });
+
+  it('invokes onOpenConversation when clicking a linked fork handoff divider', () => {
+    const onOpenConversation = vi.fn();
+    render(
+      wrapWithProviders(
+        <TimelineAgentHandoffRow
+          handoff={{
+            handoffKind: 'fork',
+            fromAgent: 'claude_code',
+            toAgent: 'codex',
+            fromModel: 'Grok 4.6',
+            toModel: null,
+            handoffTokens: 231,
+            continuationPolicy: 'portable',
+            linkedConversationId: 'child-session-1',
+            linkedWorkspaceId: 'ws-1',
+            forkRole: 'source',
+          }}
+          onOpenConversation={onOpenConversation}
+        />
+      )
+    );
+
+    const button = screen.getByRole('button');
+    button.click();
+    expect(onOpenConversation).toHaveBeenCalledWith(
+      'child-session-1',
+      'ws-1',
+      'codex'
+    );
+  });
+
+  it('renders InlinePendingForkDivider inline and suppresses tail duplicate when suppressPendingFork is set', () => {
+    const { unmount } = render(
+      wrapWithProviders(
+        <>
+          <InlinePendingForkDivider
+            pendingFork={{
+              id: 7,
+              sessionId: 'session-inline',
+              afterTurnId: 'turn-2',
+              fromAgent: 'antigravity',
+              fromModelLabel: '4 Neon',
+              toAgent: 'codex',
+              toModelLabel: 'Codex',
+            }}
+          />
+          <ConversationTailHandoff
+            sessionId="session-inline"
+            hasMessages={true}
+            suppressPendingFork={true}
+          />
+        </>
+      )
+    );
+
+    let pendingId = 0;
+    act(() => {
+      pendingId = beginPendingForkHandoff({
+        sessionId: 'session-inline',
+        afterTurnId: 'turn-2',
+        fromAgent: 'antigravity',
+        fromModelLabel: '4 Neon',
+        toAgent: 'codex',
+        toModelLabel: 'Codex',
+      });
+    });
+
+    const dividers = screen.getAllByTestId('context-handoff-divider');
+    expect(dividers).toHaveLength(1);
+    expect(dividers[0]).toHaveAttribute('data-handoff-mode', 'forking');
+    expect(screen.getByTestId('context-handoff-from-label')).toHaveTextContent(
+      '4 Neon'
+    );
+
+    act(() => {
+      endPendingForkHandoff(pendingId);
+    });
+    unmount();
   });
 });

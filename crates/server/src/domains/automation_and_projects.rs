@@ -747,6 +747,13 @@ impl ServerApplicationDomains {
 
     pub(super) async fn delegation_cancel(&self, args: Value) -> Result<Value, ApplicationError> {
         let args: DelegationCancelArgs = parse(args)?;
+        if let Some(orch) = crate::delegation_runtime::active_orchestration_service() {
+            orch.cancel_child_conversation(
+                args.child_conversation_id,
+                "delegation cancelled by user",
+            )
+            .await;
+        }
         ConversationSessionService::new(self.conversations.clone())
             .cancel_turn(
                 args.child_conversation_id,

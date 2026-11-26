@@ -92,6 +92,9 @@ describe('agent handoff host notes', () => {
       toModel: null,
       handoffTokens: 2200,
       continuationPolicy: 'portable',
+      linkedConversationId: null,
+      linkedWorkspaceId: null,
+      forkRole: null,
     });
 
     const roundTripSame = notice(
@@ -106,14 +109,17 @@ describe('agent handoff host notes', () => {
     expect(parseAgentHandoffNotice(roundTripSame)).toBeNull();
 
     const sameAgentFork = notice(
-      'host-note:agent-handoff:after:turn-1',
-      'host-note:agent-handoff:after:turn-1',
+      'host-note:agent-handoff:after:turn-1:fork:child-1',
+      'host-note:agent-handoff:after:turn-1:fork:child-1',
       JSON.stringify({
         handoffKind: 'fork',
         afterTurnId: 'turn-1',
         fromAgent: 'codex',
         toAgent: 'codex',
         handoffTokens: 231,
+        linkedConversationId: 'child-1',
+        linkedWorkspaceId: 'ws-1',
+        forkRole: 'source',
       })
     );
     expect(parseAgentHandoffNotice(sameAgentFork)).toEqual({
@@ -124,6 +130,9 @@ describe('agent handoff host notes', () => {
       toModel: null,
       handoffTokens: 231,
       continuationPolicy: 'portable',
+      linkedConversationId: 'child-1',
+      linkedWorkspaceId: 'ws-1',
+      forkRole: 'source',
     });
   });
 });

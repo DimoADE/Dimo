@@ -68,6 +68,9 @@ export type ParsedAgentHandoffNotice = {
   toModel: string | null;
   handoffTokens: number | null;
   continuationPolicy: 'portable' | 'fresh';
+  linkedConversationId: string | null;
+  linkedWorkspaceId: string | null;
+  forkRole: 'source' | 'child' | null;
 };
 
 export function isAgentHandoffHostNote(row: TimelineRow): boolean {
@@ -122,6 +125,23 @@ export function parseAgentHandoffNotice(
         : null;
     const continuationPolicy =
       parsed.continuationPolicy === 'fresh' ? 'fresh' : 'portable';
+    const rawLinkedConversationId =
+      parsed.linkedConversationId ?? parsed.linked_conversation_id;
+    const linkedConversationId =
+      typeof rawLinkedConversationId === 'string' &&
+      rawLinkedConversationId.trim().length > 0
+        ? rawLinkedConversationId.trim()
+        : null;
+    const rawLinkedWorkspaceId =
+      parsed.linkedWorkspaceId ?? parsed.linked_workspace_id;
+    const linkedWorkspaceId =
+      typeof rawLinkedWorkspaceId === 'string' &&
+      rawLinkedWorkspaceId.trim().length > 0
+        ? rawLinkedWorkspaceId.trim()
+        : null;
+    const rawForkRole = parsed.forkRole ?? parsed.fork_role;
+    const forkRole =
+      rawForkRole === 'source' || rawForkRole === 'child' ? rawForkRole : null;
     return {
       handoffKind,
       fromAgent,
@@ -130,6 +150,9 @@ export function parseAgentHandoffNotice(
       toModel,
       handoffTokens,
       continuationPolicy,
+      linkedConversationId,
+      linkedWorkspaceId,
+      forkRole,
     };
   } catch {
     return null;
