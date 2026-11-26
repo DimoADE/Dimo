@@ -892,6 +892,7 @@ impl HostClientRuntime {
                     account_user_id: Some(account_id.to_string()),
                     cloud_synced: true,
                     updated_at: item.updated_at.or_else(|| Some(Utc::now().to_rfc3339())),
+                    ..StoredProfile::default()
                 };
                 write_saved_ssh_host_file(self.store_path(), &created);
                 matched_local_ids.insert(id);

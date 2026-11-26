@@ -874,6 +874,14 @@ impl ServerApplicationDomains {
             }
             DomainCommand::FrontendPreferencesUpdate => {
                 let args: PreferencesArgs = parse(args)?;
+                let touches_account_connectivity = args.preferences.keys().any(|key| {
+                    matches!(
+                        key.as_str(),
+                        "__account_token_v1"
+                            | "__account_owner_v1"
+                            | "__same_account_auto_connect_v1"
+                    )
+                });
                 let stored = merge_object_section(
                     &utils::assets::settings_path(),
                     "frontend",
@@ -881,6 +889,9 @@ impl ServerApplicationDomains {
                 )
                 .await
                 .map_err(internal_error)?;
+                if touches_account_connectivity {
+                    crate::host::connectivity::account_daemon::notify_connectivity_changed();
+                }
                 serialize(stored)
             }
             DomainCommand::ProjectWorktreeSettingsGet => {

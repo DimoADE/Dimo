@@ -471,6 +471,7 @@ async fn first_token_is_remembered_until_the_host_revokes_it() {
                 origin: Some(origin.clone()),
                 token: Some("K7M2NPQX".into()),
                 profile_id: None,
+                endpoints: Vec::new(),
             },
         )
         .await
@@ -529,6 +530,7 @@ async fn first_token_is_remembered_until_the_host_revokes_it() {
                 origin: None,
                 token: None,
                 profile_id: Some(first.profile.id.clone()),
+                endpoints: Vec::new(),
             },
         )
         .await
@@ -556,6 +558,7 @@ async fn first_token_is_remembered_until_the_host_revokes_it() {
                 origin: None,
                 token: None,
                 profile_id: Some(first.profile.id.clone()),
+                endpoints: Vec::new(),
             },
         )
         .await
@@ -587,6 +590,7 @@ async fn first_token_is_remembered_until_the_host_revokes_it() {
                 origin: None,
                 token: None,
                 profile_id: Some(first.profile.id.clone()),
+                endpoints: Vec::new(),
             },
         )
         .await

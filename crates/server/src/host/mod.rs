@@ -1,6 +1,7 @@
 pub mod account_flow;
 pub mod catalog;
 pub mod collaboration;
+pub mod connectivity;
 pub mod conversation;
 pub mod conversation_handoff;
 pub mod db_health;

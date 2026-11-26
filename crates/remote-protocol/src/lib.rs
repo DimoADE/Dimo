@@ -16,7 +16,8 @@ pub use command::{CommandRequest, CommandResponse};
 pub use device_auth::{
     CreateDeviceConnectRequest, CreatePairingRequest, DeviceConnectRequestStatus, DeviceCredential,
     DeviceId, DevicePermissionPreset, PairingChallenge, PairingId, PendingDeviceConnectRequest,
-    PollDeviceConnectResponse, RedeemPairingRequest, RevokeDeviceResponse,
+    PollDeviceConnectResponse, RedeemHostAccessGrantRequest, RedeemPairingRequest,
+    RevokeDeviceResponse,
 };
 pub use error::{ErrorCode, ErrorEnvelope};
 pub use ids::{ConversationId, OperationId, SubscriptionId};

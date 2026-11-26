@@ -1164,14 +1164,15 @@ mod tests {
             tokio::task::yield_now().await;
 
             // Exactly one subscriber remains retained, so a live task must still be registered.
-            let state = bus.stream_state.lock().expect("lock stream state");
-            assert_eq!(state.refs.get(key).copied(), Some(1));
-            let handle = state
-                .tasks
-                .get(key)
-                .expect("retained subscriber must still have an active task");
-            assert!(!handle.is_finished());
-            drop(state);
+            {
+                let state = bus.stream_state.lock().expect("lock stream state");
+                assert_eq!(state.refs.get(key).copied(), Some(1));
+                let handle = state
+                    .tasks
+                    .get(key)
+                    .expect("retained subscriber must still have an active task");
+                assert!(!handle.is_finished());
+            }
 
             // Clean up for next iteration.
             bus.release_stream_task(key);

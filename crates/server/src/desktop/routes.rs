@@ -310,6 +310,23 @@ struct LeaseArg {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct LookupBeaconArg {
+    relay_origin: String,
+    pairing_code: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CustomPublicOriginArg {
+    origin: String,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    skip_probe: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct BackupCancelArg {
     #[serde(default)]
     op_id: Option<String>,
@@ -508,13 +525,22 @@ async fn invoke_desktop_command(
         "get_web_service_config" => to_json(web_service::get_web_service_config().await?)?,
         "update_web_service_config" => {
             let parsed: ConfigArg = parse_args(args)?;
-            to_json(
-                web_service::update_web_service_config(&state.web_service, parsed.config).await?,
-            )?
+            let updated =
+                web_service::update_web_service_config(&state.web_service, parsed.config).await?;
+            crate::host::connectivity::account_daemon::notify_connectivity_changed();
+            to_json(updated)?
         }
         "get_web_server_status" => to_json(web_service::get_web_server_status().await?)?,
-        "start_web_server" => to_json(web_service::start_web_server(&state.web_service).await?)?,
-        "stop_web_server" => to_json(web_service::stop_web_server().await?)?,
+        "start_web_server" => {
+            let status = web_service::start_web_server(&state.web_service).await?;
+            crate::host::connectivity::account_daemon::notify_connectivity_changed();
+            to_json(status)?
+        }
+        "stop_web_server" => {
+            let status = web_service::stop_web_server().await?;
+            crate::host::connectivity::account_daemon::notify_connectivity_changed();
+            to_json(status)?
+        }
         "probe_web_service_port" => {
             let parsed: PortArg = parse_args(args)?;
             to_json(web_service::probe_web_service_port(parsed.port).await?)?
@@ -555,9 +581,10 @@ async fn invoke_desktop_command(
         "get_host_tunnel" => to_json(host_tunnel::get_host_tunnel(&state.web_service).await?)?,
         "set_host_tunnel_enabled" => {
             let parsed: EnabledArg = parse_args(args)?;
-            to_json(
-                host_tunnel::set_host_tunnel_enabled(&state.web_service, parsed.enabled).await?,
-            )?
+            let status =
+                host_tunnel::set_host_tunnel_enabled(&state.web_service, parsed.enabled).await?;
+            crate::host::connectivity::account_daemon::notify_connectivity_changed();
+            to_json(status)?
         }
         "check_existing_host_tunnel" => {
             let parsed: AddressArg = parse_args(args)?;
@@ -567,7 +594,9 @@ async fn invoke_desktop_command(
         }
         "select_saved_host_tunnel" => {
             let parsed: OptionalIdArg = parse_args(args)?;
-            to_json(host_tunnel::select_saved_host_tunnel(parsed.id).await?)?
+            let status = host_tunnel::select_saved_host_tunnel(parsed.id).await?;
+            crate::host::connectivity::account_daemon::notify_connectivity_changed();
+            to_json(status)?
         }
         "start_create_host_tunnel" => {
             let parsed: AddressArg = parse_args(args)?;
@@ -576,18 +605,73 @@ async fn invoke_desktop_command(
             )?
         }
         "confirm_create_host_tunnel" => {
-            to_json(host_tunnel::confirm_create_host_tunnel(&state.web_service).await?)?
+            let status = host_tunnel::confirm_create_host_tunnel(&state.web_service).await?;
+            crate::host::connectivity::account_daemon::notify_connectivity_changed();
+            to_json(status)?
         }
         "cancel_create_host_tunnel" => to_json(host_tunnel::cancel_create_host_tunnel().await?)?,
         "remove_saved_host_tunnel" => {
             let parsed: IdArg = parse_args(args)?;
-            to_json(host_tunnel::remove_saved_host_tunnel(parsed.id).await?)?
+            let status = host_tunnel::remove_saved_host_tunnel(parsed.id).await?;
+            crate::host::connectivity::account_daemon::notify_connectivity_changed();
+            to_json(status)?
         }
         "set_account_relay_lease" => {
             let parsed: LeaseArg = parse_args(args)?;
-            to_json(host_tunnel::set_account_relay_lease(parsed.lease).await?)?
+            let status = host_tunnel::set_account_relay_lease(parsed.lease).await?;
+            crate::host::connectivity::account_daemon::notify_connectivity_changed();
+            to_json(status)?
         }
-        "reconnect_host_tunnel" => to_json(host_tunnel::reconnect_active_tunnel().await?)?,
+        "reconnect_host_tunnel" => {
+            let status = host_tunnel::reconnect_active_tunnel().await?;
+            crate::host::connectivity::account_daemon::notify_connectivity_changed();
+            to_json(status)?
+        }
+        "list_custom_public_origins" => {
+            to_json(crate::host::connectivity::custom_public::list_custom_public_origins().await)?
+        }
+        "probe_custom_public_origin" => {
+            let parsed: CustomPublicOriginArg = parse_args(args)?;
+            let hid = local_host_id().await;
+            let res = crate::host::connectivity::custom_public::probe_custom_public_origin(
+                &parsed.origin,
+                hid.as_deref(),
+            )
+            .await
+            .map_err(DesktopError::BadRequest)?;
+            to_json(res)?
+        }
+        "add_custom_public_origin" => {
+            let parsed: CustomPublicOriginArg = parse_args(args)?;
+            let _ = web_service::ensure_listening(&state.web_service).await;
+            let hid = local_host_id().await;
+            let (record, check) =
+                crate::host::connectivity::custom_public::add_custom_public_origin(
+                    &parsed.origin,
+                    parsed.label,
+                    hid.as_deref(),
+                    parsed.skip_probe,
+                )
+                .await
+                .map_err(DesktopError::BadRequest)?;
+            host_tunnel::refresh_published_reachability().await;
+            crate::host::connectivity::account_daemon::notify_connectivity_changed();
+            json!({
+                "record": record,
+                "check": check,
+                "customPublicOrigins": crate::host::connectivity::custom_public::list_custom_public_origins().await,
+            })
+        }
+        "remove_custom_public_origin" => {
+            let parsed: IdArg = parse_args(args)?;
+            let remaining =
+                crate::host::connectivity::custom_public::remove_custom_public_origin(&parsed.id)
+                    .await
+                    .map_err(DesktopError::BadRequest)?;
+            host_tunnel::refresh_published_reachability().await;
+            crate::host::connectivity::account_daemon::notify_connectivity_changed();
+            json!({ "customPublicOrigins": remaining })
+        }
 
         // Remote desktop proxy
         "remote_desktop_connect" => {
@@ -793,6 +877,29 @@ async fn invoke_desktop_command(
                 .await?;
             state.events.emit(HOST_CLIENT_CHANGED, ());
             to_json(result)?
+        }
+        "host_client_identity" => to_json(host_client::runtime().client_identity()?)?,
+        "host_client_connect_with_grant" => {
+            let parsed: RequestArg<host_client::probe::ConnectWithGrantRequest> = parse_args(args)?;
+            host_client::runtime()
+                .set_local_host_id(local_host_id().await)
+                .await;
+            let result = host_client::runtime()
+                .connect_with_grant(&caller, &state.remote_desktop, parsed.request)
+                .await?;
+            host_client::runtime()
+                .bind_saved_profile_window(&state.remote_desktop, &result.profile.id)
+                .await?;
+            state.events.emit(HOST_CLIENT_CHANGED, ());
+            to_json(result)?
+        }
+        "host_client_lookup_beacon" => {
+            let parsed: LookupBeaconArg = parse_args(args)?;
+            to_json(
+                host_client::runtime()
+                    .lookup_beacon(&parsed.relay_origin, &parsed.pairing_code)
+                    .await?,
+            )?
         }
         "host_client_disconnect" => {
             host_client::runtime()

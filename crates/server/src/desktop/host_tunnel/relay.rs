@@ -246,7 +246,7 @@ async fn stop_quick_tunnel_locked() {
     set_quick_tunnel_origin(None);
     *QUICK_TUNNEL_STATE.lock().await = RelayState::default();
     if let Ok(store) = load_store().await {
-        publish_browser_origins(&store);
+        publish_browser_origins(&store).await;
     }
 }
 
@@ -707,7 +707,7 @@ where
     if publish_to_host {
         set_quick_tunnel_origin(Some(tenant_origin.clone()));
         if let Ok(store) = load_store().await {
-            publish_browser_origins(&store);
+            publish_browser_origins(&store).await;
         }
         promote_pending_if_connected(host, port, token, host_id).await;
         {

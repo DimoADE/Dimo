@@ -1,3 +1,4 @@
+mod headless;
 mod relay;
 
 use std::{
@@ -15,6 +16,10 @@ use utils::tunnel::{
 };
 use uuid::Uuid;
 
+pub use self::headless::{
+    account_lease_remaining_seconds, current_relay_status, current_status_snapshot,
+    refresh_published_reachability, set_headless_listen_port, set_host_tunnel_enabled_headless,
+};
 use self::relay::{
     ensure_quick_tunnel, quick_tunnel_origin, quick_tunnel_snapshot, relay_snapshot,
     set_quick_tunnel_origin, start_relay,
@@ -242,19 +247,8 @@ async fn save_store(store: &HostTunnelStore) -> Result<(), DesktopError> {
     )
     .await
     .map_err(|error| DesktopError::Internal(error.to_string()))?;
-    publish_browser_origins(store);
+    publish_browser_origins(store).await;
     Ok(())
-}
-
-fn active_published_origin(store: &HostTunnelStore) -> Option<String> {
-    if !store.enabled {
-        return None;
-    }
-    store
-        .saved
-        .iter()
-        .find(|item| Some(item.id.as_str()) == store.active_id.as_deref())
-        .map(|item| item.origin.clone())
 }
 
 fn valid_account_lease(store: &HostTunnelStore) -> Option<&AccountRelayLease> {
@@ -304,33 +298,8 @@ fn default_official_quick_origin(store: &HostTunnelStore) -> Option<String> {
     ))
 }
 
-fn all_published_origin_strings(store: &HostTunnelStore) -> Vec<String> {
-    let mut origins = Vec::new();
-    if store.enabled {
-        if let Some(custom) = active_published_origin(store) {
-            origins.push(custom);
-        }
-        if let Some(quick) = default_official_quick_origin(store)
-            && !origins.contains(&quick)
-        {
-            origins.push(quick);
-        }
-    } else if let Some(quick) = quick_tunnel_origin()
-        && !origins.contains(&quick)
-    {
-        origins.push(quick);
-    }
-    origins
-}
-
-fn publish_browser_origins(store: &HostTunnelStore) {
-    let origins = all_published_origin_strings(store);
-    crate::set_extra_browser_origins(origins.clone());
-    crate::set_published_reachability(
-        origins
-            .into_iter()
-            .map(remote_protocol::ReachabilityOrigin::published),
-    );
+async fn publish_browser_origins(store: &HostTunnelStore) {
+    headless::publish_reachability_for_store(store).await;
 }
 
 fn view_saved(item: &SavedTunnel) -> SavedTunnelView {
@@ -409,7 +378,10 @@ fn status_from(store: &HostTunnelStore, relay: &RelayState) -> HostTunnelStatus 
 }
 
 async fn host_listen_port() -> u16 {
-    if let Some(port) = super::web_service::listening_port().await {
+    if let Some(port) = super::web_service::listening_port()
+        .await
+        .or_else(headless::headless_listen_port)
+    {
         return port;
     }
     #[derive(Deserialize)]
@@ -431,10 +403,13 @@ async fn host_listen_port() -> u16 {
 
 pub async fn published_origins() -> Vec<ReachabilityOrigin> {
     let store = load_store().await.unwrap_or_default();
-    all_published_origin_strings(&store)
-        .into_iter()
-        .map(ReachabilityOrigin::published)
-        .collect()
+    let mut origins = headless::store_published_reachability(&store);
+    for custom in crate::host::connectivity::custom_public::custom_public_reachability().await {
+        if !origins.iter().any(|item| item.origin == custom.origin) {
+            origins.push(custom);
+        }
+    }
+    origins
 }
 
 pub async fn should_keep_listening() -> bool {
@@ -656,8 +631,10 @@ pub async fn publish_pairing_code_beacon(
 
 pub async fn sync_relay() {
     let store = load_store().await.unwrap_or_default();
-    publish_browser_origins(&store);
-    let listening_port = super::web_service::listening_port().await;
+    publish_browser_origins(&store).await;
+    let listening_port = super::web_service::listening_port()
+        .await
+        .or_else(headless::headless_listen_port);
     let local_port = listening_port.unwrap_or(17891);
 
     match decide_relay_sync_mode(&store) {

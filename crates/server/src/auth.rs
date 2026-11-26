@@ -422,6 +422,10 @@ pub trait ServerAuth: Send + Sync {
     ) -> Result<(), AuthStoreError> {
         Err(AuthStoreError::PairingUnavailable)
     }
+
+    fn sqlite_pool(&self) -> Option<&SqlitePool> {
+        None
+    }
 }
 
 pub(crate) struct StaticServerAuth {
@@ -547,6 +551,10 @@ fn decode_hex_blob(hex: &str) -> Option<Vec<u8>> {
 
 #[async_trait]
 impl ServerAuth for SqliteServerAuth {
+    fn sqlite_pool(&self) -> Option<&SqlitePool> {
+        Some(&self.pool)
+    }
+
     async fn authenticate(
         &self,
         candidate: &str,
@@ -1065,11 +1073,13 @@ impl ServerAuth for SqliteServerAuth {
             let canonical_pubkey = parsed_pubkey.map(|(_, pk)| pk);
 
             let owner = AuthenticatedCredential::host_console_owner();
-            let preset = if client_kind == "mobile" {
-                DevicePermissionPreset::Companion
-            } else {
-                DevicePermissionPreset::Workstation
-            };
+            let preset = request.preset.unwrap_or_else(|| {
+                if client_kind == "mobile" {
+                    DevicePermissionPreset::Companion
+                } else {
+                    DevicePermissionPreset::Workstation
+                }
+            });
             let scopes = resolve_pairing_scopes(
                 &owner.scopes,
                 CreatePairingRequest {

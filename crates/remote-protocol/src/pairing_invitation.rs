@@ -25,6 +25,27 @@ impl ReachabilityOrigin {
             kind: "published".to_string(),
         }
     }
+
+    pub fn custom_public(origin: impl Into<String>) -> Self {
+        Self {
+            origin: origin.into(),
+            kind: "custom_public".to_string(),
+        }
+    }
+
+    pub fn custom_relay(origin: impl Into<String>) -> Self {
+        Self {
+            origin: origin.into(),
+            kind: "custom_relay".to_string(),
+        }
+    }
+
+    pub fn official_relay(origin: impl Into<String>) -> Self {
+        Self {
+            origin: origin.into(),
+            kind: "official_relay".to_string(),
+        }
+    }
 }
 
 /// Payload inside a `dimo-pairing:` invitation. Long-lived credentials must

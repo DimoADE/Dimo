@@ -33,6 +33,7 @@ impl std::fmt::Debug for RemoteCredential {
 struct RemoteProfile {
     base_url: String,
     token: RemoteCredential,
+    e2ee: Arc<RwLock<Option<crate::host::connectivity::e2ee_client::E2eeClientSession>>>,
 }
 
 struct RemotePump {
@@ -43,6 +44,50 @@ struct RemotePump {
 
 pub type RemoteEventSink = Arc<dyn Fn(Value) + Send + Sync>;
 pub type HostFamilyEventEmitter = Arc<dyn Fn(&str, &str, &Value) + Send + Sync>;
+
+fn is_loopback_base_url(base_url: &str) -> bool {
+    Url::parse(base_url).ok().is_some_and(|url| {
+        matches!(
+            url.host_str().map(str::to_ascii_lowercase).as_deref(),
+            Some("127.0.0.1" | "localhost" | "::1" | "[::1]")
+        )
+    })
+}
+
+fn is_relay_base_url(base_url: &str) -> bool {
+    Url::parse(base_url)
+        .ok()
+        .is_some_and(|url| url.path().starts_with("/t/"))
+}
+
+async fn ensure_profile_e2ee(
+    client: &reqwest::Client,
+    profile: &RemoteProfile,
+    force_refresh: bool,
+) -> Result<Option<crate::host::connectivity::e2ee_client::E2eeClientSession>, DesktopError> {
+    if is_loopback_base_url(&profile.base_url) {
+        return Ok(None);
+    }
+    if !force_refresh
+        && let Some(existing) = profile.e2ee.read().await.clone()
+    {
+        return Ok(Some(existing));
+    }
+    match crate::host::connectivity::e2ee_client::handshake(client, &profile.base_url).await {
+        Ok(session) => {
+            *profile.e2ee.write().await = Some(session.clone());
+            Ok(Some(session))
+        }
+        Err(error) => {
+            if is_relay_base_url(&profile.base_url) {
+                return Err(DesktopError::Internal(format!(
+                    "E2EE handshake required for relay connection: {error}"
+                )));
+            }
+            Ok(None)
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct RemoteDesktopRegistry {
@@ -88,6 +133,7 @@ impl RemoteDesktopRegistry {
             RemoteProfile {
                 base_url,
                 token: RemoteCredential(token),
+                e2ee: Arc::new(RwLock::new(None)),
             },
         );
         Ok(())
@@ -158,6 +204,77 @@ impl RemoteDesktopRegistry {
         ))
     }
 
+    async fn send_authed_request(
+        &self,
+        profile: &RemoteProfile,
+        method: reqwest::Method,
+        path: &str,
+        body_json: Option<&Value>,
+    ) -> Result<(reqwest::StatusCode, Vec<u8>), DesktopError> {
+        let url = format!("{}{path}", profile.base_url);
+        let plain_body = body_json
+            .map(serde_json::to_vec)
+            .transpose()
+            .map_err(internal)?;
+
+        for attempt in 0..2 {
+            let session = ensure_profile_e2ee(&self.client, profile, attempt > 0).await?;
+            let mut req = self
+                .client
+                .request(method.clone(), &url)
+                .header("x-dimo-protocol-version", remote_protocol::PROTOCOL_VERSION);
+
+            if let Some(ref session) = session {
+                let enc_headers =
+                    crate::host::connectivity::e2ee_client::build_encrypted_headers(
+                        session,
+                        Some(&profile.token.0),
+                    )
+                    .map_err(internal)?;
+                req = req.headers(enc_headers);
+                if let Some(ref plain) = plain_body {
+                    let encrypted = crate::host::connectivity::e2ee_client::encrypt_request_body(
+                        session, plain,
+                    )
+                    .map_err(internal)?;
+                    req = req.body(encrypted);
+                }
+            } else {
+                req = req.bearer_auth(&profile.token.0);
+                if let Some(ref plain) = plain_body {
+                    req = req
+                        .header("content-type", "application/json")
+                        .body(plain.clone());
+                }
+            }
+
+            let response = req.send().await.map_err(internal)?;
+            let status = response.status();
+            if status == reqwest::StatusCode::PRECONDITION_FAILED && attempt == 0 && session.is_some()
+            {
+                *profile.e2ee.write().await = None;
+                continue;
+            }
+            let resp_headers = response.headers().clone();
+            let raw = response.bytes().await.map_err(internal)?;
+            let decoded = if let Some(ref session) = session {
+                crate::host::connectivity::e2ee_client::decrypt_response_bytes(
+                    session,
+                    &resp_headers,
+                    &raw,
+                )
+                .map_err(internal)?
+            } else {
+                raw.to_vec()
+            };
+            return Ok((status, decoded));
+        }
+
+        Err(DesktopError::Internal(
+            "remote Server E2EE session re-key failed".to_string(),
+        ))
+    }
+
     pub async fn call(
         &self,
         window_label: &str,
@@ -178,19 +295,19 @@ impl RemoteDesktopRegistry {
             ));
         }
         let profile = self.profile(window_label, profile_id).await?;
-        let response = self
-            .client
-            .post(format!("{}/api/v1/call/{command}", profile.base_url))
-            .bearer_auth(&profile.token.0)
-            .header("x-dimo-protocol-version", remote_protocol::PROTOCOL_VERSION)
-            .json(&serde_json::json!({
-                "operation_id": operation_id.unwrap_or_default(),
-                "args": args,
-            }))
-            .send()
-            .await
-            .map_err(internal)?;
-        decode_command_response(response).await
+        let payload = serde_json::json!({
+            "operation_id": operation_id.unwrap_or_default(),
+            "args": args,
+        });
+        let (status, body) = self
+            .send_authed_request(
+                &profile,
+                reqwest::Method::POST,
+                &format!("/api/v1/call/{command}"),
+                Some(&payload),
+            )
+            .await?;
+        decode_command_bytes(status, &body)
     }
 
     pub async fn capabilities(
@@ -199,18 +316,13 @@ impl RemoteDesktopRegistry {
         profile_id: &str,
     ) -> Result<ServerCapabilities, DesktopError> {
         let profile = self.profile(window_label, profile_id).await?;
-        let response = self
-            .client
-            .get(format!("{}/api/v1/capabilities", profile.base_url))
-            .bearer_auth(&profile.token.0)
-            .header("x-dimo-protocol-version", remote_protocol::PROTOCOL_VERSION)
-            .send()
-            .await
-            .map_err(internal)?;
-        if response.status().is_success() {
-            return response.json().await.map_err(internal);
+        let (status, body) = self
+            .send_authed_request(&profile, reqwest::Method::GET, "/api/v1/capabilities", None)
+            .await?;
+        if status.is_success() {
+            return serde_json::from_slice(&body).map_err(internal);
         }
-        Err(remote_error(response).await)
+        Err(remote_error_from_bytes(status, &body))
     }
 
     pub async fn listen_host_event(
@@ -233,9 +345,11 @@ impl RemoteDesktopRegistry {
             },
         );
         let pumps = self.pumps.clone();
+        let http_client = self.client.clone();
         let window_label = window_label.to_string();
         tokio::spawn(async move {
             let result = pump_host_event_socket(
+                http_client,
                 emitter,
                 profile,
                 event,
@@ -272,8 +386,10 @@ impl RemoteDesktopRegistry {
             },
         );
         let pumps = self.pumps.clone();
+        let http_client = self.client.clone();
         tokio::spawn(async move {
             let result = pump_subscription_socket(
+                http_client,
                 profile,
                 request,
                 on_event.clone(),
@@ -295,20 +411,17 @@ impl RemoteDesktopRegistry {
     }
 }
 
-async fn decode_command_response(response: reqwest::Response) -> Result<Value, DesktopError> {
-    if response.status().is_success() {
-        return response
-            .json::<CommandResponse<Value>>()
-            .await
+fn decode_command_bytes(status: reqwest::StatusCode, body: &[u8]) -> Result<Value, DesktopError> {
+    if status.is_success() {
+        return serde_json::from_slice::<CommandResponse<Value>>(body)
             .map(|response| response.data)
             .map_err(internal);
     }
-    Err(remote_error(response).await)
+    Err(remote_error_from_bytes(status, body))
 }
 
-async fn remote_error(response: reqwest::Response) -> DesktopError {
-    let status = response.status();
-    match response.json::<ErrorEnvelope>().await {
+fn remote_error_from_bytes(status: reqwest::StatusCode, body: &[u8]) -> DesktopError {
+    match serde_json::from_slice::<ErrorEnvelope>(body) {
         Ok(envelope) => DesktopError::BadRequest(format!(
             "remote Server rejected the request ({status}): {}",
             envelope.message
@@ -318,25 +431,7 @@ async fn remote_error(response: reqwest::Response) -> DesktopError {
 }
 
 pub(crate) fn validate_base_url(value: &str) -> Result<String, DesktopError> {
-    let url = Url::parse(value.trim())
-        .map_err(|error| DesktopError::BadRequest(format!("invalid Server URL: {error}")))?;
-    if !matches!(url.scheme(), "https" | "http") {
-        return Err(DesktopError::BadRequest(
-            "remote Server URL must use HTTP or HTTPS".to_string(),
-        ));
-    }
-    if !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || !matches!(url.path(), "" | "/")
-    {
-        return Err(DesktopError::BadRequest(
-            "remote Server URL must be an origin without credentials, path, query, or fragment"
-                .to_string(),
-        ));
-    }
-    Ok(url.as_str().trim_end_matches('/').to_string())
+    crate::host::connectivity::validate_remote_base_url(value).map_err(DesktopError::BadRequest)
 }
 
 fn internal(error: impl std::fmt::Display) -> DesktopError {
@@ -353,16 +448,30 @@ fn token_protocol(token: &str) -> String {
 }
 
 async fn connect_remote_socket(
+    client: &reqwest::Client,
     profile: &RemoteProfile,
 ) -> Result<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        Option<crate::host::connectivity::e2ee_client::E2eeClientSession>,
+    ),
     DesktopError,
 > {
     use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue};
+    let e2ee = ensure_profile_e2ee(client, profile, false).await?;
     let mut request = websocket_url(&profile.base_url)
         .into_client_request()
         .map_err(internal)?;
-    let protocol = format!("dimo.v1, {}", token_protocol(&profile.token.0));
+    let protocol = match &e2ee {
+        Some(session) => format!(
+            "dimo.v1, {}, {}",
+            token_protocol(&profile.token.0),
+            crate::host::connectivity::e2ee_client::ws_e2ee_subprotocol(session)
+        ),
+        None => format!("dimo.v1, {}", token_protocol(&profile.token.0)),
+    };
     request.headers_mut().insert(
         "Sec-WebSocket-Protocol",
         HeaderValue::from_str(&protocol).map_err(internal)?,
@@ -370,10 +479,34 @@ async fn connect_remote_socket(
     let (stream, _) = tokio_tungstenite::connect_async(request)
         .await
         .map_err(internal)?;
-    Ok(stream)
+    Ok((stream, e2ee))
 }
 
+fn encode_ws_frame(
+    e2ee: Option<&crate::host::connectivity::e2ee_client::E2eeClientSession>,
+    plain: &str,
+) -> Result<String, DesktopError> {
+    match e2ee {
+        Some(session) => {
+            crate::host::connectivity::e2ee_client::encrypt_ws_text(session, plain).map_err(internal)
+        }
+        None => Ok(plain.to_string()),
+    }
+}
+
+fn decode_ws_frame(
+    e2ee: Option<&crate::host::connectivity::e2ee_client::E2eeClientSession>,
+    wire: &str,
+) -> Option<String> {
+    match e2ee {
+        Some(session) => crate::host::connectivity::e2ee_client::decrypt_ws_text(session, wire).ok(),
+        None => Some(wire.to_string()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn pump_host_event_socket(
+    http_client: reqwest::Client,
     emitter: HostFamilyEventEmitter,
     profile: RemoteProfile,
     event: String,
@@ -390,12 +523,13 @@ async fn pump_host_event_socket(
     let mut after_sequence: i64 = 0;
 
     loop {
-        let mut stream = match connect_remote_socket(&profile).await {
-            Ok(stream) => {
+        let (mut stream, e2ee) = match connect_remote_socket(&http_client, &profile).await {
+            Ok(pair) => {
                 backoff_ms = 500;
-                stream
+                pair
             }
             Err(_) => {
+                *profile.e2ee.write().await = None;
                 tokio::select! {
                     _ = &mut cancel_rx => return Ok(()),
                     _ = tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)) => {
@@ -415,11 +549,15 @@ async fn pump_host_event_socket(
                 "after_sequence": after_sequence,
             }
         });
-        if stream
-            .send(Message::Text(attach.to_string().into()))
-            .await
-            .is_err()
-        {
+        let attach_wire = match encode_ws_frame(e2ee.as_ref(), &attach.to_string()) {
+            Ok(text) => text,
+            Err(_) => {
+                *profile.e2ee.write().await = None;
+                continue;
+            }
+        };
+        if stream.send(Message::Text(attach_wire.into())).await.is_err() {
+            *profile.e2ee.write().await = None;
             tokio::select! {
                 _ = &mut cancel_rx => return Ok(()),
                 _ = tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)) => {
@@ -438,7 +576,9 @@ async fn pump_host_event_socket(
                         "type": "detach",
                         "subscription_id": subscription_id,
                     });
-                    let _ = stream.send(Message::Text(detach.to_string().into())).await;
+                    if let Ok(wire) = encode_ws_frame(e2ee.as_ref(), &detach.to_string()) {
+                        let _ = stream.send(Message::Text(wire.into())).await;
+                    }
                     return Ok(());
                 }
                 _ = keepalive.tick() => {
@@ -458,7 +598,10 @@ async fn pump_host_event_socket(
                         }
                         Message::Pong(_) => {}
                         Message::Text(text) => {
-                            let Ok(value) = serde_json::from_str::<Value>(&text) else {
+                            let Some(plain) = decode_ws_frame(e2ee.as_ref(), &text) else {
+                                continue;
+                            };
+                            let Ok(value) = serde_json::from_str::<Value>(&plain) else {
                                 continue;
                             };
                             match value.get("type").and_then(Value::as_str) {
@@ -498,6 +641,7 @@ async fn pump_host_event_socket(
         if non_retriable_error {
             return Ok(());
         }
+        *profile.e2ee.write().await = None;
         tokio::select! {
             _ = &mut cancel_rx => return Ok(()),
             _ = tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)) => {
@@ -508,6 +652,7 @@ async fn pump_host_event_socket(
 }
 
 async fn pump_subscription_socket(
+    http_client: reqwest::Client,
     profile: RemoteProfile,
     request: Value,
     on_event: RemoteEventSink,
@@ -516,7 +661,17 @@ async fn pump_subscription_socket(
 ) -> Result<(), DesktopError> {
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
-    let mut stream = connect_remote_socket(&profile).await?;
+    let (mut stream, e2ee) = match connect_remote_socket(&http_client, &profile).await {
+        Ok(pair) => pair,
+        Err(first_error) => {
+            let had_e2ee = profile.e2ee.read().await.is_some();
+            if !had_e2ee {
+                return Err(first_error);
+            }
+            *profile.e2ee.write().await = None;
+            connect_remote_socket(&http_client, &profile).await?
+        }
+    };
     let mut request = request;
     if let Some(object) = request.as_object_mut() {
         object.insert(
@@ -528,8 +683,9 @@ async fn pump_subscription_socket(
         "type": "attach",
         "request": request,
     });
+    let attach_wire = encode_ws_frame(e2ee.as_ref(), &attach.to_string())?;
     stream
-        .send(Message::Text(attach.to_string().into()))
+        .send(Message::Text(attach_wire.into()))
         .await
         .map_err(internal)?;
     tokio::pin!(cancel_rx);
@@ -541,7 +697,9 @@ async fn pump_subscription_socket(
                     "type": "detach",
                     "subscription_id": subscription_id,
                 });
-                let _ = stream.send(Message::Text(detach.to_string().into())).await;
+                if let Ok(wire) = encode_ws_frame(e2ee.as_ref(), &detach.to_string()) {
+                    let _ = stream.send(Message::Text(wire.into())).await;
+                }
                 break;
             }
             _ = keepalive.tick() => {
@@ -562,7 +720,10 @@ async fn pump_subscription_socket(
                     Message::Text(text) => text,
                     _ => continue,
                 };
-                let Ok(value) = serde_json::from_str::<Value>(&text) else {
+                let Some(plain) = decode_ws_frame(e2ee.as_ref(), &text) else {
+                    continue;
+                };
+                let Ok(value) = serde_json::from_str::<Value>(&plain) else {
                     continue;
                 };
                 match value.get("type").and_then(Value::as_str) {
@@ -629,10 +790,20 @@ mod tests {
             validate_base_url("http://47.109.140.92:13630").expect("tunnel origin"),
             "http://47.109.140.92:13630"
         );
+        assert_eq!(
+            validate_base_url("https://relay.dimo-ai.com/t/host-abc123/").expect("relay origin"),
+            "https://relay.dimo-ai.com/t/host-abc123"
+        );
+        assert_eq!(
+            validate_base_url("https://my.example.com/dimo/").expect("reverse proxy subpath"),
+            "https://my.example.com/dimo"
+        );
         assert!(validate_base_url("https://203.0.113.10").is_ok());
         assert!(validate_base_url("ftp://server.example").is_err());
         assert!(validate_base_url("https://user@server.example").is_err());
-        assert!(validate_base_url("https://server.example/path").is_err());
+        assert!(validate_base_url("https://server.example/a/../b").is_err());
+        assert!(validate_base_url("https://server.example/dimo?q=1").is_err());
+        assert!(validate_base_url("https://server.example/dimo#frag").is_err());
     }
 
     #[tokio::test]

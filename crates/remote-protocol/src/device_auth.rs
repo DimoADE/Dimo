@@ -195,6 +195,8 @@ pub struct CreateDeviceConnectRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<DevicePermissionPreset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_key_ed25519: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_nonce: Option<String>,
@@ -211,6 +213,7 @@ impl std::fmt::Debug for CreateDeviceConnectRequest {
         f.debug_struct("CreateDeviceConnectRequest")
             .field("device_name", &self.device_name)
             .field("client_kind", &self.client_kind)
+            .field("preset", &self.preset)
             .field("public_key_ed25519", &self.public_key_ed25519)
             .field("session_nonce", &self.session_nonce)
             .field("replace_existing_mobile", &self.replace_existing_mobile)
@@ -218,6 +221,33 @@ impl std::fmt::Debug for CreateDeviceConnectRequest {
                 "account_token",
                 &self.account_token.as_ref().map(|_| "<redacted>"),
             )
+            .finish()
+    }
+}
+
+/// Request sent by a signed-in client to exchange a short-lived Ed25519-signed
+/// cloud `HostAccessGrant` for a long-lived device credential without transmitting
+/// the user's account bearer token to the Host.
+#[derive(Clone, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct RedeemHostAccessGrantRequest {
+    pub grant_token: String,
+    pub device_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<DevicePermissionPreset>,
+    pub client_public_key_ed25519: String,
+    pub pop_signature: String,
+}
+
+impl std::fmt::Debug for RedeemHostAccessGrantRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RedeemHostAccessGrantRequest")
+            .field("grant_token", &"<redacted>")
+            .field("device_name", &self.device_name)
+            .field("client_kind", &self.client_kind)
+            .field("preset", &self.preset)
+            .field("client_public_key_ed25519", &self.client_public_key_ed25519)
             .finish()
     }
 }

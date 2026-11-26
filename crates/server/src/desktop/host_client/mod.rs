@@ -15,6 +15,8 @@ use tokio::sync::Mutex;
 use url::Url;
 use uuid::Uuid;
 
+pub mod identity;
+pub mod probe;
 pub mod sync;
 
 use super::{
@@ -78,6 +80,12 @@ pub(crate) struct StoredProfile {
     pub(crate) cloud_synced: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) endpoints: Vec<remote_protocol::ReachabilityOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_good_origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) trust_source: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -96,6 +104,10 @@ pub struct HostClientProfileView {
     pub provision_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provision: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoints: Vec<remote_protocol::ReachabilityOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_source: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -114,6 +126,8 @@ pub struct ConnectHostRequest {
     pub token: Option<String>,
     #[serde(default)]
     pub profile_id: Option<String>,
+    #[serde(default, deserialize_with = "probe::deserialize_flexible_endpoints")]
+    pub endpoints: Vec<remote_protocol::ReachabilityOrigin>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -136,6 +150,8 @@ pub struct HostClientStatus {
     pub profiles: Vec<HostClientProfileView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_ssh: Option<LocalSshTargetView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_host_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -231,11 +247,13 @@ impl HostClientRuntime {
         let profile = active_id
             .as_deref()
             .and_then(|id| profiles.iter().find(|item| item.id == id).cloned());
+        let local_host_id = self.local_host_id.lock().await.clone();
         Ok(HostClientStatus {
             connected: profile.is_some(),
             profile,
             profiles,
             local_ssh: local_ssh_target(),
+            local_host_id,
         })
     }
 
@@ -440,18 +458,15 @@ impl HostClientRuntime {
             .as_deref()
             .and_then(|id| state.profiles.iter().find(|profile| profile.id == id))
             .cloned();
-        let origin = normalize_origin(&resolve_connect_origin(
-            request.origin.as_deref(),
-            selected.as_ref().map(|profile| profile.origin.as_str()),
-            selected
-                .as_ref()
-                .and_then(|profile| profile.provision.as_ref()),
-        ))?;
         let supplied_token = request
             .token
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty());
+        let parsed_pairing = supplied_token.map(probe::parse_pairing_input);
+        let origin = self
+            .resolve_origin_for_connect(&request, selected.as_ref(), parsed_pairing.as_ref())
+            .await?;
         let stored_token = selected
             .as_ref()
             .and_then(|profile| profile.access_token.clone())
@@ -528,6 +543,17 @@ impl HostClientRuntime {
             credential.clone(),
             now,
         );
+        if let Some(profile) = state.profiles.iter_mut().find(|item| item.id == profile_id) {
+            profile.last_good_origin = Some(origin_for_bind.clone());
+            for ep in capabilities.reachability {
+                if !profile.endpoints.iter().any(|existing| existing.origin == ep.origin) {
+                    profile.endpoints.push(ep);
+                }
+            }
+            if profile.trust_source.is_none() {
+                profile.trust_source = Some("paired".to_string());
+            }
+        }
         state.active_profile_id = None;
         self.save(&state).await?;
 
@@ -673,6 +699,7 @@ impl HostClientRuntime {
                 account_user_id: account_owner,
                 cloud_synced: false,
                 updated_at: Some(now),
+                ..StoredProfile::default()
             });
             id
         };
@@ -902,6 +929,8 @@ fn views_with_active_windows(
                 connected_window_label,
                 provision_kind: profile.provision_kind.clone(),
                 provision: profile.provision.clone(),
+                endpoints: profile.endpoints.clone(),
+                trust_source: profile.trust_source.clone(),
             }
         })
         .collect();
@@ -966,6 +995,7 @@ fn upsert_profile(
         account_user_id: account_owner,
         cloud_synced: false,
         updated_at: Some(now),
+        ..StoredProfile::default()
     });
     id
 }
@@ -1295,16 +1325,7 @@ async fn obtain_device_credential(
 }
 
 fn pairing_token_from_input(token: &str) -> String {
-    let trimmed = token.trim();
-    let extracted = if let Some(payload) = trimmed.strip_prefix("dimo-pairing:")
-        && let Ok(value) = serde_json::from_str::<serde_json::Value>(payload)
-        && let Some(code) = value.get("pairing_token").and_then(|item| item.as_str())
-    {
-        code.to_string()
-    } else {
-        trimmed.to_string()
-    };
-    remote_protocol::canonical_pairing_token(&extracted)
+    probe::parse_pairing_input(token).pairing_token
 }
 
 async fn redeem(
@@ -1313,26 +1334,27 @@ async fn redeem(
     pairing_token: &str,
     device_name: &str,
 ) -> Result<DeviceCredentialParts, DesktopError> {
-    let response = client
-        .post(format!("{origin}/api/v1/auth/pairings/redeem"))
-        .header("x-dimo-protocol-version", remote_protocol::PROTOCOL_VERSION)
-        .json(&RedeemPairingRequest {
-            pairing_token: pairing_token.to_string(),
-            device_name: device_name.to_string(),
-            public_key_ed25519: None,
-            client_kind: Some("desktop".to_string()),
-            replace_existing_mobile: false,
-        })
-        .send()
-        .await
-        .map_err(reachability)?;
-    if !response.status().is_success() {
+    let payload = serde_json::to_vec(&RedeemPairingRequest {
+        pairing_token: pairing_token.to_string(),
+        device_name: device_name.to_string(),
+        public_key_ed25519: None,
+        client_kind: Some("desktop".to_string()),
+        replace_existing_mobile: false,
+    })
+    .map_err(internal)?;
+    let (status, body_bytes) = probe::send_host_http_request(
+        client,
+        reqwest::Method::POST,
+        origin,
+        "/api/v1/auth/pairings/redeem",
+        None,
+        Some(&payload),
+    )
+    .await?;
+    if !status.is_success() {
         return Err(DesktopError::BadRequest(NEEDS_TOKEN.to_string()));
     }
-    let credential = response
-        .json::<DeviceCredential>()
-        .await
-        .map_err(internal)?;
+    let credential = serde_json::from_slice::<DeviceCredential>(&body_bytes).map_err(internal)?;
     Ok(DeviceCredentialParts {
         device_id: Some(credential.device_id.to_string()),
         access_token: credential.access_token,
@@ -1352,23 +1374,24 @@ async fn fetch_capabilities(
     origin: &str,
     token: &str,
 ) -> Result<ServerCapabilities, DesktopError> {
-    let response = client
-        .get(format!("{origin}/api/v1/capabilities"))
-        .bearer_auth(token)
-        .header("x-dimo-protocol-version", remote_protocol::PROTOCOL_VERSION)
-        .send()
-        .await
-        .map_err(reachability)?;
-    if response.status().as_u16() == 401 || response.status().as_u16() == 403 {
+    let (status, body_bytes) = probe::send_host_http_request(
+        client,
+        reqwest::Method::GET,
+        origin,
+        "/api/v1/capabilities",
+        Some(token),
+        None,
+    )
+    .await?;
+    if status.as_u16() == 401 || status.as_u16() == 403 {
         return Err(DesktopError::BadRequest(NEEDS_TOKEN.to_string()));
     }
-    if !response.status().is_success() {
+    if !status.is_success() {
         return Err(DesktopError::Internal(format!(
-            "remote Server returned HTTP {}",
-            response.status()
+            "remote Server returned HTTP {status}"
         )));
     }
-    response.json().await.map_err(internal)
+    serde_json::from_slice(&body_bytes).map_err(internal)
 }
 
 async fn discover_name(client: &reqwest::Client, origin: &str) -> Option<String> {
@@ -1383,14 +1406,16 @@ async fn revoke_remote_device(
     device_id: &str,
     token: &str,
 ) -> Result<(), DesktopError> {
-    let response = client
-        .delete(format!("{origin}/api/v1/auth/devices/{device_id}"))
-        .bearer_auth(token)
-        .header("x-dimo-protocol-version", remote_protocol::PROTOCOL_VERSION)
-        .send()
-        .await
-        .map_err(reachability)?;
-    if response.status().is_success() || response.status().as_u16() == 401 {
+    let (status, _) = probe::send_host_http_request(
+        client,
+        reqwest::Method::DELETE,
+        origin,
+        &format!("/api/v1/auth/devices/{device_id}"),
+        Some(token),
+        None,
+    )
+    .await?;
+    if status.is_success() || status.as_u16() == 401 {
         return Ok(());
     }
     Ok(())
@@ -1406,25 +1431,7 @@ fn local_device_name() -> String {
 }
 
 async fn fetch_latest_host_version(client: &reqwest::Client) -> Option<String> {
-    let repository = std::env::var("DIMO_UPDATE_REPOSITORY")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "DimoADE/Dimo".to_string());
-    let url = format!("https://api.github.com/repos/{repository}/releases/latest");
-    let response = client
-        .get(url)
-        .header(reqwest::header::USER_AGENT, "Dimo")
-        .send()
-        .await
-        .ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let body: serde_json::Value = response.json().await.ok()?;
-    body.get("tag_name")
-        .and_then(serde_json::Value::as_str)
-        .map(|tag| tag.trim_start_matches('v').to_string())
-        .filter(|value| !value.is_empty())
+    probe::fetch_latest_host_version(client).await
 }
 
 async fn probe_health_version(client: &reqwest::Client, origin: &str) -> Option<HealthBody> {
@@ -1467,10 +1474,6 @@ fn empty_to_none(value: String) -> Option<String> {
 
 fn is_needs_token(error: &DesktopError) -> bool {
     matches!(error, DesktopError::BadRequest(message) if message == NEEDS_TOKEN)
-}
-
-fn reachability(error: reqwest::Error) -> DesktopError {
-    DesktopError::BadRequest(format!("could not reach Host: {error}"))
 }
 
 fn internal(error: impl std::fmt::Display) -> DesktopError {

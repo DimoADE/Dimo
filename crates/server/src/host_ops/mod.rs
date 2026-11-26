@@ -1469,6 +1469,15 @@ impl ServerApplicationDomains {
         )
         .await
         .map_err(internal_error)?;
+        for ws_id in [current_workspace.id, target_workspace.id] {
+            self.events.emit(
+                "workspace-sessions-changed",
+                conversations::WorkspaceSessionsChanged {
+                    workspace_id: ws_id,
+                    conversation_id: session.id,
+                },
+            );
+        }
         serialize(self.require_session(session.id).await?)
     }
 

@@ -874,6 +874,14 @@ pub(crate) async fn listening_port() -> Option<u16> {
         .map(|runtime| runtime.port)
 }
 
+pub(crate) async fn listening_endpoint() -> Option<(u16, bool)> {
+    WEB_SERVICE_RUNTIME
+        .lock()
+        .await
+        .as_ref()
+        .map(|runtime| (runtime.port, runtime.allow_lan))
+}
+
 pub async fn ensure_listening(
     ctx: &DesktopWebServiceContext,
 ) -> Result<WebServerStatus, DesktopError> {

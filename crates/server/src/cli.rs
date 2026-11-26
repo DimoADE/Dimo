@@ -48,10 +48,27 @@ impl ServerLaunch {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConnectivityCommand {
+    Login,
+    Logout,
+    Status,
+    TunnelAddUrl {
+        url: String,
+        label: Option<String>,
+        skip_probe: bool,
+    },
+    TunnelRemoveUrl {
+        id_or_url: String,
+    },
+    TunnelList,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ParsedArgs {
     Command(LaunchCommand),
     Agents(AgentsCommand),
     Pairing(PairingCommand),
+    Connectivity(ConnectivityCommand),
     Start(ServerLaunch),
 }
 
@@ -104,6 +121,10 @@ where
 
     if let Some(pairing) = parse_pairing_command(&mut tokens)? {
         return Ok(ParsedArgs::Pairing(pairing));
+    }
+
+    if let Some(connectivity) = parse_connectivity_command(&mut tokens)? {
+        return Ok(ParsedArgs::Connectivity(connectivity));
     }
 
     if let Some(agents) = parse_agents_command(&mut tokens)? {
@@ -228,9 +249,121 @@ pub fn usage() -> &'static str {
      dimo-server serve --local        Start the Web UI on loopback only\n  \
      dimo-server serve --port N\n  \
      dimo-server serve --rotate-token\n  \
+     dimo-server login                Sign in this Host to your Dimo account (enables Official Cloud Relay & instant connect)\n  \
+     dimo-server logout               Sign out this Host and revoke account-linked devices\n  \
+     dimo-server status               Show Host ID, account binding, and reachable endpoints\n  \
+     dimo-server tunnel add-url <url> [--label <name>] [--skip-probe]\n  \
+     dimo-server tunnel remove-url <id|url>\n  \
+     dimo-server tunnel list\n  \
      dimo-server list [--json] [--refresh]\n  \
      dimo-server install <agent-id> [--yes]\n  \
      dimo-server pairing [--preset companion|workstation] [--ttl 30m|1h|6h|1d|7d|30d]\n"
+}
+
+fn parse_connectivity_command<I>(
+    tokens: &mut std::iter::Peekable<I>,
+) -> Result<Option<ConnectivityCommand>, ParseError>
+where
+    I: Iterator<Item = String>,
+{
+    let Some(first) = tokens.peek() else {
+        return Ok(None);
+    };
+    match first.as_str() {
+        "login" => {
+            tokens.next();
+            if let Some(extra) = tokens.next() {
+                return Err(ParseError(format!("unknown login argument: {extra}")));
+            }
+            Ok(Some(ConnectivityCommand::Login))
+        }
+        "logout" => {
+            tokens.next();
+            if let Some(extra) = tokens.next() {
+                return Err(ParseError(format!("unknown logout argument: {extra}")));
+            }
+            Ok(Some(ConnectivityCommand::Logout))
+        }
+        "status" => {
+            tokens.next();
+            if let Some(extra) = tokens.next() {
+                return Err(ParseError(format!("unknown status argument: {extra}")));
+            }
+            Ok(Some(ConnectivityCommand::Status))
+        }
+        "tunnel" => {
+            tokens.next();
+            let sub = tokens.next().ok_or_else(|| {
+                ParseError("usage: dimo-server tunnel add-url|remove-url|list".to_string())
+            })?;
+            match sub.as_str() {
+                "list" => {
+                    if let Some(extra) = tokens.next() {
+                        return Err(ParseError(format!("unknown tunnel list argument: {extra}")));
+                    }
+                    Ok(Some(ConnectivityCommand::TunnelList))
+                }
+                "add-url" => {
+                    let mut url: Option<String> = None;
+                    let mut label: Option<String> = None;
+                    let mut skip_probe = false;
+                    while let Some(token) = tokens.next() {
+                        match token.as_str() {
+                            "--label" => {
+                                let val = tokens.next().ok_or_else(|| {
+                                    ParseError("missing value for --label".to_string())
+                                })?;
+                                label = Some(val);
+                            }
+                            other if other.starts_with("--label=") => {
+                                label = Some(other[8..].to_string());
+                            }
+                            "--skip-probe" => skip_probe = true,
+                            other if other.starts_with('-') => {
+                                return Err(ParseError(format!(
+                                    "unknown tunnel add-url argument: {other}"
+                                )));
+                            }
+                            other => {
+                                if url.is_some() {
+                                    return Err(ParseError(format!(
+                                        "unexpected extra argument: {other}"
+                                    )));
+                                }
+                                url = Some(other.to_string());
+                            }
+                        }
+                    }
+                    let url = url.ok_or_else(|| {
+                        ParseError(
+                            "usage: dimo-server tunnel add-url <url> [--label <name>] [--skip-probe]"
+                                .to_string(),
+                        )
+                    })?;
+                    Ok(Some(ConnectivityCommand::TunnelAddUrl {
+                        url,
+                        label,
+                        skip_probe,
+                    }))
+                }
+                "remove-url" => {
+                    let id_or_url = tokens.next().ok_or_else(|| {
+                        ParseError("usage: dimo-server tunnel remove-url <id|url>".to_string())
+                    })?;
+                    if let Some(extra) = tokens.next() {
+                        return Err(ParseError(format!(
+                            "unknown tunnel remove-url argument: {extra}"
+                        )));
+                    }
+                    Ok(Some(ConnectivityCommand::TunnelRemoveUrl { id_or_url }))
+                }
+                other => Err(ParseError(format!(
+                    "unknown tunnel subcommand: {other} (expected add-url, remove-url, or list)"
+                ))),
+            }
+        }
+        _ => Ok(None),
+    }
 }
 
 fn parse_pairing_command<I>(
@@ -545,5 +678,48 @@ mod tests {
         assert!(launch.desktop);
         assert!(!launch.allow_lan);
         assert_eq!(launch.port, 18999);
+    }
+
+    #[test]
+    fn parses_connectivity_commands() {
+        use super::ConnectivityCommand;
+        assert_eq!(
+            parse_args(["login"]).expect("login"),
+            ParsedArgs::Connectivity(ConnectivityCommand::Login)
+        );
+        assert_eq!(
+            parse_args(["logout"]).expect("logout"),
+            ParsedArgs::Connectivity(ConnectivityCommand::Logout)
+        );
+        assert_eq!(
+            parse_args(["status"]).expect("status"),
+            ParsedArgs::Connectivity(ConnectivityCommand::Status)
+        );
+        assert_eq!(
+            parse_args([
+                "tunnel",
+                "add-url",
+                "https://box.example.com/dimo",
+                "--label",
+                "CF Tunnel",
+                "--skip-probe",
+            ])
+            .expect("tunnel add-url"),
+            ParsedArgs::Connectivity(ConnectivityCommand::TunnelAddUrl {
+                url: "https://box.example.com/dimo".to_string(),
+                label: Some("CF Tunnel".to_string()),
+                skip_probe: true,
+            })
+        );
+        assert_eq!(
+            parse_args(["tunnel", "remove-url", "abc-123"]).expect("tunnel remove-url"),
+            ParsedArgs::Connectivity(ConnectivityCommand::TunnelRemoveUrl {
+                id_or_url: "abc-123".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_args(["tunnel", "list"]).expect("tunnel list"),
+            ParsedArgs::Connectivity(ConnectivityCommand::TunnelList)
+        );
     }
 }

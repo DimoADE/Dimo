@@ -2,7 +2,7 @@ use std::path::Path;
 
 use db::DBService;
 use remote_protocol::{
-    CreatePairingRequest, IssuedPairingInvitation, PairingInvitationPayload, ReachabilityOrigin,
+    CreatePairingRequest, IssuedPairingInvitation, PairingInvitationPayload,
 };
 
 use crate::{
@@ -40,14 +40,32 @@ pub async fn issue_host_pairing(
             },
         )
         .await?;
-    let reachability = utils::net::advertised_http_origins(port, true)
-        .into_iter()
-        .filter(|origin| !remote_protocol::is_loopback_origin(origin))
-        .map(ReachabilityOrigin::lan)
-        .collect::<Vec<_>>();
-    let payload =
-        PairingInvitationPayload::from_challenge(host_id, command.preset, &challenge, reachability);
-    Ok(IssuedPairingInvitation::from_payload(challenge, payload))
+    let lan_origins = utils::net::advertised_http_origins(port, true);
+    let published = if cfg!(test) {
+        Vec::new()
+    } else {
+        crate::desktop::host_tunnel::published_origins().await
+    };
+    let reachability = crate::desktop::host_tunnel::merge_host_reachability(&lan_origins, published);
+    let payload = PairingInvitationPayload::from_challenge(
+        host_id.clone(),
+        command.preset,
+        &challenge,
+        reachability,
+    );
+    let issued = IssuedPairingInvitation::from_payload(challenge, payload);
+    if !cfg!(test) {
+        let expires_at_unix = chrono::DateTime::parse_from_rfc3339(&issued.expires_at)
+            .ok()
+            .map(|dt| dt.timestamp());
+        crate::desktop::host_tunnel::publish_pairing_code_beacon(
+            &issued.connection_code,
+            &host_id,
+            expires_at_unix,
+        )
+        .await;
+    }
+    Ok(issued)
 }
 
 pub fn format_pairing_console(issued: &IssuedPairingInvitation) -> String {
