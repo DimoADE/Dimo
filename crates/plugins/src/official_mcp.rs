@@ -692,9 +692,23 @@ pub fn advertised_mcp_tools(product: &str, features: u8) -> Vec<PluginMcpToolSta
     };
     match product {
         "delegation" => vec![
-            tool("delegate_to_agent", "delegation"),
-            tool("get_delegation_status", "delegation"),
-            tool("cancel_delegation", "delegation"),
+            tool("orchestrator_capabilities", "delegation"),
+            tool("delegate_task", "delegation"),
+            tool("task_status", "delegation"),
+            tool("task_cancel", "delegation"),
+            tool("thread_launch", "delegation"),
+            tool("create_threads", "delegation"),
+            tool("thread_list", "delegation"),
+            tool("thread_read", "delegation"),
+            tool("thread_send", "delegation"),
+            tool("thread_wait", "delegation"),
+            tool("thread_interrupt", "delegation"),
+            tool("thread_transfer", "delegation"),
+            tool("project_list", "delegation"),
+            tool("project_read", "delegation"),
+            tool("project_create", "delegation"),
+            tool("project_clone", "delegation"),
+            tool("pending_request", "delegation"),
             tool("get_session_info", "collaboration"),
             tool("list_conversations", "collaboration"),
             tool("send_session_input", "collaboration"),
@@ -1415,7 +1429,9 @@ mod tests {
         let tools = advertised_mcp_tools("superagent", SESSION_FEAT_ASK);
         assert!(tools.iter().any(|t| t.name == "workflow_graph_patch"));
         assert!(tools.iter().any(|t| t.name == "pulse_rule_upsert"));
-        assert!(tools.iter().any(|t| t.name == "delegate_to_agent"));
+        assert!(tools.iter().any(|t| t.name == "delegate_task"));
+        assert!(tools.iter().any(|t| t.name == "thread_launch"));
+        assert!(tools.iter().any(|t| t.name == "orchestrator_capabilities"));
         assert!(tools.iter().any(|t| t.name == "ask_user_question"));
     }
 

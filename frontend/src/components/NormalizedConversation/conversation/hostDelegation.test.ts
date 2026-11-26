@@ -315,4 +315,113 @@ describe('hostDelegation', () => {
       'codex'
     );
   });
+
+  it('parses delegate_task nested target.agent_id, preparing/waiting_for_input states, and task_status results', () => {
+    const call = use(
+      'delegate_task',
+      {
+        target: { agent_id: 'codex', model: 'gpt-5.4' },
+        task: 'Implement worktree isolation',
+        isolation: 'worktree',
+      },
+      'call-orch-1'
+    );
+    const preparingRes = result(
+      JSON.stringify({
+        run_id: 'run-42',
+        child_conversation_id: 'child-42',
+        status: 'preparing',
+      })
+    );
+    const preparingView = mergeHostDelegationView(call, preparingRes, null);
+    expect(preparingView.agent_id).toBe('codex');
+    expect(preparingView.delegation_id).toBe('run-42');
+    expect(preparingView.child_conversation_id).toBe('child-42');
+    expect(preparingView.status).toBe('preparing');
+
+    const waitingRes = result(
+      JSON.stringify({
+        run_id: 'run-42',
+        child_conversation_id: 'child-42',
+        status: 'waiting_for_input',
+      })
+    );
+    expect(mergeHostDelegationView(call, waitingRes, null).status).toBe(
+      'waiting_for_input'
+    );
+    expect(hostDelegationLifecycleStatus(waitingRes)).toBe('running');
+
+    const pollDone = result(
+      JSON.stringify({
+        run_id: 'run-42',
+        child_conversation_id: 'child-42',
+        status: 'completed',
+        result_text: 'Worktree tests passed',
+      })
+    );
+    const merged = mergeHostDelegationView(call, preparingRes, null, [
+      pollDone,
+    ]);
+    expect(merged.status).toBe('completed');
+    expect(merged.result).toEqual({
+      kind: 'ok',
+      text_preview: 'Worktree tests passed',
+      duration_ms: null,
+    });
+  });
+
+  it('extracts result_summary from task_status and maps timed_out to failed', () => {
+    const call = use(
+      'delegate_task',
+      {
+        target: { agent_id: 'codex' },
+        task: 'Audit database migrations',
+      },
+      'call-orch-2'
+    );
+    const runningRes = result(
+      JSON.stringify({
+        run_id: 'run-99',
+        child_conversation_id: 'child-99',
+        status: 'running',
+      })
+    );
+    const pollSummary = result(
+      JSON.stringify({
+        run_id: 'run-99',
+        child_conversation_id: 'child-99',
+        status: 'completed',
+        result_summary: 'All 12 migrations validated',
+      })
+    );
+    const completed = mergeHostDelegationView(call, runningRes, null, [
+      pollSummary,
+    ]);
+    expect(completed.status).toBe('completed');
+    expect(completed.result).toEqual({
+      kind: 'ok',
+      text_preview: 'All 12 migrations validated',
+      duration_ms: null,
+    });
+
+    const timedOutRes = result(
+      JSON.stringify({
+        run_id: 'run-100',
+        child_conversation_id: 'child-100',
+        status: 'timed_out',
+        error_message: 'deadline exceeded',
+      })
+    );
+    const timedOutView = mergeHostDelegationView(call, timedOutRes, null);
+    expect(timedOutView.status).toBe('failed');
+    expect(timedOutView.result).toEqual({
+      kind: 'err',
+      error: {
+        code: 'timed_out',
+        kind: 'unknown',
+        message: 'deadline exceeded',
+      },
+    });
+    expect(hostDelegationLifecycleStatus(timedOutRes)).toBe('failed');
+  });
 });

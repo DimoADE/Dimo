@@ -51,7 +51,7 @@ export function matchHostDelegationView(
     if (exact) return exact;
   }
   const input = peelHostDelegationCall(use).input;
-  const agentId = readString(input, ['agent_id', 'agent_type']);
+  const agentId = readTargetAgentId(input);
   const task = readString(input, ['task', 'prompt']);
   const byFacts = views.find((view) => {
     const agentOk = !agentId || !view.agent_id || view.agent_id === agentId;
@@ -90,15 +90,15 @@ export function mergeHostDelegationView(
   const output = parseRecord(result?.output_preview);
   const agentId =
     event?.agent_id ??
-    readString(input, ['agent_id', 'agent_type']) ??
-    readString(output, ['agent_id', 'agent_type']);
+    readTargetAgentId(input) ??
+    readTargetAgentId(output);
   const inferred = inferResult(result, output);
   const childConversationId =
     event?.child_conversation_id ??
-    readString(output, ['child_session_id', 'child_conversation_id']);
+    readString(output, ['child_conversation_id', 'child_session_id']);
   const pollTask = matchPollTask(pollResults, {
     childId: childConversationId,
-    taskId: readString(output, ['task_id']),
+    taskId: readString(output, ['run_id', 'task_id']),
     agentId,
   });
   const pollInferred = inferResult(null, pollTask);
@@ -113,11 +113,15 @@ export function mergeHostDelegationView(
   );
 
   return {
-    delegation_id: event?.delegation_id ?? use.tool_use_id ?? 'host-delegation',
+    delegation_id:
+      event?.delegation_id ??
+      readString(output, ['run_id']) ??
+      use.tool_use_id ??
+      'host-delegation',
     parent_tool_call_id: event?.parent_tool_call_id ?? use.tool_use_id ?? null,
     child_conversation_id:
       childConversationId ??
-      readString(pollTask, ['child_session_id', 'child_conversation_id']),
+      readString(pollTask, ['child_conversation_id', 'child_session_id']),
     agent_id: agentId as ConversationDelegationView['agent_id'],
     task_preview: taskPreview,
     status:
@@ -142,20 +146,20 @@ function matchPollTask(
   if (keys.childId) {
     const byChild = tasks.find(
       (task) =>
-        readString(task, ['child_session_id', 'child_conversation_id']) ===
+        readString(task, ['child_conversation_id', 'child_session_id']) ===
         keys.childId
     );
     if (byChild) return byChild;
   }
   if (keys.taskId) {
     const byTask = tasks.find(
-      (task) => readString(task, ['task_id']) === keys.taskId
+      (task) => readString(task, ['run_id', 'task_id']) === keys.taskId
     );
     if (byTask) return byTask;
   }
   if (keys.agentId) {
     const byAgent = tasks.filter(
-      (task) => readString(task, ['agent_id', 'agent_type']) === keys.agentId
+      (task) => readTargetAgentId(task) === keys.agentId
     );
     if (byAgent.length === 1) return byAgent[0];
   }
@@ -233,6 +237,7 @@ function terminalStatus(status: string | null | undefined): string | null {
   ) {
     return status === 'cancelled' ? 'canceled' : status;
   }
+  if (status === 'timed_out') return 'failed';
   return null;
 }
 
@@ -257,19 +262,26 @@ function inferResult(
     return { status: 'running', result: null };
   }
   const outputStatus = readString(output, ['status']);
-  if (outputStatus === 'running') {
-    return { status: 'running', result: null };
+  if (
+    outputStatus === 'preparing' ||
+    outputStatus === 'running' ||
+    outputStatus === 'waiting_for_input'
+  ) {
+    return { status: outputStatus, result: null };
   }
-  if (result?.is_error || outputStatus === 'failed') {
+  if (result?.is_error || outputStatus === 'failed' || outputStatus === 'timed_out') {
     return {
       status: 'failed',
       result: {
         kind: 'err',
         error: {
           message:
-            readString(output, ['message', 'error']) ??
+            readString(output, ['error_message', 'message', 'error']) ??
             result?.output_preview ??
-            'delegation failed',
+            (outputStatus === 'timed_out'
+              ? 'delegation timed out'
+              : 'delegation failed'),
+          ...(outputStatus === 'timed_out' ? { code: 'timed_out' } : {}),
           kind: 'unknown',
         },
       },
@@ -285,7 +297,9 @@ function inferResult(
       result: {
         kind: 'err',
         error: {
-          message: readString(output, ['message', 'error']) ?? 'canceled',
+          message:
+            readString(output, ['error_message', 'message', 'error']) ??
+            'canceled',
           code: outputStatus,
           kind: 'cancelled',
         },
@@ -301,7 +315,12 @@ function inferResult(
       status: 'completed',
       result: {
         kind: 'ok',
-        text_preview: readString(output, ['text', 'text_preview']),
+        text_preview: readString(output, [
+          'result_summary',
+          'result_text',
+          'text',
+          'text_preview',
+        ]),
         duration_ms: readDuration(output),
       },
     };
@@ -331,14 +350,21 @@ export function hostDelegationLifecycleStatus(
   if (
     statuses.some(
       (status) =>
+        status === 'preparing' ||
         status === 'running' ||
+        status === 'waiting_for_input' ||
         status === 'inprogress' ||
         status === 'in_progress'
     )
   ) {
     return 'running';
   }
-  if (statuses.some((status) => status === 'failed' || status === 'error')) {
+  if (
+    statuses.some(
+      (status) =>
+        status === 'failed' || status === 'error' || status === 'timed_out'
+    )
+  ) {
     return 'failed';
   }
   if (
@@ -370,6 +396,21 @@ function parseRecord(
   } catch {
     return null;
   }
+}
+
+function readTargetAgentId(
+  record: Record<string, unknown> | null
+): string | null {
+  if (!record) return null;
+  const nested = record.target;
+  if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+    const nestedAgent = readString(nested as Record<string, unknown>, [
+      'agent_id',
+      'agent_type',
+    ]);
+    if (nestedAgent) return nestedAgent;
+  }
+  return readString(record, ['target_agent_id', 'agent_id', 'agent_type']);
 }
 
 function readString(

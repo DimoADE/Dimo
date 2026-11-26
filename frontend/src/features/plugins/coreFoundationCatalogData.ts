@@ -1093,11 +1093,12 @@ export const CORE_FOUNDATION_PLUGIN_DESCRIPTORS: readonly CoreFoundationPluginDe
           id: 'subagent-delegation-mcp',
           moduleName: 'DelegationMcpBridge',
           kind: 'mcp',
-          titleZh: 'delegate_to_agent 协同调度工具',
-          titleEn: 'delegate_to_agent Coordination Tool',
-          summaryZh: '提供子智能体派发、状态轮询与任务取消的标准工具接口。',
+          titleZh: '多智能体编排与跨项目调度工具',
+          titleEn: 'Agent Orchestration & Delegation Tools',
+          summaryZh:
+            '提供能力发现、子代理委派、跨项目/Worktree 线程启动、状态追踪与权限桥接的统一 MCP 工具集。',
           summaryEn:
-            'Provides tools for spawning, monitoring, and cancelling delegated subagent tasks.',
+            'Provides unified MCP tools for capability discovery, subagent delegation, cross-project/worktree thread launching, and pending-request bridging.',
         },
         {
           id: 'collaboration-space-ui',

@@ -75,6 +75,29 @@ struct CompanionFeatures {
     workflow: bool,
 }
 
+fn is_orchestration_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "orchestrator_capabilities"
+            | "delegate_task"
+            | "task_status"
+            | "task_cancel"
+            | "thread_launch"
+            | "create_threads"
+            | "thread_list"
+            | "thread_read"
+            | "thread_send"
+            | "thread_wait"
+            | "thread_interrupt"
+            | "thread_transfer"
+            | "project_list"
+            | "project_read"
+            | "project_create"
+            | "project_clone"
+            | "pending_request"
+    )
+}
+
 impl CompanionFeatures {
     /// Parse a comma-joined feature list. Absent → delegation only (backward
     /// compatible with parents that don't pass `--features`).
@@ -110,7 +133,7 @@ impl CompanionFeatures {
 
     fn allows_tool(&self, name: &str) -> bool {
         match name {
-            "delegate_to_agent" | "get_delegation_status" | "cancel_delegation" => self.delegation,
+            other if is_orchestration_tool(other) => self.delegation,
             "check_user_feedback" => self.feedback,
             "ask_user_question" => self.ask || self.collaboration,
             "get_session_info" | "thread_read_history" => self.session_info || self.collaboration,
@@ -324,7 +347,13 @@ fn parse_args() -> Result<Args, String> {
 /// `readOnlyHint` as destructive and open-world, then gates the call behind an
 /// elicitation. These tools only inspect state.
 const READ_ONLY_MCP_TOOLS: &[&str] = &[
-    "get_delegation_status",
+    "orchestrator_capabilities",
+    "task_status",
+    "thread_list",
+    "thread_read",
+    "thread_wait",
+    "project_list",
+    "project_read",
     "check_user_feedback",
     "get_session_info",
     "thread_read_history",
@@ -709,6 +738,11 @@ impl Companion {
                 .await;
             return;
         }
+        if is_orchestration_tool(&name) {
+            self.run_orchestration_call(id, &name, arguments, meta, &stdout)
+                .await;
+            return;
+        }
         let mut arguments = arguments;
         if collaboration_needs_operation_id(&name, &arguments) {
             self.ensure_call_operation_id(&name, &mut arguments, meta.as_ref(), id.as_ref());
@@ -1026,6 +1060,64 @@ impl Companion {
                 }))
             }
             other => Err(format!("unknown tool: {other}")),
+        }
+    }
+
+    /// Proxy the 17 unified orchestration tools directly to `dimo-server`'s
+    /// Streamable HTTP `/mcp` endpoint using the per-session Bearer token.
+    async fn run_orchestration_call(
+        &self,
+        id: Option<Value>,
+        name: &str,
+        arguments: Value,
+        meta: Option<Value>,
+        stdout: &Arc<Mutex<tokio::io::Stdout>>,
+    ) {
+        let Some(server_url) = self.server_url.as_deref().filter(|u| !u.trim().is_empty()) else {
+            write_opt(
+                stdout,
+                respond_error(
+                    id,
+                    -32603,
+                    "orchestration MCP endpoint unavailable: --server-url is not configured",
+                ),
+            )
+            .await;
+            return;
+        };
+        let bearer = (!self.token.trim().is_empty())
+            .then_some(self.token.as_str())
+            .or(self.server_token.as_deref());
+        let tool_use_id = parent_tool_use_id(meta.as_ref());
+        match client::call_mcp_http(
+            server_url,
+            bearer,
+            self.conversation_id.as_deref(),
+            &self.product,
+            name,
+            &arguments,
+            &tool_use_id,
+        )
+        .await
+        {
+            Ok(result) => {
+                write_opt(
+                    stdout,
+                    respond(id, modernize_result(meta.as_ref(), result, &self.product)),
+                )
+                .await;
+            }
+            Err(err) => {
+                let outcome = err.into_mcp_error_outcome();
+                write_opt(
+                    stdout,
+                    respond(
+                        id,
+                        modernize_result(meta.as_ref(), render_result(&outcome), &self.product),
+                    ),
+                )
+                .await;
+            }
         }
     }
 

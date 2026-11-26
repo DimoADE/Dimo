@@ -62,7 +62,11 @@ export function DelegationCard({
     ? agentDisplayLabel(agentId)
     : t('delegationCard.subAgentDelegation');
   const canCancel =
-    status === 'running' && childId !== null && supports('delegation.cancel');
+    (status === 'preparing' ||
+      status === 'running' ||
+      status === 'waiting_for_input') &&
+    childId !== null &&
+    supports('delegation.cancel');
   const toggleSection = (section: 'task' | 'result') => {
     onExpandedChange?.(openSection !== section);
     toggleOpenSection(section);
@@ -198,23 +202,47 @@ export function DelegationCard({
   );
 }
 
-type Status = 'running' | 'completed' | 'failed' | 'canceled';
+type Status =
+  | 'preparing'
+  | 'running'
+  | 'waiting_for_input'
+  | 'completed'
+  | 'failed'
+  | 'canceled';
 
 function normalizeStatus(raw: string): Status {
-  if (raw === 'completed' || raw === 'failed' || raw === 'canceled') {
+  if (
+    raw === 'preparing' ||
+    raw === 'waiting_for_input' ||
+    raw === 'completed' ||
+    raw === 'failed' ||
+    raw === 'canceled'
+  ) {
     return raw;
   }
   if (raw === 'cancelled') return 'canceled';
+  if (raw === 'timed_out') return 'failed';
   return 'running';
 }
 
 function StatusPill({ status }: { status: Status }) {
   const { t } = useTranslation(['conversation', 'common']);
-  if (status === 'running') {
+  if (status === 'preparing' || status === 'running') {
     return (
       <span className="conv-count-badge inline-flex shrink-0 items-center gap-1 text-primary">
         <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none" />
-        {t('delegationCard.running')}
+        {status === 'preparing'
+          ? t('delegationCard.preparing', { defaultValue: 'Preparing' })
+          : t('delegationCard.running')}
+      </span>
+    );
+  }
+  if (status === 'waiting_for_input') {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-600 dark:text-amber-400">
+        {t('delegationCard.waitingForInput', {
+          defaultValue: 'Waiting for input',
+        })}
       </span>
     );
   }

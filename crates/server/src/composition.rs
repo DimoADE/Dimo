@@ -504,7 +504,9 @@ impl HeadlessServer {
                 plugin_control_plane.official_product_mcp_gate(),
                 events.clone(),
                 product_mcp_commands.clone(),
-            );
+                config.data_dir.clone(),
+            )
+            .await;
         collaboration_host.install_companion_memory(companion_memory.clone());
         let plugin_startup_ctx = PluginStartupContext {
             plugin_control_plane: plugin_control_plane.clone(),
@@ -838,6 +840,20 @@ impl HeadlessServer {
         let listen_addr = self.runtime.config().listen_addr;
         let listener = tokio::net::TcpListener::bind(listen_addr).await?;
         let bound_addr = listener.local_addr()?;
+        let connectivity_daemon_task = if cfg!(test) {
+            None
+        } else {
+            let allow_lan = utils::net::listen_allows_lan(listen_addr);
+            Some(
+                crate::host::connectivity::account_daemon::spawn_host_connectivity_daemon(
+                    self.runtime.config().host_id.clone(),
+                    bound_addr.port(),
+                    allow_lan,
+                    self.desktop_mode,
+                    self.runtime.config().server_version.clone(),
+                ),
+            )
+        };
         let automation_task = self.automation_owner.take().map(|engine| {
             let runtime = self.automation_runtime.clone();
             let recovery = self.automation_recovery.take();
@@ -893,6 +909,7 @@ impl HeadlessServer {
         let developer_link_task = self.developer_link_slot.lock().await.take();
         let background_tasks: Vec<JoinHandle<()>> = [
             automation_task,
+            connectivity_daemon_task,
             plugin_dev_task,
             self.agent_event_task.take(),
             self.catalog_event_task.take(),
@@ -925,6 +942,9 @@ impl HeadlessServer {
         // 3. Stop desktop web service (HTTP listeners, relay, quick tunnel).
         if self.desktop_mode {
             let _ = crate::desktop::web_service::stop_web_server().await;
+        } else {
+            crate::desktop::host_tunnel::stop_quick_tunnel().await;
+            crate::desktop::host_tunnel::stop_relay().await;
         }
 
         // 4. Shut down PluginControlPlane workers, host services, and plugin child processes.

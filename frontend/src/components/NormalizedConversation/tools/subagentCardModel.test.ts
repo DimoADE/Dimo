@@ -7,6 +7,7 @@ import {
   foldSubagentLifecycle,
   formatSubagentDuration,
   formatTokenCount,
+  hostDelegationLifecycleKind,
   isCompanionMcpDiscoverySearch,
   isHostDelegationLifecycleTool,
   isHostDelegationTool,
@@ -626,6 +627,30 @@ describe('subagent card model', () => {
     expect(isHostDelegationLifecycleTool(delegateStart)).toBe(false);
     expect(isHostDelegationLifecycleTool(delegatePoll)).toBe(true);
     expect(isHostDelegationLifecycleTool(delegateCancel)).toBe(true);
+
+    const orchStart = use('mcpToolCall', {
+      server: 'dimo-delegation-mcp',
+      tool: 'delegate_task',
+      arguments: {
+        target: { agent_id: 'codex' },
+        task: 'Verify orchestration event projection',
+      },
+    });
+    const orchStatus = use('mcpToolCall', {
+      server: 'dimo-delegation-mcp',
+      tool: 'task_status',
+      arguments: { run_id: 'run-99' },
+    });
+    const orchCancel = use('mcpToolCall', {
+      server: 'dimo-delegation-mcp',
+      tool: 'task_cancel',
+      arguments: { run_id: 'run-99', reason: 'no longer needed' },
+    });
+
+    expect(isHostDelegationTool(orchStart)).toBe(true);
+    expect(isHostDelegationLifecycleTool(orchStart)).toBe(false);
+    expect(hostDelegationLifecycleKind(orchStatus)).toBe('status');
+    expect(hostDelegationLifecycleKind(orchCancel)).toBe('cancel');
   });
 
   it('folds Codex collabAgentToolCall spawnAgent and wait lifecycle calls into a single subagent card', () => {

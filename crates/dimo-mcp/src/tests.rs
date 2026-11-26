@@ -148,8 +148,14 @@ fn tools_list_reflects_features() {
         .iter()
         .filter_map(|t| t["name"].as_str())
         .collect();
-    assert!(names.contains(&"delegate_to_agent"));
-    assert!(names.contains(&"cancel_delegation"));
+    assert!(names.contains(&"orchestrator_capabilities"));
+    assert!(names.contains(&"delegate_task"));
+    assert!(names.contains(&"task_status"));
+    assert!(names.contains(&"task_cancel"));
+    assert!(names.contains(&"thread_launch"));
+    assert!(names.contains(&"project_list"));
+    assert!(names.contains(&"pending_request"));
+    assert_eq!(names.len(), 17);
     assert!(!names.contains(&"check_user_feedback"));
     assert!(!names.contains(&"ask_user_question"));
     assert!(!names.contains(&"plugin_dev_link_request"));
@@ -287,25 +293,24 @@ fn tool_schema_explains_agent_mentions() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|tool| tool["name"] == "delegate_to_agent")
+        .find(|tool| tool["name"] == "delegate_task")
         .and_then(|tool| tool["description"].as_str())
-        .expect("delegate_to_agent description");
+        .expect("delegate_task description");
 
     assert!(description.contains("every AgentMention"));
     assert!(description.contains("[&Codex](dimo://agent/codex)"));
     assert!(description.contains("does not itself start"));
-    assert!(description.contains("ASYNCHRONOUS"));
+    assert!(description.contains("do NOT poll in a loop"));
     assert!(description.contains("do not call search_tool"));
-    assert!(description.contains("MUST call get_delegation_status"));
 }
 
 #[test]
-fn all_features_expose_five_tools() {
+fn all_features_expose_orchestration_feedback_and_ask_tools() {
     let value = respond_text(classify(
         "delegation,feedback,ask",
         r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#,
     ));
-    assert_eq!(value["result"]["tools"].as_array().unwrap().len(), 5);
+    assert_eq!(value["result"]["tools"].as_array().unwrap().len(), 19);
 }
 
 #[test]
@@ -381,7 +386,8 @@ fn collaboration_opens_same_workspace_tools_without_session_control() {
     assert!(!names.contains(&"memory_write"));
     assert!(!names.contains(&"cancel_session_turn"));
     assert!(!names.contains(&"wait_for_session"));
-    assert!(!names.contains(&"delegate_to_agent"));
+    assert!(!names.contains(&"delegate_task"));
+    assert!(!names.contains(&"thread_launch"));
     assert!(!names.contains(&"handoff"));
     assert!(!names.contains(&"ask_person"));
     assert!(!names.contains(&"resolve_card"));
@@ -547,10 +553,10 @@ fn delegate_reads_progress_token_as_parent_tool_use_id() {
 fn tools_call_classifies_as_call() {
     let action = classify(
         "delegation",
-        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"delegate_to_agent","arguments":{"agent_type":"codex","task":"x"}}}"#,
+        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"delegate_task","arguments":{"target":{"agent_id":"codex"},"task":"x"}}}"#,
     );
     match action {
-        LineAction::Call { name, .. } => assert_eq!(name, "delegate_to_agent"),
+        LineAction::Call { name, .. } => assert_eq!(name, "delegate_task"),
         _ => panic!("expected Call"),
     }
 }
@@ -649,7 +655,10 @@ fn conversation_id_falls_back_to_the_parent_process_env() {
 fn feature_gate_rejects_disabled_tool() {
     let c = companion("delegation");
     assert!(!c.features.allows_tool("check_user_feedback"));
-    assert!(c.features.allows_tool("delegate_to_agent"));
+    assert!(c.features.allows_tool("delegate_task"));
+    assert!(c.features.allows_tool("thread_launch"));
+    assert!(c.features.allows_tool("orchestrator_capabilities"));
+    assert!(!c.features.allows_tool("delegate_to_agent"));
 }
 
 #[test]

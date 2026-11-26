@@ -30,6 +30,7 @@ mod pulse_dispatch;
 mod pulse_http;
 mod pulse_outbox;
 mod pulse_runtime;
+mod remote_mcp_forwarder;
 mod runtime;
 mod token_store;
 mod transport_session;
@@ -53,9 +54,32 @@ pub use chat_inbound::{
 };
 pub use chat_notify::{ChatDeliveryPublisher, notify_conversation_event};
 pub use cli::{
-    AgentsCommand, LaunchCommand, PairingCommand, ParseError, ParsedArgs, ServerLaunch,
-    format_host_console, parse_args, usage,
+    AgentsCommand, ConnectivityCommand, LaunchCommand, PairingCommand, ParseError, ParsedArgs,
+    ServerLaunch, format_host_console, parse_args, usage,
 };
+
+pub async fn run_connectivity_command(command: ConnectivityCommand) -> std::process::ExitCode {
+    match command {
+        ConnectivityCommand::Login => host::connectivity::account_daemon::run_login_command().await,
+        ConnectivityCommand::Logout => {
+            host::connectivity::account_daemon::run_logout_command().await
+        }
+        ConnectivityCommand::Status | ConnectivityCommand::TunnelList => {
+            host::connectivity::account_daemon::run_status_command().await
+        }
+        ConnectivityCommand::TunnelAddUrl {
+            url,
+            label,
+            skip_probe,
+        } => {
+            host::connectivity::account_daemon::run_tunnel_add_url_command(url, label, skip_probe)
+                .await
+        }
+        ConnectivityCommand::TunnelRemoveUrl { id_or_url } => {
+            host::connectivity::account_daemon::run_tunnel_remove_url_command(id_or_url).await
+        }
+    }
+}
 pub use companion_session::CompanionSessionAdapter;
 pub use composition::{HeadlessServer, ServerBootstrapConfig, ServerBootstrapError};
 pub use config::{EmbeddedAsset, ListenPolicyError, ServerConfig, StaticAssetResolver};
@@ -92,7 +116,10 @@ pub use pairing_cli::{
 pub use preview_proxy::{
     PreviewProxyRegistry, PreviewRegistrationError, start_loopback_preview_proxy,
 };
-pub use product_mcp::{ProductMcpCommandHost, ProductMcpSessionLookup, start_product_mcp_gateway};
+pub use product_mcp::{
+    ProductMcpCommandHost, ProductMcpSessionLookup, start_product_mcp_gateway,
+    start_product_mcp_gateway_with_orchestration,
+};
 pub use pulse_connectors::{bridge_feishu_inbound_to_pulse, trigger_pulse_poll_for_source};
 pub use pulse_runtime::PULSE_DECK_CHANGED_EVENT;
 

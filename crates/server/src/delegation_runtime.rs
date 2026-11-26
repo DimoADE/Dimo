@@ -34,19 +34,29 @@ use uuid::Uuid;
 
 type ResolverMap = Arc<Mutex<HashMap<Uuid, ResolverEntry>>>;
 
+static ACTIVE_ORCHESTRATION: std::sync::RwLock<Option<Arc<delegation::orchestration::OrchestrationService>>> =
+    std::sync::RwLock::new(None);
+
+pub(crate) fn active_orchestration_service()
+-> Option<Arc<delegation::orchestration::OrchestrationService>> {
+    ACTIVE_ORCHESTRATION.read().ok().and_then(|g| g.clone())
+}
+
 pub(crate) struct HeadlessDelegationRuntime {
     tasks: Vec<JoinHandle<()>>,
+    _reactors: delegation::orchestration::DelegationReactors,
     service: Arc<DelegationService>,
 }
 
 impl HeadlessDelegationRuntime {
-    pub(crate) fn start(
+    pub(crate) async fn start(
         runtime: Arc<AgentRuntime>,
         pool: SqlitePool,
         conversation_context: ConversationContext,
         official_mcp: Arc<OfficialMcpRuntime>,
         events: Arc<crate::HostEventBus>,
         command_host: crate::ProductMcpCommandHost,
+        data_dir: PathBuf,
     ) -> (Self, Arc<InMemoryCompanionFeatures>, Arc<DelegationBroker>) {
         let map = Arc::new(Mutex::new(HashMap::new()));
         let broker = Arc::new(DelegationBroker::new(
@@ -87,7 +97,7 @@ impl HeadlessDelegationRuntime {
             features.clone(),
             pool.clone(),
             runtime.clone(),
-            ScopedConversationControl::new(conversation_context),
+            ScopedConversationControl::new(conversation_context.clone()),
         ));
         runtime_features.set_collaboration_limits({
             let broker = broker.clone();
@@ -110,6 +120,37 @@ impl HeadlessDelegationRuntime {
                 );
             }
         });
+
+        // Build unified SQLite Single-Authority OrchestrationService & reactors.
+        let preparations = delegation::orchestration::ActivePreparations::default();
+        let pending_permissions = delegation::orchestration::PendingPermissionStore::default();
+        let orchestration_config = delegation::orchestration::OrchestrationConfig::default();
+        let max_result_bytes = orchestration_config.max_result_bytes;
+        let orchestration = Arc::new(delegation::orchestration::OrchestrationService::new(
+            conversation_context.clone(),
+            runtime.clone(),
+            preparations.clone(),
+            pending_permissions.clone(),
+            features.clone(),
+            orchestration_config,
+        ));
+        orchestration.set_remote_forwarder(Arc::new(
+            crate::remote_mcp_forwarder::PairedHostMcpForwarder::new(data_dir),
+        ));
+        if let Ok(mut slot) = ACTIVE_ORCHESTRATION.write() {
+            *slot = Some(orchestration.clone());
+        }
+        let reactors = delegation::orchestration::spawn_orchestration_reactors(
+            conversation_context.clone(),
+            runtime.clone(),
+            preparations,
+            pending_permissions,
+            max_result_bytes,
+        );
+        let reconciler_task = tokio::spawn(delegation::orchestration::run_startup_reconciler(
+            conversation_context,
+        ));
+
         let listener = Arc::new(DelegationListener::new_with_features(
             broker.clone(),
             tokens.clone(),
@@ -119,23 +160,24 @@ impl HeadlessDelegationRuntime {
             runtime_features,
         ));
         let listen_path = socket_path.clone();
-        let gateway_listener = listener.clone();
-        let gateway_tokens = tokens.clone();
-        let gateway_gate = official_mcp.clone();
-        let gateway_runtime = runtime.clone();
-        tokio::spawn(async move {
-            let _ = crate::start_product_mcp_gateway(
-                gateway_listener,
-                gateway_tokens,
-                gateway_gate,
-                Arc::new(RuntimeConversationLookup {
-                    runtime: gateway_runtime,
-                    pool: pool.clone(),
-                }),
-                command_host,
-            )
-            .await;
-        });
+        // Bind the loopback MCP HTTP gateway synchronously before returning so
+        // `official_mcp.http_base()` is always populated before any Agent session
+        // starts or native MCP sync runs.
+        if let Err(error) = crate::start_product_mcp_gateway_with_orchestration(
+            listener.clone(),
+            tokens.clone(),
+            official_mcp.clone(),
+            Arc::new(RuntimeConversationLookup {
+                runtime: runtime.clone(),
+                pool: pool.clone(),
+            }),
+            command_host,
+            Some(orchestration),
+        )
+        .await
+        {
+            tracing::warn!(%error, "product MCP HTTP gateway failed to bind");
+        }
         let service = DelegationService::new(listener.clone(), listen_path);
         DelegationService::install(service.clone());
         let start_service = service.clone();
@@ -151,7 +193,8 @@ impl HeadlessDelegationRuntime {
 
         (
             Self {
-                tasks: vec![listener_task, resolver_task, teardown_task],
+                tasks: vec![listener_task, resolver_task, teardown_task, reconciler_task],
+                _reactors: reactors,
                 service,
             },
             features,

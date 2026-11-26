@@ -287,6 +287,7 @@ where
             .route("/capabilities", get(capabilities::<R>))
             .route("/ws", get(crate::ws::ws_handler::<R>))
             .route("/call/{command}", post(application_call::<R>))
+            .route("/mcp", post(crate::product_mcp::remote_mcp_jsonrpc))
             .route("/auth/pairings", post(create_pairing::<R>))
             .route(
                 "/auth/connect-requests/pending",
@@ -310,6 +311,10 @@ where
                 get(notification_summary::<R>),
             )
             .route("/terminals/{session_id}/output", get(terminal_output::<R>))
+            .nest(
+                "/host/connectivity",
+                crate::host::connectivity::routes::connectivity_router::<R>(),
+            )
             .route_layer(middleware::from_fn_with_state(
                 Arc::clone(&self.state),
                 require_token::<R>,
@@ -327,6 +332,10 @@ where
             .route("/health", get(health::<R>))
             .route("/api/v1/e2ee/handshake", get(health::<R>))
             .route("/api/v1/auth/pairings/redeem", post(redeem_pairing::<R>))
+            .route(
+                "/api/v1/auth/grant-exchange",
+                post(crate::host::connectivity::routes::redeem_host_access_grant::<R>),
+            )
             .route(
                 "/api/v1/auth/connect-requests",
                 post(create_connect_request::<R>),
@@ -618,10 +627,13 @@ fn origin_allowed(config: &ServerConfig, origin: &str) -> bool {
     {
         return true;
     }
-    if config.allowed_origins.contains(origin) {
+    if config.allowed_origins.contains(origin) || origin == utils::site_origin() {
         return true;
     }
-    if config.reachability.iter().any(|item| item.origin == origin) {
+    if config.reachability.iter().any(|item| {
+        item.origin == origin
+            || crate::host::connectivity::browser_origin_of(&item.origin).as_deref() == Some(origin)
+    }) {
         return true;
     }
     let Ok(uri) = origin.parse::<axum::http::Uri>() else {

@@ -184,7 +184,9 @@ fn superagent_companion_announces_unified_server_and_all_tool_groups() {
         .filter_map(|t| t["name"].as_str())
         .collect();
 
-    assert!(names.contains(&"delegate_to_agent"));
+    assert!(names.contains(&"delegate_task"));
+    assert!(names.contains(&"thread_launch"));
+    assert!(names.contains(&"orchestrator_capabilities"));
     assert!(names.contains(&"get_session_info"));
     assert!(names.contains(&"list_spaces"));
     for pulse_name in PULSE_TOOL_NAMES {

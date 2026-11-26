@@ -53,6 +53,96 @@ pub async fn call_http(
         .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
+/// POST one JSON-RPC 2.0 `tools/call` to the Host unified Streamable HTTP `/mcp`
+/// endpoint for the 17 orchestration tools (`orchestrator_capabilities`,
+/// `delegate_task`, `task_*`, `thread_*`, `project_*`, `pending_request`).
+pub async fn call_mcp_http(
+    server_url: &str,
+    bearer_token: Option<&str>,
+    conversation_id: Option<&str>,
+    product: &str,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    parent_tool_use_id: &str,
+) -> Result<serde_json::Value, HostCallError> {
+    let url = format!("{}/mcp", server_url.trim_end_matches('/'));
+    let client = http_client().map_err(|err| HostCallError::transport(err.to_string()))?;
+    let mut params = serde_json::json!({
+        "name": tool_name,
+        "arguments": arguments,
+    });
+    if !parent_tool_use_id.trim().is_empty()
+        && let Some(obj) = params.as_object_mut()
+    {
+        obj.insert(
+            "_meta".into(),
+            serde_json::json!({ "tool_use_id": parent_tool_use_id }),
+        );
+    }
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": params,
+    });
+
+    let mut request = client.post(&url).json(&body);
+    if let Some(token) = bearer_token.filter(|t| !t.trim().is_empty()) {
+        request = request.bearer_auth(token);
+    }
+    if let Some(conv) = conversation_id.filter(|c| !c.trim().is_empty()) {
+        request = request.header("x-dimo-conversation-id", conv);
+    }
+    request = request.header("x-dimo-product", product);
+    if !parent_tool_use_id.trim().is_empty() {
+        request = request.header("x-dimo-tool-use-id", parent_tool_use_id);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|error| HostCallError::transport(error.to_string()))?;
+    let status = response.status();
+    let raw_text = response
+        .text()
+        .await
+        .map_err(|error| HostCallError::transport(error.to_string()))?;
+
+    if !status.is_success() {
+        return Err(HostCallError {
+            status: Some(status.as_u16()),
+            code: format!("http_{}", status.as_u16()),
+            message: if raw_text.trim().is_empty() {
+                format!("Host /mcp HTTP {} on {}", status.as_u16(), tool_name)
+            } else {
+                format!(
+                    "Host /mcp HTTP {} on {}: {}",
+                    status.as_u16(),
+                    tool_name,
+                    raw_text.trim()
+                )
+            },
+            violations: Vec::new(),
+            unmounted_v1_route: status.as_u16() == 404,
+        });
+    }
+
+    let parsed: serde_json::Value = serde_json::from_str(&raw_text)
+        .map_err(|error| HostCallError::transport(error.to_string()))?;
+    if let Some(err) = parsed.get("error") {
+        return Err(HostCallError::from_json_error(
+            None,
+            "mcp_rpc_error",
+            format!("Host /mcp RPC error on {tool_name}"),
+            err,
+        ));
+    }
+    Ok(parsed
+        .get("result")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null))
+}
+
 /// Structured error returned by Host HTTP (`/api/v1/call/<command>`) or Socket IPC
 /// (`BrokerMessage::Collaborate`) so `vibex-mcp` never swallows Host validation or
 /// runtime errors into fake local success.

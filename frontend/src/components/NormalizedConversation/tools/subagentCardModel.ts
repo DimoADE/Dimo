@@ -250,6 +250,13 @@ export function peelHostDelegationCall(use: ToolUseBlock): {
     wireCanonical === 'usetool' ||
     canonicalToolName(vendorName ?? '') === 'usetool'
   ) {
+    const nestedTarget = asObject(input?.target);
+    if (
+      readString(nestedTarget as JsonValue, 'agent_id') &&
+      readString(input as JsonValue, 'task')
+    ) {
+      return { name: 'delegate_task', input };
+    }
     if (
       readString(input as JsonValue, 'agent_type') &&
       readString(input as JsonValue, 'task')
@@ -258,6 +265,17 @@ export function peelHostDelegationCall(use: ToolUseBlock): {
     }
     if (Array.isArray(input?.task_ids)) {
       return { name: 'get_delegation_status', input };
+    }
+    if (
+      readString(input as JsonValue, ['run_id', 'child_conversation_id']) &&
+      !readString(input as JsonValue, 'task')
+    ) {
+      return {
+        name: readString(input as JsonValue, 'reason')
+          ? 'task_cancel'
+          : 'task_status',
+        input,
+      };
     }
     if (
       readString(input as JsonValue, 'task_id') &&
@@ -274,10 +292,8 @@ function hostCompanionCanonicalName(name: string): string {
 }
 
 export function isHostDelegationTool(use: ToolUseBlock): boolean {
-  return (
-    hostCompanionCanonicalName(peelHostDelegationCall(use).name) ===
-    'delegatetoagent'
-  );
+  const name = hostCompanionCanonicalName(peelHostDelegationCall(use).name);
+  return name === 'delegatetask' || name === 'delegatetoagent';
 }
 
 export function isHostDelegationLifecycleTool(use: ToolUseBlock): boolean {
@@ -288,13 +304,13 @@ export function hostDelegationLifecycleKind(
   use: ToolUseBlock
 ): 'status' | 'cancel' | null {
   const name = hostCompanionCanonicalName(peelHostDelegationCall(use).name);
-  if (name === 'getdelegationstatus') return 'status';
-  if (name === 'canceldelegation') return 'cancel';
+  if (name === 'taskstatus' || name === 'getdelegationstatus') return 'status';
+  if (name === 'taskcancel' || name === 'canceldelegation') return 'cancel';
   return null;
 }
 
 const COMPANION_TOOL_QUERY =
-  /delegate_to_agent|get_delegation_status|cancel_delegation|dimo-delegation|dimo-superagent|dimo\.multi-agent/i;
+  /orchestrator_capabilities|delegate_task|task_status|task_cancel|thread_launch|create_threads|thread_list|thread_read|thread_send|thread_wait|thread_interrupt|thread_transfer|project_list|project_read|project_create|project_clone|pending_request|delegate_to_agent|get_delegation_status|cancel_delegation|dimo-delegation|dimo-superagent|dimo\.multi-agent/i;
 
 export function isCompanionSearchQuery(
   query: string | null | undefined
