@@ -774,6 +774,13 @@ mod tests {
         let git = git::GitService::new();
         git.initialize_repo_with_main_branch(dir.path())
             .expect("init repo");
+        let repo = git2::Repository::open(dir.path()).expect("open temp repo");
+        let mut cfg = repo.config().expect("repo config");
+        cfg.set_str("user.name", "Dimo Test").expect("set name");
+        cfg.set_str("user.email", "test@dimo.local")
+            .expect("set email");
+        drop(cfg);
+        drop(repo);
         let file = dir.path().join("tracked.txt");
         std::fs::write(&file, "line1\n").expect("write initial");
         git.commit(dir.path(), "initial").expect("initial commit");
