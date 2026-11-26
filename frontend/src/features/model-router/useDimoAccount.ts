@@ -133,6 +133,7 @@ export async function refreshAccountOverview(options?: {
           void writeDesktopSharedPreferenceSection(
             DESKTOP_SHARED_ACCOUNT_OWNER_KEY,
             {
+              ...(data.user.id ? { userId: data.user.id } : {}),
               username: data.user.username,
               displayName: resolveAccountDisplayName(data.user),
               avatarUrl: data.user.avatarUrl ?? null,

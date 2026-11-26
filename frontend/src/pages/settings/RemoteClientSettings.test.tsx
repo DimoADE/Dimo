@@ -12,7 +12,9 @@ import { RemoteClientSettings } from './RemoteClientSettings';
 const hostClientApiMock = vi.hoisted(() => ({
   status: vi.fn(),
   discover: vi.fn(),
+  identity: vi.fn(),
   connect: vi.fn(),
+  connectWithGrant: vi.fn(),
   disconnect: vi.fn(),
   delete: vi.fn(),
   hostUpdates: vi.fn(),
@@ -631,5 +633,137 @@ describe('RemoteClientSettings', () => {
         '远程 Host 连接失败，更新错误，请检查远程服务状态'
       )
     );
+  });
+
+  it('lists My Account Hosts when signed in, excludes local_host_id and saved profiles, and connects via Ed25519 grant', async () => {
+    const user = userEvent.setup();
+    const { ACCOUNT_TOKEN_STORAGE_KEY } = await import(
+      '@/features/model-router'
+    );
+    window.localStorage.setItem(ACCOUNT_TOKEN_STORAGE_KEY, 'tok_client_dir');
+
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/api/account/hosts/remote-cloud-1/access-grant')) {
+          return new Response(
+            JSON.stringify({
+              grantToken: 'payload.sig',
+              expiresAt: '2026-12-01T00:00:00Z',
+              kid: 'k1',
+              hostId: 'remote-cloud-1',
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        if (url.includes('/api/account/hosts')) {
+          return new Response(
+            JSON.stringify({
+              hosts: [
+                {
+                  hostId: 'local-desktop-1',
+                  hostName: 'This Desktop',
+                  hostKind: 'desktop',
+                  online: true,
+                  endpoints: [
+                    {
+                      origin: 'https://relay.dimo-ai.com/t/local-desktop-1',
+                      kind: 'official_relay',
+                    },
+                  ],
+                },
+                {
+                  hostId: 'host-b',
+                  hostName: 'Beta (Saved)',
+                  hostKind: 'desktop',
+                  online: true,
+                  endpoints: [
+                    {
+                      origin: 'http://192.168.1.9:17891',
+                      kind: 'lan',
+                    },
+                  ],
+                },
+                {
+                  hostId: 'remote-cloud-1',
+                  hostName: 'Cloud Build Box',
+                  hostKind: 'headless',
+                  online: true,
+                  endpoints: [
+                    {
+                      origin: 'https://relay.dimo-ai.com/t/remote-cloud-1',
+                      kind: 'official_relay',
+                    },
+                  ],
+                },
+              ],
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            user: { id: 'u1', username: 'alice', displayName: 'Alice' },
+            relayPermission: true,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      });
+
+    try {
+      hostClientApiMock.status.mockResolvedValue({
+        connected: true,
+        profile: connectedHost,
+        profiles: [connectedHost, otherHost],
+        local_host_id: 'local-desktop-1',
+      });
+      hostClientApiMock.identity.mockResolvedValue({
+        publicKeyEd25519: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+        clientId: 'client-1',
+      });
+      hostClientApiMock.connectWithGrant.mockResolvedValue({
+        profile: {
+          id: 'p-cloud-1',
+          origin: 'https://relay.dimo-ai.com/t/remote-cloud-1',
+          host_id: 'remote-cloud-1',
+          name: 'Cloud Build Box',
+          connected: true,
+          has_credential: true,
+          needs_token: false,
+        },
+        stopped_host: false,
+      });
+
+      render(<RemoteClientSettings />);
+
+      const row = await screen.findByTestId('account-host-row-remote-cloud-1');
+      expect(row).toBeInTheDocument();
+      expect(
+        screen.queryByTestId('account-host-row-local-desktop-1')
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByTestId('account-host-row-host-b')
+      ).not.toBeInTheDocument();
+
+      await user.click(within(row).getByRole('button'));
+
+      await waitFor(() =>
+        expect(hostClientApiMock.connectWithGrant).toHaveBeenCalledWith({
+          hostId: 'remote-cloud-1',
+          name: 'Cloud Build Box',
+          endpoints: [
+            {
+              origin: 'https://relay.dimo-ai.com/t/remote-cloud-1',
+              kind: 'official_relay',
+            },
+          ],
+          grantToken: 'payload.sig',
+        })
+      );
+    } finally {
+      fetchSpy.mockRestore();
+      window.localStorage.removeItem(ACCOUNT_TOKEN_STORAGE_KEY);
+    }
   });
 });

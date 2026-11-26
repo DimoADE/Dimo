@@ -412,4 +412,71 @@ describe('HostSelector', () => {
       within(badge).getByRole('img', { name: 'Alice Chen' })
     ).toHaveAttribute('src', 'https://example.com/alice.png');
   });
+
+  it('excludes the local machine hostId from My Account Hosts while showing other online account hosts', async () => {
+    const user = userEvent.setup();
+    const { ACCOUNT_TOKEN_STORAGE_KEY } = await import(
+      '@/features/model-router'
+    );
+    window.localStorage.setItem(ACCOUNT_TOKEN_STORAGE_KEY, 'tok_self_filter');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/api/account/hosts')) {
+          return new Response(
+            JSON.stringify({
+              hosts: [
+                {
+                  hostId: 'local-machine-id',
+                  hostName: 'This Local Mac',
+                  hostKind: 'desktop',
+                  online: true,
+                  endpoints: [
+                    { origin: 'https://relay.dimo-ai.com/t/local-machine-id', kind: 'official_relay' },
+                  ],
+                },
+                {
+                  hostId: 'remote-gpu-id',
+                  hostName: 'Remote GPU Box',
+                  hostKind: 'headless',
+                  online: true,
+                  endpoints: [
+                    { origin: 'https://relay.dimo-ai.com/t/remote-gpu-id', kind: 'official_relay' },
+                  ],
+                },
+              ],
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            user: { id: 'u1', username: 'alice', displayName: 'Alice' },
+            relayPermission: true,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      });
+
+    try {
+      mocks.status.mockResolvedValue({
+        profiles: [],
+        local_host_id: 'local-machine-id',
+      });
+
+      renderHostSelector();
+      await user.click(screen.getByTestId('toolbar-host-selector'));
+
+      expect(
+        await screen.findByTestId('host-selector-account-remote-gpu-id')
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByTestId('host-selector-account-local-machine-id')
+      ).not.toBeInTheDocument();
+    } finally {
+      fetchSpy.mockRestore();
+      window.localStorage.removeItem(ACCOUNT_TOKEN_STORAGE_KEY);
+    }
+  });
 });

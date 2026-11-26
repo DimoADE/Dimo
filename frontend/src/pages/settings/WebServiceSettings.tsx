@@ -40,7 +40,10 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import {
+  hostConnectivityApi,
   hostTunnelApi,
+  type HostConnectivityStatus,
+  type HostTunnelStatus,
   type PortProbeResult,
   type WebServerStatus,
   type WebServiceConfig,
@@ -52,6 +55,10 @@ import { cn } from '@/lib/utils';
 import { SettingsSection } from './SettingsUi';
 import { useLiveSettingsCommit } from './useLiveSettingsCommit';
 import { DevicePairingPanel } from './DevicePairingPanel';
+import {
+  isOfficialCloudTunnel,
+  pickPreferredTunnelId,
+} from './HostTunnelPanel';
 import { RemoteClientSettings } from './RemoteClientSettings';
 import { SurfaceLoading } from '@/components/layout/SurfaceLoading';
 
@@ -102,12 +109,26 @@ export function WebServiceSettings({
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const [status, setStatus] = useState<WebServerStatus | null>(null);
+  const [headlessStatus, setHeadlessStatus] =
+    useState<HostConnectivityStatus | null>(null);
   const [probe, setProbe] = useState<PortProbeResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [statusBusy, setStatusBusy] = useState(false);
   const [probing, setProbing] = useState(false);
   const [tunnelEnabled, setTunnelEnabled] = useState(false);
+  const [hasSavedCustomTunnel, setHasSavedCustomTunnel] = useState(false);
   const [showModePrompt, setShowModePrompt] = useState(false);
+  const canOfferCloudMode = hasRelayPermission || hasSavedCustomTunnel;
+  const syncTunnelSummary = useCallback(
+    (tunnelStatus: HostTunnelStatus | null | undefined) => {
+      if (!tunnelStatus) return;
+      setTunnelEnabled(Boolean(tunnelStatus.enabled && tunnelStatus.active_id));
+      setHasSavedCustomTunnel(
+        tunnelStatus.saved.some((item) => !isOfficialCloudTunnel(item))
+      );
+    },
+    []
+  );
   const [autoConnect, setAutoConnectState] = useState<boolean>(() =>
     getRemoteAutoConnect()
   );
@@ -121,7 +142,7 @@ export function WebServiceSettings({
       setRole('client');
     }
   }, [hostConsole, prefersClientTab]);
-  const serviceRunning = Boolean(status?.running);
+  const serviceRunning = hostConsole ? Boolean(status?.running) : true;
   const { writeNow, writeSettled, flush, holdingRef } = useLiveSettingsCommit(
     async (next: WebServiceConfig) => {
       if (!validPort(next.port)) return;
@@ -163,7 +184,18 @@ export function WebServiceSettings({
 
   const load = useCallback(
     async (showSpinner = true) => {
-      if (!hostConsole || boundToRemote) {
+      if (boundToRemote) {
+        setLoading(false);
+        return;
+      }
+      if (!hostConsole) {
+        if (typeof hostConnectivityApi?.getStatus === 'function') {
+          const next = await hostConnectivityApi.getStatus().catch(() => null);
+          setHeadlessStatus(next);
+          if (next?.tunnel) {
+            setTunnelEnabled(Boolean(next.tunnel.enabled));
+          }
+        }
         setLoading(false);
         return;
       }
@@ -174,9 +206,7 @@ export function WebServiceSettings({
           webServiceApi.getStatus(),
           Promise.resolve(hostTunnelApi.get?.()).catch(() => null),
         ]);
-        if (tunnelStatus) {
-          setTunnelEnabled(Boolean(tunnelStatus.enabled));
-        }
+        syncTunnelSummary(tunnelStatus);
         const lanMissing =
           currentStatus.running &&
           savedConfig.allow_lan &&
@@ -209,7 +239,7 @@ export function WebServiceSettings({
         setLoading(false);
       }
     },
-    [boundToRemote, holdingRef, hostConsole, t]
+    [boundToRemote, holdingRef, hostConsole, syncTunnelSummary, t]
   );
 
   useEffect(() => {
@@ -232,20 +262,26 @@ export function WebServiceSettings({
   const refreshStatus = useCallback(async () => {
     setStatusBusy(true);
     try {
+      if (!hostConsole) {
+        if (typeof hostConnectivityApi?.getStatus === 'function') {
+          const next = await hostConnectivityApi.getStatus();
+          setHeadlessStatus(next);
+          setTunnelEnabled(Boolean(next?.tunnel?.enabled));
+        }
+        return;
+      }
       const [nextStatus, tunnelStatus] = await Promise.all([
         webServiceApi.getStatus(),
         hostTunnelApi.get().catch(() => null),
       ]);
       setStatus(nextStatus);
-      if (tunnelStatus) {
-        setTunnelEnabled(Boolean(tunnelStatus.enabled));
-      }
+      syncTunnelSummary(tunnelStatus);
     } catch (error) {
       toast.error(getErrorMessage(error, t('webService.statusLoadFailed')));
     } finally {
       setStatusBusy(false);
     }
-  }, [t]);
+  }, [hostConsole, syncTunnelSummary, t]);
 
   const selectConnectionMode = useCallback(
     async (useCloud: boolean) => {
@@ -255,8 +291,21 @@ export function WebServiceSettings({
         if (useCloud && hasRelayPermission) {
           await syncCurrentHostRelayLease().catch(() => false);
         }
-        const updatedTunnel = await hostTunnelApi.setEnabled(useCloud);
-        setTunnelEnabled(Boolean(updatedTunnel.enabled));
+        let updatedTunnel = await hostTunnelApi.setEnabled(useCloud);
+        if (
+          useCloud &&
+          !updatedTunnel.active_id &&
+          typeof hostTunnelApi.selectSaved === 'function'
+        ) {
+          const preferredId = pickPreferredTunnelId(
+            updatedTunnel,
+            hasRelayPermission
+          );
+          if (preferredId) {
+            updatedTunnel = await hostTunnelApi.selectSaved(preferredId);
+          }
+        }
+        syncTunnelSummary(updatedTunnel);
         window.dispatchEvent(new CustomEvent('dimo:host-tunnel-updated'));
         if (!useCloud && !draftRef.current.allow_lan) {
           commitDraft({ ...draftRef.current, allow_lan: true });
@@ -270,9 +319,7 @@ export function WebServiceSettings({
             hostTunnelApi.get().catch(() => null),
           ]);
           setStatus(actualStatus);
-          if (actualTunnel) {
-            setTunnelEnabled(Boolean(actualTunnel.enabled));
-          }
+          syncTunnelSummary(actualTunnel);
         } catch {
           // Preserve current state if secondary refresh fails
         }
@@ -281,7 +328,7 @@ export function WebServiceSettings({
         setStatusBusy(false);
       }
     },
-    [commitDraft, hasRelayPermission, t]
+    [commitDraft, hasRelayPermission, syncTunnelSummary, t]
   );
 
   const startServer = useCallback(async () => {
@@ -437,9 +484,7 @@ export function WebServiceSettings({
                         data-status={portHealthy ? 'healthy' : 'unhealthy'}
                         className={cn(
                           'absolute right-2 inline-flex !h-5 !min-h-0 !w-5 cursor-pointer items-center justify-center border-0 bg-transparent p-0 transition-opacity hover:bg-transparent hover:opacity-80 focus-visible:outline-none',
-                          portHealthy
-                            ? 'text-[hsl(var(--success))]'
-                            : 'text-destructive'
+                          portHealthy ? 'text-success' : 'text-destructive'
                         )}
                       >
                         {probing ? (
@@ -466,29 +511,29 @@ export function WebServiceSettings({
                     checked={serviceRunning}
                     onCheckedChange={(checked: boolean) => {
                       if (checked) {
-                        if (hasRelayPermission) {
+                        if (canOfferCloudMode) {
                           setShowModePrompt(true);
+                          void Promise.resolve(
+                            hostTunnelApi.setEnabled?.(false)
+                          )
+                            .then((next) => {
+                              syncTunnelSummary(next);
+                              window.dispatchEvent(
+                                new CustomEvent('dimo:host-tunnel-updated')
+                              );
+                            })
+                            .catch((error) => {
+                              toast.error(
+                                getErrorMessage(
+                                  error,
+                                  t('webService.tunnelSaveFailed')
+                                )
+                              );
+                              window.dispatchEvent(
+                                new CustomEvent('dimo:host-tunnel-updated')
+                              );
+                            });
                         }
-                        void Promise.resolve(hostTunnelApi.setEnabled?.(false))
-                          .then((next) => {
-                            if (next) {
-                              setTunnelEnabled(Boolean(next.enabled));
-                            }
-                            window.dispatchEvent(
-                              new CustomEvent('dimo:host-tunnel-updated')
-                            );
-                          })
-                          .catch((error) => {
-                            toast.error(
-                              getErrorMessage(
-                                error,
-                                t('webService.tunnelSaveFailed')
-                              )
-                            );
-                            window.dispatchEvent(
-                              new CustomEvent('dimo:host-tunnel-updated')
-                            );
-                          });
                         void startServer();
                       } else {
                         setShowModePrompt(false);
@@ -505,7 +550,7 @@ export function WebServiceSettings({
                 </div>
               </div>
 
-              {serviceRunning && showModePrompt && hasRelayPermission ? (
+              {serviceRunning && showModePrompt && canOfferCloudMode ? (
                 <div
                   data-testid="remote-connection-mode-prompt"
                   className="mx-4 my-2 flex flex-col gap-2.5 rounded-lg border border-primary/30 bg-primary/5 p-3.5 text-xs"
@@ -626,9 +671,91 @@ export function WebServiceSettings({
             </SettingsSection>
           ) : null}
 
+          {!hostConsole && headlessStatus ? (
+            <SettingsSection
+              icon={Server}
+              title={headlessStatus.host_name || headlessStatus.host_id}
+              description={t('webService.headlessHostDescription')}
+            >
+              <div className="settings-row">
+                <div className="min-w-0 flex-1">
+                  <Label htmlFor="headless-tunnel-switch">
+                    {t('webService.headlessTunnelLabel')}
+                  </Label>
+                  <p className="settings-row__description break-all font-mono text-xs">
+                    {headlessStatus.tunnel?.saved?.find(
+                      (item) => item.id === headlessStatus.tunnel?.active_id
+                    )?.origin ||
+                      (!tunnelEnabled
+                        ? t('webService.headlessTunnelDisabled')
+                        : headlessStatus.tunnel?.relay_state === 'connected'
+                          ? t('webService.headlessTunnelConnected')
+                          : headlessStatus.tunnel?.relay_state === 'connecting'
+                            ? t('webService.headlessTunnelConnecting')
+                            : t('webService.headlessTunnelDisconnected'))}
+                  </p>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-7 px-2.5 text-xs"
+                    disabled={statusBusy || !tunnelEnabled}
+                    onClick={() => {
+                      setStatusBusy(true);
+                      void hostConnectivityApi
+                        .reconnectTunnel()
+                        .then(() => refreshStatus())
+                        .catch((error) =>
+                          toast.error(
+                            getErrorMessage(
+                              error,
+                              t('webService.tunnelSaveFailed')
+                            )
+                          )
+                        )
+                        .finally(() => setStatusBusy(false));
+                    }}
+                  >
+                    {statusBusy ? (
+                      <Loader2
+                        className="mr-1 h-3 w-3 animate-spin"
+                        aria-hidden="true"
+                      />
+                    ) : null}
+                    {t('common:reconnect')}
+                  </Button>
+                  <Switch
+                    id="headless-tunnel-switch"
+                    className="settings-switch"
+                    checked={tunnelEnabled}
+                    disabled={statusBusy}
+                    aria-label={t('webService.headlessTunnelLabel')}
+                    onCheckedChange={(checked: boolean) => {
+                      setStatusBusy(true);
+                      void hostConnectivityApi
+                        .setTunnelEnabled(checked)
+                        .then(() => refreshStatus())
+                        .catch((error) =>
+                          toast.error(
+                            getErrorMessage(
+                              error,
+                              t('webService.tunnelSaveFailed')
+                            )
+                          )
+                        )
+                        .finally(() => setStatusBusy(false));
+                    }}
+                  />
+                </div>
+              </div>
+            </SettingsSection>
+          ) : null}
+
           <DevicePairingPanel
             transport={transport}
-            hostId={status?.host_id}
+            hostId={status?.host_id ?? headlessStatus?.host_id}
             hostUrls={
               status?.addresses && status.addresses.length > 0
                 ? status.addresses
@@ -636,10 +763,12 @@ export function WebServiceSettings({
                   ? [status.address]
                   : []
             }
-            reachability={status?.reachability ?? []}
+            reachability={
+              status?.reachability ?? headlessStatus?.endpoints ?? []
+            }
             listenAddresses={status?.listen_addresses ?? []}
             serviceRunning={serviceRunning}
-            showTunnel={hostConsole && hasRelayPermission}
+            showTunnel={hostConsole}
             onReachabilityChange={() => void refreshStatus()}
           />
         </div>

@@ -40,6 +40,25 @@ const EMPTY_STATUS: HostTunnelStatus = {
   last_error: null,
 };
 
+export function isOfficialCloudTunnel(
+  item: Pick<SavedHostTunnel, 'id' | 'kind'>
+): boolean {
+  return item.id === 'auto-quick-tunnel' || item.kind === 'quick';
+}
+
+export function pickPreferredTunnelId(
+  status: Pick<HostTunnelStatus, 'saved'>,
+  hasOfficialRelay: boolean
+): string | null {
+  if (
+    hasOfficialRelay &&
+    status.saved.some((item) => item.id === 'auto-quick-tunnel')
+  ) {
+    return 'auto-quick-tunnel';
+  }
+  return status.saved.find((item) => !isOfficialCloudTunnel(item))?.id ?? null;
+}
+
 type TunnelConnectivityResult = {
   connected: boolean;
   latencyMs: number;
@@ -166,6 +185,9 @@ export function HostTunnelPanel({
 }) {
   const { t } = useTranslation(['settings', 'common']);
   const { isSignedIn, overview } = useDimoAccount();
+  const hasOfficialRelay = Boolean(
+    isSignedIn && overview?.relayPermission !== false
+  );
   const portalContainer = usePortalContainer();
   const [status, setStatus] = useState<HostTunnelStatus>(EMPTY_STATUS);
   const [address, setAddress] = useState('');
@@ -294,17 +316,22 @@ export function HostTunnelPanel({
   const toggleEnabled = async (enabled: boolean) => {
     setBusy(true);
     try {
-      if (enabled && isSignedIn) {
+      if (enabled && hasOfficialRelay) {
         await syncCurrentHostRelayLease().catch(() => false);
       }
       let next = await hostTunnelApi.setEnabled(enabled);
       if (
         enabled &&
         !next.active_id &&
-        next.saved.some((item) => item.id === 'auto-quick-tunnel') &&
         typeof hostTunnelApi.selectSaved === 'function'
       ) {
-        next = await hostTunnelApi.selectSaved('auto-quick-tunnel');
+        const preferredId = pickPreferredTunnelId(next, hasOfficialRelay);
+        if (preferredId) {
+          next = await hostTunnelApi.selectSaved(preferredId);
+        }
+      }
+      if (enabled && next.saved.length === 0) {
+        setListExpanded(true);
       }
       applyStatus(next);
       onReachabilityChange();
@@ -451,6 +478,9 @@ export function HostTunnelPanel({
     setBusy(true);
     setTogglingId(item.id);
     try {
+      if (!active && !serviceRunning) {
+        await hostTunnelApi.setEnabled(true);
+      }
       applyStatus(await hostTunnelApi.selectSaved(active ? null : item.id));
       onReachabilityChange();
     } catch (error) {
@@ -507,7 +537,11 @@ export function HostTunnelPanel({
             </span>
           </div>
           <p className="settings-row__description">
-            {t('webService.tunnelDescription')}
+            {hasOfficialRelay
+              ? t('webService.tunnelDescription')
+              : isSignedIn
+                ? t('webService.tunnelDescriptionNoOfficialRelay')
+                : t('webService.tunnelDescriptionSignedOut')}
           </p>
         </div>
         <Switch
@@ -564,15 +598,18 @@ export function HostTunnelPanel({
               data-testid="saved-tunnels-scroll-box"
             >
               {status.saved.length === 0 ? (
-                <p className="settings-pairing-devices__empty">
-                  {t('webService.tunnelSavedEmpty')}
-                </p>
+                <div className="settings-pairing-devices__empty flex flex-col gap-1">
+                  <span>{t('webService.tunnelSavedEmpty')}</span>
+                  {!hasOfficialRelay && status.enabled ? (
+                    <span className="text-[11px] text-muted-foreground/90">
+                      {t('webService.tunnelNeedSelfHostedHint')}
+                    </span>
+                  ) : null}
+                </div>
               ) : (
                 status.saved.map((item) => {
                   const active = status.enabled && item.id === status.active_id;
-                  const isOfficialCloud =
-                    item.id === 'auto-quick-tunnel' ||
-                    item.origin.includes('/t/');
+                  const isOfficialCloud = isOfficialCloudTunnel(item);
                   const officialNodeName =
                     item.name?.trim() ||
                     overview?.assignedRelayServer?.name?.trim() ||
@@ -581,7 +618,7 @@ export function HostTunnelPanel({
                     });
                   const isRelayPolling =
                     active &&
-                    item.kind === 'relay' &&
+                    (item.kind === 'relay' || item.kind === 'quick') &&
                     status.relay_state !== 'connected';
                   return (
                     <div

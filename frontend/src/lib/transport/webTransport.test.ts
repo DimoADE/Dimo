@@ -452,8 +452,17 @@ describe('WebTransport', () => {
 
   it('generates RFC 4122 v4 operation_id and subscription_id in HTTP insecure contexts where crypto.randomUUID is undefined', async () => {
     const originalRandomUUID = globalThis.crypto.randomUUID;
+    const originalSecureContext = Object.getOwnPropertyDescriptor(
+      globalThis,
+      'isSecureContext'
+    );
     Object.defineProperty(globalThis.crypto, 'randomUUID', {
       value: undefined,
+      configurable: true,
+      writable: true,
+    });
+    Object.defineProperty(globalThis, 'isSecureContext', {
+      value: false,
       configurable: true,
       writable: true,
     });
@@ -503,6 +512,15 @@ describe('WebTransport', () => {
         configurable: true,
         writable: true,
       });
+      if (originalSecureContext) {
+        Object.defineProperty(
+          globalThis,
+          'isSecureContext',
+          originalSecureContext
+        );
+      } else {
+        delete (globalThis as { isSecureContext?: boolean }).isSecureContext;
+      }
     }
   });
 

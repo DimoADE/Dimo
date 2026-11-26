@@ -40,10 +40,21 @@ const hostTunnelApiMock = vi.hoisted(() => ({
   removeSaved: vi.fn(),
 }));
 
+const hostConnectivityApiMock = vi.hoisted(() => ({
+  getStatus: vi.fn(async () => null),
+  listCustomPublicOrigins: vi.fn(async () => []),
+  probeCustomPublicOrigin: vi.fn(),
+  addCustomPublicOrigin: vi.fn(),
+  removeCustomPublicOrigin: vi.fn(),
+  setTunnelEnabled: vi.fn(),
+  reconnectTunnel: vi.fn(),
+}));
+
 vi.mock('@/lib/api', () => ({
   webServiceApi: webServiceApiMock,
   hostClientApi: hostClientApiMock,
   hostTunnelApi: hostTunnelApiMock,
+  hostConnectivityApi: hostConnectivityApiMock,
 }));
 
 vi.mock('@/components/ui/toast', () => ({
@@ -392,7 +403,7 @@ describe('WebServiceSettings', () => {
     expect(screen.getByRole('switch', { name: '自动启动' })).toBeVisible();
     expect(screen.getByRole('switch', { name: '允许局域网' })).toBeVisible();
     const lamp = screen.getByTestId('web-service-status-lamp');
-    expect(lamp).toHaveClass('text-[hsl(var(--success))]');
+    expect(lamp).toHaveClass('text-success');
     expect(lamp).toHaveAttribute('data-status', 'healthy');
     expect(lamp.querySelector('.vu-toast-status-icon')).not.toBeNull();
 
@@ -618,7 +629,31 @@ describe('WebServiceSettings', () => {
     expect(screen.getByText('http://127.0.0.1:17892')).toBeVisible();
   });
 
-  it('hides the Cloud Relay Service (Beta) section when the account does not have relay permission', async () => {
+  it('keeps the Cloud Service switch and self-hosted VPS setup available when signed out', async () => {
+    const user = userEvent.setup();
+    dimoAccountMock.isSignedIn = false;
+    dimoAccountMock.overview = null;
+
+    renderSettings();
+
+    expect(await screen.findByText('远程服务状态')).toBeVisible();
+    expect(screen.getByRole('switch', { name: '云服务' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '新建云节点' })).toBeVisible();
+    expect(
+      screen.getByText(
+        '可添加自建 VPS 节点跨网连接；登录 Dimo 账号后可使用官方云服务。'
+      )
+    ).toBeVisible();
+
+    await user.click(screen.getByRole('switch', { name: '启动' }));
+    await waitFor(() => expect(webServiceApiMock.start).toHaveBeenCalledOnce());
+    expect(
+      screen.queryByTestId('remote-connection-mode-prompt')
+    ).not.toBeInTheDocument();
+  });
+
+  it('keeps the Cloud Service switch available for self-hosted VPS when the account lacks official relay permission', async () => {
+    dimoAccountMock.isSignedIn = true;
     dimoAccountMock.overview = {
       relayPermission: false,
       assignedRelayServer: null,
@@ -628,9 +663,72 @@ describe('WebServiceSettings', () => {
     renderSettings();
 
     expect(await screen.findByText('远程服务状态')).toBeVisible();
+    expect(screen.getByRole('switch', { name: '云服务' })).toBeVisible();
+    expect(screen.getByRole('button', { name: '新建云节点' })).toBeVisible();
     expect(
-      screen.queryByRole('switch', { name: '云服务' })
-    ).not.toBeInTheDocument();
+      screen.getByText(
+        '当前账号未开通官方云服务，可添加自建 VPS 节点跨网连接。'
+      )
+    ).toBeVisible();
+  });
+
+  it('offers cloud mode for a saved self-hosted VPS when signed out and activates it on confirm', async () => {
+    const user = userEvent.setup();
+    dimoAccountMock.isSignedIn = false;
+    dimoAccountMock.overview = null;
+    const savedVps = {
+      id: 'vps-1',
+      origin: 'http://203.0.113.10:17891/t/my-host',
+      host: '203.0.113.10',
+      port: 17891,
+      kind: 'relay',
+      created_at: '2026-11-12T00:00:00Z',
+    };
+    hostTunnelApiMock.get.mockResolvedValue({
+      enabled: false,
+      saved: [savedVps],
+      active_id: null,
+      pending: null,
+      relay_state: 'idle',
+      last_error: null,
+    });
+    hostTunnelApiMock.setEnabled
+      .mockResolvedValueOnce({
+        enabled: false,
+        saved: [savedVps],
+        active_id: null,
+        pending: null,
+        relay_state: 'idle',
+        last_error: null,
+      })
+      .mockResolvedValueOnce({
+        enabled: true,
+        saved: [savedVps],
+        active_id: null,
+        pending: null,
+        relay_state: 'idle',
+        last_error: null,
+      });
+    hostTunnelApiMock.selectSaved.mockResolvedValue({
+      enabled: true,
+      saved: [savedVps],
+      active_id: 'vps-1',
+      pending: null,
+      relay_state: 'connecting',
+      last_error: null,
+    });
+
+    renderSettings();
+
+    await user.click(await screen.findByRole('switch', { name: '启动' }));
+    const cloudBtn = await screen.findByRole('button', {
+      name: /使用云服务 Beta/,
+    });
+    await user.click(cloudBtn);
+
+    await waitFor(() =>
+      expect(hostTunnelApiMock.selectSaved).toHaveBeenCalledWith('vps-1')
+    );
   });
 
   it('shows toast error and preserves actual tunnel state when selecting cloud mode fails', async () => {

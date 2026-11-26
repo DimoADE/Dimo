@@ -10,6 +10,7 @@ import { UNSAFE_LocationContext } from 'react-router-dom';
 import { backendListen } from '@/lib/backendTransport';
 import {
   ChevronDown,
+  Cloud,
   Laptop,
   Loader2,
   Radio,
@@ -41,6 +42,12 @@ import {
   type SavedHostUpdateView,
 } from '@/lib/api';
 import { getSiteUrl } from '@/lib/branding';
+import {
+  type AccountDirectoryHost,
+  listAccountDirectoryHosts,
+  parsePairingInvitation,
+  requestHostAccessGrant,
+} from '@/lib/connectivity';
 import { getErrorMessage } from '@/lib/modals';
 import { cn } from '@/lib/utils';
 
@@ -234,6 +241,9 @@ export function RemoteClientSettings() {
   );
   const provisioners = useLocalProvisioners();
   const [profiles, setProfiles] = useState<HostClientProfile[]>([]);
+  const [localHostId, setLocalHostId] = useState<string | null>(null);
+  const [accountHosts, setAccountHosts] = useState<AccountDirectoryHost[]>([]);
+  const [loadingAccountHosts, setLoadingAccountHosts] = useState(false);
   const [discovered, setDiscovered] = useState<DiscoveredHost[]>([]);
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
@@ -279,8 +289,69 @@ export function RemoteClientSettings() {
   const loadStatus = useCallback(async () => {
     const status = await hostClientApi.status();
     setProfiles(status.profiles);
+    setLocalHostId(status.local_host_id ?? null);
     return status;
   }, []);
+
+  const loadAccountHosts = useCallback(async () => {
+    if (!isSignedIn) {
+      setAccountHosts([]);
+      return;
+    }
+    setLoadingAccountHosts(true);
+    try {
+      setAccountHosts(await listAccountDirectoryHosts());
+    } finally {
+      setLoadingAccountHosts(false);
+    }
+  }, [isSignedIn]);
+
+  const connectAccountHost = useCallback(
+    async (host: AccountDirectoryHost) => {
+      const key = `account:${host.hostId}`;
+      setConnectingKey(key);
+      try {
+        if (
+          typeof hostClientApi.identity !== 'function' ||
+          typeof hostClientApi.connectWithGrant !== 'function'
+        ) {
+          throw new Error(t('webService.clientConnectFailed'));
+        }
+        const identity = await hostClientApi.identity();
+        const grant = await requestHostAccessGrant({
+          hostId: host.hostId,
+          clientPublicKeyEd25519: identity.publicKeyEd25519,
+          clientKind: 'desktop',
+          preset: 'workstation',
+        });
+        const result = await hostClientApi.connectWithGrant({
+          hostId: host.hostId,
+          name: host.hostName,
+          endpoints: host.endpoints,
+          grantToken: grant.grantToken,
+        });
+        if (result.profile?.connected) {
+          void reconcileRemoteHostAccount(result.profile);
+        }
+        if (result.stopped_host) {
+          toast.info(t('webService.stoppedHostForClient'));
+        }
+        await loadStatus();
+        toast.success(t('webService.clientConnected'));
+      } catch (error) {
+        toast.error(
+          connectErrorMessage(
+            error,
+            t('webService.clientConnectFailed'),
+            t('webService.sshLoginRejected')
+          )
+        );
+      } finally {
+        setConnectingKey(null);
+      }
+    },
+    [loadStatus, t]
+  );
 
   const loadHostUpdates = useCallback(async () => {
     try {
@@ -304,6 +375,10 @@ export function RemoteClientSettings() {
       setScanning(false);
     }
   }, [t]);
+
+  useEffect(() => {
+    void loadAccountHosts();
+  }, [loadAccountHosts]);
 
   useEffect(() => {
     let cancelled = false;
@@ -380,10 +455,20 @@ export function RemoteClientSettings() {
     }) => {
       setConnectingKey(request.key);
       try {
+        const parsedInvitation = request.token?.trim().startsWith('dimo-pairing:')
+          ? parsePairingInvitation(request.token)
+          : null;
+        const resolvedOrigin =
+          request.origin?.trim() ||
+          parsedInvitation?.endpoints[0]?.origin ||
+          undefined;
         const result = await hostClientApi.connect({
-          origin: request.origin,
+          origin: resolvedOrigin,
           token: request.token,
           profile_id: request.profile_id,
+          ...(parsedInvitation && parsedInvitation.endpoints.length > 0
+            ? { endpoints: parsedInvitation.endpoints }
+            : {}),
         });
         if (result.profile?.connected) {
           void reconcileRemoteHostAccount(result.profile);
@@ -399,6 +484,7 @@ export function RemoteClientSettings() {
         if (result.stopped_host) {
           toast.success(t('webService.stoppedHostForClient'));
         }
+        return true;
       } catch (error) {
         if (isNeedsToken(error)) {
           setTokenFor(request.key);
@@ -413,6 +499,7 @@ export function RemoteClientSettings() {
             )
           );
         }
+        return false;
       } finally {
         setConnectingKey(null);
       }
@@ -547,39 +634,61 @@ export function RemoteClientSettings() {
   );
 
   const connectManual = useCallback(async () => {
-    const rawOrigin = manualOrigin.trim();
-    if (!rawOrigin) {
+    const rawOriginInput = manualOrigin.trim();
+    const rawCodeInput = manualCode.trim();
+    const invitationInput = rawCodeInput.startsWith('dimo-pairing:')
+      ? rawCodeInput
+      : rawOriginInput.startsWith('dimo-pairing:')
+        ? rawOriginInput
+        : null;
+    const parsedInvitation = invitationInput
+      ? parsePairingInvitation(invitationInput)
+      : null;
+
+    const rawOrigin = rawOriginInput.startsWith('dimo-pairing:')
+      ? (parsedInvitation?.endpoints[0]?.origin ?? '')
+      : rawOriginInput || parsedInvitation?.endpoints[0]?.origin || '';
+    const effectiveCode = invitationInput ?? rawCodeInput;
+
+    if (!rawOrigin && !parsedInvitation?.endpoints.length) {
       toast.error(t('webService.clientOriginRequired'));
       return;
     }
-    const saved = profiles.find((profile) => profile.origin === rawOrigin);
+    const saved = rawOrigin
+      ? profiles.find((profile) => profile.origin === rawOrigin)
+      : undefined;
     const origin =
-      hasRelayPermission && manualUseRelay
+      rawOrigin && hasRelayPermission && manualUseRelay
         ? resolveCloudRelayTargetOrigin(
             rawOrigin,
             relayPublicOrigin,
             saved?.host_id
           )
-        : rawOrigin;
-    if (saved?.has_credential && !manualCode.trim()) {
-      await connect({
+        : rawOrigin || undefined;
+    if (saved?.has_credential && !effectiveCode) {
+      const ok = await connect({
         origin,
         profile_id: saved.id,
         key: 'manual',
       });
+      if (ok) {
+        setManualOpen(false);
+      }
       return;
     }
-    if (!manualCode.trim() && !saved?.has_credential) {
+    if (!effectiveCode && !saved?.has_credential) {
       toast.error(t('webService.clientNeedsCode'));
       return;
     }
-    await connect({
+    const ok = await connect({
       origin,
-      token: manualCode.trim() || undefined,
+      token: effectiveCode || undefined,
       profile_id: saved?.id,
       key: 'manual',
     });
-    setManualOpen(false);
+    if (ok) {
+      setManualOpen(false);
+    }
   }, [
     connect,
     hasRelayPermission,
@@ -679,6 +788,16 @@ export function RemoteClientSettings() {
     [connected, discovered]
   );
 
+  const accountHostsVisible = useMemo(
+    () =>
+      accountHosts.filter(
+        (host) =>
+          (!localHostId || host.hostId !== localHostId) &&
+          !profiles.some((profile) => profile.host_id === host.hostId)
+      ),
+    [accountHosts, localHostId, profiles]
+  );
+
   if (loading) {
     return <SurfaceLoading />;
   }
@@ -721,62 +840,82 @@ export function RemoteClientSettings() {
                 align="end"
                 className="settings-manual-connect w-80"
               >
-                <div>
-                  <Label>{t('webService.manualOriginLabel')}</Label>
-                  <TextInput
-                    label={t('webService.manualOriginLabel')}
-                    isLabelHidden
-                    value={manualOrigin}
-                    onChange={setManualOrigin}
-                    placeholder={t('webService.manualOriginPlaceholder')}
-                    width="100%"
-                    className="mt-1 [&_input]:font-mono [&_input]:text-sm"
-                  />
-                </div>
-                <div>
-                  <Label>{t('webService.clientCodeLabel')}</Label>
-                  <TextInput
-                    label={t('webService.clientCodeLabel')}
-                    isLabelHidden
-                    value={manualCode}
-                    onChange={setManualCode}
-                    placeholder={t('webService.clientCodePlaceholder')}
-                    width="100%"
-                    className="mt-1 [&_input]:font-mono [&_input]:text-sm"
-                  />
-                </div>
-                {hasRelayPermission ? (
-                  <div
-                    data-testid="manual-connect-cloud-relay-row"
-                    className="flex items-center justify-between gap-2 rounded-md border border-border/70 bg-muted/30 px-2.5 py-1.5"
-                  >
-                    <Label
-                      htmlFor="manual-connect-use-cloud-relay"
-                      className="text-xs font-medium"
-                    >
-                      使用云中继服务
+                <form
+                  className="flex flex-col gap-3"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void connectManual();
+                  }}
+                >
+                  <div>
+                    <Label htmlFor="manual-connect-origin">
+                      {t('webService.manualOriginLabel')}
                     </Label>
-                    <Switch
-                      id="manual-connect-use-cloud-relay"
-                      aria-label="使用云中继服务"
-                      checked={manualUseRelay}
-                      onCheckedChange={(checked: boolean) =>
-                        setManualUseRelay(checked)
-                      }
+                    <TextInput
+                      id="manual-connect-origin"
+                      label={t('webService.manualOriginLabel')}
+                      isLabelHidden
+                      value={manualOrigin}
+                      onChange={setManualOrigin}
+                      placeholder={t('webService.manualOriginPlaceholder')}
+                      width="100%"
+                      className="mt-1 [&_input]:font-mono [&_input]:text-sm"
                     />
                   </div>
-                ) : null}
-                <Button
-                  size="sm"
-                  className="h-8 self-end"
-                  onClick={() => void connectManual()}
-                  disabled={connectingKey === 'manual'}
-                >
-                  {connectingKey === 'manual' ? (
-                    <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                  <div>
+                    <Label htmlFor="manual-connect-code">
+                      {t('webService.clientCodeLabel')}
+                    </Label>
+                    <TextInput
+                      id="manual-connect-code"
+                      label={t('webService.clientCodeLabel')}
+                      isLabelHidden
+                      value={manualCode}
+                      onChange={setManualCode}
+                      placeholder={t('webService.clientCodePlaceholder')}
+                      width="100%"
+                      className="mt-1 [&_input]:font-mono [&_input]:text-sm"
+                    />
+                    {(parsePairingInvitation(manualCode.trim()) ||
+                      parsePairingInvitation(manualOrigin.trim())) ? (
+                      <p className="mt-1 text-xs text-success">
+                        {t('webService.pairingDetected')}
+                      </p>
+                    ) : null}
+                  </div>
+                  {hasRelayPermission ? (
+                    <div
+                      data-testid="manual-connect-cloud-relay-row"
+                      className="flex items-center justify-between gap-2 rounded-md border border-border/70 bg-muted/30 px-2.5 py-1.5"
+                    >
+                      <Label
+                        htmlFor="manual-connect-use-cloud-relay"
+                        className="text-xs font-medium"
+                      >
+                        {t('webService.useCloudRelayService')}
+                      </Label>
+                      <Switch
+                        id="manual-connect-use-cloud-relay"
+                        aria-label={t('webService.useCloudRelayService')}
+                        checked={manualUseRelay}
+                        onCheckedChange={(checked: boolean) =>
+                          setManualUseRelay(checked)
+                        }
+                      />
+                    </div>
                   ) : null}
-                  {t('webService.clientConnect')}
-                </Button>
+                  <Button
+                    type="submit"
+                    size="sm"
+                    className="h-8 self-end"
+                    disabled={connectingKey === 'manual'}
+                  >
+                    {connectingKey === 'manual' ? (
+                      <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                    ) : null}
+                    {t('webService.clientConnect')}
+                  </Button>
+                </form>
               </PopoverContent>
             </Popover>
             <Button
@@ -869,6 +1008,99 @@ export function RemoteClientSettings() {
           </div>
         </div>
       </SettingsSection>
+
+      {isSignedIn ? (
+        <SettingsSection
+          icon={Cloud}
+          title={t('webService.accountHostsTitle')}
+          action={
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8"
+              onClick={() => void loadAccountHosts()}
+              disabled={loadingAccountHosts}
+            >
+              {loadingAccountHosts ? (
+                <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="mr-1 h-3.5 w-3.5" />
+              )}
+              {t('webService.accountHostsRefresh')}
+            </Button>
+          }
+        >
+          <div
+            className="settings-bounded-list-container min-w-0 overflow-hidden rounded-lg border border-border bg-background/50"
+            data-testid="account-hosts-list-container"
+          >
+            <div
+              className="settings-bounded-list max-h-56 divide-y divide-border/60 overflow-y-auto"
+              data-testid="account-hosts-scroll-box"
+            >
+              {accountHostsVisible.length === 0 ? (
+                <p className="settings-pairing-devices__empty">
+                  {t('webService.accountHostsEmpty')}
+                </p>
+              ) : (
+                accountHostsVisible.map((host) => {
+                  const key = `account:${host.hostId}`;
+                  const busy = connectingKey === key;
+                  const canConnect = host.online && host.endpoints.length > 0;
+                  const primaryOrigin = host.endpoints[0]?.origin;
+                  return (
+                    <div
+                      className="settings-host-row"
+                      key={host.hostId}
+                      data-testid={`account-host-row-${host.hostId}`}
+                    >
+                      <div className="settings-host-row__summary flex min-h-11 min-w-0 items-center justify-between gap-3 px-3 py-2">
+                        <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden">
+                          <span
+                            className={cn(
+                              'h-2 w-2 shrink-0 rounded-full',
+                              host.online
+                                ? 'bg-success'
+                                : 'bg-muted-foreground/40'
+                            )}
+                          />
+                          <span className="max-w-[14rem] shrink-0 truncate text-xs font-medium text-foreground">
+                            {host.hostName || host.hostId}
+                          </span>
+                          {primaryOrigin ? (
+                            <span className="truncate rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-muted-foreground">
+                              {primaryOrigin}
+                            </span>
+                          ) : (
+                            <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">
+                              {host.online
+                                ? t('webService.accountHostNoEndpoints')
+                                : t('webService.accountHostOffline')}
+                            </span>
+                          )}
+                        </div>
+                        <Button
+                          size="sm"
+                          className="h-7 shrink-0 px-2.5 text-xs"
+                          onClick={() => void connectAccountHost(host)}
+                          disabled={!canConnect || connectingKey !== null}
+                        >
+                          {busy ? (
+                            <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                          ) : null}
+                          {host.online
+                            ? t('webService.clientConnect')
+                            : t('webService.accountHostOffline')}
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </SettingsSection>
+      ) : null}
 
       {openProvisioner?.plugin.enabled ? (
         <SettingsSection icon={Laptop} title={openProvisioner.label}>
@@ -984,11 +1216,11 @@ export function RemoteClientSettings() {
                               htmlFor={`saved-host-use-cloud-relay-${profile.id}`}
                               className="text-xs font-medium"
                             >
-                              使用云中继服务
+                              {t('webService.useCloudRelayService')}
                             </Label>
                             <Switch
                               id={`saved-host-use-cloud-relay-${profile.id}`}
-                              aria-label="使用云中继服务"
+                              aria-label={t('webService.useCloudRelayService')}
                               checked={Boolean(
                                 savedUseRelayById[profile.id] ??
                                   profile.origin.includes('/t/')

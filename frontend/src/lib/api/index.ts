@@ -47,6 +47,7 @@ export {
   webServiceApi,
   hostTunnelApi,
   hostClientApi,
+  hostConnectivityApi,
   chatChannelApi,
 } from './config';
 export {
@@ -85,6 +86,11 @@ export type {
   HostPairedDevice,
   PendingDeviceConnectRequest,
   HostClientProfile,
+  ClientIdentityView,
+  BeaconLookupResult,
+  CustomPublicOriginRecord,
+  CustomPublicProbeResult,
+  HostConnectivityStatus,
   LocalSshTarget,
   DiscoveredHost,
   HostClientStatus,

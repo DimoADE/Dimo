@@ -383,4 +383,103 @@ describe('HostTunnelPanel', () => {
       { timeout: 3500 }
     );
   });
+
+  it('renders self-hosted VPS relay tunnels with /t/ paths as custom nodes with host:port and remove button', async () => {
+    const customVpsRelay = {
+      id: 'vps-uuid-1',
+      origin: 'http://203.0.113.10:17891/t/my-host',
+      host: '203.0.113.10',
+      port: 17891,
+      kind: 'relay',
+      created_at: '2026-11-12T00:00:00Z',
+    };
+    hostTunnelApi.get.mockResolvedValue({
+      enabled: true,
+      saved: [customVpsRelay],
+      active_id: 'vps-uuid-1',
+      pending: null,
+      relay_state: 'connected',
+      last_error: null,
+    });
+
+    render(
+      <HostTunnelPanel serviceRunning onReachabilityChange={() => undefined} />
+    );
+
+    expect(
+      await screen.findByText('http://203.0.113.10:17891/t/my-host')
+    ).toBeVisible();
+    expect(screen.getByText('203.0.113.10:17891')).toBeVisible();
+    expect(screen.getByRole('button', { name: '移除' })).toBeVisible();
+    expect(screen.queryByText('官方云服务')).not.toBeInTheDocument();
+  });
+
+  it('auto-selects a saved self-hosted VPS when enabling cloud service while signed out', async () => {
+    const user = userEvent.setup();
+    const customVps = {
+      id: 'vps-uuid-2',
+      origin: 'http://198.51.100.8:17891/t/my-host',
+      host: '198.51.100.8',
+      port: 17891,
+      kind: 'relay',
+      created_at: '2026-11-12T00:00:00Z',
+    };
+    hostTunnelApi.get.mockResolvedValue({
+      enabled: false,
+      saved: [customVps],
+      active_id: null,
+      pending: null,
+      relay_state: 'idle',
+      last_error: null,
+    });
+    hostTunnelApi.setEnabled.mockResolvedValue({
+      enabled: true,
+      saved: [customVps],
+      active_id: null,
+      pending: null,
+      relay_state: 'idle',
+      last_error: null,
+    });
+    hostTunnelApi.selectSaved.mockResolvedValue({
+      enabled: true,
+      saved: [customVps],
+      active_id: 'vps-uuid-2',
+      pending: null,
+      relay_state: 'connected',
+      last_error: null,
+    });
+
+    render(
+      <HostTunnelPanel serviceRunning onReachabilityChange={() => undefined} />
+    );
+
+    await user.click(await screen.findByRole('switch', { name: '云服务' }));
+    await waitFor(() =>
+      expect(hostTunnelApi.selectSaved).toHaveBeenCalledWith('vps-uuid-2')
+    );
+    expect(screen.getByTestId('tunnel-usage-badge')).toHaveAttribute(
+      'data-state',
+      'in-use'
+    );
+  });
+
+  it('shows self-hosted setup guidance when enabled while signed out with no saved nodes', async () => {
+    const user = userEvent.setup();
+    render(
+      <HostTunnelPanel serviceRunning onReachabilityChange={() => undefined} />
+    );
+
+    expect(
+      await screen.findByText(
+        '可添加自建 VPS 节点跨网连接；登录 Dimo 账号后可使用官方云服务。'
+      )
+    ).toBeVisible();
+
+    await user.click(screen.getByRole('switch', { name: '云服务' }));
+    expect(
+      await screen.findByText(
+        '点击右上角「新建云节点」添加自建 VPS 后即可跨网连接。'
+      )
+    ).toBeVisible();
+  });
 });

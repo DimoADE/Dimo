@@ -1,4 +1,16 @@
 import { randomUUID } from '@/utils/randomUUID';
+import {
+  buildEncryptedRequestHeaders,
+  decryptResponseBodyText,
+  decryptWsFrame,
+  encryptRequestBody,
+  encryptWsFrame,
+  handshakeWebE2ee,
+  isRelayOrigin,
+  shouldUseWebE2ee,
+  wsE2eeSubprotocol,
+  type WebE2eeSession,
+} from '@/lib/connectivity/webE2ee';
 import type {
   BackendTransport,
   CreateDevicePairingRequest,
@@ -181,6 +193,14 @@ export class WebTransport implements BackendTransport {
   private readonly onAuthError?: (error: WebTransportError) => void;
   private readonly requestTimeoutMs: number | null;
   private socket: WebSocket | undefined;
+  private socketE2eeSession: WebE2eeSession | undefined;
+  private socketGeneration = 0;
+  private socketOpening = false;
+  private wsSendChain: Promise<void> = Promise.resolve();
+  private wsRecvChain: Promise<void> = Promise.resolve();
+  private e2eeSession: WebE2eeSession | undefined;
+  private e2eeHandshakePromise: Promise<WebE2eeSession | null> | undefined;
+  private e2eeUnsupported = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private pingTimer: ReturnType<typeof setInterval> | undefined;
   private reconnectAttempts = 0;
@@ -220,6 +240,12 @@ export class WebTransport implements BackendTransport {
     }
     this.baseUrl = nextBaseUrl;
     this.token = nextToken;
+    this.e2eeSession = undefined;
+    this.e2eeHandshakePromise = undefined;
+    this.e2eeUnsupported = false;
+    this.socketE2eeSession = undefined;
+    this.socketGeneration += 1;
+    this.socketOpening = false;
     this.capabilitiesCache = undefined;
     this.capabilitiesPromise = undefined;
     this.reconnectAttempts = 0;
@@ -431,6 +457,11 @@ export class WebTransport implements BackendTransport {
 
   destroy(): void {
     this.destroyed = true;
+    this.socketGeneration += 1;
+    this.socketOpening = false;
+    this.e2eeSession = undefined;
+    this.e2eeHandshakePromise = undefined;
+    this.socketE2eeSession = undefined;
     this.stopKeepalive();
     this.detachLifecycleListeners();
     if (this.reconnectTimer) {
@@ -462,12 +493,91 @@ export class WebTransport implements BackendTransport {
     this.subscriptions.clear();
   }
 
+  /**
+   * Sends an authenticated (and E2EE-encrypted on non-loopback origins) JSON
+   * request to a REST endpoint on the connected Host (e.g. `/api/v1/host/connectivity/*`).
+   */
+  async requestJson<T>(
+    path: string,
+    init?: { method?: string; body?: unknown; timeoutMs?: number }
+  ): Promise<T> {
+    const response = await this.request(
+      path,
+      {
+        method: init?.method ?? 'GET',
+        body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
+      },
+      init?.timeoutMs ?? this.requestTimeoutMs ?? CONTROL_REQUEST_TIMEOUT_MS
+    );
+    const text = await response.text();
+    if (!text.trim()) {
+      return undefined as T;
+    }
+    return JSON.parse(text) as T;
+  }
+
   private resolveReady(subscriptionId: string): void {
     const resolver = this.readyResolvers.get(subscriptionId);
     if (resolver) {
       this.readyResolvers.delete(subscriptionId);
       resolver();
     }
+  }
+
+  private async ensureE2eeSession(
+    forceRefresh = false,
+    signal?: AbortSignal
+  ): Promise<WebE2eeSession | null> {
+    if (!shouldUseWebE2ee(this.baseUrl)) {
+      if (isRelayOrigin(this.baseUrl)) {
+        throw new WebTransportError(
+          'Relay connections require WebCrypto E2EE in a secure browser context',
+          'e2ee_required',
+          false
+        );
+      }
+      return null;
+    }
+    if (!forceRefresh && this.e2eeUnsupported) {
+      return null;
+    }
+    if (!forceRefresh && this.e2eeSession) {
+      return this.e2eeSession;
+    }
+    if (!forceRefresh && this.e2eeHandshakePromise) {
+      return this.e2eeHandshakePromise;
+    }
+    const targetBaseUrl = this.baseUrl;
+    const pending = handshakeWebE2ee(targetBaseUrl, { signal })
+      .then((session) => {
+        if (this.baseUrl === targetBaseUrl && !this.destroyed) {
+          this.e2eeSession = session;
+          this.e2eeUnsupported = false;
+        }
+        return session;
+      })
+      .catch((err) => {
+        if (isRelayOrigin(targetBaseUrl)) {
+          throw new WebTransportError(
+            `E2EE handshake required for relay connection: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+            'e2ee_handshake_failed',
+            true
+          );
+        }
+        if (this.baseUrl === targetBaseUrl && !this.destroyed) {
+          this.e2eeUnsupported = true;
+        }
+        return null;
+      })
+      .finally(() => {
+        if (this.e2eeHandshakePromise === pending) {
+          this.e2eeHandshakePromise = undefined;
+        }
+      });
+    this.e2eeHandshakePromise = pending;
+    return pending;
   }
 
   private async request(
@@ -503,17 +613,56 @@ export class WebTransport implements BackendTransport {
           }, effectiveTimeoutMs)
         : undefined;
 
-    let response: Response;
+    let response: Response | undefined;
+    let activeSession: WebE2eeSession | null = null;
     try {
-      response = await fetch(`${this.baseUrl}${path}`, {
-        ...init,
-        signal: controller.signal,
-        headers: {
-          Authorization: `Bearer ${this.token}`,
-          'Content-Type': 'application/json',
-          'X-Dimo-Protocol-Version': PROTOCOL_VERSION,
-        },
-      });
+      const useE2ee = shouldUseWebE2ee(this.baseUrl);
+      if (!useE2ee && isRelayOrigin(this.baseUrl)) {
+        throw new WebTransportError(
+          'Relay connections require WebCrypto E2EE in a secure browser context',
+          'e2ee_required',
+          false
+        );
+      }
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        activeSession =
+          useE2ee && !this.e2eeUnsupported
+            ? await this.ensureE2eeSession(attempt > 0, controller.signal)
+            : null;
+        let headers: Record<string, string>;
+        let body = init.body;
+        if (activeSession) {
+          const encHeaders = await buildEncryptedRequestHeaders(
+            activeSession,
+            this.token
+          );
+          headers = {
+            ...encHeaders,
+            'X-Dimo-Protocol-Version': PROTOCOL_VERSION,
+          };
+          if (typeof init.body === 'string') {
+            body = await encryptRequestBody(activeSession, init.body);
+          }
+        } else {
+          headers = {
+            Authorization: `Bearer ${this.token}`,
+            'Content-Type': 'application/json',
+            'X-Dimo-Protocol-Version': PROTOCOL_VERSION,
+          };
+        }
+        const candidate = await fetch(`${this.baseUrl}${path}`, {
+          ...init,
+          body,
+          signal: controller.signal,
+          headers,
+        });
+        if (candidate.status === 412 && attempt === 0 && activeSession) {
+          this.e2eeSession = undefined;
+          continue;
+        }
+        response = candidate;
+        break;
+      }
     } catch (err) {
       if (timedOut) {
         throw new WebTransportError(
@@ -530,6 +679,29 @@ export class WebTransport implements BackendTransport {
       if (externalSignal && onExternalAbort) {
         externalSignal.removeEventListener('abort', onExternalAbort);
       }
+    }
+
+    if (!response) {
+      throw new WebTransportError(
+        'Dimo Server E2EE session re-key failed',
+        'e2ee_rekey_failed',
+        true
+      );
+    }
+
+    if (
+      activeSession &&
+      response.headers.get('x-dimo-e2ee')?.toLowerCase() === 'v1'
+    ) {
+      const decryptedText = await decryptResponseBodyText(
+        activeSession,
+        response
+      );
+      response = new Response(decryptedText, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: { 'Content-Type': 'application/json' },
+      });
     }
 
     if (!response.ok) {
@@ -556,19 +728,72 @@ export class WebTransport implements BackendTransport {
   }
 
   private connectSocket(): void {
+    if (
+      this.destroyed ||
+      this.socket ||
+      this.socketOpening ||
+      this.subscriptions.size === 0
+    ) {
+      return;
+    }
+    if (!shouldUseWebE2ee(this.baseUrl)) {
+      if (isRelayOrigin(this.baseUrl)) {
+        return;
+      }
+      this.openSocketWithSession(null);
+      return;
+    }
+    if (this.e2eeUnsupported && !isRelayOrigin(this.baseUrl)) {
+      this.openSocketWithSession(null);
+      return;
+    }
+    const generation = ++this.socketGeneration;
+    this.socketOpening = true;
+    void this.ensureE2eeSession()
+      .then((session) => {
+        if (
+          this.destroyed ||
+          this.socketGeneration !== generation ||
+          this.subscriptions.size === 0
+        ) {
+          return;
+        }
+        this.socketOpening = false;
+        this.openSocketWithSession(session);
+      })
+      .catch(() => {
+        if (this.socketGeneration === generation) {
+          this.socketOpening = false;
+          if (!this.destroyed && this.subscriptions.size > 0) {
+            this.scheduleReconnect();
+          }
+        }
+      });
+  }
+
+  private openSocketWithSession(session: WebE2eeSession | null): void {
     if (this.destroyed || this.socket || this.subscriptions.size === 0) {
       return;
     }
-    const socket = new WebSocket(this.webSocketUrl(), [
+    const protocols = [
       'dimo.v1',
       `dimo.token.${base64UrlEncode(this.token)}`,
-    ]);
+    ];
+    if (session) {
+      protocols.push(wsE2eeSubprotocol(session));
+    }
+    const socket = new WebSocket(this.webSocketUrl(), protocols);
     this.socket = socket;
+    this.socketE2eeSession = session ?? undefined;
+    this.wsSendChain = Promise.resolve();
+    this.wsRecvChain = Promise.resolve();
+    let opened = false;
     this.attachLifecycleListeners();
     socket.onopen = () => {
       if (this.socket !== socket || this.destroyed) {
         return;
       }
+      opened = true;
       this.reconnectAttempts = 0;
       this.awaitingPong = false;
       this.startKeepalive();
@@ -587,8 +812,23 @@ export class WebTransport implements BackendTransport {
       if (this.socket !== socket || this.destroyed) {
         return;
       }
+      const raw = typeof message.data === 'string' ? message.data : '';
+      if (!raw) return;
+      if (session) {
+        this.wsRecvChain = this.wsRecvChain
+          .then(async () => {
+            if (this.socket !== socket || this.destroyed) return;
+            const plain = await decryptWsFrame(session, raw);
+            if (this.socket !== socket || this.destroyed) return;
+            this.handleServerMessage(JSON.parse(plain) as WireServerMessage);
+          })
+          .catch(() => {
+            // Ignore malformed or undecryptable frames while keeping chain alive.
+          });
+        return;
+      }
       try {
-        this.handleServerMessage(JSON.parse(message.data) as WireServerMessage);
+        this.handleServerMessage(JSON.parse(raw) as WireServerMessage);
       } catch {
         // Unknown or malformed frames are ignored without damaging siblings.
       }
@@ -604,8 +844,15 @@ export class WebTransport implements BackendTransport {
       if (this.socket !== socket) {
         return;
       }
+      const failedSession = this.socketE2eeSession;
       this.stopKeepalive();
       this.socket = undefined;
+      this.socketE2eeSession = undefined;
+      // If an E2EE socket failed to open (e.g. HTTP 412 after Host restart) or
+      // dropped while carrying a cached session, force a fresh handshake next time.
+      if (failedSession && (!opened || this.e2eeSession === failedSession)) {
+        this.e2eeSession = undefined;
+      }
       if (!this.destroyed && this.subscriptions.size > 0) {
         this.scheduleReconnect();
       }
@@ -926,6 +1173,23 @@ export class WebTransport implements BackendTransport {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return false;
     }
+    const e2ee = socket === this.socket ? this.socketE2eeSession : undefined;
+    if (e2ee) {
+      this.wsSendChain = this.wsSendChain
+        .then(async () => {
+          if (this.socket !== socket || socket.readyState !== WebSocket.OPEN) {
+            return;
+          }
+          const wire = await encryptWsFrame(e2ee, payload);
+          if (this.socket === socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(wire);
+          }
+        })
+        .catch(() => {
+          this.handleBrokenSocket(socket);
+        });
+      return true;
+    }
     try {
       socket.send(payload);
       return true;
@@ -946,6 +1210,7 @@ export class WebTransport implements BackendTransport {
     }
     this.stopKeepalive();
     this.socket = undefined;
+    this.socketE2eeSession = undefined;
     this.detachSocketHandlers(socket);
     try {
       socket.close();

@@ -40,6 +40,7 @@ import type {
   DevicePairingChallenge,
 } from '@/lib/backendTransport';
 import { cn } from '@/lib/utils';
+import { CustomPublicOriginsSection } from './CustomPublicOriginsSection';
 import { HostTunnelPanel } from './HostTunnelPanel';
 import { SettingsSection } from './SettingsUi';
 import {
@@ -743,6 +744,12 @@ export function DevicePairingPanel({
       {showTunnel && onReachabilityChange ? (
         <HostTunnelPanel
           serviceRunning={serviceRunning}
+          onReachabilityChange={onReachabilityChange}
+        />
+      ) : null}
+
+      {serviceRunning ? (
+        <CustomPublicOriginsSection
           onReachabilityChange={onReachabilityChange}
         />
       ) : null}

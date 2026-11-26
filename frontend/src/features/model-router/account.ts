@@ -417,6 +417,15 @@ async function call<T>(
       response.status === 405 ||
       response.status === 501
     ) {
+      const errorPayload = (await response
+        .json()
+        .catch(() => null)) as { error?: unknown } | null;
+      if (
+        typeof errorPayload?.error === 'string' &&
+        errorPayload.error.trim().length > 0
+      ) {
+        throw new AccountError(errorPayload.error.trim());
+      }
       throw new AccountError('unsupported');
     }
     const payload = (await response.json()) as (T & { error?: string }) | null;
@@ -495,6 +504,62 @@ export const accountApi = {
     void hostTunnelApi.setAccountLease(null).catch(() => null);
     if (isTauriClient()) {
       void hostClientApi.setSyncAccount(null).catch(() => null);
+    } else {
+      void import('@/lib/connectivity/webHostStore')
+        .then(async (mod) => {
+          const saved = await mod.listSavedWebHosts();
+          const accountLinkedOrigins = new Set(
+            saved
+              .filter((item) => item.trustSource === 'account_linked')
+              .flatMap((item) => [
+                item.origin,
+                item.lastGoodOrigin,
+                ...item.endpoints.map((ep) => ep.origin),
+              ])
+              .filter((o): o is string => typeof o === 'string' && o.length > 0)
+              .map((o) => o.replace(/\/+$/, ''))
+          );
+          const accountLinkedIds = new Set(
+            saved
+              .filter((item) => item.trustSource === 'account_linked')
+              .flatMap((item) =>
+                item.hostId ? [item.id, item.hostId] : [item.id]
+              )
+          );
+          await mod.clearAccountLinkedWebHosts();
+          if (typeof window !== 'undefined') {
+            try {
+              const rawSession = window.sessionStorage.getItem(
+                'dimo.web_session'
+              );
+              if (rawSession) {
+                const parsed = JSON.parse(rawSession) as {
+                  baseUrl?: string;
+                  origin?: string;
+                  hostId?: string;
+                  trustSource?: string;
+                };
+                const cleanOrigin = (
+                  parsed.baseUrl ??
+                  parsed.origin ??
+                  ''
+                ).replace(/\/+$/, '');
+                if (
+                  parsed.trustSource === 'account_linked' ||
+                  (parsed.hostId && accountLinkedIds.has(parsed.hostId)) ||
+                  (cleanOrigin && accountLinkedOrigins.has(cleanOrigin))
+                ) {
+                  window.sessionStorage.removeItem('dimo.web_session');
+                  await mod.setLastActiveWebHostId(null);
+                  window.dispatchEvent(new CustomEvent('dimo:web-disconnect'));
+                }
+              }
+            } catch {
+              // Ignore sessionStorage read errors.
+            }
+          }
+        })
+        .catch(() => null);
     }
     if (isLocalDesktopHost()) {
       // Phones were admitted because they share this account; signing out ends that trust.
@@ -618,6 +683,33 @@ export const accountApi = {
     serverName?: string;
     serverRegion?: string;
   }> => authed('/api/account/relay/lease', 'POST', input),
+
+  listDirectoryHosts: (): Promise<{ hosts: unknown[] }> =>
+    authed('/api/account/hosts', 'GET'),
+
+  deleteDirectoryHost: (hostId: string): Promise<{ ok?: boolean }> =>
+    authed(`/api/account/hosts/${encodeURIComponent(hostId)}`, 'DELETE'),
+
+  issueHostAccessGrant: (input: {
+    hostId: string;
+    clientPublicKeyEd25519: string;
+    clientKind: 'desktop' | 'web' | 'mobile';
+    preset?: 'workstation' | 'companion';
+  }): Promise<{
+    grantToken: string;
+    expiresAt: number;
+    kid: string;
+    hostId: string;
+  }> =>
+    authed(
+      `/api/account/hosts/${encodeURIComponent(input.hostId)}/access-grant`,
+      'POST',
+      {
+        clientPublicKeyEd25519: input.clientPublicKeyEd25519,
+        clientKind: input.clientKind,
+        preset: input.preset ?? 'workstation',
+      }
+    ),
 };
 
 export function modelMarketplacePath(

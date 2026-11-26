@@ -232,4 +232,40 @@ describe('accountApi & Model Marketplace helpers', () => {
       });
     }
   });
+
+  it('preserves structured JSON error codes on 404 responses while keeping HTML 404 as unsupported', async () => {
+    localStorage.setItem(ACCOUNT_TOKEN_STORAGE_KEY, 'tok_abc');
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: 'host_not_found' }), {
+          status: 404,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response('<html>Not Found</html>', {
+          status: 404,
+          headers: { 'Content-Type': 'text/html' },
+        })
+      );
+
+    await expect(
+      accountApi.issueHostAccessGrant({
+        hostId: 'missing-host',
+        clientPublicKeyEd25519: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+        clientKind: 'desktop',
+      })
+    ).rejects.toMatchObject({ code: 'host_not_found' });
+
+    await expect(
+      accountApi.issueHostAccessGrant({
+        hostId: 'legacy-site',
+        clientPublicKeyEd25519: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+        clientKind: 'desktop',
+      })
+    ).rejects.toMatchObject({ code: 'unsupported' });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });

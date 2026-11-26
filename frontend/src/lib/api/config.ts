@@ -9,8 +9,8 @@ import type {
   ChatChannelMessageLog,
 } from 'shared/types';
 
-import { desktopShellCall } from '@/lib/desktopShell';
-import { getBackendTransport } from '@/lib/transport';
+import { desktopShellCall, isTauriClient } from '@/lib/desktopShell';
+import { getBackendTransport, WebTransport } from '@/lib/transport';
 
 import { backendCall } from './base';
 
@@ -503,6 +503,50 @@ export interface HostClientProfile {
   connected_window_label?: string | null;
   provision_kind?: string | null;
   provision?: Record<string, unknown> | null;
+  endpoints?: Array<{ origin: string; kind?: string }>;
+  last_good_origin?: string | null;
+  trust_source?: string | null;
+}
+
+export interface ClientIdentityView {
+  publicKeyEd25519: string;
+}
+
+export interface BeaconLookupResult {
+  host_id: string;
+  origin: string;
+}
+
+export interface CustomPublicOriginRecord {
+  id: string;
+  origin: string;
+  label?: string | null;
+  created_at: string;
+}
+
+export interface CustomPublicProbeResult {
+  origin: string;
+  reachable: boolean;
+  host_id_matched: boolean;
+  reported_host_id?: string | null;
+  warning?: string | null;
+  error?: string | null;
+}
+
+export interface HostConnectivityStatus {
+  host_id: string;
+  host_name?: string | null;
+  desktop_mode: boolean;
+  account: {
+    signed_in: boolean;
+    user_id?: string | null;
+    username?: string | null;
+    display_name?: string | null;
+    auto_connect: boolean;
+  };
+  custom_public_origins: CustomPublicOriginRecord[];
+  tunnel: HostTunnelStatus;
+  endpoints: Array<{ origin: string; kind: string }>;
 }
 
 export interface DiscoveredHost {
@@ -523,6 +567,7 @@ export interface HostClientStatus {
   profile: HostClientProfile | null;
   profiles: HostClientProfile[];
   local_ssh?: LocalSshTarget | null;
+  local_host_id?: string | null;
 }
 
 export interface ConnectHostResult {
@@ -582,6 +627,31 @@ export interface ExportSyncBundle {
   pendingDeletes: PendingCloudDelete[];
 }
 
+function normalizeClientEndpoints(
+  endpoints?: Array<{ origin: string; kind?: string }>
+): Array<{ origin: string; kind: string }> | undefined {
+  if (!endpoints) return undefined;
+  return endpoints
+    .map((ep) => {
+      const origin = ep.origin.trim().replace(/\/+$/, '');
+      if (!origin) return null;
+      const lower = origin.toLowerCase();
+      const kind =
+        ep.kind?.trim() ||
+        (lower.includes('/t/')
+          ? 'official_relay'
+          : /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::|\/|$)/i.test(lower)
+            ? 'direct'
+            : /^http:\/\/(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(
+                  lower
+                )
+              ? 'lan'
+              : 'custom_public');
+      return { origin, kind };
+    })
+    .filter((ep): ep is { origin: string; kind: string } => ep !== null);
+}
+
 export const hostClientApi = {
   status: async (): Promise<HostClientStatus> => {
     return desktopShellCall<HostClientStatus>('host_client_status');
@@ -589,13 +659,49 @@ export const hostClientApi = {
   discover: async (): Promise<DiscoveredHost[]> => {
     return desktopShellCall<DiscoveredHost[]>('host_client_discover');
   },
+  identity: async (): Promise<ClientIdentityView> => {
+    return desktopShellCall<ClientIdentityView>('host_client_identity');
+  },
   connect: async (request: {
     origin?: string;
     token?: string;
     profile_id?: string;
+    endpoints?: Array<{ origin: string; kind?: string }>;
   }): Promise<ConnectHostResult> => {
     return desktopShellCall<ConnectHostResult>('host_client_connect', {
-      request,
+      request: {
+        ...request,
+        endpoints: normalizeClientEndpoints(request.endpoints),
+      },
+    });
+  },
+  connectWithGrant: async (request: {
+    hostId: string;
+    name?: string;
+    endpoints: Array<{ origin: string; kind?: string }>;
+    grantToken: string;
+    profileId?: string;
+  }): Promise<ConnectHostResult> => {
+    return desktopShellCall<ConnectHostResult>(
+      'host_client_connect_with_grant',
+      {
+        request: {
+          hostId: request.hostId,
+          name: request.name,
+          endpoints: normalizeClientEndpoints(request.endpoints) ?? [],
+          grantToken: request.grantToken,
+          profileId: request.profileId,
+        },
+      }
+    );
+  },
+  lookupBeacon: async (request: {
+    relay_origin: string;
+    pairing_code: string;
+  }): Promise<BeaconLookupResult> => {
+    return desktopShellCall<BeaconLookupResult>('host_client_lookup_beacon', {
+      relayOrigin: request.relay_origin,
+      pairingCode: request.pairing_code,
     });
   },
   disconnect: async (): Promise<void> => {
@@ -657,6 +763,139 @@ export const hostClientApi = {
     await desktopShellCall('host_client_ack_sync_deletes', {
       request: { deleteIds },
     });
+  },
+};
+
+function activeWebTransport(): WebTransport | null {
+  try {
+    const transport = getBackendTransport();
+    return transport instanceof WebTransport ? transport : null;
+  } catch {
+    return null;
+  }
+}
+
+export const hostConnectivityApi = {
+  getStatus: async (): Promise<HostConnectivityStatus | null> => {
+    const web = !isTauriClient() ? activeWebTransport() : null;
+    if (web) {
+      return web.requestJson<HostConnectivityStatus>(
+        '/api/v1/host/connectivity/status'
+      );
+    }
+    return null;
+  },
+  listCustomPublicOrigins: async (): Promise<CustomPublicOriginRecord[]> => {
+    if (!isTauriClient()) {
+      const web = activeWebTransport();
+      if (!web) return [];
+      const status = await web.requestJson<HostConnectivityStatus>(
+        '/api/v1/host/connectivity/status'
+      );
+      return status.custom_public_origins ?? [];
+    }
+    return desktopShellCall<CustomPublicOriginRecord[]>(
+      'list_custom_public_origins'
+    );
+  },
+  probeCustomPublicOrigin: async (
+    origin: string
+  ): Promise<CustomPublicProbeResult> => {
+    if (!isTauriClient()) {
+      const web = activeWebTransport();
+      if (!web) throw new Error('Web transport unavailable');
+      return web.requestJson<CustomPublicProbeResult>(
+        '/api/v1/host/connectivity/custom-public/probe',
+        { method: 'POST', body: { origin } }
+      );
+    }
+    return desktopShellCall<CustomPublicProbeResult>(
+      'probe_custom_public_origin',
+      { origin }
+    );
+  },
+  addCustomPublicOrigin: async (request: {
+    origin: string;
+    label?: string | null;
+    skip_probe?: boolean;
+  }): Promise<{
+    record: CustomPublicOriginRecord;
+    check: CustomPublicProbeResult | null;
+    customPublicOrigins: CustomPublicOriginRecord[];
+  }> => {
+    if (!isTauriClient()) {
+      const web = activeWebTransport();
+      if (!web) throw new Error('Web transport unavailable');
+      const res = await web.requestJson<{
+        record: CustomPublicOriginRecord;
+        check: CustomPublicProbeResult | null;
+        custom_public_origins: CustomPublicOriginRecord[];
+      }>('/api/v1/host/connectivity/custom-public', {
+        method: 'POST',
+        body: {
+          origin: request.origin,
+          label: request.label ?? null,
+          skip_probe: Boolean(request.skip_probe),
+        },
+      });
+      return {
+        record: res.record,
+        check: res.check ?? null,
+        customPublicOrigins: res.custom_public_origins ?? [],
+      };
+    }
+    return desktopShellCall<{
+      record: CustomPublicOriginRecord;
+      check: CustomPublicProbeResult | null;
+      customPublicOrigins: CustomPublicOriginRecord[];
+    }>('add_custom_public_origin', {
+      origin: request.origin,
+      label: request.label ?? null,
+      skipProbe: Boolean(request.skip_probe),
+    });
+  },
+  removeCustomPublicOrigin: async (
+    idOrOrigin: string
+  ): Promise<CustomPublicOriginRecord[]> => {
+    if (!isTauriClient()) {
+      const web = activeWebTransport();
+      if (!web) throw new Error('Web transport unavailable');
+      const res = await web.requestJson<{
+        custom_public_origins: CustomPublicOriginRecord[];
+      }>(
+        `/api/v1/host/connectivity/custom-public/${encodeURIComponent(idOrOrigin)}`,
+        { method: 'DELETE' }
+      );
+      return res.custom_public_origins ?? [];
+    }
+    const res = await desktopShellCall<{
+      customPublicOrigins: CustomPublicOriginRecord[];
+    }>('remove_custom_public_origin', { id: idOrOrigin });
+    return res.customPublicOrigins ?? [];
+  },
+  setTunnelEnabled: async (enabled: boolean): Promise<HostTunnelStatus> => {
+    if (!isTauriClient()) {
+      const web = activeWebTransport();
+      if (!web) throw new Error('Web transport unavailable');
+      return web.requestJson<HostTunnelStatus>(
+        '/api/v1/host/connectivity/tunnel/enabled',
+        { method: 'POST', body: { enabled } }
+      );
+    }
+    return desktopShellCall<HostTunnelStatus>('set_host_tunnel_enabled', {
+      enabled,
+    });
+  },
+  reconnectTunnel: async (): Promise<HostTunnelStatus> => {
+    if (!isTauriClient()) {
+      const web = activeWebTransport();
+      if (!web) throw new Error('Web transport unavailable');
+      return web.requestJson<HostTunnelStatus>(
+        '/api/v1/host/connectivity/tunnel/reconnect',
+        { method: 'POST' }
+      );
+    }
+    return desktopShellCall<HostTunnelStatus>('reconnect_host_tunnel');
   },
 };
 

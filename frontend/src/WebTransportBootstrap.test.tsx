@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import '@/i18n';
+import { clearAllSavedWebHosts } from '@/lib/connectivity';
 import { useBackendTransport } from '@/lib/transport';
 import {
   disconnectWebSession,
@@ -26,11 +27,12 @@ function jsonFetch(payload: unknown) {
 }
 
 describe('WebTransportBootstrap', () => {
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     window.sessionStorage.clear();
     window.localStorage.clear();
+    await clearAllSavedWebHosts();
     window.history.replaceState({}, '', '/');
   });
 
@@ -280,5 +282,45 @@ describe('WebTransportBootstrap', () => {
       ).toBeInTheDocument();
     });
     expect(window.sessionStorage.getItem('dimo.web_session')).toBeNull();
+  });
+
+  it('offers Dimo Account sign-in on the connect screen when signed out', async () => {
+    const user = userEvent.setup();
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes('/api/auth/desktop/start')) {
+          return jsonFetch({
+            requestId: 'req-web-1',
+            verifier: 'ver-web-1',
+            userCode: 'WXYZ-1234',
+            verifyUrl: 'https://dimo.test/desktop/authorize?request=req-web-1',
+            expiresIn: 300,
+            interval: 60,
+          });
+        }
+        return jsonFetch({ status: 'ok' });
+      })
+    );
+
+    render(
+      <WebTransportBootstrap>
+        <ConnectedApp />
+      </WebTransportBootstrap>
+    );
+
+    const signInButton = await screen.findByRole('button', {
+      name: /(Sign in with Dimo|登录 Dimo 账号)/,
+    });
+    await user.click(signInButton);
+
+    expect(await screen.findByText('WXYZ-1234')).toBeInTheDocument();
+    expect(openSpy).toHaveBeenCalledWith(
+      'https://dimo.test/desktop/authorize?request=req-web-1',
+      '_blank',
+      'noopener,noreferrer'
+    );
   });
 });
