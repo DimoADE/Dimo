@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "agents"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "agent-client-protocol",
  "api-types",
@@ -175,7 +175,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "api-types"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -185,7 +185,7 @@ dependencies = [
 
 [[package]]
 name = "application"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "agents",
  "artifacts",
@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "artifacts"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "async-trait",
  "serde",
@@ -344,7 +344,7 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "automation"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "agents",
  "async-trait",
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "browser-host"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -707,7 +707,7 @@ checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
 name = "conversations"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "agents",
  "async-trait",
@@ -890,7 +890,7 @@ checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
 name = "db"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "anyhow",
  "api-types",
@@ -916,7 +916,7 @@ dependencies = [
 
 [[package]]
 name = "delegation"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "agents",
  "async-trait",
@@ -938,7 +938,7 @@ dependencies = [
 
 [[package]]
 name = "delegation-proto"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -947,7 +947,7 @@ dependencies = [
 
 [[package]]
 name = "deployment"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1031,7 +1031,7 @@ dependencies = [
 
 [[package]]
 name = "dimo-mcp"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "delegation-proto",
  "reqwest",
@@ -1200,7 +1200,7 @@ dependencies = [
 
 [[package]]
 name = "executors"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "api-types",
  "chrono",
@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "git"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "chrono",
  "git2",
@@ -2242,7 +2242,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "local-deployment"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "agents",
  "anyhow",
@@ -2730,7 +2730,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "plugins"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "async-trait",
  "axum",
@@ -2890,7 +2890,7 @@ dependencies = [
 
 [[package]]
 name = "pulse"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "api-types",
  "base64",
@@ -3075,7 +3075,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "remote-protocol"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "schemars 1.2.1",
  "serde",
@@ -3526,7 +3526,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "agents",
  "anyhow",
@@ -3596,7 +3596,7 @@ dependencies = [
 
 [[package]]
 name = "services"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "agents",
  "anyhow",
@@ -4344,7 +4344,7 @@ dependencies = [
 
 [[package]]
 name = "tool-runtime"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -4646,7 +4646,7 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "utils"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "bytes",
  "chrono",
@@ -5510,7 +5510,7 @@ dependencies = [
 
 [[package]]
 name = "workflows"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "api-types",
  "chrono",
