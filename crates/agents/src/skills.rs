@@ -3662,8 +3662,8 @@ mod tests {
             "manage_group must name required actions"
         );
         assert!(
-            skill.contains("必填 `agent_type`、`task`"),
-            "delegate_to_agent must name required args"
+            skill.contains("必填 `target.agent_id`、`task`"),
+            "delegate_task must name required args"
         );
         assert!(memory.contains("private"));
         assert!(
@@ -3696,8 +3696,8 @@ mod tests {
             "request_approval",
             "memory_search",
             "memory_write",
-            "delegate_to_agent",
-            "get_delegation_status",
+            "delegate_task",
+            "task_status",
             "send_session_input",
         ] {
             assert!(skill.contains(tool), "missing tool {tool}");

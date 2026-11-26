@@ -2031,6 +2031,18 @@ impl AgentRuntime {
             .map(|session| session.controls.clone())
     }
 
+    pub async fn session_auto_approve_mode(
+        &self,
+        session_id: AgentSessionId,
+    ) -> Option<AgentAutoApproveMode> {
+        let state = self.state.read().await;
+        let conn_id = state.sessions.get(&session_id)?.snapshot.connection_id;
+        state
+            .connections
+            .get(&conn_id)
+            .map(|conn| conn.launch.auto_approve_mode)
+    }
+
     /// Fork the live ACP session behind `session_id` (P1-4). Returns the new
     /// forked external session id (the agent branched its context). Errors when
     /// the session has no live connection or the agent doesn't support fork —

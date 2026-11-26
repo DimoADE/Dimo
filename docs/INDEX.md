@@ -72,6 +72,7 @@ Read only the smallest set of files matching your task:
 | File | Purpose |
 | :--- | :--- |
 | [`docs/specs/agent-driver-engine.md`](specs/agent-driver-engine.md) | Normative Agent Driver Engine v2.0 spec (dedicated engine adapters, ACP fallback, session lifecycle, error taxonomy). |
+| [`docs/specs/agent-orchestration-and-delegation.md`](specs/agent-orchestration-and-delegation.md) | Multi-agent orchestration, `&Agent` delegation, cross-project `thread_launch`, two-phase worktree launch, push completion wakeup, and unified HTTP `/mcp` contract. |
 | [`docs/specs/context-menu-surfaces.md`](specs/context-menu-surfaces.md) | Unified right-click context menu contract across Workbench surfaces. |
 | [`docs/specs/cross-agent-continuation.md`](specs/cross-agent-continuation.md) | Deterministic cross-agent handoff, binding generations, history segments, and replay semantics. |
 | [`docs/specs/instant-session-controls-and-lazy-bind.md`](specs/instant-session-controls-and-lazy-bind.md) | Zero-latency provider capability catalog (bundled baselines, SWR, EventBus push), lazy turn-start session bind, and native engine probe de-blocking. |

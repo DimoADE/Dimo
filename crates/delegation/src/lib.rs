@@ -19,6 +19,8 @@ pub mod host_features;
 pub mod listener;
 pub mod lookups;
 pub mod meta_writer;
+pub mod mode_limit;
+pub mod orchestration;
 pub mod service;
 pub mod spawner;
 pub mod steering;
@@ -36,6 +38,16 @@ pub use host_features::{CollaborationLimits, HostCompanionFeatures};
 pub use listener::{DelegationListener, default_socket_path};
 pub use lookups::{ChildStatusLookup, ChildStatusRecord, DepthLookup, ParentSessionLookup};
 pub use meta_writer::DelegationMetaWriter;
+pub use mode_limit::{
+    InteractionModeRank, MODE_LIMIT_HEADER, OrchestrationModeLimit, RuntimeModeRank,
+};
+pub use orchestration::{
+    ActivePreparations, ConversationLaunchService, DelegationReactors, McpInvocationContext,
+    OrchestrationConfig, OrchestrationError, OrchestrationService, PendingPermissionEntry,
+    PendingPermissionStore, RemoteMcpForwarder, SharedRemoteForwarder, conversation_link,
+    idempotency_scope_key, is_orchestration_tool, orchestration_tool_schemas,
+    run_startup_reconciler, spawn_orchestration_reactors,
+};
 pub use service::DelegationService;
 pub use spawner::{ConnectionSpawner, SpawnerError};
 pub use steering::{

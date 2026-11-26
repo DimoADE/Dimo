@@ -378,6 +378,20 @@ impl InMemoryCompanionFeatures {
         Ok(question)
     }
 
+    pub async fn list_pending_questions(&self, conversation_id: Uuid) -> Vec<Value> {
+        let questions = self.questions.lock().unwrap();
+        questions
+            .values()
+            .filter(|state| state.question.scope.parent_conversation_id == conversation_id)
+            .map(|state| {
+                json!({
+                    "request_id": state.question.id,
+                    "questions": state.question.questions,
+                })
+            })
+            .collect()
+    }
+
     pub async fn register_session_info(
         &self,
         scope: DelegationScope,

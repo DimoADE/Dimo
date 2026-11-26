@@ -84,6 +84,7 @@ struct RegisteredToken {
     entry: TokenEntry,
     permissions: TokenPermissions,
     product: Option<String>,
+    mode_limit: crate::mode_limit::OrchestrationModeLimit,
 }
 
 type ProductGateFn = Arc<dyn Fn(&str) -> bool + Send + Sync>;
@@ -133,6 +134,25 @@ impl TokenRegistry {
         self.insert(token, entry, permissions, Some(product.to_string()));
     }
 
+    pub fn register_product_token_with_mode_limit(
+        &self,
+        token: String,
+        entry: TokenEntry,
+        permissions: TokenPermissions,
+        product: &str,
+        mode_limit: crate::mode_limit::OrchestrationModeLimit,
+    ) {
+        self.inner.write().unwrap().insert(
+            token,
+            RegisteredToken {
+                entry,
+                permissions,
+                product: Some(product.to_string()),
+                mode_limit,
+            },
+        );
+    }
+
     fn insert(
         &self,
         token: String,
@@ -146,6 +166,7 @@ impl TokenRegistry {
                 entry,
                 permissions,
                 product,
+                mode_limit: crate::mode_limit::OrchestrationModeLimit::default(),
             },
         );
     }
@@ -169,6 +190,14 @@ impl TokenRegistry {
             .unwrap()
             .get(token)
             .map(|registered| registered.permissions)
+    }
+
+    pub fn mode_limit(&self, token: &str) -> Option<crate::mode_limit::OrchestrationModeLimit> {
+        self.inner
+            .read()
+            .unwrap()
+            .get(token)
+            .map(|registered| registered.mode_limit)
     }
 
     pub fn authorize(&self, token: &str, feature: TokenFeature) -> Option<TokenEntry> {

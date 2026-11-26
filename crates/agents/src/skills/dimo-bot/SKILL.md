@@ -57,10 +57,10 @@ Bot 身份按权限分为三级：**主管（总管）**（工作区唯一全局
 
 | 意图 | 工具 | 何时调用 / 最少参数 |
 |---|---|---|
-| 会话外一次性子代理 | `delegate_to_agent` | 短小、自包含、不需要 Space 可见的后台子任务。必填 `agent_type`、`task`（冷启动，写全背景与绝对路径）。立刻返回 `task_id` |
-| 收集或取消委派 | `get_delegation_status`、`cancel_delegation` | `get_delegation_status` 必填 `task_ids`，可用 `wait_ms` 等到终态。`cancel_delegation` 必填 `task_id`。这是委派收口，不是协作主循环 |
+| 会话外一次性子代理 | `delegate_task` | 短小、自包含、不需要 Space 可见的后台子任务（支持同项目/跨项目、`isolation: "worktree"` 隔离分支）。必填 `target.agent_id`、`task`（冷启动，写全背景与绝对路径）。异步推送回执，勿轮询 |
+| 查询或取消委派 | `task_status`、`task_cancel` | `task_status` / `task_cancel` 传 `run_id` 或 `child_conversation_id`。这是委派收口，不是协作主循环 |
 | 用户点名的过往会话 | `get_session_info`、`list_conversations` | 消息里出现 `dimo://conversation/<uuid>` 时，`get_session_info` 传该 `conversation_id`。只读 |
-| 新建一等会话 | `create_conversation` | 工作区里一条持久 Conversation，不是 Bot，也不是 `delegate_to_agent` |
+| 新建一等会话 | `create_conversation` / `thread_launch` | 工作区或跨项目持久 Conversation，不是 Bot，也不是 `delegate_task` |
 | 向指定 Conversation 注入指令 | `send_session_input` | 只在用户明确要往某条 Conversation 塞输入时用。Space 里说话用隐式文本或 `post_space_message` |
 
 向同伴交接工作：在 GroupSpace 回复中 `@目标Bot`。格式与空节判定见 [`SPACE-RULES.md`](SPACE-RULES.md)「任务交接」。

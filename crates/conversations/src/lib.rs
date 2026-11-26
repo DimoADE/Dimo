@@ -70,7 +70,7 @@ pub use export::{render_html, render_markdown};
 pub use handoff::{
     ConversationEngineHandoffPackedItem, ConversationEngineHandoffPreview,
     DEFAULT_HANDOFF_TOKEN_BUDGET, DeterministicHandoffService, EngineHandoffConfirmation,
-    HandoffContext, HandoffError, latest_agent_handoff_sequence,
+    ForkHandoffNoticeParams, HandoffContext, HandoffError, latest_agent_handoff_sequence,
 };
 pub use host::{
     DefaultConversationHost, persist_agent_auto_approve_mode,
@@ -126,19 +126,26 @@ pub use service::{
     ConversationServiceError, ConversationSessionService, ConversationSessionWarmup,
     ConversationStartTurnInput, ConversationSteerInput, ConversationSteeringReceipt,
     ConversationSteeringStatus, ConversationTurnSnapshot, CreateDelegatedConversation,
-    CreateForkConversation, CreateWorkflowConversation, ForkVisibleConversation,
-    NoopConversationEventPublisher, PreparedCheckpointFileChanges, QueuedConversationInputClaim,
-    RuntimeEventNotification, clear_turn_hooks, commit_checkpoint_metadata_on_connection,
-    continuation_key_instance_id, create_delegated_conversation, create_fork_conversation,
+    CreateForkConversation, CreateOrchestratedConversation, CreateWorkflowConversation,
+    ForkVisibleConversation, NoopConversationEventPublisher, PreparedCheckpointFileChanges,
+    QueuedConversationInputClaim, RuntimeEventNotification, clear_turn_hooks,
+    commit_checkpoint_metadata_on_connection, continuation_key_instance_id,
+    create_delegated_conversation, create_fork_conversation, create_orchestrated_conversation,
     create_workflow_conversation, finalize_checkpoint_file_changes, fork_visible_conversation,
     prepare_checkpoint_file_changes, preview_checkpoint_file_changes, register_after_turn_hook,
     register_before_turn_hook, remember_creation_session_controls, subscribe_after_turn_events,
     subscribe_runtime_events,
 };
+pub use isolated_workspace::{
+    IsolatedWorkspaceError, PreparedProjectWorkspace, WorkspaceLaunchStrategy,
+    ensure_orchestration_scratch_workspace, prepare_project_workspace, rollback_prepared_workspace,
+    validate_existing_worktree_path,
+};
 pub use session_info::{
     SessionInfo, agent_session_title_from_patch, derive_session_display_name,
-    first_prompt_session_name, load_compact_transcript, read_history_page,
-    resolve_referenced_session, sanitize_agent_session_title, session_info_value,
+    first_prompt_session_name, format_forked_session_title, load_compact_transcript,
+    read_history_page, resolve_referenced_session, sanitize_agent_session_title,
+    session_info_value,
 };
 pub use usage_accounting::{
     assemble_project_usage_statistics, assemble_project_usage_statistics_cached,

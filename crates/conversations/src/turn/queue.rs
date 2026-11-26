@@ -800,6 +800,56 @@ async fn copy_sqlite_conversation_snapshot_on_connection(
             } else {
                 None
             }
+        } else if record.event_kind == "raw_diagnostic_recorded" {
+            if let Ok(mut event) = serde_json::from_str::<agents::conversation::ConversationEvent>(
+                &record.normalized_json,
+            ) && let agents::conversation::ConversationEvent::RawDiagnosticRecorded {
+                ref label,
+                payload: Some(ref mut payload_val),
+            } = event
+                && (label == "agent_handoff"
+                    || payload_val
+                        .get("kind")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("agent_handoff"))
+            {
+                let is_fork = payload_val
+                    .get("handoffKind")
+                    .or_else(|| payload_val.get("handoff_kind"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    == Some("fork");
+                if is_fork {
+                    continue;
+                }
+                let after_turn_key = if payload_val.get("afterTurnId").is_some() {
+                    Some("afterTurnId")
+                } else if payload_val.get("after_turn_id").is_some() {
+                    Some("after_turn_id")
+                } else {
+                    None
+                };
+                if let Some(key) = after_turn_key
+                    && let Some(raw_turn_id) =
+                        payload_val.get(key).and_then(serde_json::Value::as_str)
+                    && let Ok(parsed_turn_id) = Uuid::parse_str(raw_turn_id.trim())
+                {
+                    let Some(&mapped_after) = turn_map.get(&parsed_turn_id) else {
+                        continue;
+                    };
+                    if let Some(obj) = payload_val.as_object_mut() {
+                        obj.insert(
+                            key.to_string(),
+                            serde_json::Value::String(mapped_after.to_string()),
+                        );
+                    }
+                    Some(serde_json::to_string(&event)?)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -908,6 +958,112 @@ pub async fn create_workflow_conversation(
             return Err(error);
         }
     };
+    Ok(input.id)
+}
+
+/// Durable conversation creation for both orchestrated child delegations
+/// (with optional cross-project or worktree `target_workspace_id`) and
+/// top-level threads launched via `thread_launch` / `create_threads`.
+pub struct CreateOrchestratedConversation {
+    pub id: Uuid,
+    pub parent_conversation_id: Option<Uuid>,
+    pub parent_tool_call_id: Option<String>,
+    pub delegation_id: Option<String>,
+    pub workspace_id: Uuid,
+    pub agent_id: AgentId,
+    pub provider_instance_id: Option<String>,
+    pub title: Option<String>,
+    pub initial_prompt: Option<String>,
+    pub policy: serde_json::Value,
+}
+
+pub async fn create_orchestrated_conversation(
+    pool: &SqlitePool,
+    input: CreateOrchestratedConversation,
+) -> Result<Uuid, ConversationServiceError> {
+    let task_id = db::models::workspace::Workspace::find_by_id(pool, input.workspace_id)
+        .await?
+        .map(|workspace| workspace.task_id);
+    let session = CreateSession {
+        executor: None,
+        agent_id: Some(input.agent_id),
+        provider_instance_id: input.provider_instance_id,
+        task_id,
+        name: input.title,
+        initial_prompt: input.initial_prompt,
+        status: Some(SessionStatus::InProgress),
+    };
+    let mut conn = pool.acquire().await?;
+    sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+    let transaction = async {
+        if let (Some(parent_id), Some(delegation_id)) = (
+            input.parent_conversation_id,
+            input.delegation_id.as_deref(),
+        ) {
+            let parent_tool_call_id = input.parent_tool_call_id.as_deref().unwrap_or("");
+            Session::create_with_delegation_on_connection(
+                &mut conn,
+                &session,
+                input.id,
+                input.workspace_id,
+                parent_id,
+                parent_tool_call_id,
+                delegation_id,
+            )
+            .await
+            .map_err(|error| ConversationServiceError::Internal(error.to_string()))?;
+
+            let relation = ConversationEvent::ConversationRelationCreated {
+                relation_id: Uuid::new_v4(),
+                parent_conversation_id: parent_id,
+                child_conversation_id: input.id,
+                relation_kind: agents::ConversationRelationKind::Delegation,
+                visibility: agents::ConversationRelationVisibility::Visible,
+                metadata: serde_json::json!({
+                    "parentToolCallId": parent_tool_call_id,
+                    "delegationId": delegation_id,
+                    "policy": &input.policy,
+                }),
+            };
+            let normalized_json = serde_json::to_string(&relation)?;
+            let relation_key = format!("conversation-relation-delegation:{}", input.id);
+            ConversationEventAppender::append_and_apply(
+                &mut conn,
+                AppendConversationEvent {
+                    id: Uuid::new_v4(),
+                    conversation_id: parent_id,
+                    turn_id: None,
+                    binding_id: None,
+                    connection_id: None,
+                    prompt_id: None,
+                    source: "system",
+                    event_kind: "conversation_relation_created",
+                    normalized_json: &normalized_json,
+                    raw_json: None,
+                    idempotency_key: Some(&relation_key),
+                },
+            )
+            .await?;
+        } else {
+            Session::create_on_connection(&mut conn, &session, input.id, input.workspace_id)
+                .await
+                .map_err(|error| ConversationServiceError::Internal(error.to_string()))?;
+        }
+        Ok::<_, ConversationServiceError>(())
+    }
+    .await;
+    match transaction {
+        Ok(()) => {
+            if let Err(error) = sqlx::query("COMMIT").execute(&mut *conn).await {
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                return Err(error.into());
+            }
+        }
+        Err(error) => {
+            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+            return Err(error);
+        }
+    }
     Ok(input.id)
 }
 
