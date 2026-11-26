@@ -390,7 +390,10 @@ impl FilesystemService {
         let mut git_repos = Vec::new();
 
         for root in paths {
-            if cancel.as_ref().is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            if cancel
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Relaxed))
+            {
                 break;
             }
 

@@ -143,8 +143,7 @@ describe('resolveWorkspaceTabNavigation', () => {
     expect(
       resolveWorkspaceTabNavigation({
         projectId: 'project-2',
-        lastRoute:
-          '/local-projects/project-2/workspaces/workspace-project-1',
+        lastRoute: '/local-projects/project-2/workspaces/workspace-project-1',
         rightSession: {
           workspaceId: 'workspace-project-1',
           sessionId: 'session-1',

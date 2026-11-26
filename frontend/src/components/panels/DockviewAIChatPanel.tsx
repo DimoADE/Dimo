@@ -4,6 +4,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
 } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
 import { MessageSquare } from 'lucide-react';
@@ -31,6 +32,37 @@ export interface SessionTabPanelParams {
   workspaceId?: string;
   title?: string | null;
   agentId?: string | null;
+}
+
+function useDockviewPanelGroupActive(
+  panelApi: IDockviewPanelProps['api']
+): boolean {
+  const [isGroupActive, setIsGroupActive] = useState<boolean>(() =>
+    typeof panelApi.isGroupActive === 'boolean' ? panelApi.isGroupActive : true
+  );
+
+  useEffect(() => {
+    const sync = () => {
+      setIsGroupActive(
+        typeof panelApi.isGroupActive === 'boolean'
+          ? panelApi.isGroupActive
+          : true
+      );
+    };
+    sync();
+    const activeGroupDisposable = panelApi.onDidActiveGroupChange?.((event) => {
+      setIsGroupActive(event.isActive);
+    });
+    const groupChangeDisposable = panelApi.onDidGroupChange?.(() => {
+      sync();
+    });
+    return () => {
+      activeGroupDisposable?.dispose();
+      groupChangeDisposable?.dispose();
+    };
+  }, [panelApi]);
+
+  return isGroupActive;
 }
 
 function WorkspaceSessionTabContent({
@@ -67,6 +99,14 @@ function WorkspaceSessionTabContent({
     maxWarmHidden: DEFAULT_MAX_WARM_HIDDEN_PANELS,
     pinned: isSessionKeepAlivePinned,
   });
+  const isGroupActive = useDockviewPanelGroupActive(panelApi);
+  const [hasFocusWithin, setHasFocusWithin] = useState(false);
+
+  useEffect(() => {
+    if (!isVisible) {
+      setHasFocusWithin(false);
+    }
+  }, [isVisible]);
 
   useEffect(() => {
     if (!matchingSession) return;
@@ -158,6 +198,12 @@ function WorkspaceSessionTabContent({
       className="workspace-right-panel relative h-full w-full min-w-0 flex flex-col overflow-hidden"
       data-panel="ai-chat"
       data-session-id={sessionId}
+      onFocusCapture={() => setHasFocusWithin(true)}
+      onBlurCapture={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setHasFocusWithin(false);
+        }
+      }}
     >
       {isGitProject && isVisible ? (
         <BranchInfoHeader workspaceId={effectiveWorkspaceId} />
@@ -169,7 +215,7 @@ function WorkspaceSessionTabContent({
             sessionId={sessionId}
             embedded
             interactive
-            markViewed={isVisible}
+            markViewed={isVisible && (isGroupActive || hasFocusWithin)}
             showSessionSelector={false}
             onSessionCreated={handleSessionCreated}
             onSessionSelected={handleSessionSelected}

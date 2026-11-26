@@ -321,15 +321,14 @@ impl DiffStreamManager {
 
         let git_for_watcher = self.args.git_service.clone();
         let worktree_for_git = self.args.worktree_path.clone();
-        let (git_debouncer, mut git_rx) =
-            match tokio::task::spawn_blocking(move || {
-                setup_git_watcher(&git_for_watcher, &worktree_for_git)
-            })
-            .await?
-            {
-                Some((d, rx)) => (Some(d), Some(rx)),
-                None => (None, None),
-            };
+        let (git_debouncer, mut git_rx) = match tokio::task::spawn_blocking(move || {
+            setup_git_watcher(&git_for_watcher, &worktree_for_git)
+        })
+        .await?
+        {
+            Some((d, rx)) => (Some(d), Some(rx)),
+            None => (None, None),
+        };
         let _git_guard = git_debouncer;
 
         // This timer only detects an out-of-band target-branch change (a rare
@@ -708,8 +707,10 @@ fn setup_git_watcher(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-    use std::sync::{Arc, Mutex};
+    use std::{
+        collections::HashSet,
+        sync::{Arc, Mutex},
+    };
 
     use utils::diff::{Diff, DiffChangeKind};
     use uuid::Uuid;

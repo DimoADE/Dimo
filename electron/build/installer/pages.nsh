@@ -762,6 +762,9 @@ Function DimoPageMainLeave
     ${EndIf}
     ; Reject empty, relative, UNC, and drive-root paths before and after canonicalization.
     StrCpy $DimoT2 $DimoT0 2 1
+    ${If} $DimoT2 == ":/"
+      StrCpy $DimoT2 ":\"
+    ${EndIf}
     ${GetRoot} "$DimoT0" $DimoT3
     StrLen $DimoT4 $DimoT3
     ${If} $DimoT0 == ""
@@ -770,7 +773,17 @@ Function DimoPageMainLeave
       MessageBox MB_OK|MB_ICONEXCLAMATION "$(DIMO_PATH_INVALID)"
       Abort
     ${EndIf}
-    GetFullPathName $DimoT1 $DimoT0
+    ; NSIS's built-in GetFullPathName clears the output when the target path does not
+    ; exist on disk yet; call Win32 GetFullPathNameW directly so fresh installs work.
+    Push $DimoT0
+    System::Call 'kernel32::GetFullPathNameW(w s, i ${NSIS_MAX_STRLEN}, w .s, p 0) i .s'
+    Pop $DimoT4
+    Pop $DimoT1
+    ${If} $DimoT4 <= 0
+    ${OrIf} $DimoT4 >= ${NSIS_MAX_STRLEN}
+      MessageBox MB_OK|MB_ICONEXCLAMATION "$(DIMO_PATH_INVALID)"
+      Abort
+    ${EndIf}
     ${Do}
       StrCpy $DimoT2 $DimoT1 "" -1
       ${If} $DimoT2 != "\"
@@ -782,10 +795,18 @@ Function DimoPageMainLeave
     ${GetRoot} "$DimoT1" $DimoT3
     StrLen $DimoT4 $DimoT3
     StrLen $DimoT5 $DimoT1
+    StrCpy $DimoT6 0
+    ${If} $DimoT4 == 2
+      Push "$DimoT3\"
+      System::Call 'kernel32::GetDriveTypeW(w s) i .s'
+      Pop $DimoT6
+    ${EndIf}
     ${If} $DimoT4 != 2
     ${OrIf} $DimoT2 != ":\"
     ${OrIf} $DimoT5 <= 3
     ${OrIf} $DimoT1 == $DimoT3
+    ${OrIf} $DimoT6 <= 1
+    ${OrIf} $DimoT6 == 5
       MessageBox MB_OK|MB_ICONEXCLAMATION "$(DIMO_PATH_INVALID)"
       Abort
     ${EndIf}

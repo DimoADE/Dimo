@@ -45,7 +45,7 @@ pub const AAD_REQ: &[u8] = b"dimo-e2ee-req-v1";
 pub const AAD_RESP: &[u8] = b"dimo-e2ee-resp-v1";
 pub const AAD_WS: &[u8] = b"dimo-e2ee-ws-v1";
 
-const MAX_E2EE_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_E2EE_BODY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHED_SESSIONS: usize = 512;
 
 #[derive(Clone, Debug)]

@@ -3,6 +3,10 @@ import { act, renderHook } from '@testing-library/react';
 import { type ReactNode } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { AgentKind, ScratchType, type ExecutorProfileId } from 'shared/types';
+import {
+  clearLastSessionAgent,
+  getLastSessionAgent,
+} from '@/lib/lastSessionAgent';
 import type { WorkspaceBranchOption } from '@/lib/workspaceBranchOptions';
 import { useKanbanSessionMutations } from './useKanbanSessionMutations';
 
@@ -44,6 +48,7 @@ function workspaceOption(
 
 describe('useKanbanSessionMutations', () => {
   it('runs create and rename side effects behind the session mutation hook', async () => {
+    clearLastSessionAgent();
     const queryClient = new QueryClient({
       defaultOptions: {
         queries: { retry: false },
@@ -109,6 +114,7 @@ describe('useKanbanSessionMutations', () => {
       mode_override: 'plan',
       config_overrides: { model: 'gpt-5.6-sol' },
     });
+    expect(getLastSessionAgent()).toBe('codex');
     expect(scratchUpdateMock).toHaveBeenCalledWith(
       ScratchType.DRAFT_FOLLOW_UP,
       'session-1',

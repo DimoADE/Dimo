@@ -16,12 +16,15 @@ describe('filePaths', () => {
 
   it('normalizes dot and parent segments when resolving relative paths from root', () => {
     expect(
-      resolveFilePathFromRoot('../生财航海/高手领航2-小志同学.md', 'E:\\0A\\AI助理')
+      resolveFilePathFromRoot(
+        '../生财航海/高手领航2-小志同学.md',
+        'E:\\0A\\AI助理'
+      )
     ).toBe('E:\\0A\\生财航海\\高手领航2-小志同学.md');
 
-    expect(
-      resolveFilePathFromRoot('./docs/../README.md', 'E:/0A/AI助理')
-    ).toBe('E:/0A/AI助理/README.md');
+    expect(resolveFilePathFromRoot('./docs/../README.md', 'E:/0A/AI助理')).toBe(
+      'E:/0A/AI助理/README.md'
+    );
 
     expect(
       resolveFilePathFromRoot('../shared/types.ts', '/workspace/project')

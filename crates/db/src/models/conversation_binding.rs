@@ -68,8 +68,7 @@ impl ConversationAgentBindingRecord {
                  agent_id = (SELECT agent_id FROM conversation_agent_bindings WHERE id = ?1),
                  agent_type = (SELECT agent_id FROM conversation_agent_bindings WHERE id = ?1),
                  executor = (SELECT agent_id FROM conversation_agent_bindings WHERE id = ?1),
-                 external_session_id = (SELECT acp_session_id FROM conversation_agent_bindings WHERE id = ?1),
-                 updated_at = datetime('now', 'subsec')
+                 external_session_id = (SELECT acp_session_id FROM conversation_agent_bindings WHERE id = ?1)
              WHERE id = ?2 AND EXISTS (SELECT 1 FROM conversation_agent_bindings
                  WHERE id = ?1 AND conversation_id = ?2 AND resume_allowed = 1)",
         )

@@ -350,7 +350,9 @@ mod tests {
             assert_eq!(consent.arm("t2", "r2".into()).err(), Some(AskRefused::Busy));
         }
         // Dropping guard abandoned r1, so t2 can now claim the slot.
-        let _rx2 = consent.arm("t2", "r2".into()).expect("slot released on drop");
+        let _rx2 = consent
+            .arm("t2", "r2".into())
+            .expect("slot released on drop");
         let mut disarmed_guard = EvalConsentGuard::new(consent.clone(), "r2".into());
         disarmed_guard.disarm();
         drop(disarmed_guard);

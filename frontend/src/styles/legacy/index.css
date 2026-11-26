@@ -460,11 +460,7 @@
     --usage-red-fg: hsl(8 55% 50%);
     /* Markdown typography & semantic link / alert tokens (light). */
     --radius-inline-code: 0.25rem;
-    --md-inline-code-bg: color-mix(
-      in srgb,
-      var(--text-strong) 8%,
-      transparent
-    );
+    --md-inline-code-bg: color-mix(in srgb, var(--text-strong) 8%, transparent);
     --md-link: hsl(212 85% 42%);
     --md-link-hover: hsl(212 90% 34%);
     --md-file-link: oklch(0.49 0.115 215);

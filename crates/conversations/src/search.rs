@@ -408,15 +408,16 @@ pub async fn search_conversations_with_offset(
     let bounded_offset = offset.max(0) as usize;
     let total_needed = bounded_offset.saturating_add(bounded_limit as usize);
 
+    let activity_order = db::models::session::SESSION_ACTIVITY_AT_SQL;
     let title_sql = format!(
-        "SELECT id AS conversation_id, workspace_id, name AS title, \
-                COALESCE(name, '') AS snippet \
-         FROM sessions \
-         WHERE deleted_at IS NULL AND name LIKE ?1 ESCAPE '\\' {} \
-         ORDER BY pinned_at IS NULL, pinned_at DESC, updated_at DESC \
+        "SELECT s.id AS conversation_id, s.workspace_id, s.name AS title, \
+                COALESCE(s.name, '') AS snippet \
+         FROM sessions s \
+         WHERE s.deleted_at IS NULL AND s.name LIKE ?1 ESCAPE '\\' {} \
+         ORDER BY s.pinned_at IS NULL, s.pinned_at DESC, {activity_order} DESC \
          LIMIT ?2",
         if workspace_id.is_some() {
-            "AND workspace_id = ?3"
+            "AND s.workspace_id = ?3"
         } else {
             ""
         }
@@ -471,7 +472,7 @@ pub async fn search_conversations_with_offset(
                AND ctr.deleted_sequence IS NULL \
              WHERE conversation_fts MATCH ?1 \
                AND s.deleted_at IS NULL {} \
-             ORDER BY s.pinned_at IS NULL, s.pinned_at DESC, s.updated_at DESC \
+             ORDER BY s.pinned_at IS NULL, s.pinned_at DESC, {activity_order} DESC \
              LIMIT ?2",
             if workspace_id.is_some() {
                 "AND s.workspace_id = ?3"
@@ -529,7 +530,7 @@ pub async fn search_conversations_with_offset(
                AND ctr.deleted_sequence IS NULL \
              WHERE conversation_fts.text LIKE ?1 ESCAPE '\\' \
                AND s.deleted_at IS NULL {} \
-             ORDER BY s.pinned_at IS NULL, s.pinned_at DESC, s.updated_at DESC \
+             ORDER BY s.pinned_at IS NULL, s.pinned_at DESC, {activity_order} DESC \
              LIMIT ?2",
             if workspace_id.is_some() {
                 "AND s.workspace_id = ?3"

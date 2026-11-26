@@ -1,19 +1,28 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { KanbanProjectSessionRecord } from '@/hooks/useKanbanProjectSessions';
 import { TooltipProvider } from '@/components/ui/tooltip';
+import { sessionsApi } from '@/lib/api';
 import { SessionMonitorCard } from './SessionMonitorCard';
 
 vi.mock('@/components/kanban/KanbanSessionConversationView', () => ({
   KanbanSessionConversationView: ({
     interactive,
+    markViewed,
   }: {
     interactive?: boolean;
+    markViewed?: boolean;
   }) => (
     <div
       data-testid="session-conversation"
       data-interactive={String(!!interactive)}
-    />
+      data-mark-viewed={String(Boolean(markViewed))}
+    >
+      <button type="button" data-testid="conversation-focus-target">
+        focus
+      </button>
+    </div>
   ),
 }));
 
@@ -242,5 +251,51 @@ describe('SessionMonitorCard', () => {
       container.querySelector('.canvas-card-drag-handle') as HTMLElement
     );
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('enables markViewed on focus within an unselected canvas card and marks review-ready sessions viewed on pointer down', async () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const markViewedSpy = vi
+      .spyOn(sessionsApi, 'markViewed')
+      .mockResolvedValue({} as never);
+
+    try {
+      render(
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <SessionMonitorCard
+              session={{
+                ...createSession(),
+                status: 'inreview',
+                isRunning: false,
+              }}
+              variant="canvas"
+              selected={false}
+              onClose={vi.fn()}
+            />
+          </TooltipProvider>
+        </QueryClientProvider>
+      );
+
+      const conversation = screen.getByTestId('session-conversation');
+      const focusTarget = screen.getByTestId('conversation-focus-target');
+
+      expect(conversation).toHaveAttribute('data-mark-viewed', 'false');
+
+      fireEvent.focus(focusTarget);
+      expect(conversation).toHaveAttribute('data-mark-viewed', 'true');
+
+      fireEvent.blur(focusTarget, { relatedTarget: null });
+      expect(conversation).toHaveAttribute('data-mark-viewed', 'false');
+
+      fireEvent.pointerDown(focusTarget);
+      await waitFor(() => {
+        expect(markViewedSpy).toHaveBeenCalledWith('session-1');
+      });
+    } finally {
+      markViewedSpy.mockRestore();
+    }
   });
 });

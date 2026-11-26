@@ -262,9 +262,7 @@ mod tests {
         AgentId,
         acp_transcript::{self, EntryKind, TranscriptHeader, dimo_acp_transcripts_root},
     };
-    use db::models::{
-        conversation::ConversationRecord, conversation_turn::ConversationTurnRecord,
-    };
+    use db::models::{conversation::ConversationRecord, conversation_turn::ConversationTurnRecord};
     use sqlx::{
         SqlitePool,
         sqlite::{SqliteConnectOptions, SqlitePoolOptions},

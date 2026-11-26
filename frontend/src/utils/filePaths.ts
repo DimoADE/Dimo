@@ -10,10 +10,7 @@ export function normalizeFilePath(path: string): string {
   return path.replace(/\\/g, '/').replace(/\/+$/, '');
 }
 
-function collapseDotSegments(
-  inputPath: string,
-  separator: '\\' | '/'
-): string {
+function collapseDotSegments(inputPath: string, separator: '\\' | '/'): string {
   let prefix = '';
   let rest = inputPath;
 
@@ -133,7 +130,8 @@ export function findFallbackWorkspaceFilePath(params: {
     return null;
   }
 
-  const isWindowsRoot = /^[a-zA-Z]:[\\/]/.test(rootPath) || rootPath.includes('\\');
+  const isWindowsRoot =
+    /^[a-zA-Z]:[\\/]/.test(rootPath) || rootPath.includes('\\');
   const normalizeForCompare = (value: string) => {
     const normalized = normalizeFilePath(value).replace(/^\/+/, '');
     return isWindowsRoot ? normalized.toLowerCase() : normalized;

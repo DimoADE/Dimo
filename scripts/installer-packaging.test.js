@@ -635,7 +635,8 @@ test("Windows NSIS installer requires \\Dimo separator on Browse and rejects roo
   const leaveEnd = pagesNsh.indexOf("FunctionEnd", leaveStart);
   assert.ok(leaveStart >= 0 && leaveEnd > leaveStart);
   const leaveBody = pagesNsh.slice(leaveStart, leaveEnd);
-  assert.match(leaveBody, /GetFullPathName\s+\$DimoT1\s+\$DimoT0/);
+  assert.match(leaveBody, /kernel32::GetFullPathNameW\(/);
+  assert.match(leaveBody, /kernel32::GetDriveTypeW\(/);
   assert.match(leaveBody, /\$\{GetRoot\}\s+"\$DimoT1"\s+\$DimoT3/);
   assert.match(leaveBody, /\$\{OrIf\}\s+\$DimoT2\s+!=\s+":\\"/);
   assert.match(leaveBody, /\$\{OrIf\}\s+\$DimoT5\s+<=\s+3/);

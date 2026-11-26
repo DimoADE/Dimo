@@ -45,10 +45,11 @@ import {
   resolveWorkspaceBranchSelection,
   type WorkspaceBranchOption,
 } from '@/lib/workspaceBranchOptions';
+import { getDefaultProfileForExecutor } from '@/utils/executor';
 import {
-  getDefaultProfileForExecutor,
-  getFirstAvailableProfile,
-} from '@/utils/executor';
+  recordLastSessionAgent,
+  useNewSessionDefaultExecutorProfile,
+} from '@/lib/lastSessionAgent';
 import {
   CREATE_AGENT_SESSION_EVENT,
   DISMISS_CREATE_SESSION_OVERLAY_EVENT,
@@ -413,10 +414,6 @@ export function RightPanelContent() {
     hasExistingWorkspace: canUseExistingWorkspace,
   });
 
-  const defaultExecutorProfile = useMemo<ExecutorProfileId | null>(
-    () => config?.executor_profile ?? getFirstAvailableProfile(profiles),
-    [config?.executor_profile, profiles]
-  );
   const currentOverlayWorkspaceId = workspaceId ?? activeWorktreeId ?? null;
   const [isCreateOverlayOpen, setIsCreateOverlayOpen] = useState(false);
   const [createOverlayProjectId, setCreateOverlayProjectId] = useState<
@@ -431,8 +428,6 @@ export function RightPanelContent() {
   const [createWorkspaceValue, setCreateWorkspaceValue] = useState(
     defaultWorkspaceValue
   );
-  const [selectedExecutorProfile, setSelectedExecutorProfile] =
-    useState<ExecutorProfileId | null>(defaultExecutorProfile);
   const isCreateOverlayVisible = isCreateSessionFormVisibleForProject({
     open: isCreateOverlayOpen,
     openedForProjectId: createOverlayProjectId,
@@ -440,6 +435,15 @@ export function RightPanelContent() {
     openedForWorkspaceId: createOverlayWorkspaceId,
     currentWorkspaceId: currentOverlayWorkspaceId,
   });
+  const defaultExecutorProfile = useNewSessionDefaultExecutorProfile({
+    configExecutorProfile: config?.executor_profile,
+    profiles,
+    refreshKey: isCreateOverlayVisible || showEmptyCreateForm,
+  });
+  const [userSelectedExecutorProfile, setUserSelectedExecutorProfile] =
+    useState<ExecutorProfileId | null>(null);
+  const selectedExecutorProfile =
+    userSelectedExecutorProfile ?? defaultExecutorProfile;
   const {
     configs: repoBranchConfigs,
     isLoading: isLoadingRepoBranches,
@@ -463,14 +467,6 @@ export function RightPanelContent() {
       setCreateWorkspaceValue(defaultWorkspaceValue);
     }
   }, [createWorkspaceValue, defaultWorkspaceValue, workspaceBranchOptions]);
-
-  useEffect(() => {
-    if (selectedExecutorProfile) {
-      return;
-    }
-
-    setSelectedExecutorProfile(defaultExecutorProfile);
-  }, [defaultExecutorProfile, selectedExecutorProfile]);
 
   const selectedWorkspaceOption = useMemo<WorkspaceBranchOption | null>(
     () =>
@@ -680,6 +676,7 @@ export function RightPanelContent() {
         context?.originProfile ??
         variables?.executorProfile ??
         selectedExecutorProfile;
+      recordLastSessionAgent(profileToPersist?.executor ?? newSession.executor);
       if (profileToPersist?.executor) {
         try {
           await scratchApi.update(ScratchType.DRAFT_FOLLOW_UP, newSession.id, {
@@ -730,6 +727,7 @@ export function RightPanelContent() {
         workspaceId: newSession.workspace_id,
         agentId: newSession.executor ?? profileToPersist?.executor ?? null,
       });
+      setUserSelectedExecutorProfile(null);
       setIsCreateOverlayOpen(false);
     },
     onError: (_error, _variables, context) => {
@@ -763,6 +761,7 @@ export function RightPanelContent() {
     sessionControlsPresetRef.current = null;
     setCreateWorkspaceValue('');
     setUserCreateMode(null);
+    setUserSelectedExecutorProfile(null);
     resetRepoBranchSelection();
     resetCreateSessionMutation();
   }, [
@@ -782,7 +781,7 @@ export function RightPanelContent() {
         dismissCollaborationCreateOverlays();
         sessionControlsPresetRef.current = null;
         setCreateWorkspaceValue(defaultWorkspaceValue);
-        setSelectedExecutorProfile(defaultExecutorProfile);
+        setUserSelectedExecutorProfile(null);
         setUserCreateMode(null);
         resetRepoBranchSelection();
         return;
@@ -794,7 +793,6 @@ export function RightPanelContent() {
     [
       collaborationStore,
       currentOverlayWorkspaceId,
-      defaultExecutorProfile,
       defaultWorkspaceValue,
       effectiveProjectId,
       resetCreateSessionMutation,
@@ -921,7 +919,7 @@ export function RightPanelContent() {
         variant: null,
       };
 
-      setSelectedExecutorProfile(targetProfile);
+      setUserSelectedExecutorProfile(targetProfile);
 
       const canCreateImmediately =
         Boolean(effectiveProjectId) &&
@@ -935,7 +933,7 @@ export function RightPanelContent() {
       }
 
       openCreateSessionOverlay();
-      setSelectedExecutorProfile(targetProfile);
+      setUserSelectedExecutorProfile(targetProfile);
     };
 
     window.addEventListener(
@@ -1027,7 +1025,7 @@ export function RightPanelContent() {
     setCreateWorkspaceValue,
     profiles,
     selectedExecutorProfile,
-    setSelectedExecutorProfile,
+    setSelectedExecutorProfile: setUserSelectedExecutorProfile,
     repoBranchConfigs,
     setRepoBranch,
     isLoadingRepoBranches,

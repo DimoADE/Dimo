@@ -79,6 +79,7 @@ fn is_orchestration_tool(name: &str) -> bool {
     matches!(
         name,
         "orchestrator_capabilities"
+            | "environment_links"
             | "delegate_task"
             | "task_status"
             | "task_cancel"
@@ -348,6 +349,7 @@ fn parse_args() -> Result<Args, String> {
 /// elicitation. These tools only inspect state.
 const READ_ONLY_MCP_TOOLS: &[&str] = &[
     "orchestrator_capabilities",
+    "environment_links",
     "task_status",
     "thread_list",
     "thread_read",

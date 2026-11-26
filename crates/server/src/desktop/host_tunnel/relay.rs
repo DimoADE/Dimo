@@ -1456,7 +1456,9 @@ mod tests {
         assert!(is_valid_relay_http_path("/"));
         assert!(is_valid_relay_http_path("/api/v1/health?ok=1"));
         assert!(!is_valid_relay_http_path(""));
-        assert!(!is_valid_relay_http_path("@169.254.169.254/latest/meta-data"));
+        assert!(!is_valid_relay_http_path(
+            "@169.254.169.254/latest/meta-data"
+        ));
         assert!(!is_valid_relay_http_path(":80@evil.example/path"));
         assert!(!is_valid_relay_http_path("//evil.example/path"));
         assert!(!is_valid_relay_http_path("/\\evil.example/path"));

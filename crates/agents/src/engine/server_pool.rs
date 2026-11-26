@@ -243,10 +243,7 @@ where
 
     #[cfg(test)]
     pub(crate) fn entry_count_for_test(&self) -> usize {
-        self.entries
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len()
+        self.entries.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 }
 

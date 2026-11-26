@@ -29,7 +29,11 @@ export function requeueDesktopOpenFiles(paths: readonly string[]): void {
   for (const raw of paths) {
     if (typeof raw !== 'string') continue;
     const trimmed = raw.trim();
-    if (!trimmed || unique.includes(trimmed) || pendingFiles.includes(trimmed)) {
+    if (
+      !trimmed ||
+      unique.includes(trimmed) ||
+      pendingFiles.includes(trimmed)
+    ) {
       continue;
     }
     unique.push(trimmed);

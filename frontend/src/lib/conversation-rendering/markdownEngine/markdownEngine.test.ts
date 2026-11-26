@@ -19,7 +19,10 @@ import { normalizeOverIndentedNestedLists } from './remarkNormalizeListIndentati
 
 describe('fileLinkLabel helpers', () => {
   it('parses hash and colon line/range/column locations', () => {
-    expect(extractFileLocation('src/a.rs#L22')).toEqual({ line: 22, column: 1 });
+    expect(extractFileLocation('src/a.rs#L22')).toEqual({
+      line: 22,
+      column: 1,
+    });
     expect(extractFileLocation('src/a.rs#L22-L40')).toEqual({
       line: 22,
       column: 1,

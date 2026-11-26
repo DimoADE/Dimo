@@ -827,10 +827,10 @@ describe('KanbanSessionConversationView', () => {
     expect(sessionsMarkViewedMock).not.toHaveBeenCalled();
   });
 
-  it('marks a finished session viewed when the conversation opens', async () => {
+  it('marks a finished in-review session viewed when the conversation opens', async () => {
     sessionsMarkViewedMock.mockClear();
     useWorkspaceSessionsMock.mockReturnValue({
-      sessions: [{ id: 'session-1', isRunning: false }],
+      sessions: [{ id: 'session-1', status: 'inreview', isRunning: false }],
       selectedSession: undefined,
       selectedSessionId: undefined,
       selectSession: vi.fn(),
@@ -848,7 +848,10 @@ describe('KanbanSessionConversationView', () => {
       defaultOptions: { queries: { retry: false } },
     });
     const workspace = createWorkspace('workspace-1');
-    const session = createSession('session-1', workspace.id);
+    const session: Session = {
+      ...createSession('session-1', workspace.id),
+      status: 'inreview',
+    };
     queryClient.setQueryData(['taskAttempt', workspace.id], workspace);
     queryClient.setQueryData(['session', session.id], session);
 
@@ -869,10 +872,13 @@ describe('KanbanSessionConversationView', () => {
     });
   });
 
-  it('does not mark a running session viewed, even after the turn later ends', async () => {
+  it('automatically marks a focused running session viewed once its turn finishes in the foreground', async () => {
     sessionsMarkViewedMock.mockClear();
-    const workspaceSessions = (isRunning: boolean) => ({
-      sessions: [{ id: 'session-1', isRunning }],
+    const workspaceSessions = (
+      status: Session['status'],
+      isRunning: boolean
+    ) => ({
+      sessions: [{ id: 'session-1', status, isRunning }],
       selectedSession: undefined,
       selectedSessionId: undefined,
       selectSession: vi.fn(),
@@ -885,17 +891,22 @@ describe('KanbanSessionConversationView', () => {
       cancelNewSession: vi.fn(),
       startNewSession: vi.fn(),
     });
-    useWorkspaceSessionsMock.mockReturnValue(workspaceSessions(true));
+    useWorkspaceSessionsMock.mockReturnValue(
+      workspaceSessions('inprogress', true)
+    );
 
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
     const workspace = createWorkspace('workspace-1');
-    const session = createSession('session-1', workspace.id);
+    const session: Session = {
+      ...createSession('session-1', workspace.id),
+      status: 'inprogress',
+    };
     queryClient.setQueryData(['taskAttempt', workspace.id], workspace);
     queryClient.setQueryData(['session', session.id], session);
 
-    const view = (
+    const renderView = () => (
       <MemoryRouter>
         <QueryClientProvider client={queryClient}>
           <KanbanSessionConversationView
@@ -906,15 +917,140 @@ describe('KanbanSessionConversationView', () => {
         </QueryClientProvider>
       </MemoryRouter>
     );
-    const { rerender } = render(view);
+    const { rerender } = render(renderView());
 
     await waitFor(() => {
       expect(screen.getByTestId('virtualized-list')).toBeInTheDocument();
     });
     expect(sessionsMarkViewedMock).not.toHaveBeenCalled();
 
-    useWorkspaceSessionsMock.mockReturnValue(workspaceSessions(false));
-    rerender(view);
+    useWorkspaceSessionsMock.mockReturnValue(
+      workspaceSessions('inreview', false)
+    );
+    rerender(renderView());
+
+    await waitFor(() => {
+      expect(sessionsMarkViewedMock).toHaveBeenCalledWith(session.id);
+    });
+  });
+
+  it('keeps a session in review when its turn finishes while unfocused, then marks viewed on window focus', async () => {
+    sessionsMarkViewedMock.mockClear();
+    let focused = false;
+    const hasFocusSpy = vi
+      .spyOn(document, 'hasFocus')
+      .mockImplementation(() => focused);
+
+    try {
+      const workspaceSessions = (
+        status: Session['status'],
+        isRunning: boolean
+      ) => ({
+        sessions: [{ id: 'session-bg', status, isRunning }],
+        selectedSession: undefined,
+        selectedSessionId: undefined,
+        selectSession: vi.fn(),
+        selectLatestSession: vi.fn(),
+        isLoading: false,
+        isNewSessionMode: false,
+        isPendingNewSessionMode: false,
+        requestNewSession: vi.fn(),
+        confirmNewSession: vi.fn(),
+        cancelNewSession: vi.fn(),
+        startNewSession: vi.fn(),
+      });
+      useWorkspaceSessionsMock.mockReturnValue(
+        workspaceSessions('inprogress', true)
+      );
+
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      const workspace = createWorkspace('workspace-1');
+      const session: Session = {
+        ...createSession('session-bg', workspace.id),
+        status: 'inprogress',
+      };
+      queryClient.setQueryData(['taskAttempt', workspace.id], workspace);
+      queryClient.setQueryData(['session', session.id], session);
+
+      const renderView = () => (
+        <MemoryRouter>
+          <QueryClientProvider client={queryClient}>
+            <KanbanSessionConversationView
+              workspaceId={workspace.id}
+              sessionId={session.id}
+              interactive
+            />
+          </QueryClientProvider>
+        </MemoryRouter>
+      );
+      const { rerender } = render(renderView());
+
+      useWorkspaceSessionsMock.mockReturnValue(
+        workspaceSessions('inreview', false)
+      );
+      rerender(renderView());
+
+      await waitFor(() => {
+        expect(screen.getByTestId('virtualized-list')).toBeInTheDocument();
+      });
+      expect(sessionsMarkViewedMock).not.toHaveBeenCalled();
+
+      focused = true;
+      act(() => {
+        window.dispatchEvent(new Event('focus'));
+      });
+
+      await waitFor(() => {
+        expect(sessionsMarkViewedMock).toHaveBeenCalledWith(session.id);
+      });
+    } finally {
+      hasFocusSpy.mockRestore();
+    }
+  });
+
+  it('does not mark a blocked in-review session viewed while isRunning is true', async () => {
+    sessionsMarkViewedMock.mockClear();
+    useWorkspaceSessionsMock.mockReturnValue({
+      sessions: [
+        { id: 'session-blocked', status: 'inreview', isRunning: true },
+      ],
+      selectedSession: undefined,
+      selectedSessionId: undefined,
+      selectSession: vi.fn(),
+      selectLatestSession: vi.fn(),
+      isLoading: false,
+      isNewSessionMode: false,
+      isPendingNewSessionMode: false,
+      requestNewSession: vi.fn(),
+      confirmNewSession: vi.fn(),
+      cancelNewSession: vi.fn(),
+      startNewSession: vi.fn(),
+    });
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const workspace = createWorkspace('workspace-1');
+    const session: Session = {
+      ...createSession('session-blocked', workspace.id),
+      status: 'inreview',
+    };
+    queryClient.setQueryData(['taskAttempt', workspace.id], workspace);
+    queryClient.setQueryData(['session', session.id], session);
+
+    render(
+      <MemoryRouter>
+        <QueryClientProvider client={queryClient}>
+          <KanbanSessionConversationView
+            workspaceId={workspace.id}
+            sessionId={session.id}
+            interactive
+          />
+        </QueryClientProvider>
+      </MemoryRouter>
+    );
 
     await waitFor(() => {
       expect(screen.getByTestId('virtualized-list')).toBeInTheDocument();
@@ -1597,7 +1733,7 @@ describe('KanbanSessionConversationView', () => {
       queryClient.setQueryData(['taskAttempt', workspace.id], workspace);
       queryClient.setQueryData(['session', session.id], session);
 
-      const { container } = render(
+      const { container, rerender } = render(
         <MemoryRouter>
           <QueryClientProvider client={queryClient}>
             <KanbanSessionConversationPlacementProvider>
@@ -1660,6 +1796,48 @@ describe('KanbanSessionConversationView', () => {
         stage?.style.getPropertyValue('--conv-floating-composer-height')
       ).toBe('196px');
       expect(virtualizedListScrollToBottomMock).not.toHaveBeenCalled();
+
+      // Switch to another session in the same workspace: ConversationStatusProvider
+      // remounts the composer dock under a new key. ResizeObserver must re-attach
+      // to the new dock and bottom-follow must reset for the newly mounted stream.
+      const session2 = createSession('session-floating-2', workspace.id);
+      queryClient.setQueryData(['session', session2.id], session2);
+      virtualizedListScrollToBottomMock.mockClear();
+
+      rerender(
+        <MemoryRouter>
+          <QueryClientProvider client={queryClient}>
+            <KanbanSessionConversationPlacementProvider>
+              <KanbanSessionConversationView
+                workspaceId={workspace.id}
+                sessionId={session2.id}
+                interactive={true}
+              />
+            </KanbanSessionConversationPlacementProvider>
+          </QueryClientProvider>
+        </MemoryRouter>
+      );
+
+      const nextStage = container.querySelector<HTMLElement>(
+        '.conversation-floating-stage'
+      );
+      const nextDock = screen.getByTestId(
+        'conversation-floating-composer-dock'
+      );
+      expect(nextDock).not.toBe(dock);
+      Object.defineProperty(nextDock, 'offsetHeight', {
+        configurable: true,
+        get: () => 260,
+      });
+
+      act(() => {
+        resizeCallbacks.forEach((cb) => cb([], {} as ResizeObserver));
+      });
+
+      expect(
+        nextStage?.style.getPropertyValue('--conv-floating-composer-height')
+      ).toBe('260px');
+      expect(virtualizedListScrollToBottomMock).toHaveBeenCalledWith('auto');
     } finally {
       globalThis.ResizeObserver = originalResizeObserver;
     }

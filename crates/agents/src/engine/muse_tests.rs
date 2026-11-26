@@ -1215,7 +1215,8 @@ async fn muse_tracker_evicts_terminal_items_turn_items_and_closed_full_access_se
         Arc::new(StderrTail::new()),
     );
     let driver = MuseNativeDriver::new();
-    let h1 = driver.bind_existing_server(spec.clone(), Arc::clone(&server), Some("sess-fa-1".into()));
+    let h1 =
+        driver.bind_existing_server(spec.clone(), Arc::clone(&server), Some("sess-fa-1".into()));
     let h2 = driver.bind_existing_server(spec, Arc::clone(&server), Some("sess-fa-2".into()));
     server.set_session_full_access("sess-fa-1", true);
     server.set_session_full_access("sess-fa-2", true);

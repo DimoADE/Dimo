@@ -187,7 +187,9 @@ describe('conversation tool cards', () => {
       phase: 'streaming' as const,
     };
     const { rerender } = render(<MessageTurnView {...props} turn={turn} />);
-    const disclosure = screen.getByRole('button', { name: '运行 3 个命令' });
+    const disclosure = screen.getByRole('button', {
+      name: 'batch-command-4',
+    });
     expect(disclosure).toHaveAttribute('aria-expanded', 'false');
 
     const failedCommands: ContentBlock[] = commands.flatMap((block, index) =>
@@ -207,7 +209,7 @@ describe('conversation tool cards', () => {
       <MessageTurnView {...props} turn={{ ...turn, blocks: failedCommands }} />
     );
     const updatedDisclosure = screen.getByRole('button', {
-      name: '运行 3 个命令',
+      name: 'batch-command-4',
     });
     expect(updatedDisclosure).toHaveAttribute('aria-expanded', 'false');
     for (let index = 0; index < 3; index += 1) {
@@ -217,9 +219,6 @@ describe('conversation tool cards', () => {
         })
       ).not.toBeInTheDocument();
     }
-    expect(updatedDisclosure.parentElement!).not.toContainElement(
-      screen.getByText('batch-command-3')
-    );
 
     rerender(
       <MessageTurnView
@@ -312,12 +311,11 @@ describe('conversation tool cards', () => {
         .filter((button) =>
           button.classList.contains('conv-collapsed-process-toggle')
         )[0];
-    const batch = foldToggle();
-    expect(batch).toHaveAttribute('aria-expanded', 'false');
+    const liveBatch = screen.getByRole('button', { name: 'next-check' });
+    expect(liveBatch).toHaveAttribute('aria-expanded', 'false');
     expect(screen.queryByText('denied.ts')).not.toBeInTheDocument();
     expect(screen.queryByText('locked.ts')).not.toBeInTheDocument();
-    expect(screen.getByText('available.ts')).toBeInTheDocument();
-    expect(screen.getByText('next-check')).toBeInTheDocument();
+    expect(screen.queryByText('available.ts')).not.toBeInTheDocument();
 
     const answeredTurn: MessageTurn = {
       ...turn,
@@ -334,12 +332,11 @@ describe('conversation tool cards', () => {
       <MessageTurnView {...props} turn={answeredTurn} phase="settled" />
     );
     fireEvent.click(foldToggle());
-    expect(
-      screen.getByRole('button', {
-        name: '运行 1 个命令、已读 2 个文件、已改 1 个文件',
-      })
-    ).toHaveAttribute('aria-expanded', 'false');
-    fireEvent.click(screen.getByRole('button', { name: /已读 2 个文件/ }));
+    const settledBatch = screen.getByRole('button', {
+      name: '运行 1 个命令、已改 1 个文件，以及其他 2 项操作',
+    });
+    expect(settledBatch).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(settledBatch);
     expect(
       screen.getByRole('button', { name: /Error:.*denied.ts/ })
     ).toBeInTheDocument();

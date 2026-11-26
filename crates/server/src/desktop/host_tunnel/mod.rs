@@ -16,15 +16,17 @@ use utils::tunnel::{
 };
 use uuid::Uuid;
 
-pub use self::headless::{
-    account_lease_remaining_seconds, current_relay_status, current_status_snapshot,
-    refresh_published_reachability, set_headless_listen_port, set_host_tunnel_enabled_headless,
-};
 use self::relay::{
     ensure_quick_tunnel, quick_tunnel_origin, quick_tunnel_snapshot, relay_snapshot,
     set_quick_tunnel_origin, start_relay,
 };
-pub use self::relay::{stop_quick_tunnel, stop_relay};
+pub use self::{
+    headless::{
+        account_lease_remaining_seconds, current_relay_status, current_status_snapshot,
+        refresh_published_reachability, set_headless_listen_port, set_host_tunnel_enabled_headless,
+    },
+    relay::{stop_quick_tunnel, stop_relay},
+};
 use super::{error::DesktopError, web_service::DesktopWebServiceContext};
 
 const SETTINGS_SECTION: &str = "host_tunnel";

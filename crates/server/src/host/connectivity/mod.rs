@@ -29,9 +29,7 @@ pub fn validate_remote_base_url(value: &str) -> Result<String, String> {
                     lowered.as_str(),
                     "." | ".." | "%2e" | "%2e%2e" | ".%2e" | "%2e."
                 ) {
-                    return Err(
-                        "remote Server URL path must not contain dot segments".to_string(),
-                    );
+                    return Err("remote Server URL path must not contain dot segments".to_string());
                 }
             }
         }

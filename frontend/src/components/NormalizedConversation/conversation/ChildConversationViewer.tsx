@@ -364,7 +364,8 @@ export function ChildConversationViewer({
           <div
             ref={scrollRef}
             data-panel="child-conversation-logs"
-            className="h-full overflow-y-auto px-2 py-3"
+            data-overlay-scrollbar-x="off"
+            className="h-full overflow-x-hidden overflow-y-auto px-2 py-3"
           >
             {conversation.loading && messages.length === 0 ? (
               <ConversationTimelineSkeleton label={t('childViewer.loading')} />

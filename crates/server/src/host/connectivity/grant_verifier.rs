@@ -116,7 +116,8 @@ pub enum GrantVerifyError {
     Database(String),
 }
 
-static KEY_CACHE: LazyLock<RwLock<CachedKeySet>> = LazyLock::new(|| RwLock::new(CachedKeySet::default()));
+static KEY_CACHE: LazyLock<RwLock<CachedKeySet>> =
+    LazyLock::new(|| RwLock::new(CachedKeySet::default()));
 
 fn now_unix() -> i64 {
     SystemTime::now()
@@ -188,7 +189,9 @@ pub async fn refresh_grant_keys_from_site() -> Result<Vec<HostGrantPublicKey>, G
     Ok(body.keys)
 }
 
-pub async fn get_cached_grant_keys(force_refresh: bool) -> Result<Vec<HostGrantPublicKey>, GrantVerifyError> {
+pub async fn get_cached_grant_keys(
+    force_refresh: bool,
+) -> Result<Vec<HostGrantPublicKey>, GrantVerifyError> {
     let now = now_unix();
     if !force_refresh {
         let mem = KEY_CACHE.read().await.clone();
@@ -305,8 +308,8 @@ pub fn verify_grant_with_keys(
         return Err(GrantVerifyError::AccountMismatch);
     }
 
-    let grant_client_pk =
-        decode_ed25519_pubkey_32(&payload.client_pubkey).ok_or(GrantVerifyError::ClientKeyMismatch)?;
+    let grant_client_pk = decode_ed25519_pubkey_32(&payload.client_pubkey)
+        .ok_or(GrantVerifyError::ClientKeyMismatch)?;
     let presented_client_pk =
         decode_ed25519_pubkey_32(client_pubkey_input).ok_or(GrantVerifyError::ClientKeyMismatch)?;
     if grant_client_pk != presented_client_pk {
@@ -399,15 +402,10 @@ pub async fn consume_jti(
     expires_at_unix: i64,
     now: i64,
 ) -> Result<(), GrantVerifyError> {
-    let consumed = ConsumedHostGrant::try_consume(
-        pool,
-        jti,
-        expires_at_unix,
-        now,
-        CLOCK_SKEW_SECONDS,
-    )
-    .await
-    .map_err(|error| GrantVerifyError::Database(error.to_string()))?;
+    let consumed =
+        ConsumedHostGrant::try_consume(pool, jti, expires_at_unix, now, CLOCK_SKEW_SECONDS)
+            .await
+            .map_err(|error| GrantVerifyError::Database(error.to_string()))?;
 
     if !consumed {
         return Err(GrantVerifyError::Replayed);
@@ -480,15 +478,9 @@ mod tests {
             account_username: Some("alice"),
         };
 
-        let verified = verify_grant_with_keys(
-            &grant_token,
-            &client_pub,
-            &pop_sig,
-            expected,
-            &keys,
-            now,
-        )
-        .expect("valid grant should verify");
+        let verified =
+            verify_grant_with_keys(&grant_token, &client_pub, &pop_sig, expected, &keys, now)
+                .expect("valid grant should verify");
         assert_eq!(verified.preset, DevicePermissionPreset::Workstation);
         assert_eq!(verified.account_display_name, "Alice");
 
@@ -541,14 +533,7 @@ mod tests {
         // Tampered PoP
         let bad_pop = BASE64_URL.encode([0u8; 64]);
         assert_eq!(
-            verify_grant_with_keys(
-                &grant_token,
-                &client_pub,
-                &bad_pop,
-                expected,
-                &keys,
-                now,
-            ),
+            verify_grant_with_keys(&grant_token, &client_pub, &bad_pop, expected, &keys, now,),
             Err(GrantVerifyError::InvalidPopSignature)
         );
 

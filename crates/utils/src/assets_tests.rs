@@ -651,7 +651,10 @@ fn machine_fingerprint_is_stable_sha256_hex() {
     assert_eq!(a, b);
     assert_ne!(a, c);
     assert_eq!(a.len(), 64);
-    assert!(a.chars().all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()));
+    assert!(
+        a.chars()
+            .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
+    );
 
     let fp1 = super::machine_fingerprint(Some("host-a"));
     let fp2 = super::machine_fingerprint(Some("host-a"));

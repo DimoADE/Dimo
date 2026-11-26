@@ -315,6 +315,9 @@
       "other_other": "{{count}} 次其他工具调用",
       "otherActivities_one": "{{count}} 项其他活动",
       "otherActivities_other": "{{count}} 项其他活动",
+      "otherActions_one": "以及其他 {{count}} 项操作",
+      "otherActions_other": "以及其他 {{count}} 项操作",
+      "otherActionsJoin": "，",
       "separator": "、",
       "failed": "工具调用失败",
       "commandExitCode": "命令退出码 {{code}}",
@@ -327,7 +330,8 @@
   },
   "toolChips": {
     "showDiff": "查看 {{file}} 的变更",
-    "more": "+{{count}} 更多"
+    "more": "+{{count}} 更多",
+    "activityList": "工具调用列表"
   },
   "statusDock": {
     "dismiss": "关闭提示",

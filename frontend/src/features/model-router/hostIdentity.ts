@@ -185,7 +185,11 @@ export async function resolveCurrentHostIdForHandoff(): Promise<string | null> {
   ) {
     const identity = await resolveCurrentHostIdentity().catch(() => null);
     const hostId = identity?.hostId?.trim();
-    if (!hostId || hostId === 'host:local-desktop' || hostId === 'host:remote-desktop') {
+    if (
+      !hostId ||
+      hostId === 'host:local-desktop' ||
+      hostId === 'host:remote-desktop'
+    ) {
       return null;
     }
     return hostId;

@@ -1,9 +1,10 @@
-//! JSON Schema definitions for all 17 unified Orchestration MCP tools.
+//! JSON Schema definitions for all 18 unified Orchestration MCP tools.
 
 use serde_json::{Value, json};
 
 pub const ORCHESTRATION_TOOL_NAMES: &[&str] = &[
     "orchestrator_capabilities",
+    "environment_links",
     "delegate_task",
     "task_status",
     "task_cancel",
@@ -37,6 +38,16 @@ pub fn orchestration_tool_schemas() -> Vec<Value> {
                     "query": { "type": "string", "description": "Optional substring filter across agent ids, names, and model ids." },
                     "refresh": { "type": "boolean", "description": "Optional flag requesting catalog refresh hints." },
                     "environment_id": { "type": "string", "description": "Optional paired remote Host id." }
+                }
+            }
+        }),
+        json!({
+            "name": "environment_links",
+            "description": "List paired remote Dimo Hosts (environments) available for cross-Host orchestration (`environment_id`, `host_id`, `name`, `origin`, credential status). Call before targeting a remote Host with `environment_id` on `orchestrator_capabilities`, `project_list`, `delegate_task`, or `thread_launch`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Optional substring filter across environment ids, names, and origins." }
                 }
             }
         }),

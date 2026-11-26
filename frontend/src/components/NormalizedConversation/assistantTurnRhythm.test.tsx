@@ -248,6 +248,102 @@ describe('assistant turn vertical rhythm', () => {
     expect(getComputedStyle(quoteP2).marginBottom).toBe('0px');
     expect(getComputedStyle(q2).marginTop).toBe('1.1rem');
   });
+
+  it('keeps symmetrical T3Code-aligned spacing between tool-call batches and prose across folds and slices', () => {
+    const toolChipsStyles = readFileSync(
+      resolve(process.cwd(), 'src/styles/conversation/conv-tool-chips.css'),
+      'utf8'
+    );
+    const { container } = render(
+      <div className="legacy-design">
+        <style>{`${conversationStyles}\n${toolChipsStyles}`}</style>
+        <div className="conv-assistant-body">
+          <div className="conv-collapsed-process is-expanded">
+            <button type="button" className="conv-collapsed-process-toggle">
+              Worked for 1m 20s
+            </button>
+            <div className="conv-nested-scroll">
+              <div className="conv-markdown" data-testid="nested-prose-1">
+                <p>Before</p>
+              </div>
+              <div
+                className="dimo-turn-tool-calls"
+                data-testid="nested-tools-1"
+              >
+                <div className="conv-activity-batch conv-tool-chips-batch">
+                  <button type="button" className="conv-tool-chips-header">
+                    Ran 2 commands
+                  </button>
+                </div>
+              </div>
+              <div
+                className="dimo-turn-tool-calls"
+                data-testid="nested-tools-2"
+              >
+                <div className="conv-activity-batch conv-tool-chips-batch">
+                  <button type="button" className="conv-tool-chips-header">
+                    Read 1 file
+                  </button>
+                </div>
+              </div>
+              <div className="conv-markdown" data-testid="nested-prose-2">
+                <p>Between</p>
+              </div>
+              <div
+                className="dimo-turn-tool-calls"
+                data-testid="nested-tools-last"
+              >
+                <div className="conv-activity-batch conv-tool-chips-batch">
+                  <button type="button" className="conv-tool-chips-header">
+                    Edited 1 file
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="conv-markdown" data-testid="final-prose">
+            <p>Final</p>
+          </div>
+        </div>
+        <div className="conv-turn-row is-fold-tail">
+          <div className="conv-assistant-msg">
+            <div className="conv-assistant-body">
+              <div className="dimo-turn-tool-calls" data-testid="slice-tail">
+                <div className="conv-activity-batch conv-tool-chips-batch">
+                  <button type="button" className="conv-tool-chips-header">
+                    Ran 3 commands
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+
+    const toggle = container.querySelector('.conv-collapsed-process-toggle');
+    const nested = container.querySelector('.conv-nested-scroll');
+    const tools1 = container.querySelector('[data-testid="nested-tools-1"]');
+    const tools2 = container.querySelector('[data-testid="nested-tools-2"]');
+    const prose2 = container.querySelector('[data-testid="nested-prose-2"]');
+    const toolsLast = container.querySelector(
+      '[data-testid="nested-tools-last"]'
+    );
+    const sliceTail = container.querySelector('[data-testid="slice-tail"]');
+    const batch = container.querySelector('.conv-tool-chips-batch');
+    const header = container.querySelector('.conv-tool-chips-header');
+
+    expect(getComputedStyle(toggle as Element).paddingBottom).toBe('8px');
+    expect(getComputedStyle(nested as Element).marginTop).toBe('6px');
+    expect(getComputedStyle(batch as Element).paddingBottom).toBe('0px');
+    expect(getComputedStyle(header as Element).paddingTop).toBe('2px');
+    expect(getComputedStyle(header as Element).paddingBottom).toBe('2px');
+    expect(getComputedStyle(tools1 as Element).marginTop).toBe('10px');
+    expect(getComputedStyle(tools2 as Element).marginTop).not.toBe('10px');
+    expect(getComputedStyle(prose2 as Element).marginTop).toBe('10px');
+    expect(getComputedStyle(toolsLast as Element).marginBottom).toBe('10px');
+    expect(getComputedStyle(sliceTail as Element).marginBottom).toBe('10px');
+  });
 });
 
 describe('user message action rail', () => {

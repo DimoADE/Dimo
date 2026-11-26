@@ -322,7 +322,6 @@ describe('TurnActivity subagent expansion', () => {
     expect(
       screen.getByRole('button', { name: '查看详情' })
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '运行 1 个命令' }));
     expect(screen.getByText('ls')).toBeInTheDocument();
     expect(
       renderedChipRowTexts().some((name) =>
@@ -371,7 +370,6 @@ describe('TurnActivity subagent expansion', () => {
     expect(
       screen.queryByTestId('ask-question-tool-card')
     ).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '运行 1 个命令' }));
     expect(screen.getByText('ls')).toBeInTheDocument();
 
     rerender(

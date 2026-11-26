@@ -306,10 +306,7 @@ impl ConversationDelegationRecord {
         .await
     }
 
-    pub async fn mark_delivered(
-        pool: &SqlitePool,
-        run_ids: &[String],
-    ) -> Result<u64, sqlx::Error> {
+    pub async fn mark_delivered(pool: &SqlitePool, run_ids: &[String]) -> Result<u64, sqlx::Error> {
         let mut total = 0u64;
         for run_id in run_ids {
             let result = sqlx::query(
@@ -359,10 +356,7 @@ impl ConversationDelegationRecord {
 }
 
 impl McpIdempotencyReceipt {
-    pub async fn find(
-        pool: &SqlitePool,
-        scope_key: &str,
-    ) -> Result<Option<Self>, sqlx::Error> {
+    pub async fn find(pool: &SqlitePool, scope_key: &str) -> Result<Option<Self>, sqlx::Error> {
         sqlx::query_as::<_, Self>(
             "SELECT scope_key, tool_name, response_json, created_at FROM mcp_idempotency_receipts WHERE scope_key = ?",
         )

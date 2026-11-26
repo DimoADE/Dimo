@@ -87,10 +87,7 @@ export function bytesToBase64(bytes: Uint8Array): string {
 }
 
 export function base64ToBytes(encoded: string): Uint8Array {
-  const normalized = encoded
-    .trim()
-    .replace(/-/g, '+')
-    .replace(/_/g, '/');
+  const normalized = encoded.trim().replace(/-/g, '+').replace(/_/g, '/');
   const padLen = (4 - (normalized.length % 4)) % 4;
   const padded = normalized + '='.repeat(padLen);
   const binary = atob(padded);
@@ -281,7 +278,11 @@ export async function encryptRequestBody(
   session: WebE2eeSession,
   plaintext: string
 ): Promise<string> {
-  return encryptE2eePayload(session.key, AAD_REQ, TEXT_ENCODER.encode(plaintext));
+  return encryptE2eePayload(
+    session.key,
+    AAD_REQ,
+    TEXT_ENCODER.encode(plaintext)
+  );
 }
 
 export async function decryptResponseBodyText(
@@ -294,7 +295,11 @@ export async function decryptResponseBodyText(
   if (!isEncrypted || !raw.trim()) {
     return raw;
   }
-  const plainBytes = await decryptE2eePayload(session.key, AAD_RESP, raw.trim());
+  const plainBytes = await decryptE2eePayload(
+    session.key,
+    AAD_RESP,
+    raw.trim()
+  );
   return TEXT_DECODER.decode(plainBytes);
 }
 

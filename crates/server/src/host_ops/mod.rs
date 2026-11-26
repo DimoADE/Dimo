@@ -350,8 +350,10 @@ impl ServerApplicationDomains {
                         repo_id: args.repo_id,
                     })
                     .await?;
-                self.git_read(path, move |git, path| git.get_commit_detail(path, &args.sha))
-                    .await
+                self.git_read(path, move |git, path| {
+                    git.get_commit_detail(path, &args.sha)
+                })
+                .await
             }
             DomainCommand::WorkspaceCheckoutBranch => {
                 let args: WorkspaceBranchArgs = parse(args)?;
@@ -2602,7 +2604,11 @@ async fn read_file_truncated_at_path(
         .await
         .map_err(internal_error)?;
     let truncated = bytes.len() > max_bytes;
-    let slice = if truncated { &bytes[..max_bytes] } else { &bytes };
+    let slice = if truncated {
+        &bytes[..max_bytes]
+    } else {
+        &bytes
+    };
     if slice.contains(&0) {
         return Err(ApplicationError::bad_request(
             "Binary files cannot be opened as text",

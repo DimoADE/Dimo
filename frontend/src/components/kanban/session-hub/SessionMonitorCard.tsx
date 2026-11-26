@@ -1,4 +1,10 @@
-import { type CSSProperties, type MouseEvent } from 'react';
+import {
+  useContext,
+  useState,
+  type CSSProperties,
+  type MouseEvent,
+} from 'react';
+import { QueryClientContext } from '@tanstack/react-query';
 import { AlertCircle, ArrowRight, Minimize2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Badge } from '@/components/ui/badge';
@@ -10,6 +16,11 @@ import {
 } from '@/components/ui/tooltip';
 import { KanbanSessionConversationView } from '@/components/kanban/KanbanSessionConversationView';
 import type { KanbanProjectSessionRecord } from '@/hooks/useKanbanProjectSessions';
+import {
+  isDocumentForegroundActive,
+  isSessionReviewReady,
+  markReviewSessionViewed,
+} from '@/lib/sessionQueryCache';
 import { cn } from '@/lib/utils';
 import { DRAG_HANDLE_CLASS } from '@/components/kanban/canvas/canvasModel';
 import { formatTimeAgo, sessionAttentionKind, sessionSlotHue } from './utils';
@@ -40,7 +51,9 @@ export function SessionMonitorCard({
   onHeaderContextMenu,
 }: SessionMonitorCardProps) {
   const { t } = useTranslation(['tasks', 'common']);
+  const queryClient = useContext(QueryClientContext);
   const isCanvas = variant === 'canvas';
+  const [hasFocusWithin, setHasFocusWithin] = useState(false);
   const attention = sessionAttentionKind(session);
   const canvasSlotHue =
     isCanvas && typeof slotIndex === 'number'
@@ -76,6 +89,28 @@ export function SessionMonitorCard({
             ? 'session-monitor-slot-error rounded-lg hover:bg-[var(--surface-control-hover)]'
             : cn('rounded-lg', monitorSlotHue && 'session-monitor-slotted')
       )}
+      onFocusCapture={() => setHasFocusWithin(true)}
+      onBlurCapture={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setHasFocusWithin(false);
+        }
+      }}
+      onPointerDownCapture={() => {
+        if (
+          !isCanvas ||
+          !isDocumentForegroundActive() ||
+          !isSessionReviewReady(session)
+        ) {
+          return;
+        }
+        void markReviewSessionViewed(queryClient, session.id, {
+          workspaceId: session.workspace.id,
+          knownState: {
+            status: session.status,
+            isRunning: session.isRunning,
+          },
+        });
+      }}
       style={
         canvasSlotHue
           ? ({
@@ -192,7 +227,7 @@ export function SessionMonitorCard({
           workspaceId={session.workspace.id}
           sessionId={session.id}
           interactive={isCanvas}
-          markViewed={!isCanvas || selected}
+          markViewed={!isCanvas || selected || hasFocusWithin}
           className="h-full"
         />
       </div>

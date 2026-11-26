@@ -229,7 +229,11 @@ pub fn credential_matches_url(cred: &StoredCredential, tab_url: &str) -> bool {
                 .unwrap_or_else(|| cred.host.to_ascii_lowercase()),
             url.port_or_known_default(),
         ),
-        None => ("https".to_owned(), cred.host.to_ascii_lowercase(), Some(443)),
+        None => (
+            "https".to_owned(),
+            cred.host.to_ascii_lowercase(),
+            Some(443),
+        ),
     };
 
     if cred_host.is_empty() {
@@ -1107,7 +1111,10 @@ mod tests {
             source: "manual".into(),
             updated_at: 3,
         };
-        assert!(credential_matches_url(&http_default, "http://localhost:80/"));
+        assert!(credential_matches_url(
+            &http_default,
+            "http://localhost:80/"
+        ));
         assert!(!credential_matches_url(
             &http_default,
             "http://localhost:8080/"

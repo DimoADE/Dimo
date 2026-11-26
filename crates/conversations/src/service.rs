@@ -53,11 +53,12 @@ pub use queue::{
 };
 pub use restart_continuation::{RESTART_CONTINUATION_ORIGIN, RESTART_CONTINUATION_PROMPT};
 pub use start::{
-    AfterTurnEvent, BeforeTurnContext, RuntimeEventNotification, clear_turn_hooks,
-    register_after_turn_hook, register_before_turn_hook, subscribe_after_turn_events,
-    subscribe_runtime_events,
+    AfterTurnEvent, AsyncBeforeTurnFuture, BeforeTurnContext, RuntimeEventNotification,
+    clear_turn_hooks, register_after_turn_hook, register_async_before_turn_hook,
+    register_before_turn_hook, subscribe_after_turn_events, subscribe_runtime_events,
 };
 pub(crate) use start::{
+    collect_registered_async_before_turn_contributions,
     collect_registered_before_turn_contributions, emit_after_turn_event, emit_runtime_event,
     spawn_turn_end_collaboration_cleanup,
 };

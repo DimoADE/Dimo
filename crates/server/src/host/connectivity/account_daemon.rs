@@ -174,8 +174,11 @@ pub async fn read_bound_account_at(settings_path: &Path) -> BoundHostAccount {
     }
     .filter(|t| !t.is_empty());
 
-    let owner_obj = frontend.get(HOST_ACCOUNT_OWNER_KEY).and_then(Value::as_object);
-    let user_id = owner_obj.and_then(|o| value_id_to_string(o.get("userId").or_else(|| o.get("id"))));
+    let owner_obj = frontend
+        .get(HOST_ACCOUNT_OWNER_KEY)
+        .and_then(Value::as_object);
+    let user_id =
+        owner_obj.and_then(|o| value_id_to_string(o.get("userId").or_else(|| o.get("id"))));
     let username = owner_obj
         .and_then(|o| o.get("username"))
         .and_then(Value::as_str)
@@ -301,7 +304,10 @@ async fn fetch_overview(client: &reqwest::Client, token: &str) -> Result<Overvie
         .await
         .map_err(|e| format!("account overview request failed: {e}"))?;
     if !resp.status().is_success() {
-        return Err(format!("account overview returned HTTP {}", resp.status().as_u16()));
+        return Err(format!(
+            "account overview returned HTTP {}",
+            resp.status().as_u16()
+        ));
     }
     resp.json::<OverviewResponse>()
         .await
@@ -329,7 +335,10 @@ async fn request_relay_lease(
         .await
         .map_err(|e| format!("relay lease request failed: {e}"))?;
     if !resp.status().is_success() {
-        return Err(format!("relay lease returned HTTP {}", resp.status().as_u16()));
+        return Err(format!(
+            "relay lease returned HTTP {}",
+            resp.status().as_u16()
+        ));
     }
     let body: RelayLeaseApiResponse = resp
         .json()
@@ -379,7 +388,8 @@ async fn report_presence(
         .find(|item| item.kind == "official_relay")
         .map(|item| item.origin.clone());
 
-    let encoded_host_id = url::form_urlencoded::byte_serialize(host_id.as_bytes()).collect::<String>();
+    let encoded_host_id =
+        url::form_urlencoded::byte_serialize(host_id.as_bytes()).collect::<String>();
     let url = format!("{origin}/api/account/hosts/{encoded_host_id}/presence");
     let body = json!({
         "hostName": host_name,
@@ -499,7 +509,8 @@ pub fn spawn_host_connectivity_daemon(
                     cache.token_fingerprint.as_deref() != Some(fp.as_str())
                         || cache.user_id.is_none()
                         || now - cache.last_lease_sync_unix >= LEASE_RENEW_INTERVAL.as_secs() as i64
-                        || host_tunnel::account_lease_remaining_seconds().await
+                        || host_tunnel::account_lease_remaining_seconds()
+                            .await
                             .is_some_and(|rem| rem < LEASE_MIN_REMAINING_SECONDS)
                 };
 
@@ -615,13 +626,15 @@ pub async fn run_login_command() -> ExitCode {
         .send()
         .await
     {
-        Ok(resp) if resp.status().is_success() => match resp.json::<DeviceLoginStartResponse>().await {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                eprintln!("Invalid login response from {origin}: {error}");
-                return ExitCode::from(1);
+        Ok(resp) if resp.status().is_success() => {
+            match resp.json::<DeviceLoginStartResponse>().await {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    eprintln!("Invalid login response from {origin}: {error}");
+                    return ExitCode::from(1);
+                }
             }
-        },
+        }
         Ok(resp) => {
             eprintln!("Login start failed with HTTP {}", resp.status().as_u16());
             return ExitCode::from(1);
@@ -652,7 +665,9 @@ pub async fn run_login_command() -> ExitCode {
             .send()
             .await
         {
-            Ok(resp) if resp.status().is_success() => resp.json::<DeviceLoginPollResponse>().await.ok(),
+            Ok(resp) if resp.status().is_success() => {
+                resp.json::<DeviceLoginPollResponse>().await.ok()
+            }
             _ => None,
         };
         let Some(poll) = poll else {
@@ -690,15 +705,16 @@ pub async fn run_login_command() -> ExitCode {
             }
 
             if overview.relay_permission
-                && let Ok(lease) =
-                    request_relay_lease(&client, &token, &host_id, &host_name).await
+                && let Ok(lease) = request_relay_lease(&client, &token, &host_id, &host_name).await
             {
                 let _ = host_tunnel::set_account_relay_lease(Some(lease)).await;
             }
             let _ = grant_verifier::refresh_grant_keys_from_site().await;
             println!("Signed in as {display} (@{}).", overview.user.username);
             if overview.relay_permission {
-                println!("Official Cloud Relay lease provisioned. Start or restart `dimo-server serve` to bring this Host online.");
+                println!(
+                    "Official Cloud Relay lease provisioned. Start or restart `dimo-server serve` to bring this Host online."
+                );
             }
             return ExitCode::SUCCESS;
         }
@@ -731,7 +747,8 @@ pub async fn run_logout_command() -> ExitCode {
         let origin = utils::site_origin();
         let client = http_client();
         if let Some(host_id) = host_id.as_deref() {
-            let encoded = url::form_urlencoded::byte_serialize(host_id.as_bytes()).collect::<String>();
+            let encoded =
+                url::form_urlencoded::byte_serialize(host_id.as_bytes()).collect::<String>();
             let _ = client
                 .delete(format!("{origin}/api/account/hosts/{encoded}"))
                 .bearer_auth(token)
@@ -794,7 +811,10 @@ pub async fn run_tunnel_add_url_command(
     match custom_public::add_custom_public_origin(&url, label, host_id.as_deref(), skip_probe).await
     {
         Ok((record, check)) => {
-            println!("Saved custom public origin: {} [id={}]", record.origin, record.id);
+            println!(
+                "Saved custom public origin: {} [id={}]",
+                record.origin, record.id
+            );
             if let Some(warning) = check.and_then(|c| c.warning) {
                 eprintln!("Warning: {warning}");
             }

@@ -15,6 +15,7 @@ type ToolCallTargetProps = {
   text: string;
   path?: string | null;
   isFolder?: boolean;
+  showIcon?: boolean;
   suffix?: ReactNode;
   onClick?: () => void;
 };
@@ -31,6 +32,7 @@ export function ToolCallTarget({
   text,
   path,
   isFolder = false,
+  showIcon = true,
   suffix,
   onClick,
 }: ToolCallTargetProps) {
@@ -108,7 +110,7 @@ export function ToolCallTarget({
 
   return (
     <span className="dimo-tool-call-target">
-      {resolvedPath ? (
+      {showIcon && resolvedPath ? (
         <FileIcon
           filePath={resolvedPath}
           isFolder={isFolder}

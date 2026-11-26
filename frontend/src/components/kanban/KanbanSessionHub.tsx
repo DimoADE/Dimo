@@ -72,7 +72,7 @@ import {
   resolveCreateWorkspaceDefault,
   type WorkspaceBranchOption,
 } from '@/lib/workspaceBranchOptions';
-import { areProfilesEqual, getFirstAvailableProfile } from '@/utils/executor';
+import { useNewSessionDefaultExecutorProfile } from '@/lib/lastSessionAgent';
 import {
   type SessionControlsPreset,
   type SessionCreationMode,
@@ -258,11 +258,6 @@ export function KanbanSessionHub({
     [preferredMainBranch, workspaceBranchOptions]
   );
 
-  const defaultExecutorProfile = useMemo<ExecutorProfileId | null>(
-    () => config?.executor_profile ?? getFirstAvailableProfile(profiles),
-    [config?.executor_profile, profiles]
-  );
-
   const defaultWorkspaceValue = useMemo(
     () =>
       resolveCreateWorkspaceDefault({
@@ -289,10 +284,7 @@ export function KanbanSessionHub({
   const [userCreateMode, setUserCreateMode] =
     useState<SessionCreationMode | null>(null);
   const createMode = userCreateMode ?? defaultCreateMode;
-  const [selectedExecutorProfile, setSelectedExecutorProfile] =
-    useState<ExecutorProfileId | null>(defaultExecutorProfile);
   const createWorkspaceValueRef = useRef(createWorkspaceValue);
-  const selectedExecutorProfileRef = useRef(selectedExecutorProfile);
   // Latest ACP control preset picked in the create form (see SessionControlsPreset).
   const sessionControlsPresetRef = useRef<SessionControlsPreset | null>(null);
   const [isCreatePopoverOpen, setIsCreatePopoverOpen] = useState(false);
@@ -304,6 +296,17 @@ export function KanbanSessionHub({
     openedForProjectId: createPopoverProjectId,
     currentProjectId: projectId,
   });
+  const defaultExecutorProfile = useNewSessionDefaultExecutorProfile({
+    configExecutorProfile: config?.executor_profile,
+    profiles,
+    refreshKey: isCreatePopoverVisible,
+  });
+  const [userSelectedExecutorProfile, setUserSelectedExecutorProfile] =
+    useState<ExecutorProfileId | null>(null);
+  const selectedExecutorProfile =
+    userSelectedExecutorProfile ?? defaultExecutorProfile;
+  const selectedExecutorProfileRef = useRef(selectedExecutorProfile);
+  selectedExecutorProfileRef.current = selectedExecutorProfile;
   const [sortField, setSortField] = useState<SortField | null>(null);
   const [workspaceFilterIds, setWorkspaceFilterIds] = useState<string[]>([]);
   const [executorFilterValues, setExecutorFilterValues] = useState<string[]>(
@@ -363,10 +366,10 @@ export function KanbanSessionHub({
 
   const updateSelectedExecutorProfile = useCallback(
     (value: ExecutorProfileId | null) => {
-      selectedExecutorProfileRef.current = value;
-      setSelectedExecutorProfile(value);
+      selectedExecutorProfileRef.current = value ?? defaultExecutorProfile;
+      setUserSelectedExecutorProfile(value);
     },
-    []
+    [defaultExecutorProfile]
   );
 
   useEffect(() => {
@@ -383,20 +386,6 @@ export function KanbanSessionHub({
     defaultWorkspaceValue,
     updateCreateWorkspaceValue,
     workspaceBranchOptions,
-  ]);
-
-  useEffect(() => {
-    const nextProfile =
-      selectedExecutorProfileRef.current ?? defaultExecutorProfile;
-    if (areProfilesEqual(selectedExecutorProfile, nextProfile)) {
-      return;
-    }
-
-    updateSelectedExecutorProfile(nextProfile);
-  }, [
-    defaultExecutorProfile,
-    selectedExecutorProfile,
-    updateSelectedExecutorProfile,
   ]);
 
   useEffect(() => {
@@ -753,7 +742,7 @@ export function KanbanSessionHub({
       collaboration?.getSnapshot().closeAllOverlays();
       dismissCollaborationCreateOverlays();
       updateCreateWorkspaceValue(defaultWorkspaceValue);
-      updateSelectedExecutorProfile(defaultExecutorProfile);
+      updateSelectedExecutorProfile(null);
       setUserCreateMode(null);
       resetRepoBranchSelection();
       setDeleteErrorMessage(null);

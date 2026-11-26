@@ -41,7 +41,10 @@ struct ConversationCoalesceSlot {
 }
 
 impl ConversationCoalesceSlot {
-    fn take_pending_for_flush(&mut self, abort_timer: bool) -> Option<(ConversationRowOpBatch, bool)> {
+    fn take_pending_for_flush(
+        &mut self,
+        abort_timer: bool,
+    ) -> Option<(ConversationRowOpBatch, bool)> {
         let mut pending = self.pending.take()?;
         pending.pending_updates = 0;
         pending.pending_bytes = 0;
@@ -251,9 +254,8 @@ impl LiveRowOpCoalescer {
                 || p.pending_bytes >= self.max_pending_bytes
         });
         if over_cap {
-            let (out_batch, out_global) = slot
-                .take_pending_for_flush(true)
-                .expect("pending exists");
+            let (out_batch, out_global) =
+                slot.take_pending_for_flush(true).expect("pending exists");
             slot.next_allowed_at = Some(now + self.window);
             slot.generation = slot.generation.wrapping_add(1);
             self.emit_now(conversation_id, &out_batch, out_global);
@@ -1234,7 +1236,11 @@ mod tests {
                     assert!(batches[2].reset, "reset must be the final batch");
                 }
                 "immediate_barrier" => {
-                    assert_eq!(batches.len(), 3, "expected seq1, timer seq2, then barrier seq3");
+                    assert_eq!(
+                        batches.len(),
+                        3,
+                        "expected seq1, timer seq2, then barrier seq3"
+                    );
                     assert_eq!(batches[1].last_sequence, 2);
                     assert_eq!(batches[2].last_sequence, 3);
                 }

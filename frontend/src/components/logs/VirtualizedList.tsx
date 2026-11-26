@@ -165,7 +165,8 @@ export function scrollTopToRevealVirtualWindow(input: {
   if (input.viewportHeight <= 0 || input.windowHeight <= 1) return null;
   const visualTop = Math.max(0, input.windowStart ?? input.scrollMargin);
   const visualBottom = visualTop + input.windowHeight;
-  const effectiveVisualBottom = visualBottom + Math.max(0, input.bottomPadding ?? 0);
+  const effectiveVisualBottom =
+    visualBottom + Math.max(0, input.bottomPadding ?? 0);
   const viewTop = input.scrollTop;
   const viewBottom = input.scrollTop + input.viewportHeight;
   const intersects = visualBottom > viewTop + 1 && visualTop < viewBottom - 1;

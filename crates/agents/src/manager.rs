@@ -1013,10 +1013,7 @@ impl AgentConnectionManager {
         connection_id: AgentConnectionId,
         connection: ManagedAgentConnection,
     ) -> AgentResult<()> {
-        let is_connecting = *connection
-            .status
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        let is_connecting = *connection.status.lock().unwrap_or_else(|e| e.into_inner())
             == AgentConnectionStatus::Connecting;
         // A closed command channel means the process task is already exiting;
         // it is still safe and necessary to join it. When still in startup
@@ -1333,10 +1330,7 @@ impl AgentConnectionManager {
 
             let mut stale_ids = Vec::new();
             for (id, connection) in connections.iter() {
-                if *connection
-                    .status
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                if *connection.status.lock().unwrap_or_else(|e| e.into_inner())
                     != AgentConnectionStatus::Ready
                 {
                     continue;
@@ -1414,7 +1408,8 @@ impl AgentConnectionManager {
         }
 
         for (connection_id, connection) in finished {
-            self.cleanup_dead_connection(connection_id, connection).await;
+            self.cleanup_dead_connection(connection_id, connection)
+                .await;
         }
 
         let mut disconnected = 0;
@@ -1547,10 +1542,7 @@ impl AgentConnectionManager {
                 .await;
         }
         let status_needs_notify = {
-            let mut status = connection
-                .status
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut status = connection.status.lock().unwrap_or_else(|e| e.into_inner());
             if matches!(
                 *status,
                 AgentConnectionStatus::Disconnected | AgentConnectionStatus::Failed
@@ -1624,10 +1616,7 @@ impl AgentConnectionManager {
     ) {
         let connections = self.connections.lock().await;
         if let Some(connection) = connections.get(&connection_id) {
-            *connection
-                .status
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = status;
+            *connection.status.lock().unwrap_or_else(|e| e.into_inner()) = status;
         }
     }
 
@@ -1681,7 +1670,8 @@ impl AgentConnectionManager {
 
         let dead = self.connections.lock().await.remove(&connection_id);
         if let Some(connection) = dead {
-            self.cleanup_dead_connection(connection_id, connection).await;
+            self.cleanup_dead_connection(connection_id, connection)
+                .await;
         }
         Err(AgentError::Runtime(
             "agent connection command channel closed".into(),

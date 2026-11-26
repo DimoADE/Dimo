@@ -40,10 +40,7 @@ import { PluginBoundary } from '@/components/plugins/PluginBoundary';
 import { CodeBlock, CompactCodeBlock } from './CodeBlock';
 import { HtmlPreviewBlock, isHtmlPreviewLanguage } from './HtmlPreviewBlock';
 import { MermaidDiagram, resetMermaidSvgCache } from './MermaidDiagram';
-import {
-  MarkdownAlert,
-  isMarkdownAlertKind,
-} from './MarkdownAlert';
+import { MarkdownAlert, isMarkdownAlertKind } from './MarkdownAlert';
 import { MarkdownDetails, MarkdownSummary } from './MarkdownDetails';
 import { MarkdownTable } from './MarkdownTable';
 import { parseTagReferenceHref } from '@/lib/tagReferenceMarkers';

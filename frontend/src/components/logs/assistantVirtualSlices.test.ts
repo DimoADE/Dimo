@@ -29,7 +29,7 @@ function tool(name: string): TurnRenderItem {
 }
 
 describe('assistantBlockSlices', () => {
-  it('virtualizes a streaming tool run as a fold plus the live tail', () => {
+  it('keeps a streaming tool run without prose unfolded as individual blocks', () => {
     const items = [tool('a'), tool('b'), tool('c'), tool('d'), tool('e')];
     expect(
       assistantBlockSlices({
@@ -39,14 +39,16 @@ describe('assistantBlockSlices', () => {
         processExpanded: () => false,
       })
     ).toEqual([
-      { kind: 'process-fold', count: 3, startIndex: 0 },
+      { kind: 'block', itemIndex: 0 },
+      { kind: 'block', itemIndex: 1 },
+      { kind: 'block', itemIndex: 2 },
       { kind: 'block', itemIndex: 3 },
       { kind: 'block', itemIndex: 4 },
     ]);
   });
 
-  it('inserts one row per block when the process fold is expanded', () => {
-    const items = [tool('a'), tool('b'), tool('c'), tool('d')];
+  it('inserts one row per block when a prelude process fold is expanded', () => {
+    const items = [tool('a'), tool('b'), markdown('Status update'), tool('d')];
     expect(
       assistantBlockSlices({
         items,

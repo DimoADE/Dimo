@@ -83,6 +83,7 @@ import { ThinkingEntry } from './ThinkingEntry';
 import {
   TurnToolChipRow,
   TurnToolChipsBatch,
+  type TurnToolBatchLiveHeader,
   type TurnToolChipItem,
   type TurnToolIconKind,
   type TurnToolStatus,
@@ -105,16 +106,53 @@ type ToolSummaryCategory =
 
 const SUMMARY_ORDER: ToolSummaryCategory[] = [
   'commands',
-  'reads',
   'edits',
-  'searches',
-  'webFetches',
   'agents',
+  'searches',
+  'reads',
+  'webFetches',
   'other',
   'otherActivities',
 ];
 
-const RECENT_ACTIVITIES = 2;
+function formatBatchTimestamp(
+  timestamp: MessageTurn['timestamp']
+): string | null {
+  if (!timestamp) return null;
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return null;
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${hours}:${minutes}`;
+}
+
+function categoryIconKind(category: ToolSummaryCategory): TurnToolIconKind {
+  switch (category) {
+    case 'commands':
+      return 'run';
+    case 'edits':
+      return 'write';
+    case 'reads':
+      return 'read';
+    case 'searches':
+      return 'search';
+    case 'webFetches':
+      return 'web';
+    case 'agents':
+      return 'agent';
+    default:
+      return 'tool';
+  }
+}
+
+function lowercaseLeadingAscii(text: string): string {
+  if (!text) return text;
+  const first = text.charCodeAt(0);
+  if (first >= 65 && first <= 90) {
+    return String.fromCharCode(first + 32) + text.slice(1);
+  }
+  return text;
+}
 
 type ActivityEntry =
   | {
@@ -281,6 +319,7 @@ function FileReadStats({
     <ToolCallTarget
       text={action.path}
       path={action.path}
+      showIcon={false}
       suffix={range}
       onClick={openPreview}
     />
@@ -310,6 +349,7 @@ function FileEditPath({
     <ToolCallTarget
       text={action.path}
       path={action.path}
+      showIcon={false}
       onClick={openPreview}
     />
   );
@@ -346,16 +386,6 @@ function toolIconKind(action: ActionType): TurnToolIconKind {
     default:
       return 'tool';
   }
-}
-
-function isMonoToolChip(action: ActionType): boolean {
-  return (
-    action.action === 'command_run' ||
-    action.action === 'file_read' ||
-    action.action === 'file_edit' ||
-    action.action === 'search' ||
-    (action.action === 'tool' && action.tool_name === 'list_dir')
-  );
 }
 
 function HostDelegationToolCall({
@@ -427,7 +457,9 @@ function SubagentToolCall({
       <TurnToolChipRow
         icon="agent"
         label={label}
-        chip={target ? <ToolCallTarget text={target} /> : undefined}
+        chip={
+          target ? <ToolCallTarget text={target} showIcon={false} /> : undefined
+        }
         status={subagentChatStatus(model.status)}
         expanded={expanded}
         onExpandedChange={handleExpandedChange}
@@ -504,7 +536,7 @@ export function TurnActivity({
   showCompleted?: boolean;
   renderOtherItem?: (item: TurnRenderItem, index: number) => ReactNode;
 }) {
-  const { t } = useTranslation('conversation');
+  const { t, i18n } = useTranslation('conversation');
   const panelActions = useOptionalPanelActionsContext();
   const lifecycleIndex = useSubagentLifecycleIndex();
   const parentAgentId = attempt.session?.agent_id ?? null;
@@ -677,8 +709,21 @@ export function TurnActivity({
             ? entry.content.trim()
             : '';
       const baseName = description ?? summary.label;
-      const displayName =
+      const defaultDisplayName =
         pollCount > 1 ? `${baseName} ×${pollCount}` : baseName;
+      const omitActionLabel =
+        !description &&
+        ((action.action === 'command_run' && Boolean(detailText)) ||
+          (action.action === 'file_edit' && Boolean(action.path)));
+      const displayName = omitActionLabel
+        ? pollCount > 1
+          ? `×${pollCount}`
+          : ''
+        : !description && action.action === 'file_read'
+          ? pollCount > 1
+            ? `Read ×${pollCount}`
+            : 'Read'
+          : defaultDisplayName;
       const baseStats = description ? undefined : action.action ===
         'file_read' ? (
         <FileReadStats
@@ -695,6 +740,7 @@ export function TurnActivity({
           text={listDirPath(action.arguments) || detailText}
           path={listDirPath(action.arguments) || detailText}
           isFolder
+          showIcon={false}
           onClick={() => {
             const rawDir = (listDirPath(action.arguments) || detailText).trim();
             if (!rawDir) return;
@@ -713,8 +759,19 @@ export function TurnActivity({
           }}
         />
       ) : detailText ? (
-        <ToolCallTarget text={detailText} />
+        <ToolCallTarget text={detailText} showIcon={false} />
       ) : undefined;
+      const resolvedWorkspace = workspacePath ?? attempt.container_ref;
+      const targetText = description
+        ? undefined
+        : action.action === 'file_read' || action.action === 'file_edit'
+          ? (deriveRelativeFilePath(
+              resolveToolFilePath(action.path, resolvedWorkspace),
+              resolvedWorkspace
+            ) ?? action.path)
+          : action.action === 'tool' && action.tool_name === 'list_dir'
+            ? listDirPath(action.arguments) || detailText || undefined
+            : detailText || undefined;
       const statsNode = backgrounded ? (
         <span className="inline-flex min-w-0 items-center gap-1.5">
           {baseStats}
@@ -734,8 +791,9 @@ export function TurnActivity({
           key: toolUseId || expansionKey,
           icon: toolIconKind(action),
           label: displayName,
+          targetText,
           chip: statsNode,
-          monoChip: !description && isMonoToolChip(action),
+          monoChip: false,
           additions: editStats.additions,
           deletions: editStats.deletions,
           status,
@@ -748,7 +806,7 @@ export function TurnActivity({
                 expansionKey={expansionKey}
                 taskAttempt={attempt}
                 task={task ?? undefined}
-                workspacePath={workspacePath ?? attempt.container_ref}
+                workspacePath={resolvedWorkspace}
                 toolDetailOnly
               />
             </ToolCallResultDetail>
@@ -761,31 +819,109 @@ export function TurnActivity({
     (call) => `tool-detail:${turnId}:${call.key}`
   );
   const [expandedDetails, setExpanded] = useExpandableItems(detailKeys);
+  const standaloneKeysRef: { current: Set<string> } = { current: new Set() };
+  const preserveStandaloneExpansion = (entryKey: string, expanded: boolean) => {
+    if (expanded && standaloneKeysRef.current.has(entryKey)) {
+      setExpanded(`activity-batch:${turnId}:${entryKey}`, true);
+    }
+  };
+
   const calls = rawCalls.map((call, index) => ({
     ...call,
     isDetailExpanded: expandedDetails[index],
     onDetailExpandedChange: (expanded: boolean) => {
       setExpanded(detailKeys[index], expanded);
-      if (expanded) setExpanded(`tool-batch:${turnId}:${call.key}`, true);
+      preserveStandaloneExpansion(`tool-batch:${turnId}:${call.key}`, expanded);
     },
   }));
 
-  const summarizeActivities = (batch: ActivityEntry[]): string =>
-    SUMMARY_ORDER.flatMap((category) => {
+  const isEnglish = (i18n.resolvedLanguage ?? i18n.language)
+    .toLowerCase()
+    .startsWith('en');
+
+  const entrySummaryCategory = (
+    entry: ActivityEntry
+  ): ToolSummaryCategory | null =>
+    entry.kind === 'tool'
+      ? (callCategories.get(entry.call.key) ?? 'other')
+      : entry.kind === 'visible'
+        ? entry.category === undefined
+          ? 'other'
+          : entry.category
+        : null;
+
+  const summarizeActivities = (batch: ActivityEntry[]): string => {
+    const counts = SUMMARY_ORDER.flatMap((category) => {
       const count = batch.filter(
-        (entry) =>
-          (entry.kind === 'tool'
-            ? callCategories.get(entry.call.key)
-            : entry.kind === 'visible'
-              ? entry.category === undefined
-                ? 'other'
-                : entry.category
-              : null) === category
+        (entry) => entrySummaryCategory(entry) === category
       ).length;
-      return count > 0
-        ? [t(`messageTurnView.toolSummary.${category}`, { count })]
-        : [];
-    }).join(t('messageTurnView.toolSummary.separator'));
+      return count > 0 ? [{ category, count }] : [];
+    });
+    if (counts.length === 0) return t('messageTurnView.toolCall');
+    const separator = t('messageTurnView.toolSummary.separator');
+    const formatClause = (
+      category: ToolSummaryCategory,
+      count: number,
+      clauseIndex: number
+    ) => {
+      const text = t(`messageTurnView.toolSummary.${category}`, { count });
+      return isEnglish && clauseIndex > 0 ? lowercaseLeadingAscii(text) : text;
+    };
+    if (counts.length <= 2) {
+      return counts
+        .map(({ category, count }, clauseIndex) =>
+          formatClause(category, count, clauseIndex)
+        )
+        .join(separator);
+    }
+    const topTwo = counts
+      .slice(0, 2)
+      .map(({ category, count }, clauseIndex) =>
+        formatClause(category, count, clauseIndex)
+      )
+      .join(separator);
+    const remainingCount = counts
+      .slice(2)
+      .reduce((sum, item) => sum + item.count, 0);
+    const otherClause = t('messageTurnView.toolSummary.otherActions', {
+      count: remainingCount,
+    });
+    return `${topTwo}${t('messageTurnView.toolSummary.otherActionsJoin')}${otherClause}`;
+  };
+
+  const batchIconForEntries = (batch: ActivityEntry[]): TurnToolIconKind => {
+    const icons = new Set<TurnToolIconKind>();
+    for (const entry of batch) {
+      if (entry.kind === 'tool') {
+        icons.add(entry.call.icon);
+      } else if (entry.kind === 'visible') {
+        const category = entry.category ?? 'other';
+        icons.add(categoryIconKind(category));
+      }
+    }
+    if (icons.size === 1) {
+      return [...icons][0]!;
+    }
+    return 'mixed';
+  };
+
+  const liveHeaderForBatch = (
+    batch: ActivityEntry[]
+  ): TurnToolBatchLiveHeader | null => {
+    for (let idx = batch.length - 1; idx >= 0; idx -= 1) {
+      const entry = batch[idx]!;
+      if (entry.kind === 'tool') {
+        return {
+          icon: entry.call.icon,
+          label: entry.call.label,
+          targetText: entry.call.targetText,
+          monoTarget: entry.call.monoChip,
+          status: entry.call.status,
+        };
+      }
+    }
+    return null;
+  };
 
   const activityEntries: ActivityEntry[] = [
     ...calls.map(
@@ -797,24 +933,24 @@ export function TurnActivity({
         rawEntry: call.rawEntry,
       })
     ),
-    ...goalEntries.map(
-      ({ entry, toolUseId, index }): ActivityEntry => ({
+    ...goalEntries.map(({ entry, toolUseId, index }): ActivityEntry => {
+      const entryKey = `tool-batch:${turnId}:${toolUseId || index}`;
+      return {
         kind: 'visible',
-        key: `tool-batch:${turnId}:${toolUseId || index}`,
+        key: entryKey,
         index,
         content: (
           <GoalToolCall
             entry={entry}
             expansionKey={`goal-details:${turnId}:${toolUseId || index}`}
             sessionId={attempt.session?.id ?? null}
-            onExpandedChange={(expanded) => {
-              if (expanded)
-                setExpanded(`tool-batch:${turnId}:${toolUseId || index}`, true);
-            }}
+            onExpandedChange={(expanded) =>
+              preserveStandaloneExpansion(entryKey, expanded)
+            }
           />
         ),
-      })
-    ),
+      };
+    }),
     ...askQuestionEntries.map(
       ({ use, result, toolUseId, index }): ActivityEntry => {
         const matched = matchTimelineQuestion(use, questions);
@@ -830,40 +966,35 @@ export function TurnActivity({
               request={matched?.request}
               response={matched?.response ?? null}
               expansionKey={`question-details:${turnId}:${toolUseId || index}`}
-              onExpandedChange={(expanded) => {
-                if (expanded)
-                  setExpanded(
-                    `tool-batch:${turnId}:${toolUseId || index}`,
-                    true
-                  );
-              }}
             />
           ),
         };
       }
     ),
     ...hostDelegationEntries.map(
-      ({ use, result, toolUseId, index }): ActivityEntry => ({
-        kind: 'visible',
-        key: `tool-batch:${turnId}:${toolUseId || index}`,
-        category: 'agents',
-        index,
-        content: (
-          <HostDelegationToolCall
-            use={use}
-            result={result}
-            event={matchHostDelegationView(use, delegations)}
-            pollResults={pollResults}
-            onOpenChild={onOpenChild}
-            workspacePath={workspacePath ?? attempt.container_ref}
-            expansionKey={`delegation-details:${turnId}:${toolUseId || index}`}
-            onExpandedChange={(expanded) => {
-              if (expanded)
-                setExpanded(`tool-batch:${turnId}:${toolUseId || index}`, true);
-            }}
-          />
-        ),
-      })
+      ({ use, result, toolUseId, index }): ActivityEntry => {
+        const entryKey = `tool-batch:${turnId}:${toolUseId || index}`;
+        return {
+          kind: 'visible',
+          key: entryKey,
+          category: 'agents',
+          index,
+          content: (
+            <HostDelegationToolCall
+              use={use}
+              result={result}
+              event={matchHostDelegationView(use, delegations)}
+              pollResults={pollResults}
+              onOpenChild={onOpenChild}
+              workspacePath={workspacePath ?? attempt.container_ref}
+              expansionKey={`delegation-details:${turnId}:${toolUseId || index}`}
+              onExpandedChange={(expanded) =>
+                preserveStandaloneExpansion(entryKey, expanded)
+              }
+            />
+          ),
+        };
+      }
     ),
     ...hostLifecycleEntries.map(
       ({ use, result, toolUseId, index }): ActivityEntry => ({
@@ -891,9 +1022,10 @@ export function TurnActivity({
         const summary = toolEntry
           ? getToolSummary(toolEntry, entry?.content.trim() ?? '')
           : { label: t('genericTool.subagent'), detail: '' };
+        const entryKey = `tool-batch:${turnId}:${toolUseId || index}`;
         return {
           kind: 'visible',
-          key: `tool-batch:${turnId}:${toolUseId || index}`,
+          key: entryKey,
           category: 'agents',
           index,
           content: (
@@ -911,13 +1043,9 @@ export function TurnActivity({
               childrenTools={children}
               parentAgentId={parentAgentId}
               workspacePath={workspacePath ?? attempt.container_ref}
-              onExpandedChange={(expanded) => {
-                if (expanded)
-                  setExpanded(
-                    `tool-batch:${turnId}:${toolUseId || index}`,
-                    true
-                  );
-              }}
+              onExpandedChange={(expanded) =>
+                preserveStandaloneExpansion(entryKey, expanded)
+              }
             />
           ),
         };
@@ -938,9 +1066,9 @@ export function TurnActivity({
             content: (
               <ViewedImages
                 expansionKey={`${key}:details`}
-                onExpandedChange={(expanded) => {
-                  if (expanded) setExpanded(key, true);
-                }}
+                onExpandedChange={(expanded) =>
+                  preserveStandaloneExpansion(key, expanded)
+                }
                 images={images.map((image, imageIndex) => ({
                   key: `${key}:${imageIndex}`,
                   image,
@@ -989,30 +1117,31 @@ export function TurnActivity({
 
   if (!showCompleted) return null;
 
-  const recentStart =
-    [...new Set(activityEntries.map((entry) => entry.index))].at(
-      -RECENT_ACTIVITIES
-    ) ?? -Infinity;
   const lastIndex = items.at(-1)?.index;
   const activityUnits: {
-    kind: 'recent' | 'batch';
+    kind: 'standalone' | 'batch';
     entries: ActivityEntry[];
   }[] = [];
   let batch: ActivityEntry[] = [];
   for (const entry of activityEntries) {
     const keepVisible =
-      (entry.kind === 'visible' && entry.alwaysVisible) ||
-      (isStreaming && entry.index >= recentStart);
+      entry.kind === 'visible' && Boolean(entry.alwaysVisible);
     if (keepVisible) {
       if (batch.length > 0)
         activityUnits.push({ kind: 'batch', entries: batch });
       batch = [];
-      activityUnits.push({ kind: 'recent', entries: [entry] });
+      activityUnits.push({ kind: 'standalone', entries: [entry] });
     } else {
       batch.push(entry);
     }
   }
   if (batch.length > 0) activityUnits.push({ kind: 'batch', entries: batch });
+
+  standaloneKeysRef.current = new Set(
+    activityUnits
+      .filter((unit) => unit.kind === 'standalone' || unit.entries.length === 1)
+      .map((unit) => unit.entries[0]!.key)
+  );
 
   const openDiffChip = (diff: TurnToolDiffChip) => {
     panelActions?.openFilePreview(diff.resolvedPath, {
@@ -1057,23 +1186,27 @@ export function TurnActivity({
         taskId={task?.id ?? attempt.task_id ?? undefined}
         workspacePath={workspacePath ?? attempt.container_ref}
         isStreaming={isStreaming && entry.endIndex === lastIndex}
-        onExpandedChange={(expanded) => {
-          if (expanded) setExpanded(entry.key, true);
-        }}
+        onExpandedChange={(expanded) =>
+          preserveStandaloneExpansion(entry.key, expanded)
+        }
       />
     );
   };
 
   if (activityUnits.length === 0) return null;
 
+  const timestampLabel = formatBatchTimestamp(timestamp);
+
   return (
-    <div className="conv-entry-item dimo-turn-tool-calls flex flex-col gap-1">
+    <div className="conv-entry-item dimo-turn-tool-calls flex min-w-0 max-w-full flex-col gap-0.5">
       {activityUnits.map((unit) => {
-        const key = unit.entries[0].key;
-        if (unit.kind === 'recent')
-          return renderActivity(unit.entries[0], false);
-        if (unit.entries.every((entry) => entry.kind === 'thinking'))
+        const anchorEntry = unit.entries[0]!;
+        if (unit.kind === 'standalone' || unit.entries.length === 1) {
+          return renderActivity(anchorEntry, false);
+        }
+        if (unit.entries.every((entry) => entry.kind === 'thinking')) {
           return unit.entries.map((entry) => renderActivity(entry, false));
+        }
         const label = summarizeActivities(unit.entries);
         const batchDiffs = extractBatchDiffChips(
           unit.entries.flatMap((entry) =>
@@ -1081,11 +1214,26 @@ export function TurnActivity({
           ),
           workspacePath ?? attempt.container_ref
         );
+        const isActive =
+          isStreaming &&
+          unit.entries.some(
+            (entry) =>
+              (entry.kind === 'tool' &&
+                (entry.call.status === 'running' ||
+                  entry.call.status === 'pending')) ||
+              (entry.kind === 'thinking' && entry.endIndex === lastIndex)
+          );
         return (
           <TurnToolChipsBatch
-            key={key}
-            expansionKeys={unit.entries.map((entry) => entry.key)}
+            key={anchorEntry.key}
+            expansionKey={`activity-batch:${turnId}:${anchorEntry.key}`}
             label={label}
+            icon={batchIconForEntries(unit.entries)}
+            liveHeader={liveHeaderForBatch(unit.entries)}
+            itemCount={unit.entries.length}
+            isStreaming={isStreaming}
+            isActive={isActive}
+            timestampLabel={timestampLabel}
             diffs={batchDiffs}
             onOpenDiff={openDiffChip}
           >

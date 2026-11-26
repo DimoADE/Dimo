@@ -11,11 +11,7 @@
  *   account-issued sessions end cleanly while manually paired Hosts remain.
  */
 
-import {
-  base64ToBytes,
-  bytesToBase64Url,
-  hasSubtleCrypto,
-} from './webE2ee';
+import { base64ToBytes, bytesToBase64Url, hasSubtleCrypto } from './webE2ee';
 import {
   normalizeRemoteOrigin,
   type ReachabilityEndpoint,
@@ -140,7 +136,8 @@ function openDb(): Promise<IDBDatabase> {
 function idbRequest<T>(req: IDBRequest<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error ?? new Error('IndexedDB request failed'));
+    req.onerror = () =>
+      reject(req.error ?? new Error('IndexedDB request failed'));
   });
 }
 
@@ -221,7 +218,11 @@ export async function upsertSavedWebHost(
   const record = normalizeSavedHost({
     ...existing,
     ...input,
-    id: existing?.id || input.hostId || input.id || normalizeRemoteOrigin(input.origin),
+    id:
+      existing?.id ||
+      input.hostId ||
+      input.id ||
+      normalizeRemoteOrigin(input.origin),
     endpoints: mergedEndpoints,
     lastConnectedAt: input.lastConnectedAt || new Date().toISOString(),
   });

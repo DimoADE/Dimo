@@ -65,7 +65,10 @@ describe('markdown file prose chrome', () => {
   });
 
   it('uses crisp 4px inline code chips and minimalist row-only tables', () => {
-    const inlineCode = ruleIncluding('.markdown-file-prose', ':not(pre) > code');
+    const inlineCode = ruleIncluding(
+      '.markdown-file-prose',
+      ':not(pre) > code'
+    );
     expect(inlineCode.decls['border-radius']).toBe('var(--radius-inline-code)');
 
     const table = ruleIncluding('.markdown-file-prose table:');

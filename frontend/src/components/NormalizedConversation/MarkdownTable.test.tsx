@@ -1,9 +1,6 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  MarkdownTable,
-  computeTableScrollbarMetrics,
-} from './MarkdownTable';
+import { MarkdownTable, computeTableScrollbarMetrics } from './MarkdownTable';
 
 type ResizeObserverCallbackEntry = {
   callback: ResizeObserverCallback;
@@ -146,7 +143,9 @@ describe('MarkdownTable horizontal scrollbar', () => {
         </tbody>
       </MarkdownTable>
     );
-    const scrollEl = container.querySelector('.conv-md-table-scroll') as HTMLDivElement;
+    const scrollEl = container.querySelector(
+      '.conv-md-table-scroll'
+    ) as HTMLDivElement;
     expect(scrollEl).toHaveAttribute('data-overlay-scrollbar-x', 'off');
 
     setHorizontalGeometry(scrollEl, { clientWidth: 400, scrollWidth: 400 });
@@ -177,7 +176,9 @@ describe('MarkdownTable horizontal scrollbar', () => {
       </MarkdownTable>
     );
 
-    const scrollEl = container.querySelector('.conv-md-table-scroll') as HTMLDivElement;
+    const scrollEl = container.querySelector(
+      '.conv-md-table-scroll'
+    ) as HTMLDivElement;
     setHorizontalGeometry(scrollEl, {
       clientWidth: 200,
       scrollWidth: 800,

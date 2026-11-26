@@ -238,6 +238,21 @@ async fn viewing_a_completed_turn_moves_session_to_done() {
         None,
     )
     .await;
+
+    // Backdate the completed turn and session row so viewing happens strictly later.
+    sqlx::query(
+        "UPDATE conversation_turns SET completed_at = '2026-10-20 12:34:56.000' WHERE id = ?",
+    )
+    .bind(turn_id)
+    .execute(&pool)
+    .await
+    .expect("backdate turn completed_at");
+    sqlx::query("UPDATE sessions SET updated_at = '2026-10-20 12:34:56.000' WHERE id = ?")
+        .bind(conversation_id)
+        .execute(&pool)
+        .await
+        .expect("backdate session updated_at");
+
     crate::workbench_status::mark_latest_turn_viewed(&pool, conversation_id)
         .await
         .expect("mark viewed");
@@ -247,6 +262,21 @@ async fn viewing_a_completed_turn_moves_session_to_done() {
         .expect("load session")
         .expect("session");
     assert_eq!(session.status, db::models::session::SessionStatus::Done);
+    assert_eq!(
+        session.updated_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+        "2026-10-20 12:34:56",
+        "viewing a finished session must not overwrite its active time"
+    );
+
+    let raw_updated_at: String = sqlx::query_scalar("SELECT updated_at FROM sessions WHERE id = ?")
+        .bind(conversation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("raw session updated_at");
+    assert_eq!(
+        raw_updated_at, "2026-10-20 12:34:56.000",
+        "status reconciliation on view must not rewrite sessions.updated_at"
+    );
 }
 
 #[tokio::test]

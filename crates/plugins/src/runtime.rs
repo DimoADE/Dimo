@@ -603,9 +603,7 @@ fn safe_runtime_segment(value: &str) -> bool {
 }
 
 fn safe_hex_digest_segment(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 128
-        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    !value.is_empty() && value.len() <= 128 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 impl<'a, H: GlobalRuntimeHost + ?Sized> GlobalRuntimeInstaller<'a, H> {

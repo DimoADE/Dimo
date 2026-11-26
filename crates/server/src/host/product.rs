@@ -709,10 +709,12 @@ impl ServerApplicationDomains {
                     .await?;
                 let name = args.name.unwrap_or_else(|| "origin".to_string());
                 let url = args.url.unwrap_or_default();
-                tokio::task::spawn_blocking(move || git::GitCli::new().add_remote(&path, &name, &url))
-                    .await
-                    .map_err(internal_error)?
-                    .map_err(internal_error)?;
+                tokio::task::spawn_blocking(move || {
+                    git::GitCli::new().add_remote(&path, &name, &url)
+                })
+                .await
+                .map_err(internal_error)?
+                .map_err(internal_error)?;
                 Ok(Value::Null)
             }
             DomainCommand::RepoRemoveRemote => {

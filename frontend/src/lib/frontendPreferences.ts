@@ -37,6 +37,7 @@ const STORAGE_KEYS = {
   'dimo:hide-bot-sessions': 'hide_bot_sessions',
   'dimo:hide-default-workspace': 'hide_default_workspace',
   'dimo:hide-inactive-7d-sessions': 'hide_inactive_7d_sessions',
+  'dimo:last-session-agent': 'last_session_agent',
   'dimo:basic-guide': 'basic_guide',
   'dimo:github-star-prompt': 'github_star_prompt',
   'dimo:agent-model-market-intro': 'agent_model_market_intro',

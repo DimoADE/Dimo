@@ -693,6 +693,7 @@ pub fn advertised_mcp_tools(product: &str, features: u8) -> Vec<PluginMcpToolSta
     match product {
         "delegation" => vec![
             tool("orchestrator_capabilities", "delegation"),
+            tool("environment_links", "delegation"),
             tool("delegate_task", "delegation"),
             tool("task_status", "delegation"),
             tool("task_cancel", "delegation"),
@@ -1432,6 +1433,7 @@ mod tests {
         assert!(tools.iter().any(|t| t.name == "delegate_task"));
         assert!(tools.iter().any(|t| t.name == "thread_launch"));
         assert!(tools.iter().any(|t| t.name == "orchestrator_capabilities"));
+        assert!(tools.iter().any(|t| t.name == "environment_links"));
         assert!(tools.iter().any(|t| t.name == "ask_user_question"));
     }
 

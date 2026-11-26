@@ -10,7 +10,7 @@ use chrono::Utc;
 use remote_protocol::ReachabilityOrigin;
 
 use super::{
-    DesktopError, HostTunnelStore, HostTunnelStatus, RelaySyncMode, current_status,
+    DesktopError, HostTunnelStatus, HostTunnelStore, RelaySyncMode, current_status,
     decide_relay_sync_mode, default_official_quick_origin, load_store, quick_tunnel_origin,
     quick_tunnel_snapshot, relay_snapshot, save_store, sync_relay, valid_account_lease,
 };
@@ -30,7 +30,10 @@ pub(super) fn headless_listen_port() -> Option<u16> {
 pub(super) fn store_published_reachability(store: &HostTunnelStore) -> Vec<ReachabilityOrigin> {
     let mut origins: Vec<ReachabilityOrigin> = Vec::new();
     let mut push_unique = |item: ReachabilityOrigin| {
-        if !origins.iter().any(|existing| existing.origin == item.origin) {
+        if !origins
+            .iter()
+            .any(|existing| existing.origin == item.origin)
+        {
             origins.push(item);
         }
     };

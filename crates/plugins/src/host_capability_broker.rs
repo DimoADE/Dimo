@@ -4303,8 +4303,11 @@ mod tests {
     #[tokio::test]
     async fn net_fetch_revalidates_redirects_against_allowlist_and_ssrf_rules() {
         use std::sync::atomic::{AtomicBool, Ordering};
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
+
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
 
         let allowed_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let allowed_port = allowed_listener.local_addr().unwrap().port();

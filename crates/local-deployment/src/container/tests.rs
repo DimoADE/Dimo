@@ -316,6 +316,19 @@ async fn stop_execution_test_pool() -> SqlitePool {
         )
         "#,
         r#"
+        CREATE TABLE conversation_turns (
+            id BLOB PRIMARY KEY NOT NULL,
+            conversation_id BLOB NOT NULL,
+            ordinal INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+            started_at TEXT,
+            completed_at TEXT,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now', 'subsec')),
+            UNIQUE(conversation_id, ordinal)
+        )
+        "#,
+        r#"
         CREATE TABLE session_checkpoints (
             id BLOB PRIMARY KEY NOT NULL,
             session_id BLOB NOT NULL,

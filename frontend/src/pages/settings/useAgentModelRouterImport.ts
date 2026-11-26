@@ -188,7 +188,8 @@ export function useAgentModelRouterImport({
             remoteTarget,
             'agent_model_provider_bind',
             { agentId: targetAgentId, providerId },
-            () => agentManagementApi.bindModelProvider(targetAgentId, providerId)
+            () =>
+              agentManagementApi.bindModelProvider(targetAgentId, providerId)
           );
         }
         if (!remoteTarget) {
@@ -385,13 +386,12 @@ export function useAgentModelRouterImport({
             existing.providers.map((provider) => provider.id)
           );
           const request = providerSaveRequest(provision, null, providerName);
-          const saved =
-            await invokeTargetAgentCommand<AgentModelProvidersView>(
-              remoteTarget,
-              'agent_model_provider_save',
-              { request },
-              () => agentManagementApi.saveModelProvider(request)
-            );
+          const saved = await invokeTargetAgentCommand<AgentModelProvidersView>(
+            remoteTarget,
+            'agent_model_provider_save',
+            { request },
+            () => agentManagementApi.saveModelProvider(request)
+          );
           savedProviderId =
             saved.providers.find(
               (provider) =>

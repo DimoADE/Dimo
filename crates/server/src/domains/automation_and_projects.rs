@@ -176,14 +176,15 @@ impl ServerApplicationDomains {
         serialize(resolved.snapshot)
     }
 
-    pub(super) async fn agent_capability_catalogs_snapshot(&self) -> Result<Value, ApplicationError> {
-        let views =
-            services::services::agent_management::AgentManagementApplicationService::new(
-                self.pool.clone(),
-            )
-            .list()
-            .await
-            .map_err(internal_error)?;
+    pub(super) async fn agent_capability_catalogs_snapshot(
+        &self,
+    ) -> Result<Value, ApplicationError> {
+        let views = services::services::agent_management::AgentManagementApplicationService::new(
+            self.pool.clone(),
+        )
+        .list()
+        .await
+        .map_err(internal_error)?;
         let mut snapshots = std::collections::BTreeMap::new();
         for view in views {
             if view.retired {

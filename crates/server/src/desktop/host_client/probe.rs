@@ -59,8 +59,8 @@ pub(super) fn deserialize_flexible_endpoints<'de, D>(
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = Option::<Vec<FlexibleReachabilityOrigin>>::deserialize(deserializer)?
-        .unwrap_or_default();
+    let raw =
+        Option::<Vec<FlexibleReachabilityOrigin>>::deserialize(deserializer)?.unwrap_or_default();
     Ok(raw
         .into_iter()
         .filter_map(|item| {
@@ -234,8 +234,8 @@ pub async fn lookup_relay_beacon(
         let _ = write!(&mut hex, "{byte:02x}");
     }
     let topic = format!("vbx-p-{}", &hex[..32]);
-    let base_origin = crate::host::connectivity::browser_origin_of(&clean_relay)
-        .unwrap_or(clean_relay);
+    let base_origin =
+        crate::host::connectivity::browser_origin_of(&clean_relay).unwrap_or(clean_relay);
     let url = format!("{base_origin}/v1/beacon/{topic}");
 
     let resp = client
@@ -322,9 +322,8 @@ pub(super) async fn send_host_http_request(
         };
 
         let response = if let Some(ref session) = session {
-            let enc_headers =
-                e2ee_client::build_encrypted_headers(session, auth_header.as_deref())
-                    .map_err(DesktopError::Internal)?;
+            let enc_headers = e2ee_client::build_encrypted_headers(session, auth_header.as_deref())
+                .map_err(DesktopError::Internal)?;
             let mut req = client
                 .request(method.clone(), &url)
                 .header("x-dimo-protocol-version", remote_protocol::PROTOCOL_VERSION)
@@ -395,8 +394,7 @@ pub(super) async fn exchange_host_access_grant(
         client_kind: Some("desktop".to_string()),
         preset: Some(remote_protocol::DevicePermissionPreset::Workstation),
     };
-    let plain =
-        serde_json::to_vec(&payload).map_err(|e| DesktopError::Internal(e.to_string()))?;
+    let plain = serde_json::to_vec(&payload).map_err(|e| DesktopError::Internal(e.to_string()))?;
     let (status, body_bytes) = send_host_http_request(
         client,
         reqwest::Method::POST,
@@ -414,8 +412,8 @@ pub(super) async fn exchange_host_access_grant(
         return Err(DesktopError::BadRequest(msg));
     }
 
-    let credential: DeviceCredential = serde_json::from_slice(&body_bytes)
-        .map_err(|e| DesktopError::Internal(e.to_string()))?;
+    let credential: DeviceCredential =
+        serde_json::from_slice(&body_bytes).map_err(|e| DesktopError::Internal(e.to_string()))?;
     Ok(DeviceCredentialParts {
         device_id: Some(credential.device_id.to_string()),
         access_token: credential.access_token,
@@ -528,18 +526,18 @@ impl super::HostClientRuntime {
                     .find(|p| p.host_id.as_deref() == Some(host_id))
             })
             .cloned();
-        let last_good = selected.as_ref().and_then(|p| p.last_good_origin.as_deref());
+        let last_good = selected
+            .as_ref()
+            .and_then(|p| p.last_good_origin.as_deref());
 
-        let (origin, health) = select_best_endpoint(
-            &self.client,
-            &request.endpoints,
-            last_good,
-            Some(host_id),
-        )
-        .await
-        .ok_or_else(|| {
-            DesktopError::BadRequest("could not reach Host on any advertised endpoint".into())
-        })?;
+        let (origin, health) =
+            select_best_endpoint(&self.client, &request.endpoints, last_good, Some(host_id))
+                .await
+                .ok_or_else(|| {
+                    DesktopError::BadRequest(
+                        "could not reach Host on any advertised endpoint".into(),
+                    )
+                })?;
 
         let device_name = super::local_device_name();
         let credential = exchange_host_access_grant(
@@ -553,8 +551,8 @@ impl super::HostClientRuntime {
 
         let capabilities =
             super::fetch_capabilities(&self.client, &origin, &credential.access_token).await?;
-        let resolved_host_id = super::empty_to_none(capabilities.host_id)
-            .or_else(|| Some(host_id.to_string()));
+        let resolved_host_id =
+            super::empty_to_none(capabilities.host_id).or_else(|| Some(host_id.to_string()));
         let name = request
             .name
             .as_deref()
@@ -562,7 +560,12 @@ impl super::HostClientRuntime {
             .filter(|v| !v.is_empty())
             .map(ToOwned::to_owned)
             .or_else(|| health.name.and_then(super::empty_to_none))
-            .or_else(|| selected.as_ref().map(|p| p.name.clone()).filter(|v| !v.is_empty()))
+            .or_else(|| {
+                selected
+                    .as_ref()
+                    .map(|p| p.name.clone())
+                    .filter(|v| !v.is_empty())
+            })
             .unwrap_or_else(|| origin.clone());
 
         let now = chrono::Utc::now().to_rfc3339();

@@ -15,7 +15,7 @@ use sqlx::{FromRow, SqliteConnection, SqlitePool};
 use ts_rs::TS;
 use uuid::Uuid;
 
-use super::session::SessionStatus;
+use super::session::{SESSION_ACTIVITY_AT_SQL, SessionStatus};
 
 static ACTIVE_TURN_MUTATION_EPOCH: AtomicU64 = AtomicU64::new(1);
 static ACTIVE_BINDING_MUTATION_EPOCH: AtomicU64 = AtomicU64::new(1);
@@ -61,46 +61,51 @@ pub struct DbConversationSummary {
     pub updated_at: DateTime<Utc>,
 }
 
-const SUMMARY_COLUMNS: &str = r#"id,
-    workspace_id,
-    task_id,
-    name AS title,
-    title_locked,
-    status,
-    agent_id,
-    provider_instance_id,
-    model,
-    external_session_id,
-    message_count,
-    pinned_at,
-    parent_session_id,
-    parent_tool_use_id,
-    delegation_call_id,
-    created_at,
-    updated_at"#;
+fn summary_select_columns() -> String {
+    format!(
+        r#"s.id,
+    s.workspace_id,
+    s.task_id,
+    s.name AS title,
+    s.title_locked,
+    s.status,
+    s.agent_id,
+    s.provider_instance_id,
+    s.model,
+    s.external_session_id,
+    s.message_count,
+    s.pinned_at,
+    s.parent_session_id,
+    s.parent_tool_use_id,
+    s.delegation_call_id,
+    s.created_at,
+    {SESSION_ACTIVITY_AT_SQL} AS updated_at"#
+    )
+}
 
 impl DbConversationSummary {
     /// All non-deleted conversations for a workspace, pinned first then most
-    /// recently updated.
+    /// recently active (by latest conversation turn activity).
     pub async fn list_for_workspace(
         pool: &SqlitePool,
         workspace_id: Uuid,
     ) -> Result<Vec<Self>, sqlx::Error> {
+        let columns = summary_select_columns();
         sqlx::query_as::<_, Self>(&format!(
-            r#"SELECT {SUMMARY_COLUMNS}
-               FROM sessions
-               WHERE workspace_id = ?
-                 AND deleted_at IS NULL
-               ORDER BY pinned_at IS NULL, pinned_at DESC, updated_at DESC, created_at DESC"#
+            r#"SELECT {columns}
+               FROM sessions s
+               WHERE s.workspace_id = ?
+                 AND s.deleted_at IS NULL
+               ORDER BY s.pinned_at IS NULL, s.pinned_at DESC, {SESSION_ACTIVITY_AT_SQL} DESC, s.created_at DESC"#
         ))
         .bind(workspace_id)
         .fetch_all(pool)
         .await
     }
 
-    /// Recently updated conversations, optionally limited to one project.
+    /// Recently active conversations, optionally limited to one project.
     ///
-    /// `updated_at` is stored as TEXT in mixed RFC3339 / SQLite datetime shapes.
+    /// Activity timestamps are stored as TEXT in mixed RFC3339 / SQLite datetime shapes.
     /// Normalize the first 19 characters before comparing so a 3-day window
     /// does not silently drop rows whose timestamps contain `T` or a timezone.
     pub async fn list_recent(
@@ -113,16 +118,19 @@ impl DbConversationSummary {
             .format("%Y-%m-%d %H:%M:%S")
             .to_string();
         let limit = limit.clamp(1, 500);
-        let recency = "datetime(replace(substr(updated_at, 1, 19), 'T', ' ')) >= datetime(?)";
+        let columns = summary_select_columns();
+        let recency = format!(
+            "datetime(replace(substr({SESSION_ACTIVITY_AT_SQL}, 1, 19), 'T', ' ')) >= datetime(?)"
+        );
         if let Some(project_id) = project_id {
             sqlx::query_as::<_, Self>(&format!(
-                r#"SELECT {SUMMARY_COLUMNS}
-                   FROM sessions
-                   WHERE deleted_at IS NULL
-                     AND status != 'archived'
+                r#"SELECT {columns}
+                   FROM sessions s
+                   WHERE s.deleted_at IS NULL
+                     AND s.status != 'archived'
                      AND {recency}
-                     AND workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)
-                   ORDER BY pinned_at IS NULL, pinned_at DESC, updated_at DESC, created_at DESC
+                     AND s.workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)
+                   ORDER BY s.pinned_at IS NULL, s.pinned_at DESC, {SESSION_ACTIVITY_AT_SQL} DESC, s.created_at DESC
                    LIMIT ?"#
             ))
             .bind(cutoff)
@@ -132,12 +140,12 @@ impl DbConversationSummary {
             .await
         } else {
             sqlx::query_as::<_, Self>(&format!(
-                r#"SELECT {SUMMARY_COLUMNS}
-                   FROM sessions
-                   WHERE deleted_at IS NULL
-                     AND status != 'archived'
+                r#"SELECT {columns}
+                   FROM sessions s
+                   WHERE s.deleted_at IS NULL
+                     AND s.status != 'archived'
                      AND {recency}
-                   ORDER BY pinned_at IS NULL, pinned_at DESC, updated_at DESC, created_at DESC
+                   ORDER BY s.pinned_at IS NULL, s.pinned_at DESC, {SESSION_ACTIVITY_AT_SQL} DESC, s.created_at DESC
                    LIMIT ?"#
             ))
             .bind(cutoff)
@@ -149,10 +157,11 @@ impl DbConversationSummary {
 
     /// A single non-deleted conversation by id.
     pub async fn find_by_id(pool: &SqlitePool, id: Uuid) -> Result<Option<Self>, sqlx::Error> {
+        let columns = summary_select_columns();
         sqlx::query_as::<_, Self>(&format!(
-            r#"SELECT {SUMMARY_COLUMNS}
-               FROM sessions
-               WHERE id = ? AND deleted_at IS NULL"#
+            r#"SELECT {columns}
+               FROM sessions s
+               WHERE s.id = ? AND s.deleted_at IS NULL"#
         ))
         .bind(id)
         .fetch_optional(pool)
@@ -166,10 +175,11 @@ impl DbConversationSummary {
         external_session_id: &str,
         agent_id: &AgentId,
     ) -> Result<Option<Self>, sqlx::Error> {
+        let columns = summary_select_columns();
         sqlx::query_as::<_, Self>(&format!(
-            r#"SELECT {SUMMARY_COLUMNS}
-               FROM sessions
-               WHERE external_session_id = ? AND agent_id = ? AND deleted_at IS NULL"#
+            r#"SELECT {columns}
+               FROM sessions s
+               WHERE s.external_session_id = ? AND s.agent_id = ? AND s.deleted_at IS NULL"#
         ))
         .bind(external_session_id)
         .bind(agent_id.as_str())
@@ -181,7 +191,7 @@ impl DbConversationSummary {
     pub async fn set_title(pool: &SqlitePool, id: Uuid, title: &str) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"UPDATE sessions
-               SET name = ?, title_locked = 1, updated_at = datetime('now', 'subsec')
+               SET name = ?, title_locked = 1
                WHERE id = ?"#,
         )
         .bind(title)
@@ -199,7 +209,7 @@ impl DbConversationSummary {
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"UPDATE sessions
-               SET name = ?, updated_at = datetime('now', 'subsec')
+               SET name = ?
                WHERE id = ? AND title_locked = 0"#,
         )
         .bind(title)
@@ -213,7 +223,7 @@ impl DbConversationSummary {
         if pinned {
             sqlx::query(
                 r#"UPDATE sessions
-                   SET pinned_at = datetime('now', 'subsec'), updated_at = datetime('now', 'subsec')
+                   SET pinned_at = datetime('now', 'subsec')
                    WHERE id = ?"#,
             )
             .bind(id)
@@ -222,7 +232,7 @@ impl DbConversationSummary {
         } else {
             sqlx::query(
                 r#"UPDATE sessions
-                   SET pinned_at = NULL, updated_at = datetime('now', 'subsec')
+                   SET pinned_at = NULL
                    WHERE id = ?"#,
             )
             .bind(id)
@@ -264,7 +274,7 @@ impl DbConversationSummary {
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"UPDATE sessions
-               SET external_session_id = ?, agent_id = ?, updated_at = datetime('now', 'subsec')
+               SET external_session_id = ?, agent_id = ?
                WHERE id = ?"#,
         )
         .bind(external_session_id)
@@ -285,7 +295,7 @@ impl DbConversationSummary {
         };
         sqlx::query(
             r#"UPDATE sessions
-               SET model = ?1, updated_at = datetime('now', 'subsec')
+               SET model = ?1
                WHERE id = ?2 AND (model IS NULL OR model != ?1)"#,
         )
         .bind(model)
@@ -411,9 +421,22 @@ impl ConversationRecord {
 
     pub async fn find_by_id(pool: &SqlitePool, id: Uuid) -> Result<Option<Self>, sqlx::Error> {
         sqlx::query_as::<_, Self>(&format!(
-            r#"SELECT {CONVERSATION_COLUMNS}
-               FROM sessions
-               WHERE id = ? AND deleted_at IS NULL"#
+            r#"SELECT s.id,
+                      s.workspace_id,
+                      s.task_id,
+                      s.name AS title,
+                      s.title_locked,
+                      s.status,
+                      s.active_turn_id,
+                      s.pinned_at,
+                      s.parent_session_id AS parent_conversation_id,
+                      s.parent_tool_use_id AS parent_tool_call_id,
+                      s.delegation_call_id,
+                      s.created_at,
+                      {SESSION_ACTIVITY_AT_SQL} AS updated_at,
+                      s.deleted_at
+               FROM sessions s
+               WHERE s.id = ? AND s.deleted_at IS NULL"#
         ))
         .bind(id)
         .fetch_optional(pool)
@@ -436,7 +459,7 @@ impl ConversationRecord {
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"UPDATE sessions
-               SET status = ?, updated_at = datetime('now', 'subsec')
+               SET status = ?
                WHERE id = ?"#,
         )
         .bind(status)

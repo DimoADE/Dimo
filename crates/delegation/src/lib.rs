@@ -45,8 +45,9 @@ pub use orchestration::{
     ActivePreparations, ConversationLaunchService, DelegationReactors, McpInvocationContext,
     OrchestrationConfig, OrchestrationError, OrchestrationService, PendingPermissionEntry,
     PendingPermissionStore, RemoteMcpForwarder, SharedRemoteForwarder, conversation_link,
-    idempotency_scope_key, is_orchestration_tool, orchestration_tool_schemas,
-    run_startup_reconciler, spawn_orchestration_reactors,
+    idempotency_scope_key, install_orchestration_before_turn_hook, is_orchestration_tool,
+    orchestration_tool_schemas, run_startup_reconciler, run_startup_reconciler_with_remote,
+    spawn_orchestration_reactors,
 };
 pub use service::DelegationService;
 pub use spawner::{ConnectionSpawner, SpawnerError};

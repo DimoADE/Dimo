@@ -417,9 +417,9 @@ async function call<T>(
       response.status === 405 ||
       response.status === 501
     ) {
-      const errorPayload = (await response
-        .json()
-        .catch(() => null)) as { error?: unknown } | null;
+      const errorPayload = (await response.json().catch(() => null)) as {
+        error?: unknown;
+      } | null;
       if (
         typeof errorPayload?.error === 'string' &&
         errorPayload.error.trim().length > 0
@@ -529,9 +529,8 @@ export const accountApi = {
           await mod.clearAccountLinkedWebHosts();
           if (typeof window !== 'undefined') {
             try {
-              const rawSession = window.sessionStorage.getItem(
-                'dimo.web_session'
-              );
+              const rawSession =
+                window.sessionStorage.getItem('dimo.web_session');
               if (rawSession) {
                 const parsed = JSON.parse(rawSession) as {
                   baseUrl?: string;

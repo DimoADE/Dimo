@@ -89,9 +89,7 @@ export function mergeHostDelegationView(
   const input = peelHostDelegationCall(use).input;
   const output = parseRecord(result?.output_preview);
   const agentId =
-    event?.agent_id ??
-    readTargetAgentId(input) ??
-    readTargetAgentId(output);
+    event?.agent_id ?? readTargetAgentId(input) ?? readTargetAgentId(output);
   const inferred = inferResult(result, output);
   const childConversationId =
     event?.child_conversation_id ??
@@ -269,7 +267,11 @@ function inferResult(
   ) {
     return { status: outputStatus, result: null };
   }
-  if (result?.is_error || outputStatus === 'failed' || outputStatus === 'timed_out') {
+  if (
+    result?.is_error ||
+    outputStatus === 'failed' ||
+    outputStatus === 'timed_out'
+  ) {
     return {
       status: 'failed',
       result: {

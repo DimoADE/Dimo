@@ -1034,13 +1034,12 @@ async fn warm_native_capability_catalogs(pool: &SqlitePool, agent_runtime: &Arc<
         {
             continue;
         }
-        let Ok(resolved) =
-            conversations::resolve_instant_capability_catalog_for_provider_instance(
-                pool,
-                &view.agent_id,
-                None,
-            )
-            .await
+        let Ok(resolved) = conversations::resolve_instant_capability_catalog_for_provider_instance(
+            pool,
+            &view.agent_id,
+            None,
+        )
+        .await
         else {
             continue;
         };

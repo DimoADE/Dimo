@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { pulseApi, type PulseRuleView } from '@/lib/api/pulse';
@@ -23,7 +23,6 @@ vi.mock('@/lib/api/pulse', () => ({
     deleteRule: vi.fn(),
     subscribeThread: vi.fn(),
     unsubscribeThread: vi.fn(),
-    emitEventEnvelope: vi.fn(),
     promoteObservedCandidate: vi.fn(),
   },
 }));
@@ -218,12 +217,9 @@ describe('Collaboration Pulse UI (Track F5 / R4)', () => {
       subscriptions: [],
       pendingInteractions: [],
     });
-    vi.mocked(pulseApi.setRuleMode)
-      .mockRejectedValueOnce(new Error('Engine lock timeout'))
-      .mockResolvedValueOnce({
-        ...rule,
-        spec: { ...rule.spec, evalMode: 'auto' },
-      });
+    vi.mocked(pulseApi.setRuleEnabled).mockRejectedValueOnce(
+      new Error('Engine lock timeout')
+    );
 
     const { unmount } = render(
       <BotAutomationsPanel memberId="bot-1" botName="Triage Bot" />
@@ -232,13 +228,15 @@ describe('Collaboration Pulse UI (Track F5 / R4)', () => {
     expect(await screen.findByText(rule.spec.name)).toBeInTheDocument();
     expect(pulseApi.listRules).not.toHaveBeenCalled();
 
-    const autoBtn = screen.getByTestId('bot-rule-mode-rule-1-auto');
-    await user.click(autoBtn);
+    const enabledSwitch = screen.getByRole('switch');
+    expect(enabledSwitch).toBeChecked();
+    await user.click(enabledSwitch);
 
     // Inline error alert surfaces failure instead of silently swallowing
     expect(
       await screen.findByTestId('bot-automations-error')
     ).toHaveTextContent('Engine lock timeout');
+    expect(enabledSwitch).toBeChecked();
 
     await user.click(screen.getByTestId('bot-automations-retry'));
     await waitFor(() => {
@@ -358,7 +356,7 @@ describe('Collaboration Pulse UI (Track F5 / R4)', () => {
     });
   });
 
-  it('resets PulseRuleProposalCard when switching directly between Event Trigger and Schedule, and supports editing, test trigger, and observed candidate promotion', async () => {
+  it('switches between task creation forms and limits task card actions to enablement and deletion', async () => {
     const user = userEvent.setup();
     const baseEventSpec = buildBotPulseProposalSpec({
       memberId: 'bot-1',
@@ -371,6 +369,15 @@ describe('Collaboration Pulse UI (Track F5 / R4)', () => {
       id: 'rule-event',
       spec: {
         ...baseEventSpec,
+        targets: [
+          {
+            kind: 'bot',
+            memberId: 'bot-1',
+            conversationScope: 'per_thread_topic',
+            mailboxPolicy: 'coalesce_batch',
+            promptTemplate: 'Summarize the matching ticket.',
+          },
+        ],
         filter: {
           ...baseEventSpec.filter,
           sourceKinds: ['jira'],
@@ -398,13 +405,19 @@ describe('Collaboration Pulse UI (Track F5 / R4)', () => {
         description: 'Daily standup summary',
       }),
     });
+    const legacyRule = makeSavedRule({
+      id: 'rule-legacy',
+      enabled: false,
+      spec: { ...scheduleRule.spec, name: 'Paused schedule', evalMode: 'off' },
+    });
+    let persistedRules = [eventRule, scheduleRule, legacyRule];
 
-    vi.mocked(pulseApi.deckSnapshot).mockResolvedValue({
+    vi.mocked(pulseApi.deckSnapshot).mockImplementation(async () => ({
       engineActive: true,
       activeTicketCount: 0,
       pendingUserInteractionCount: 0,
       sources: [],
-      rules: [eventRule, scheduleRule],
+      rules: persistedRules,
       observedCandidates: [
         {
           id: 'cand-1',
@@ -420,12 +433,31 @@ describe('Collaboration Pulse UI (Track F5 / R4)', () => {
       ],
       subscriptions: [],
       pendingInteractions: [],
-    });
-    vi.mocked(pulseApi.saveRule).mockImplementation(async ({ id, spec }) =>
-      makeSavedRule({ id: id ?? 'rule-new', revision: 3, spec })
+    }));
+    vi.mocked(pulseApi.setRuleEnabled).mockImplementation(
+      async (id, enabled) => {
+        const updated = {
+          ...persistedRules.find((rule) => rule.id === id)!,
+          enabled,
+        };
+        persistedRules = persistedRules.map((rule) =>
+          rule.id === id ? updated : rule
+        );
+        return updated;
+      }
     );
-    vi.mocked(pulseApi.emitEventEnvelope).mockImplementation(
-      async (env) => env
+    vi.mocked(pulseApi.setRuleMode).mockImplementationOnce(
+      async (id, evalMode) => {
+        const updated = {
+          ...legacyRule,
+          enabled: true,
+          spec: { ...legacyRule.spec, evalMode },
+        };
+        persistedRules = persistedRules.map((rule) =>
+          rule.id === id ? updated : rule
+        );
+        return updated;
+      }
     );
     vi.mocked(pulseApi.promoteObservedCandidate).mockResolvedValue(undefined);
 
@@ -437,12 +469,13 @@ describe('Collaboration Pulse UI (Track F5 / R4)', () => {
       />
     );
 
-    expect(
-      await screen.findByTestId('bot-pulse-rule-rule-event')
-    ).toBeInTheDocument();
-    expect(
-      screen.getByTestId('bot-rule-observe-hint-rule-event')
-    ).toBeInTheDocument();
+    const eventCard = await screen.findByTestId('bot-pulse-rule-rule-event');
+    const eventSwitch = within(eventCard).getByRole('switch');
+    expect(eventSwitch).toBeChecked();
+    expect(within(eventCard).getAllByRole('button')).toEqual([
+      screen.getByTestId('bot-rule-delete-rule-event'),
+    ]);
+    expect(eventCard).not.toHaveTextContent(/信箱策略|会话范围|观察|自动/);
     expect(
       screen.getByTestId('bot-rule-last-run-rule-event')
     ).toHaveTextContent('Workspace missing');
@@ -450,7 +483,6 @@ describe('Collaboration Pulse UI (Track F5 / R4)', () => {
       screen.getByTestId('bot-rule-next-fire-rule-cron')
     ).toBeInTheDocument();
 
-    // 1. Switch directly from Event Trigger to Schedule without canceling first
     await user.click(screen.getByTestId('bot-automations-new-trigger'));
     expect(
       screen.getByTestId('pulse-source-webhook_standard').className
@@ -463,68 +495,28 @@ describe('Collaboration Pulse UI (Track F5 / R4)', () => {
     const tzInput = screen.getByLabelText('时区') as HTMLInputElement;
     expect(tzInput.value.trim().length).toBeGreaterThan(0);
 
-    // 2. Edit an existing rule -> passes rule.id on save
-    await user.click(screen.getByTestId('bot-rule-edit-rule-event'));
-    const nameInput = screen.getByLabelText('规则名称');
-    await user.clear(nameInput);
-    await user.type(nameInput, 'Updated P0 Triage');
-    await user.click(screen.getByTestId('pulse-save-rule-btn'));
+    await user.click(screen.getByRole('button', { name: '取消' }));
+    expect(screen.queryByTestId('pulse-rule-proposal-card')).toBeNull();
+
+    await user.click(eventSwitch);
+    await waitFor(() => expect(eventSwitch).not.toBeChecked());
+    expect(pulseApi.setRuleEnabled).toHaveBeenCalledWith('rule-event', false);
+
+    await user.click(eventSwitch);
+    await waitFor(() => expect(eventSwitch).toBeChecked());
+    expect(pulseApi.setRuleEnabled).toHaveBeenCalledWith('rule-event', true);
+    expect(pulseApi.setRuleMode).not.toHaveBeenCalled();
+    expect(pulseApi.saveRule).not.toHaveBeenCalled();
+    const legacySwitch = within(
+      screen.getByTestId('bot-pulse-rule-rule-legacy')
+    ).getByRole('switch');
+    expect(legacySwitch).not.toBeChecked();
+    await user.click(legacySwitch);
     await waitFor(() => {
-      expect(pulseApi.saveRule).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'rule-event',
-          spec: expect.objectContaining({ name: 'Updated P0 Triage' }),
-        })
-      );
+      expect(legacySwitch).toBeChecked();
+      expect(pulseApi.setRuleMode).toHaveBeenCalledWith('rule-legacy', 'auto');
     });
 
-    // 3. Test trigger emits matching envelope for event rule and temporal:{id} for schedule rule
-    await user.click(screen.getByTestId('bot-rule-test-rule-event'));
-    await waitFor(() => {
-      expect(pulseApi.emitEventEnvelope).toHaveBeenCalledWith(
-        expect.objectContaining({
-          eventType: 'jira.issue.updated',
-          source: expect.objectContaining({ kind: 'jira' }),
-          payload: expect.objectContaining({ summary: 'P0' }),
-        })
-      );
-    });
-
-    await user.click(screen.getByTestId('bot-rule-test-rule-cron'));
-    await waitFor(() => {
-      expect(pulseApi.emitEventEnvelope).toHaveBeenCalledWith(
-        expect.objectContaining({
-          eventType: 'pulse.cron.tick',
-          source: expect.objectContaining({
-            kind: 'time_cron',
-            instanceId: 'temporal:rule-cron',
-          }),
-        })
-      );
-    });
-
-    // 4. Switch conversationScope inline
-    await user.click(
-      screen.getByTestId('bot-rule-scope-rule-event-per_thread_topic')
-    );
-    await waitFor(() => {
-      expect(pulseApi.saveRule).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: 'rule-event',
-          spec: expect.objectContaining({
-            targets: expect.arrayContaining([
-              expect.objectContaining({
-                kind: 'bot',
-                memberId: 'bot-1',
-                conversationScope: 'per_thread_topic',
-              }),
-            ]),
-          }),
-        })
-      );
-    });
-
-    // 5. Promote pending observed candidate inline
     expect(
       screen.getByTestId('bot-observed-candidate-cand-1')
     ).toBeInTheDocument();

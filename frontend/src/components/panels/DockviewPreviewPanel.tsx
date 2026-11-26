@@ -592,12 +592,18 @@ function DockviewPreviewPanel(props: IDockviewPanelProps) {
   );
 
   useEffect(() => {
-    if (!shouldAttemptFallback || !initialResolvedFilePath || !projectId || !rootPath) {
+    if (
+      !shouldAttemptFallback ||
+      !initialResolvedFilePath ||
+      !projectId ||
+      !rootPath
+    ) {
       return;
     }
 
     const basename =
-      initialResolvedFilePath.replace(/\\/g, '/').split('/').pop()?.trim() ?? '';
+      initialResolvedFilePath.replace(/\\/g, '/').split('/').pop()?.trim() ??
+      '';
     if (!basename) {
       setFallbackResolution({
         sourcePath: initialResolvedFilePath,

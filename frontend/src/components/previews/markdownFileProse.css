@@ -180,7 +180,10 @@
   padding-inline-start: var(--spacing-6, 24px);
 }
 
-.markdown-file-prose [contenteditable] ul ul:not(#\#):not(#\#):not(#\#):not(#\#) {
+.markdown-file-prose
+  [contenteditable]
+  ul
+  ul:not(#\#):not(#\#):not(#\#):not(#\#) {
   list-style-type: circle;
 }
 
@@ -192,7 +195,10 @@
   list-style-type: square;
 }
 
-.markdown-file-prose [contenteditable] ol ol:not(#\#):not(#\#):not(#\#):not(#\#) {
+.markdown-file-prose
+  [contenteditable]
+  ol
+  ol:not(#\#):not(#\#):not(#\#):not(#\#) {
   list-style-type: lower-alpha;
 }
 

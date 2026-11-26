@@ -132,22 +132,32 @@ interface MockDockviewTabApi {
   api: IDockviewPanelProps<SessionTabPanelParams>['api'];
   setVisible: (visible: boolean) => void;
   setActive: (active: boolean) => void;
+  setGroupActive: (groupActive: boolean) => void;
   setTitleSpy: ReturnType<typeof vi.fn>;
   updateParametersSpy: ReturnType<typeof vi.fn>;
 }
 
 function createPanelApi(
   id: string,
-  options?: { isVisible?: boolean; isActive?: boolean; groupId?: string }
+  options?: {
+    isVisible?: boolean;
+    isActive?: boolean;
+    isGroupActive?: boolean;
+    groupId?: string;
+  }
 ): MockDockviewTabApi {
   let visible = options?.isVisible ?? true;
   let active = options?.isActive ?? visible;
+  let groupActive = options?.isGroupActive;
   let title = '';
   let params: SessionTabPanelParams = {};
   const visibilityListeners = new Set<
     (event: { isVisible: boolean }) => void
   >();
   const activeListeners = new Set<(event: { isActive: boolean }) => void>();
+  const activeGroupListeners = new Set<
+    (event: { isActive: boolean }) => void
+  >();
   const setTitleSpy = vi.fn((nextTitle: string) => {
     title = nextTitle;
   });
@@ -162,6 +172,9 @@ function createPanelApi(
     },
     get isActive() {
       return active;
+    },
+    get isGroupActive() {
+      return groupActive;
     },
     get title() {
       return title;
@@ -188,6 +201,16 @@ function createPanelApi(
         },
       };
     },
+    onDidActiveGroupChange: (
+      listener: (event: { isActive: boolean }) => void
+    ) => {
+      activeGroupListeners.add(listener);
+      return {
+        dispose: () => {
+          activeGroupListeners.delete(listener);
+        },
+      };
+    },
   } as unknown as IDockviewPanelProps<SessionTabPanelParams>['api'];
 
   return {
@@ -202,6 +225,12 @@ function createPanelApi(
       active = nextActive;
       for (const listener of activeListeners) {
         listener({ isActive: nextActive });
+      }
+    },
+    setGroupActive(nextGroupActive: boolean) {
+      groupActive = nextGroupActive;
+      for (const listener of activeGroupListeners) {
+        listener({ isActive: nextGroupActive });
       }
     },
     setTitleSpy,
@@ -524,5 +553,48 @@ describe('DockviewAIChatPanel', () => {
       sessionId: 'session-switch',
       workspaceId: 'ws-wt',
     });
+  });
+
+  it('enables markViewed only for the actively focused split group and switches when group focus changes', () => {
+    const leftTab = createPanelApi('ai-chat:split-focus-left', {
+      isVisible: true,
+      isActive: true,
+      isGroupActive: true,
+      groupId: 'right-group-1',
+    });
+    const rightTab = createPanelApi('ai-chat:split-focus-right', {
+      isVisible: true,
+      isActive: true,
+      isGroupActive: false,
+      groupId: 'right-group-2',
+    });
+
+    renderChatPanel(leftTab, {
+      sessionId: 'split-focus-left',
+      workspaceId: 'workspace-left',
+    });
+    renderChatPanel(rightTab, {
+      sessionId: 'split-focus-right',
+      workspaceId: 'workspace-right',
+    });
+
+    expect(
+      screen.getByTestId('conversation-view-split-focus-left')
+    ).toHaveAttribute('data-mark-viewed', 'true');
+    expect(
+      screen.getByTestId('conversation-view-split-focus-right')
+    ).toHaveAttribute('data-mark-viewed', 'false');
+
+    act(() => {
+      leftTab.setGroupActive(false);
+      rightTab.setGroupActive(true);
+    });
+
+    expect(
+      screen.getByTestId('conversation-view-split-focus-left')
+    ).toHaveAttribute('data-mark-viewed', 'false');
+    expect(
+      screen.getByTestId('conversation-view-split-focus-right')
+    ).toHaveAttribute('data-mark-viewed', 'true');
   });
 });

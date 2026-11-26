@@ -546,7 +546,11 @@ impl HostClientRuntime {
         if let Some(profile) = state.profiles.iter_mut().find(|item| item.id == profile_id) {
             profile.last_good_origin = Some(origin_for_bind.clone());
             for ep in capabilities.reachability {
-                if !profile.endpoints.iter().any(|existing| existing.origin == ep.origin) {
+                if !profile
+                    .endpoints
+                    .iter()
+                    .any(|existing| existing.origin == ep.origin)
+                {
                     profile.endpoints.push(ep);
                 }
             }
@@ -910,9 +914,7 @@ fn views_with_active_windows(
         .map(|profile| {
             let connected_window_label = active_windows
                 .iter()
-                .find_map(|(window, bound_id)| {
-                    (bound_id == &profile.id).then(|| window.clone())
-                });
+                .find_map(|(window, bound_id)| (bound_id == &profile.id).then(|| window.clone()));
             HostClientProfileView {
                 id: profile.id.clone(),
                 origin: profile.origin.clone(),

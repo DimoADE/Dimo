@@ -455,7 +455,9 @@ export function RemoteClientSettings() {
     }) => {
       setConnectingKey(request.key);
       try {
-        const parsedInvitation = request.token?.trim().startsWith('dimo-pairing:')
+        const parsedInvitation = request.token
+          ?.trim()
+          .startsWith('dimo-pairing:')
           ? parsePairingInvitation(request.token)
           : null;
         const resolvedOrigin =
@@ -876,8 +878,8 @@ export function RemoteClientSettings() {
                       width="100%"
                       className="mt-1 [&_input]:font-mono [&_input]:text-sm"
                     />
-                    {(parsePairingInvitation(manualCode.trim()) ||
-                      parsePairingInvitation(manualOrigin.trim())) ? (
+                    {parsePairingInvitation(manualCode.trim()) ||
+                    parsePairingInvitation(manualOrigin.trim()) ? (
                       <p className="mt-1 text-xs text-success">
                         {t('webService.pairingDetected')}
                       </p>

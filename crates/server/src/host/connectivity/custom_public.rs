@@ -277,7 +277,9 @@ pub async fn add_custom_public_origin_at(
     Ok(record)
 }
 
-pub async fn remove_custom_public_origin(id: &str) -> Result<Vec<CustomPublicOriginRecord>, String> {
+pub async fn remove_custom_public_origin(
+    id: &str,
+) -> Result<Vec<CustomPublicOriginRecord>, String> {
     remove_custom_public_origin_at(&utils::assets::settings_path(), id).await
 }
 

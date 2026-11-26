@@ -3,9 +3,7 @@ use std::path::Path;
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use crate::{
-    ArtifactEvent, ArtifactRecord, PendingPreviewEvent, PendingRevisionEvent, PortError,
-};
+use crate::{ArtifactEvent, ArtifactRecord, PendingPreviewEvent, PendingRevisionEvent, PortError};
 
 #[async_trait]
 pub trait ArtifactRepository: Send + Sync {

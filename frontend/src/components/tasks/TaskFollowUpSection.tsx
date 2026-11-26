@@ -58,6 +58,7 @@ import {
   normalizeProviderInstanceIdForApi,
 } from '@/lib/providerInstancesApi';
 import { canonicalSessionAgentId } from '@/lib/sessionQueryCache';
+import { useNewSessionDefaultExecutorProfile } from '@/lib/lastSessionAgent';
 import { ConversationStatusDock } from './follow-up/ConversationStatusDock';
 import { AgentQuestionCard } from './follow-up/AgentQuestionCard';
 import { PermissionRequestStack } from '@/components/NormalizedConversation/conversation/PermissionRequestCard';
@@ -438,6 +439,11 @@ export function TaskFollowUpSection({
   const resolvedSessionExecutor = (session?.agent_id ??
     session?.executor ??
     storedPersona?.agent_name) as AgentKind | null | undefined;
+  const newSessionDefaultProfile = useNewSessionDefaultExecutorProfile({
+    configExecutorProfile: config?.executor_profile,
+    profiles,
+    refreshKey: isNewSessionMode,
+  });
   const defaultExecutorProfile = useMemo(() => {
     return getDefaultExecutorProfile({
       scratchExecutorProfile,
@@ -445,7 +451,7 @@ export function TaskFollowUpSection({
       createdSessionProfiles,
       sessionId: session?.id,
       sessionExecutor: resolvedSessionExecutor,
-      configExecutorProfile: config?.executor_profile,
+      configExecutorProfile: newSessionDefaultProfile,
       profiles,
     });
   }, [
@@ -453,7 +459,7 @@ export function TaskFollowUpSection({
     createdSessionProfiles,
     session?.id,
     resolvedSessionExecutor,
-    config?.executor_profile,
+    newSessionDefaultProfile,
     profiles,
   ]);
 

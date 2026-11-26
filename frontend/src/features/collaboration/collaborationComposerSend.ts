@@ -139,7 +139,6 @@ export function parseAutomateSlashIntent(
         memberId: context.memberId,
         botName: context.botName,
         sourceKind: inferredSourceKind,
-        evalMode: 'observe',
         description,
         workspaceId: context.workspaceId ?? null,
         projectId: context.projectId ?? null,

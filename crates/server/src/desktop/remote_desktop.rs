@@ -68,9 +68,7 @@ async fn ensure_profile_e2ee(
     if is_loopback_base_url(&profile.base_url) {
         return Ok(None);
     }
-    if !force_refresh
-        && let Some(existing) = profile.e2ee.read().await.clone()
-    {
+    if !force_refresh && let Some(existing) = profile.e2ee.read().await.clone() {
         return Ok(Some(existing));
     }
     match crate::host::connectivity::e2ee_client::handshake(client, &profile.base_url).await {
@@ -225,12 +223,11 @@ impl RemoteDesktopRegistry {
                 .header("x-dimo-protocol-version", remote_protocol::PROTOCOL_VERSION);
 
             if let Some(ref session) = session {
-                let enc_headers =
-                    crate::host::connectivity::e2ee_client::build_encrypted_headers(
-                        session,
-                        Some(&profile.token.0),
-                    )
-                    .map_err(internal)?;
+                let enc_headers = crate::host::connectivity::e2ee_client::build_encrypted_headers(
+                    session,
+                    Some(&profile.token.0),
+                )
+                .map_err(internal)?;
                 req = req.headers(enc_headers);
                 if let Some(ref plain) = plain_body {
                     let encrypted = crate::host::connectivity::e2ee_client::encrypt_request_body(
@@ -250,7 +247,9 @@ impl RemoteDesktopRegistry {
 
             let response = req.send().await.map_err(internal)?;
             let status = response.status();
-            if status == reqwest::StatusCode::PRECONDITION_FAILED && attempt == 0 && session.is_some()
+            if status == reqwest::StatusCode::PRECONDITION_FAILED
+                && attempt == 0
+                && session.is_some()
             {
                 *profile.e2ee.write().await = None;
                 continue;
@@ -487,9 +486,8 @@ fn encode_ws_frame(
     plain: &str,
 ) -> Result<String, DesktopError> {
     match e2ee {
-        Some(session) => {
-            crate::host::connectivity::e2ee_client::encrypt_ws_text(session, plain).map_err(internal)
-        }
+        Some(session) => crate::host::connectivity::e2ee_client::encrypt_ws_text(session, plain)
+            .map_err(internal),
         None => Ok(plain.to_string()),
     }
 }
@@ -499,7 +497,9 @@ fn decode_ws_frame(
     wire: &str,
 ) -> Option<String> {
     match e2ee {
-        Some(session) => crate::host::connectivity::e2ee_client::decrypt_ws_text(session, wire).ok(),
+        Some(session) => {
+            crate::host::connectivity::e2ee_client::decrypt_ws_text(session, wire).ok()
+        }
         None => Some(wire.to_string()),
     }
 }
@@ -556,7 +556,11 @@ async fn pump_host_event_socket(
                 continue;
             }
         };
-        if stream.send(Message::Text(attach_wire.into())).await.is_err() {
+        if stream
+            .send(Message::Text(attach_wire.into()))
+            .await
+            .is_err()
+        {
             *profile.e2ee.write().await = None;
             tokio::select! {
                 _ = &mut cancel_rx => return Ok(()),

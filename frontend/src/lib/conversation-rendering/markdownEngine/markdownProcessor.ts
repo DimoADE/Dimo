@@ -197,10 +197,7 @@ function rehypeListMetadata() {
         return;
       }
 
-      if (
-        node.tagName === 'input' &&
-        node.properties?.type === 'checkbox'
-      ) {
+      if (node.tagName === 'input' && node.properties?.type === 'checkbox') {
         node.properties = {
           ...(node.properties ?? {}),
           dataTaskIndex: String(taskCheckboxIndex),

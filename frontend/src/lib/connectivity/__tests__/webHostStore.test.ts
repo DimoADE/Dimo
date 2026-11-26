@@ -36,7 +36,9 @@ describe('webHostStore', () => {
       hostId: 'host_1',
       name: 'Office Mac',
       origin: 'https://office.example.com/dimo',
-      endpoints: [{ origin: 'https://office.example.com/dimo', kind: 'custom_public' }],
+      endpoints: [
+        { origin: 'https://office.example.com/dimo', kind: 'custom_public' },
+      ],
       accessToken: 'tok_1_new',
       trustSource: 'paired',
       lastConnectedAt: '2026-11-25T11:00:00Z',
@@ -64,7 +66,9 @@ describe('webHostStore', () => {
       hostId: 'host_paired',
       name: 'Home Box',
       origin: 'https://home.example.com',
-      endpoints: [{ origin: 'https://home.example.com', kind: 'custom_public' }],
+      endpoints: [
+        { origin: 'https://home.example.com', kind: 'custom_public' },
+      ],
       accessToken: 'tok_paired',
       trustSource: 'paired',
       lastConnectedAt: '2026-11-25T10:00:00Z',

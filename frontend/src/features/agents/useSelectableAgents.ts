@@ -43,7 +43,7 @@ function toSelectableAgent(agent: AgentManagementView): SelectableAgent {
  * handshake and active operations, so selectors must not reconstruct those
  * decisions from the public Registry or a closed built-in list.
  */
-export function useSelectableAgents(): SelectableAgent[] {
+export function useSelectableAgents(refreshKey?: unknown): SelectableAgent[] {
   const [agents, setAgents] = useState<SelectableAgent[]>([]);
 
   useEffect(() => {
@@ -59,7 +59,7 @@ export function useSelectableAgents(): SelectableAgent[] {
     return () => {
       active = false;
     };
-  }, []);
+  }, [refreshKey]);
 
   return agents;
 }

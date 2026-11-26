@@ -26,9 +26,9 @@ import {
 } from '@xyflow/react';
 import { Map as MapIcon, Wand2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { useDocumentForegroundActive } from '@/hooks/useDocumentForegroundActive';
 import type { KanbanProjectSessionRecord } from '@/hooks/useKanbanProjectSessions';
 import { useQueryClient } from '@tanstack/react-query';
-import { sessionsApi } from '@/lib/api';
 import { CollaborationCreateOverlay } from '@/features/collaboration/CollaborationCreateOverlay';
 import {
   notifyCanvasBrowserViewportChange,
@@ -36,7 +36,10 @@ import {
 } from '@/features/host-browser/electronBrowserSurfaceStore';
 import { registerCanvasCreationHost } from './canvasCreationHost';
 import { useKanbanCanvasListVisible } from '@/lib/kanbanCanvasListVisible';
-import { invalidateWorkspaceSessions } from '@/lib/sessionQueryCache';
+import {
+  isSessionReviewReady,
+  markReviewSessionViewed,
+} from '@/lib/sessionQueryCache';
 import {
   clearCanvasReveal,
   peekCanvasReveal,
@@ -1021,27 +1024,27 @@ function SessionCanvasFlow({
     notify(session.placement);
   }, [sessionsById]);
 
+  const isForegroundActive = useDocumentForegroundActive();
+
   useEffect(() => {
+    if (!isForegroundActive) return;
     const sessionIds = selectedSessionIdsForViewed(
       documentRef.current.nodes,
       selectedIds
     );
     if (sessionIds.length === 0) return;
-    let cancelled = false;
-    void Promise.all(
-      sessionIds.map(async (sessionId) => {
-        const session = sessionsById.get(sessionId);
-        if (!session) return;
-        await sessionsApi.markViewed(sessionId);
-        if (!cancelled) {
-          await invalidateWorkspaceSessions(queryClient, session.workspace.id);
-        }
-      })
-    ).catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [queryClient, selectedIds, sessionsById, runningSessionIds]);
+    for (const sessionId of sessionIds) {
+      const session = sessionsById.get(sessionId);
+      if (!session || !isSessionReviewReady(session)) continue;
+      void markReviewSessionViewed(queryClient, sessionId, {
+        workspaceId: session.workspace.id,
+        knownState: {
+          status: session.status,
+          isRunning: session.isRunning,
+        },
+      });
+    }
+  }, [isForegroundActive, queryClient, selectedIds, sessionsById]);
 
   useEffect(() => {
     if (nodes.length >= documentState.nodes.length) return;

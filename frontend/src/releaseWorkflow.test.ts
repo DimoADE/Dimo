@@ -31,13 +31,11 @@ function cargoBinaryNames(packageDirectory: string): string[] {
 
 describe('release workflow contract', () => {
   it('builds and packages the Cargo binary targets that actually exist', () => {
-    const packages = ['crates/server', 'crates/dimo-mcp'].map(
-      (directory) => ({
-        directory,
-        packageName: cargoPackageName(directory),
-        binaryNames: cargoBinaryNames(directory),
-      })
-    );
+    const packages = ['crates/server', 'crates/dimo-mcp'].map((directory) => ({
+      directory,
+      packageName: cargoPackageName(directory),
+      binaryNames: cargoBinaryNames(directory),
+    }));
 
     expect(packages).toEqual([
       {

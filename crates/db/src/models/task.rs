@@ -163,7 +163,7 @@ impl Task {
                        SELECT s.executor
                        FROM sessions s
                        WHERE s.task_id = t.id
-                       ORDER BY s.updated_at DESC, s.created_at DESC
+                       ORDER BY COALESCE((SELECT COALESCE(ct.completed_at, ct.started_at, ct.created_at) FROM conversation_turns ct WHERE ct.conversation_id = s.id ORDER BY ct.ordinal DESC LIMIT 1), s.updated_at) DESC, s.created_at DESC
                        LIMIT 1
                    ) AS executor
                FROM tasks t

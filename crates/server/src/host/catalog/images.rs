@@ -139,6 +139,19 @@ fn metadata_for(
     }
 }
 
+fn map_image_error(error: services::services::image::ImageError) -> ApplicationError {
+    match error {
+        services::services::image::ImageError::TooLarge(_, _)
+        | services::services::image::ImageError::InvalidFormat => {
+            ApplicationError::bad_request(error.to_string())
+        }
+        services::services::image::ImageError::NotFound => {
+            ApplicationError::not_found(error.to_string())
+        }
+        other => internal_error(other),
+    }
+}
+
 pub(super) async fn upload(
     domains: &ServerApplicationDomains,
     args: Value,
@@ -151,7 +164,7 @@ pub(super) async fn upload(
             .image()
             .store_image(&bytes, &payload.file_name)
             .await
-            .map_err(internal_error)?,
+            .map_err(map_image_error)?,
     )
 }
 
@@ -173,7 +186,7 @@ pub(super) async fn upload_for_task(
         .image()
         .store_image(&bytes, &args.payload.file_name)
         .await
-        .map_err(internal_error)?;
+        .map_err(map_image_error)?;
     TaskImage::associate_many_dedup(&domains.pool, task.id, &[image.id])
         .await
         .map_err(internal_error)?;
@@ -200,7 +213,7 @@ pub(super) async fn upload_for_workspace(
         .image()
         .store_image(&bytes, &args.payload.file_name)
         .await
-        .map_err(internal_error)?;
+        .map_err(map_image_error)?;
     TaskImage::associate_many_dedup(&domains.pool, workspace.task_id, &[image.id])
         .await
         .map_err(internal_error)?;
@@ -446,5 +459,26 @@ mod tests {
         .expect("camelCase payload");
         assert_eq!(args.payload.file_name, "shot.png");
         assert_eq!(args.payload.data_base64, "aaaa");
+    }
+
+    #[test]
+    fn map_image_error_maps_client_errors_without_500() {
+        let too_large = map_image_error(services::services::image::ImageError::TooLarge(200, 100));
+        assert_eq!(
+            too_large.envelope().code,
+            remote_protocol::ErrorCode::BadRequest
+        );
+
+        let invalid = map_image_error(services::services::image::ImageError::InvalidFormat);
+        assert_eq!(
+            invalid.envelope().code,
+            remote_protocol::ErrorCode::BadRequest
+        );
+
+        let not_found = map_image_error(services::services::image::ImageError::NotFound);
+        assert_eq!(
+            not_found.envelope().code,
+            remote_protocol::ErrorCode::NotFound
+        );
     }
 }

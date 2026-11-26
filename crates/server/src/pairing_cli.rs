@@ -1,9 +1,7 @@
 use std::path::Path;
 
 use db::DBService;
-use remote_protocol::{
-    CreatePairingRequest, IssuedPairingInvitation, PairingInvitationPayload,
-};
+use remote_protocol::{CreatePairingRequest, IssuedPairingInvitation, PairingInvitationPayload};
 
 use crate::{
     AuthenticatedCredential, PairingCommand, ServerAuth, SqliteServerAuth, auth::AuthStoreError,
@@ -46,7 +44,8 @@ pub async fn issue_host_pairing(
     } else {
         crate::desktop::host_tunnel::published_origins().await
     };
-    let reachability = crate::desktop::host_tunnel::merge_host_reachability(&lan_origins, published);
+    let reachability =
+        crate::desktop::host_tunnel::merge_host_reachability(&lan_origins, published);
     let payload = PairingInvitationPayload::from_challenge(
         host_id.clone(),
         command.preset,

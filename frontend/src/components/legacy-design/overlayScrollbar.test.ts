@@ -333,4 +333,3 @@ describe('overlay scrollbar host', () => {
     outer.remove();
   });
 });
-

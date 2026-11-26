@@ -682,10 +682,17 @@ pub struct RuntimeEventNotification {
 
 type BeforeTurnHookFn =
     dyn Fn(&BeforeTurnContext) -> Vec<agents::InternalPromptBlock> + Send + Sync + 'static;
+pub type AsyncBeforeTurnFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Vec<agents::InternalPromptBlock>> + Send>>;
+type AsyncBeforeTurnHookFn =
+    dyn Fn(BeforeTurnContext) -> AsyncBeforeTurnFuture + Send + Sync + 'static;
 type AfterTurnHookFn = dyn Fn(&AfterTurnEvent) + Send + Sync + 'static;
 
 static BEFORE_TURN_HOOKS: std::sync::OnceLock<std::sync::RwLock<Vec<Arc<BeforeTurnHookFn>>>> =
     std::sync::OnceLock::new();
+static ASYNC_BEFORE_TURN_HOOKS: std::sync::OnceLock<
+    std::sync::RwLock<Vec<Arc<AsyncBeforeTurnHookFn>>>,
+> = std::sync::OnceLock::new();
 static AFTER_TURN_HOOKS: std::sync::OnceLock<std::sync::RwLock<Vec<Arc<AfterTurnHookFn>>>> =
     std::sync::OnceLock::new();
 static AFTER_TURN_TX: std::sync::OnceLock<tokio::sync::broadcast::Sender<AfterTurnEvent>> =
@@ -696,6 +703,10 @@ static RUNTIME_EVENT_TX: std::sync::OnceLock<
 
 fn before_turn_hooks() -> &'static std::sync::RwLock<Vec<Arc<BeforeTurnHookFn>>> {
     BEFORE_TURN_HOOKS.get_or_init(|| std::sync::RwLock::new(Vec::new()))
+}
+
+fn async_before_turn_hooks() -> &'static std::sync::RwLock<Vec<Arc<AsyncBeforeTurnHookFn>>> {
+    ASYNC_BEFORE_TURN_HOOKS.get_or_init(|| std::sync::RwLock::new(Vec::new()))
 }
 
 fn after_turn_hooks() -> &'static std::sync::RwLock<Vec<Arc<AfterTurnHookFn>>> {
@@ -727,6 +738,18 @@ where
     }
 }
 
+/// Register an async `beforeTurn` hook that can inspect SQLite or runtime state
+/// before contributing implicit [`agents::InternalPromptBlock`] items.
+pub fn register_async_before_turn_hook<F, Fut>(hook: F)
+where
+    F: Fn(BeforeTurnContext) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Vec<agents::InternalPromptBlock>> + Send + 'static,
+{
+    if let Ok(mut guard) = async_before_turn_hooks().write() {
+        guard.push(Arc::new(move |ctx| Box::pin(hook(ctx))));
+    }
+}
+
 /// Register a programmable `afterTurn` hook invoked when a turn finishes.
 pub fn register_after_turn_hook<F>(hook: F)
 where
@@ -740,6 +763,9 @@ where
 /// Clears globally registered `beforeTurn` and `afterTurn` hooks (primarily for tests).
 pub fn clear_turn_hooks() {
     if let Ok(mut guard) = before_turn_hooks().write() {
+        guard.clear();
+    }
+    if let Ok(mut guard) = async_before_turn_hooks().write() {
         guard.clear();
     }
     if let Ok(mut guard) = after_turn_hooks().write() {
@@ -799,6 +825,20 @@ pub(crate) fn collect_registered_before_turn_contributions(
     let mut out = Vec::new();
     for hook in hooks {
         out.extend(hook(ctx));
+    }
+    out
+}
+
+pub(crate) async fn collect_registered_async_before_turn_contributions(
+    ctx: &BeforeTurnContext,
+) -> Vec<agents::InternalPromptBlock> {
+    let hooks = async_before_turn_hooks()
+        .read()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for hook in hooks {
+        out.extend(hook(ctx.clone()).await);
     }
     out
 }

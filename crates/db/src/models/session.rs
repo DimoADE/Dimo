@@ -127,68 +127,19 @@ pub struct CreateSession {
     pub status: Option<SessionStatus>,
 }
 
+/// Authoritative session activity timestamp: the completion time of the latest
+/// conversation turn, falling back to its start/creation time while a turn is
+/// in flight, or `s.updated_at` when a session has no turns yet.
+///
+/// Using this expression on read ensures that non-conversation operations
+/// (viewing a session, toggling pin, hydrating bindings, etc.) never distort
+/// a session's displayed active time or recency ordering — including for rows
+/// whose `sessions.updated_at` was overwritten before this invariant existed.
+pub const SESSION_ACTIVITY_AT_SQL: &str = "COALESCE((SELECT COALESCE(t.completed_at, t.started_at, t.created_at) FROM conversation_turns t WHERE t.conversation_id = s.id ORDER BY t.ordinal DESC LIMIT 1), s.updated_at)";
+
 impl Session {
     pub async fn find_by_id(pool: &SqlitePool, id: Uuid) -> Result<Option<Self>, sqlx::Error> {
-        sqlx::query_as::<_, Session>(
-            r#"SELECT id,
-                      workspace_id,
-                      task_id,
-                      name,
-                      initial_prompt,
-                      status,
-                      executor,
-                      external_session_id,
-                      agent_id,
-                      provider_instance_id,
-                      parent_session_id,
-                      parent_tool_use_id,
-                      delegation_call_id,
-                      created_at,
-                      updated_at
-               FROM sessions
-               WHERE id = ?"#,
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await
-    }
-
-    pub async fn find_by_task_id(
-        pool: &SqlitePool,
-        task_id: Uuid,
-    ) -> Result<Vec<Self>, sqlx::Error> {
-        sqlx::query_as::<_, Session>(
-            r#"SELECT id,
-                      workspace_id,
-                      task_id,
-                      name,
-                      initial_prompt,
-                      status,
-                      executor,
-                      external_session_id,
-                      agent_id,
-                      provider_instance_id,
-                      parent_session_id,
-                      parent_tool_use_id,
-                      delegation_call_id,
-                      created_at,
-                      updated_at
-               FROM sessions
-               WHERE task_id = ?
-               ORDER BY updated_at DESC, created_at DESC"#,
-        )
-        .bind(task_id)
-        .fetch_all(pool)
-        .await
-    }
-
-    /// Find all sessions for a workspace, ordered by recent session activity.
-    /// Includes collaboration member sessions so the list can show bot badges.
-    pub async fn find_by_workspace_id(
-        pool: &SqlitePool,
-        workspace_id: Uuid,
-    ) -> Result<Vec<Self>, sqlx::Error> {
-        sqlx::query_as::<_, Session>(
+        sqlx::query_as::<_, Session>(&format!(
             r#"SELECT s.id,
                       s.workspace_id,
                       s.task_id,
@@ -203,13 +154,72 @@ impl Session {
                       s.parent_tool_use_id,
                       s.delegation_call_id,
                       s.created_at,
-                      s.updated_at
+                      {SESSION_ACTIVITY_AT_SQL} AS updated_at
+               FROM sessions s
+               WHERE s.id = ?"#,
+        ))
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+    }
+
+    pub async fn find_by_task_id(
+        pool: &SqlitePool,
+        task_id: Uuid,
+    ) -> Result<Vec<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Session>(&format!(
+            r#"SELECT s.id,
+                      s.workspace_id,
+                      s.task_id,
+                      s.name,
+                      s.initial_prompt,
+                      s.status,
+                      s.executor,
+                      s.external_session_id,
+                      s.agent_id,
+                      s.provider_instance_id,
+                      s.parent_session_id,
+                      s.parent_tool_use_id,
+                      s.delegation_call_id,
+                      s.created_at,
+                      {SESSION_ACTIVITY_AT_SQL} AS updated_at
+               FROM sessions s
+               WHERE s.task_id = ?
+               ORDER BY {SESSION_ACTIVITY_AT_SQL} DESC, s.created_at DESC"#,
+        ))
+        .bind(task_id)
+        .fetch_all(pool)
+        .await
+    }
+
+    /// Find all sessions for a workspace, ordered by recent session activity.
+    /// Includes collaboration member sessions so the list can show bot badges.
+    pub async fn find_by_workspace_id(
+        pool: &SqlitePool,
+        workspace_id: Uuid,
+    ) -> Result<Vec<Self>, sqlx::Error> {
+        sqlx::query_as::<_, Session>(&format!(
+            r#"SELECT s.id,
+                      s.workspace_id,
+                      s.task_id,
+                      s.name,
+                      s.initial_prompt,
+                      s.status,
+                      s.executor,
+                      s.external_session_id,
+                      s.agent_id,
+                      s.provider_instance_id,
+                      s.parent_session_id,
+                      s.parent_tool_use_id,
+                      s.delegation_call_id,
+                      s.created_at,
+                      {SESSION_ACTIVITY_AT_SQL} AS updated_at
                FROM sessions s
                WHERE s.workspace_id = ?
                  AND s.deleted_at IS NULL
-               ORDER BY s.updated_at DESC,
+               ORDER BY {SESSION_ACTIVITY_AT_SQL} DESC,
                         s.created_at DESC"#,
-        )
+        ))
         .bind(workspace_id)
         .fetch_all(pool)
         .await
@@ -222,7 +232,7 @@ impl Session {
         pool: &SqlitePool,
         workspace_id: Uuid,
     ) -> Result<Option<Self>, sqlx::Error> {
-        sqlx::query_as::<_, Session>(
+        sqlx::query_as::<_, Session>(&format!(
             r#"SELECT s.id,
                       s.workspace_id,
                       s.task_id,
@@ -237,7 +247,7 @@ impl Session {
                       s.parent_tool_use_id,
                       s.delegation_call_id,
                       s.created_at,
-                      s.updated_at
+                      {SESSION_ACTIVITY_AT_SQL} AS updated_at
                FROM sessions s
                WHERE s.workspace_id = ?
                  AND s.deleted_at IS NULL
@@ -249,10 +259,10 @@ impl Session {
                      SELECT 1 FROM collaboration_space_members sm
                      WHERE replace(sm.conversation_id, '-', '') = lower(hex(s.id))
                  )
-               ORDER BY s.updated_at DESC,
+               ORDER BY {SESSION_ACTIVITY_AT_SQL} DESC,
                         s.created_at DESC
                LIMIT 1"#,
-        )
+        ))
         .bind(workspace_id)
         .fetch_optional(pool)
         .await
@@ -352,6 +362,31 @@ impl Session {
         parent_tool_use_id: &str,
         delegation_call_id: &str,
     ) -> Result<Self, SessionError> {
+        Self::create_with_optional_delegation_on_connection(
+            conn,
+            data,
+            id,
+            workspace_id,
+            Some(parent_session_id),
+            parent_tool_use_id,
+            delegation_call_id,
+        )
+        .await
+    }
+
+    /// Create a delegated child session where `parent_session_id` may be `None`
+    /// (for cross-Host delegations whose parent conversation lives on another
+    /// Host) while still recording `parent_tool_use_id` and `delegation_call_id`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_with_optional_delegation_on_connection(
+        conn: &mut SqliteConnection,
+        data: &CreateSession,
+        id: Uuid,
+        workspace_id: Uuid,
+        parent_session_id: Option<Uuid>,
+        parent_tool_use_id: &str,
+        delegation_call_id: &str,
+    ) -> Result<Self, SessionError> {
         let normalized_instance =
             normalize_provider_instance_storage_id(data.provider_instance_id.as_deref());
         sqlx::query_as::<_, Session>(
@@ -402,25 +437,25 @@ impl Session {
         pool: &SqlitePool,
         delegation_call_id: &str,
     ) -> Result<Option<Self>, sqlx::Error> {
-        sqlx::query_as::<_, Session>(
-            r#"SELECT id,
-                      workspace_id,
-                      task_id,
-                      name,
-                      initial_prompt,
-                      status,
-                      executor,
-                      external_session_id,
-                      agent_id,
-                      provider_instance_id,
-                      parent_session_id,
-                      parent_tool_use_id,
-                      delegation_call_id,
-                      created_at,
-                      updated_at
-               FROM sessions
-               WHERE delegation_call_id = ?"#,
-        )
+        sqlx::query_as::<_, Session>(&format!(
+            r#"SELECT s.id,
+                      s.workspace_id,
+                      s.task_id,
+                      s.name,
+                      s.initial_prompt,
+                      s.status,
+                      s.executor,
+                      s.external_session_id,
+                      s.agent_id,
+                      s.provider_instance_id,
+                      s.parent_session_id,
+                      s.parent_tool_use_id,
+                      s.delegation_call_id,
+                      s.created_at,
+                      {SESSION_ACTIVITY_AT_SQL} AS updated_at
+               FROM sessions s
+               WHERE s.delegation_call_id = ?"#,
+        ))
         .bind(delegation_call_id)
         .fetch_optional(pool)
         .await
@@ -434,8 +469,7 @@ impl Session {
         let normalized = normalize_provider_instance_storage_id(provider_instance_id);
         sqlx::query(
             r#"UPDATE sessions
-               SET provider_instance_id = ?,
-                   updated_at = datetime('now', 'subsec')
+               SET provider_instance_id = ?
                WHERE id = ?"#,
         )
         .bind(normalized)
@@ -456,8 +490,7 @@ impl Session {
         }
         sqlx::query(
             r#"UPDATE sessions
-               SET external_session_id = COALESCE(?, external_session_id),
-                   updated_at = datetime('now', 'subsec')
+               SET external_session_id = COALESCE(?, external_session_id)
                WHERE id = ?"#,
         )
         .bind(trimmed)
@@ -490,8 +523,7 @@ impl Session {
                    END,
                    agent_id = COALESCE(?2, agent_id),
                    agent_type = COALESCE(?2, agent_type),
-                   executor = COALESCE(?2, executor),
-                   updated_at = datetime('now', 'subsec')
+                   executor = COALESCE(?2, executor)
                WHERE id = ?3"#,
         )
         .bind(trimmed_ext)
@@ -509,7 +541,7 @@ impl Session {
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"UPDATE sessions
-               SET name = ?, updated_at = datetime('now', 'subsec')
+               SET name = ?
                WHERE id = ?"#,
         )
         .bind(name.filter(|value| !value.trim().is_empty()))
@@ -535,7 +567,7 @@ impl Session {
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"UPDATE sessions
-               SET status = ?, updated_at = datetime('now', 'subsec')
+               SET status = ?
                WHERE id = ?"#,
         )
         .bind(status)
@@ -554,8 +586,7 @@ impl Session {
         sqlx::query(
             r#"UPDATE sessions
                SET workspace_id = ?,
-                   task_id = COALESCE(?, task_id),
-                   updated_at = datetime('now', 'subsec')
+                   task_id = COALESCE(?, task_id)
                WHERE id = ?"#,
         )
         .bind(workspace_id)
@@ -859,5 +890,190 @@ mod tests {
             .expect("session exists");
         assert_eq!(updated.workspace_id, second_workspace);
         assert_eq!(updated.task_id, Some(second_task));
+    }
+
+    #[tokio::test]
+    async fn updated_at_reflects_latest_turn_completion_time_not_view_or_metadata_writes() {
+        let pool = setup_pool().await;
+        let workspace_id = Uuid::new_v4();
+        let older_session_id = Uuid::new_v4();
+        let newer_session_id = Uuid::new_v4();
+        let empty_session_id = Uuid::new_v4();
+
+        Session::create(&pool, &sample("CODEX"), older_session_id, workspace_id)
+            .await
+            .expect("create older session");
+        Session::create(&pool, &sample("CODEX"), newer_session_id, workspace_id)
+            .await
+            .expect("create newer session");
+        Session::create(&pool, &sample("CODEX"), empty_session_id, workspace_id)
+            .await
+            .expect("create empty session");
+
+        // Set older_session's raw sessions.updated_at to a much later timestamp
+        // (simulating a previously polluted view/metadata write), while its
+        // latest turn completed earlier than newer_session's turn.
+        sqlx::query("UPDATE sessions SET updated_at = '2026-10-25 12:00:00.000' WHERE id = ?")
+            .bind(older_session_id)
+            .execute(&pool)
+            .await
+            .expect("pollute older session updated_at");
+        sqlx::query("UPDATE sessions SET updated_at = '2026-10-20 08:00:00.000' WHERE id = ?")
+            .bind(newer_session_id)
+            .execute(&pool)
+            .await
+            .expect("set newer session updated_at");
+        sqlx::query("UPDATE sessions SET updated_at = '2026-10-19 08:00:00.000' WHERE id = ?")
+            .bind(empty_session_id)
+            .execute(&pool)
+            .await
+            .expect("set empty session updated_at");
+
+        sqlx::query(
+            r#"INSERT INTO conversation_turns
+                   (id, conversation_id, ordinal, status, created_at, started_at, completed_at)
+               VALUES (?, ?, 1, 'completed', '2026-10-21 09:00:00.000', '2026-10-21 09:00:01.000', '2026-10-21 09:05:00.000')"#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(older_session_id)
+        .execute(&pool)
+        .await
+        .expect("insert older completed turn");
+
+        sqlx::query(
+            r#"INSERT INTO conversation_turns
+                   (id, conversation_id, ordinal, status, created_at, started_at, completed_at)
+               VALUES (?, ?, 1, 'completed', '2026-10-22 10:00:00.000', '2026-10-22 10:00:01.000', '2026-10-22 10:15:00.000')"#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(newer_session_id)
+        .execute(&pool)
+        .await
+        .expect("insert newer completed turn");
+
+        // Status, name, and pin updates must not alter updated_at.
+        Session::update_status(&pool, empty_session_id, SessionStatus::Done)
+            .await
+            .expect("update empty status");
+        Session::update_name(&pool, empty_session_id, Some("Renamed"))
+            .await
+            .expect("update empty name");
+        crate::models::conversation::DbConversationSummary::set_pinned(
+            &pool,
+            empty_session_id,
+            true,
+        )
+        .await
+        .expect("pin empty session");
+        crate::models::conversation::DbConversationSummary::set_pinned(
+            &pool,
+            empty_session_id,
+            false,
+        )
+        .await
+        .expect("unpin empty session");
+
+        let older = Session::find_by_id(&pool, older_session_id)
+            .await
+            .expect("load older")
+            .expect("older exists");
+        let newer = Session::find_by_id(&pool, newer_session_id)
+            .await
+            .expect("load newer")
+            .expect("newer exists");
+        let empty = Session::find_by_id(&pool, empty_session_id)
+            .await
+            .expect("load empty")
+            .expect("empty exists");
+
+        assert_eq!(
+            older.updated_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+            "2026-10-21 09:05:00"
+        );
+        assert_eq!(
+            newer.updated_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+            "2026-10-22 10:15:00"
+        );
+        assert_eq!(
+            empty.updated_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+            "2026-10-19 08:00:00"
+        );
+
+        let ordered = Session::find_by_workspace_id(&pool, workspace_id)
+            .await
+            .expect("list workspace sessions");
+        let ordered_ids: Vec<Uuid> = ordered.into_iter().map(|s| s.id).collect();
+        assert_eq!(
+            ordered_ids,
+            vec![newer_session_id, older_session_id, empty_session_id]
+        );
+
+        let summaries = crate::models::conversation::DbConversationSummary::list_for_workspace(
+            &pool,
+            workspace_id,
+        )
+        .await
+        .expect("list conversation summaries");
+        let summary_ids: Vec<Uuid> = summaries.iter().map(|s| s.id).collect();
+        assert_eq!(
+            summary_ids,
+            vec![newer_session_id, older_session_id, empty_session_id]
+        );
+        assert_eq!(
+            summaries[1]
+                .updated_at
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string(),
+            "2026-10-21 09:05:00"
+        );
+    }
+
+    #[tokio::test]
+    async fn in_flight_turn_uses_started_at_then_switches_to_completed_at() {
+        let pool = setup_pool().await;
+        let workspace_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+
+        Session::create(&pool, &sample("CODEX"), session_id, workspace_id)
+            .await
+            .expect("create session");
+
+        sqlx::query(
+            r#"INSERT INTO conversation_turns
+                   (id, conversation_id, ordinal, status, created_at, started_at, completed_at)
+               VALUES (?, ?, 1, 'running', '2026-10-23 11:00:00.000', '2026-10-23 11:00:05.000', NULL)"#,
+        )
+        .bind(turn_id)
+        .bind(session_id)
+        .execute(&pool)
+        .await
+        .expect("insert running turn");
+
+        let running = Session::find_by_id(&pool, session_id)
+            .await
+            .expect("load running")
+            .expect("session exists");
+        assert_eq!(
+            running.updated_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+            "2026-10-23 11:00:05"
+        );
+
+        sqlx::query(
+            "UPDATE conversation_turns SET status = 'completed', completed_at = '2026-10-23 11:02:30.000' WHERE id = ?",
+        )
+        .bind(turn_id)
+        .execute(&pool)
+        .await
+        .expect("complete turn");
+
+        let completed = Session::find_by_id(&pool, session_id)
+            .await
+            .expect("load completed")
+            .expect("session exists");
+        assert_eq!(
+            completed.updated_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+            "2026-10-23 11:02:30"
+        );
     }
 }

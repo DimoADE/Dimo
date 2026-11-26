@@ -152,9 +152,12 @@ pub fn decrypt_response_bytes(
     decrypt_payload(&session.key, AAD_RESP, encoded.trim()).map_err(str::to_string)
 }
 
-pub fn encrypt_ws_text(session: &E2eeClientSession, plaintext_json: &str) -> Result<String, String> {
-    let cipher = encrypt_payload(&session.key, AAD_WS, plaintext_json.as_bytes())
-        .map_err(str::to_string)?;
+pub fn encrypt_ws_text(
+    session: &E2eeClientSession,
+    plaintext_json: &str,
+) -> Result<String, String> {
+    let cipher =
+        encrypt_payload(&session.key, AAD_WS, plaintext_json.as_bytes()).map_err(str::to_string)?;
     Ok(serde_json::json!({
         "type": "e2ee",
         "d": cipher,

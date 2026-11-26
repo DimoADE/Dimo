@@ -529,7 +529,11 @@ const AgentTimelineConversation = forwardRef<
   }, [timeline]);
 
   const handleOpenLinkedConversation = useCallback(
-    (targetId: string, targetWorkspaceId?: string | null, agentId?: string | null) => {
+    (
+      targetId: string,
+      targetWorkspaceId?: string | null,
+      agentId?: string | null
+    ) => {
       panelActions?.openSessionTab({
         sessionId: targetId,
         workspaceId: targetWorkspaceId ?? attempt.id,
@@ -544,13 +548,21 @@ const AgentTimelineConversation = forwardRef<
     async (turnId?: string, targetAgentId?: string) => {
       if (!sessionId) return;
       const fromAgent =
-        attempt.session?.agent_id ?? attempt.session?.executor ?? targetAgentId ?? 'claude_code';
+        attempt.session?.agent_id ??
+        attempt.session?.executor ??
+        targetAgentId ??
+        'claude_code';
       const toAgent = targetAgentId ?? fromAgent;
       const turnModel = turnId
-        ? timeline.find((r) => r.turn.role === 'assistant' && dimoTurnIdFromTimelineRowId(r.turn.id) === turnId)?.turn.model
+        ? timeline.find(
+            (r) =>
+              r.turn.role === 'assistant' &&
+              dimoTurnIdFromTimelineRowId(r.turn.id) === turnId
+          )?.turn.model
         : null;
       const fallbackModel = timeline.reduce<string | null>(
-        (acc, r) => (r.turn.role === 'assistant' && r.turn.model ? r.turn.model : acc),
+        (acc, r) =>
+          r.turn.role === 'assistant' && r.turn.model ? r.turn.model : acc,
         null
       );
       const pendingId = beginPendingForkHandoff({
@@ -561,11 +573,21 @@ const AgentTimelineConversation = forwardRef<
         fromModelLabel: turnModel ?? fallbackModel,
       });
       try {
-        const result = await conversationApi.fork(sessionId, turnId, targetAgentId);
+        const result = await conversationApi.fork(
+          sessionId,
+          turnId,
+          targetAgentId
+        );
         if (result.continuity === 'history_only') {
-          toast.warning(t('tasks:hubListItem.forkHistoryOnly', { reason: result.continuityNote }));
+          toast.warning(
+            t('tasks:hubListItem.forkHistoryOnly', {
+              reason: result.continuityNote,
+            })
+          );
         }
-        void queryClient?.invalidateQueries({ queryKey: ['workspaceSessions', attempt.id] });
+        void queryClient?.invalidateQueries({
+          queryKey: ['workspaceSessions', attempt.id],
+        });
         kanbanSessions?.placeForkedChild(
           { sessionId: result.conversationId, workspaceId: attempt.id },
           sessionId
@@ -577,12 +599,24 @@ const AgentTimelineConversation = forwardRef<
           activate: true,
         });
       } catch (error) {
-        toast.error(t('tasks:hubListItem.forkFailed', { error: getErrorMessage(error) }));
+        toast.error(
+          t('tasks:hubListItem.forkFailed', { error: getErrorMessage(error) })
+        );
       } finally {
         endPendingForkHandoff(pendingId);
       }
     },
-    [attempt.id, attempt.session?.agent_id, attempt.session?.executor, kanbanSessions, panelActions, queryClient, sessionId, t, timeline]
+    [
+      attempt.id,
+      attempt.session?.agent_id,
+      attempt.session?.executor,
+      kanbanSessions,
+      panelActions,
+      queryClient,
+      sessionId,
+      t,
+      timeline,
+    ]
   );
   // The Nth user turn maps to the Nth checkpoint ordinal (see G-R1).
   const userOrdinalByKey = useMemo(() => {
@@ -1024,20 +1058,21 @@ const AgentTimelineConversation = forwardRef<
         <div
           ref={containerRef}
           className={cn(
-            'min-h-0 flex-1 overflow-y-auto px-2 py-3',
+            'min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2 py-3',
             !usesComposerStatusDock && 'pb-14'
           )}
           data-panel="conversation-logs"
+          data-overlay-scrollbar-x="off"
           onScroll={handleScroll}
           onClickCapture={(event) => {
             if (isConversationExpansionToggle(event.target)) {
-              markExpansionInView();
+              markExpansionInView(event.target);
             }
           }}
           onKeyDownCapture={(event) => {
             if (event.key !== 'Enter' && event.key !== ' ') return;
             if (isConversationExpansionToggle(event.target)) {
-              markExpansionInView();
+              markExpansionInView(event.target);
             }
           }}
           onWheel={(event) => {
@@ -1286,7 +1321,9 @@ const AgentTimelineConversation = forwardRef<
                                 dismissedQuestionIds={dismissedQuestionIds}
                                 onDismissQuestion={handleDismissQuestion}
                                 onOpenChild={handleOpenChild}
-                                onOpenConversation={handleOpenLinkedConversation}
+                                onOpenConversation={
+                                  handleOpenLinkedConversation
+                                }
                                 contextCompact={
                                   row
                                     ? (contextCompactByRowKey.get(row.key) ??

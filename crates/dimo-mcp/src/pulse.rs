@@ -405,8 +405,8 @@ impl PulseState {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or("dimo-mcp");
-        let root_event_id = extract_trace_root_event_id(arguments, meta)
-            .unwrap_or_else(|| event_id.clone());
+        let root_event_id =
+            extract_trace_root_event_id(arguments, meta).unwrap_or_else(|| event_id.clone());
         let parent_run_id = extract_trace_parent_run_id(arguments, meta);
         let correlations = arguments
             .get("correlations")

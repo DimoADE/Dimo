@@ -1013,7 +1013,9 @@ describe('Phase 1 & Phase 2 Markdown upgrades', () => {
       ].join('\n')
     );
 
-    const note = container.querySelector('.conv-md-alert[data-alert-kind="note"]');
+    const note = container.querySelector(
+      '.conv-md-alert[data-alert-kind="note"]'
+    );
     const warning = container.querySelector(
       '.conv-md-alert[data-alert-kind="warning"]'
     );
@@ -1070,7 +1072,12 @@ describe('Phase 1 & Phase 2 Markdown upgrades', () => {
 
   it('normalizes LLM under- and over-indented nested lists without turning them into code blocks', () => {
     const { container } = renderMarkdown(
-      ['1. Top item', '  - two-space nested bullet', '        - over-indented sub-bullet', '2. Next top item'].join('\n')
+      [
+        '1. Top item',
+        '  - two-space nested bullet',
+        '        - over-indented sub-bullet',
+        '2. Next top item',
+      ].join('\n')
     );
 
     expect(container.querySelector('pre')).toBeNull();
@@ -1086,9 +1093,9 @@ describe('Phase 1 & Phase 2 Markdown upgrades', () => {
 
     const codeblock = container.querySelector('.conv-md-codeblock');
     expect(codeblock).toBeInTheDocument();
-    expect(codeblock?.querySelector('.conv-md-codeblock-title')).toHaveTextContent(
-      'src/engine.ts'
-    );
+    expect(
+      codeblock?.querySelector('.conv-md-codeblock-title')
+    ).toHaveTextContent('src/engine.ts');
     expect(codeblock).not.toHaveClass('is-wrapped');
 
     const wrapBtn = screen.getByRole('button', { name: /自动换行|Word wrap/i });
@@ -1105,7 +1112,9 @@ describe('Phase 1 & Phase 2 Markdown upgrades', () => {
     const { container } = render(
       <QueryClientProvider client={queryClient}>
         <Markdown
-          value={'---\ntitle: Spec\n---\n\n# Heading\n\n- [ ] First task\n- [x] Done task'}
+          value={
+            '---\ntitle: Spec\n---\n\n# Heading\n\n- [ ] First task\n- [x] Done task'
+          }
           workspacePath="C:/workspace/project"
           stripFrontmatter
           onToggleTaskCheckbox={onToggle}

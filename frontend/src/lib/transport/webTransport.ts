@@ -775,10 +775,7 @@ export class WebTransport implements BackendTransport {
     if (this.destroyed || this.socket || this.subscriptions.size === 0) {
       return;
     }
-    const protocols = [
-      'dimo.v1',
-      `dimo.token.${base64UrlEncode(this.token)}`,
-    ];
+    const protocols = ['dimo.v1', `dimo.token.${base64UrlEncode(this.token)}`];
     if (session) {
       protocols.push(wsE2eeSubprotocol(session));
     }

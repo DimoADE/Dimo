@@ -861,8 +861,7 @@ impl PluginControlPlane {
 
 #[cfg(test)]
 mod lifecycle_serialization_tests {
-    use std::path::Path;
-    use std::sync::Arc;
+    use std::{path::Path, sync::Arc};
 
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
@@ -945,7 +944,13 @@ mod lifecycle_serialization_tests {
         let contributions = descriptors_for_package(&pkg, stale_gen);
         let publish_err = control_plane
             .registry
-            .publish_candidate("dimo.candidate-retire", stale_gen, &pkg, &contributions, &[])
+            .publish_candidate(
+                "dimo.candidate-retire",
+                stale_gen,
+                &pkg,
+                &contributions,
+                &[],
+            )
             .await
             .expect_err("retired candidate must not be publishable");
         assert!(publish_err.message().contains("no longer publishable"));

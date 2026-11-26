@@ -20,7 +20,10 @@ describe('happyEyeballs', () => {
           reachability: [
             { origin: 'http://192.168.1.20:17891/', kind: 'lan' },
             { origin: 'https://box.example.com/dimo/', kind: 'custom_public' },
-            { origin: 'https://relay.dimo-ai.com/t/host_abc', kind: 'official_relay' },
+            {
+              origin: 'https://relay.dimo-ai.com/t/host_abc',
+              kind: 'official_relay',
+            },
           ],
         })
     );
@@ -30,7 +33,10 @@ describe('happyEyeballs', () => {
     expect(inv?.endpoints).toEqual([
       { origin: 'http://192.168.1.20:17891', kind: 'lan' },
       { origin: 'https://box.example.com/dimo', kind: 'custom_public' },
-      { origin: 'https://relay.dimo-ai.com/t/host_abc', kind: 'official_relay' },
+      {
+        origin: 'https://relay.dimo-ai.com/t/host_abc',
+        kind: 'official_relay',
+      },
     ]);
 
     const shortCode = parsePairingInvitation('k7m2 npqx');
@@ -87,13 +93,21 @@ describe('happyEyeballs', () => {
       if (url.startsWith('http://192.168.1.20:17891/health')) {
         // Wrong host_id on LAN IP!
         return new Response(
-          JSON.stringify({ status: 'ok', host_id: 'host_wrong', name: 'Other' }),
+          JSON.stringify({
+            status: 'ok',
+            host_id: 'host_wrong',
+            name: 'Other',
+          }),
           { status: 200, headers: { 'content-type': 'application/json' } }
         );
       }
       if (url.startsWith('https://box.example.com/dimo/health')) {
         return new Response(
-          JSON.stringify({ status: 'ok', host_id: 'host_target', name: 'My Box' }),
+          JSON.stringify({
+            status: 'ok',
+            host_id: 'host_target',
+            name: 'My Box',
+          }),
           { status: 200, headers: { 'content-type': 'application/json' } }
         );
       }
@@ -104,7 +118,10 @@ describe('happyEyeballs', () => {
       [
         { origin: 'http://192.168.1.20:17891', kind: 'lan' },
         { origin: 'https://box.example.com/dimo', kind: 'custom_public' },
-        { origin: 'https://relay.dimo-ai.com/t/host_target', kind: 'official_relay' },
+        {
+          origin: 'https://relay.dimo-ai.com/t/host_target',
+          kind: 'official_relay',
+        },
       ],
       {
         expectedHostId: 'host_target',

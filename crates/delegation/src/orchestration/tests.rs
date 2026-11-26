@@ -116,10 +116,10 @@ async fn seed_parent_and_child(pool: &SqlitePool) -> (Uuid, Uuid, Uuid, Uuid) {
 }
 
 #[test]
-fn advertises_all_seventeen_orchestration_tools() {
+fn advertises_all_eighteen_orchestration_tools() {
     let schemas = orchestration_tool_schemas();
-    assert_eq!(schemas.len(), 17);
-    assert_eq!(ORCHESTRATION_TOOL_NAMES.len(), 17);
+    assert_eq!(schemas.len(), 18);
+    assert_eq!(ORCHESTRATION_TOOL_NAMES.len(), 18);
     for name in ORCHESTRATION_TOOL_NAMES {
         assert!(is_orchestration_tool(name), "missing tool {name}");
         assert!(
@@ -129,6 +129,7 @@ fn advertises_all_seventeen_orchestration_tools() {
             "schema missing for {name}"
         );
     }
+    assert!(is_orchestration_tool("environment_links"));
     assert!(!is_orchestration_tool("delegate_to_agent"));
     assert!(!is_orchestration_tool("list_spaces"));
 }
@@ -357,7 +358,12 @@ async fn pending_permission_store_round_trip() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].permission_id, perm_id.to_string());
     assert_eq!(entries[0].summary, "git push origin feat");
-    assert!(store.find_request(conv_id, &perm_id.to_string()).await.is_some());
+    assert!(
+        store
+            .find_request(conv_id, &perm_id.to_string())
+            .await
+            .is_some()
+    );
 
     store.remove(conv_id, &perm_id.to_string()).await;
     assert!(store.list_entries(conv_id).await.is_empty());
@@ -480,5 +486,359 @@ fn compose_message_with_attachments_handles_all_cases() {
     assert_eq!(
         compose_message_with_attachments(Some("Please check"), &["/tmp/a.log".into()]),
         Some("Please check\n\n[Attached files]\n- /tmp/a.log\n".into())
+    );
+}
+
+#[test]
+fn agent_entry_is_launchable_distinguishes_ready_from_uninstalled_and_disabled() {
+    use super::launch::agent_entry_is_launchable;
+
+    assert!(agent_entry_is_launchable(&json!({
+        "agent_id": "codex",
+        "enabled": true,
+        "lifecycle": "ready"
+    })));
+    assert!(agent_entry_is_launchable(&json!({
+        "agent_id": "claude_code",
+        "enabled": true,
+        "lifecycle": "needs_auth"
+    })));
+    assert!(agent_entry_is_launchable(&json!({
+        "agent_id": "gemini",
+        "enabled": true,
+        "lifecycle": "needs_config"
+    })));
+    assert!(!agent_entry_is_launchable(&json!({
+        "agent_id": "claude_code",
+        "enabled": false,
+        "lifecycle": "ready"
+    })));
+    assert!(!agent_entry_is_launchable(&json!({
+        "agent_id": "claude_code",
+        "enabled": true,
+        "lifecycle": "uninstalled"
+    })));
+    assert!(!agent_entry_is_launchable(&json!({
+        "agent_id": "claude_code",
+        "enabled": true,
+        "lifecycle": "needs_repair"
+    })));
+}
+
+#[tokio::test]
+async fn remote_originated_delegation_avoids_parent_session_fk_violation() {
+    use conversations::{CreateOrchestratedConversation, create_orchestrated_conversation};
+
+    let pool = setup_test_db().await;
+    let (_project_id, workspace_id, _parent_id, _existing_child) =
+        seed_parent_and_child(&pool).await;
+
+    let child_id = Uuid::new_v4();
+    let remote_parent_id = Uuid::new_v4(); // Does NOT exist in local `sessions` table!
+    let run_id = format!("run_remote_fk_{}", Uuid::new_v4().simple());
+
+    // Passing `parent_conversation_id: None` on `sessions` avoids FK failure under PRAGMA foreign_keys = ON,
+    // while `conversation_delegations` preserves `remote_parent_id` without FK constraints.
+    create_orchestrated_conversation(
+        &pool,
+        CreateOrchestratedConversation {
+            id: child_id,
+            parent_conversation_id: None,
+            parent_tool_call_id: Some("tool_remote_1".into()),
+            delegation_id: Some(run_id.clone()),
+            workspace_id,
+            agent_id: agents::AgentId::parse("codex").unwrap(),
+            provider_instance_id: None,
+            title: Some("Remote Child".into()),
+            initial_prompt: Some("Run tests on remote host".into()),
+            policy: json!({
+                "remoteParentConversationId": remote_parent_id,
+            }),
+        },
+    )
+    .await
+    .expect("remote-originated child session should insert without FK error");
+
+    let rec = ConversationDelegationRecord::create(
+        &pool,
+        CreateConversationDelegation {
+            run_id: &run_id,
+            parent_conversation_id: remote_parent_id,
+            child_conversation_id: child_id,
+            parent_tool_call_id: "tool_remote_1",
+            target_project_id: None,
+            target_workspace_id: Some(workspace_id),
+            target_environment_id: None,
+            agent_id: "codex",
+            provider_instance_id: None,
+            model: None,
+            role: None,
+            task_preview: "Run tests on remote host",
+            isolation: "shared",
+            mode: "async",
+            completion_wake: "always",
+            status: "running",
+            preparation_stage: Some("ready"),
+            worktree_path: None,
+            branch: None,
+            max_runtime_mode: RuntimeModeRank::FullAccess.as_i64(),
+            max_interaction_mode: InteractionModeRank::Default.as_i64(),
+            deadline_at: None,
+        },
+    )
+    .await
+    .expect("delegation row with remote parent id should insert cleanly");
+
+    assert_eq!(rec.parent_conversation_id, remote_parent_id);
+    let session = Session::find_by_id(&pool, child_id)
+        .await
+        .expect("query session")
+        .expect("session exists");
+    assert_eq!(session.parent_session_id, None);
+    assert_eq!(session.delegation_call_id.as_deref(), Some(run_id.as_str()));
+}
+
+#[tokio::test]
+async fn remote_shadow_row_syncs_status_and_formats_env_deep_link() {
+    use super::reactors::{format_coalesced_completion_message, sync_remote_status_into_shadow};
+
+    let pool = setup_test_db().await;
+    let (_project_id, _workspace_id, parent_id, _local_child) = seed_parent_and_child(&pool).await;
+
+    let remote_child_id = Uuid::new_v4(); // Lives on remote Host, NOT in local `sessions`!
+    let run_id = format!("run_shadow_{}", Uuid::new_v4().simple());
+
+    ConversationDelegationRecord::create(
+        &pool,
+        CreateConversationDelegation {
+            run_id: &run_id,
+            parent_conversation_id: parent_id,
+            child_conversation_id: remote_child_id,
+            parent_tool_call_id: "tool_shadow_1",
+            target_project_id: None,
+            target_workspace_id: None,
+            target_environment_id: Some("gpu-box"),
+            agent_id: "claude_code",
+            provider_instance_id: None,
+            model: Some("claude-sonnet-4-6"),
+            role: Some("Remote Trainer"),
+            task_preview: "Train evaluation baseline",
+            isolation: "worktree",
+            mode: "async",
+            completion_wake: "always",
+            status: "preparing",
+            preparation_stage: Some("creating_worktree"),
+            worktree_path: None,
+            branch: None,
+            max_runtime_mode: RuntimeModeRank::ApprovalRequired.as_i64(),
+            max_interaction_mode: InteractionModeRank::Default.as_i64(),
+            deadline_at: Some(Utc::now() + Duration::minutes(5)),
+        },
+    )
+    .await
+    .expect("insert local shadow row");
+
+    // Intermediate running sync should not mark terminal.
+    let still_running = sync_remote_status_into_shadow(
+        &pool,
+        &run_id,
+        &json!({
+            "run_id": run_id,
+            "status": "running",
+            "preparation_stage": "ready",
+            "branch": "feat/gpu-eval",
+            "worktree_path": "/srv/worktrees/gpu-eval",
+        }),
+        4096,
+    )
+    .await;
+    assert!(still_running.is_none());
+
+    // Terminal sync finishes shadow row and preserves branch/worktree/result_summary.
+    let finished = sync_remote_status_into_shadow(
+        &pool,
+        &run_id,
+        &json!({
+            "run_id": run_id,
+            "status": "completed",
+            "result_summary": "Eval passed with 98.4% accuracy.",
+            "branch": "feat/gpu-eval",
+            "worktree_path": "/srv/worktrees/gpu-eval",
+        }),
+        4096,
+    )
+    .await
+    .expect("terminal shadow transition");
+
+    assert_eq!(finished.status, "completed");
+    assert_eq!(finished.target_environment_id.as_deref(), Some("gpu-box"));
+    assert_eq!(finished.branch.as_deref(), Some("feat/gpu-eval"));
+    assert_eq!(
+        finished.result_summary.as_deref(),
+        Some("Eval passed with 98.4% accuracy.")
+    );
+
+    let msg = format_coalesced_completion_message(std::slice::from_ref(&finished));
+    assert!(
+        msg.contains(&format!(
+            "dimo://conversation/{remote_child_id}?env=gpu-box"
+        )),
+        "completion message must include ?env=gpu-box deep link, got: {msg}"
+    );
+    assert!(msg.contains("Eval passed with 98.4% accuracy."));
+}
+
+#[tokio::test]
+async fn orchestration_before_turn_instructions_gate_first_turn_child_space_and_disabled() {
+    use super::instructions::{
+        DELEGATED_CHILD_INSTRUCTIONS, ORCHESTRATION_PLUGIN_ID,
+        TOP_LEVEL_ORCHESTRATION_INSTRUCTIONS, build_orchestration_before_turn_blocks,
+    };
+
+    let pool = setup_test_db().await;
+    let (_project_id, workspace_id, parent_id, child_id) = seed_parent_and_child(&pool).await;
+
+    let parent_ctx = conversations::BeforeTurnContext {
+        conversation_id: parent_id,
+        workspace_id,
+        agent_id: agents::AgentId::parse("codex").unwrap(),
+        text: "Help me inspect this repo".into(),
+        display_text: "Help me inspect this repo".into(),
+        origin: "user".into(),
+    };
+
+    // 1. Disabled -> empty.
+    let disabled = build_orchestration_before_turn_blocks(&pool, &parent_ctx, false).await;
+    assert!(disabled.is_empty());
+
+    // 2. Collaboration origin -> empty.
+    let mut collab_ctx = parent_ctx.clone();
+    collab_ctx.origin = "collaboration".into();
+    let collab_blocks = build_orchestration_before_turn_blocks(&pool, &collab_ctx, true).await;
+    assert!(collab_blocks.is_empty());
+
+    // 3. Ordinary session turn #1 -> injects concise top-level orchestration block.
+    let turn1_blocks = build_orchestration_before_turn_blocks(&pool, &parent_ctx, true).await;
+    assert_eq!(turn1_blocks.len(), 1);
+    assert_eq!(turn1_blocks[0].plugin_id, ORCHESTRATION_PLUGIN_ID);
+    assert_eq!(
+        turn1_blocks[0].content,
+        TOP_LEVEL_ORCHESTRATION_INSTRUCTIONS
+    );
+
+    // 4. Turn #2+ -> skipped once conversation_turns has >= 2 rows.
+    for idx in 0..2 {
+        db::models::conversation_turn::ConversationTurnRecord::create_pending(
+            &pool,
+            Uuid::new_v4(),
+            db::models::conversation_turn::CreateConversationTurn {
+                conversation_id: parent_id,
+                prompt_id: None,
+                text_preview: Some(&format!("turn {idx}")),
+                input_blocks_json: "[]",
+            },
+        )
+        .await
+        .expect("insert turn");
+    }
+    let turn2_blocks = build_orchestration_before_turn_blocks(&pool, &parent_ctx, true).await;
+    assert!(turn2_blocks.is_empty());
+
+    // 5. Delegated child session -> injects compact child instructions.
+    let run_id = format!("run_child_instr_{}", Uuid::new_v4().simple());
+    ConversationDelegationRecord::create(
+        &pool,
+        CreateConversationDelegation {
+            run_id: &run_id,
+            parent_conversation_id: parent_id,
+            child_conversation_id: child_id,
+            parent_tool_call_id: "tool_instr",
+            target_project_id: None,
+            target_workspace_id: Some(workspace_id),
+            target_environment_id: None,
+            agent_id: "codex",
+            provider_instance_id: None,
+            model: None,
+            role: None,
+            task_preview: "Child task",
+            isolation: "shared",
+            mode: "async",
+            completion_wake: "always",
+            status: "running",
+            preparation_stage: Some("ready"),
+            worktree_path: None,
+            branch: None,
+            max_runtime_mode: RuntimeModeRank::FullAccess.as_i64(),
+            max_interaction_mode: InteractionModeRank::Default.as_i64(),
+            deadline_at: None,
+        },
+    )
+    .await
+    .expect("insert child delegation");
+    let child_ctx = conversations::BeforeTurnContext {
+        conversation_id: child_id,
+        workspace_id,
+        agent_id: agents::AgentId::parse("codex").unwrap(),
+        text: "Do child task".into(),
+        display_text: "Do child task".into(),
+        origin: "user".into(),
+    };
+    let child_blocks = build_orchestration_before_turn_blocks(&pool, &child_ctx, true).await;
+    assert_eq!(child_blocks.len(), 1);
+    assert_eq!(child_blocks[0].content, DELEGATED_CHILD_INSTRUCTIONS);
+
+    // 6. Collaboration Space session -> strictly skipped even when origin is "user".
+    let space_id = Uuid::new_v4().to_string();
+    let bot_conv_id = Uuid::new_v4();
+    let mut conn = pool.acquire().await.expect("conn");
+    Session::create_on_connection(
+        &mut conn,
+        &CreateSession {
+            executor: Some("codex".into()),
+            agent_id: None,
+            provider_instance_id: None,
+            initial_prompt: None,
+            name: Some("Bot Space Session".into()),
+            status: None,
+            task_id: None,
+        },
+        bot_conv_id,
+        workspace_id,
+    )
+    .await
+    .expect("create bot session");
+    drop(conn);
+    sqlx::query(
+        r#"INSERT INTO collaboration_spaces (id, workspace_id, name, created_at)
+           VALUES (?, ?, 'Bot Space', datetime('now'))"#,
+    )
+    .bind(&space_id)
+    .bind(workspace_id.to_string())
+    .execute(&pool)
+    .await
+    .expect("insert space");
+    sqlx::query(
+        r#"INSERT INTO collaboration_space_members (space_id, member_id, conversation_id, nickname, kind, visible_to_agents)
+           VALUES (?, ?, ?, 'HelperBot', 'agent', 1)"#,
+    )
+    .bind(&space_id)
+    .bind(Uuid::new_v4().to_string())
+    .bind(bot_conv_id.to_string())
+    .execute(&pool)
+    .await
+    .expect("insert space member");
+
+    let space_ctx = conversations::BeforeTurnContext {
+        conversation_id: bot_conv_id,
+        workspace_id,
+        agent_id: agents::AgentId::parse("codex").unwrap(),
+        text: "Hello bot".into(),
+        display_text: "Hello bot".into(),
+        origin: "user".into(),
+    };
+    let space_blocks = build_orchestration_before_turn_blocks(&pool, &space_ctx, true).await;
+    assert!(
+        space_blocks.is_empty(),
+        "Collaboration Space sessions must never receive orchestration instructions"
     );
 }

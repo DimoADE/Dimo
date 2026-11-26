@@ -59,7 +59,7 @@ describe('collaborationComposerSend', () => {
 
     expect(parsed).not.toBeNull();
     expect(parsed?.inferredSourceKind).toBe('jira');
-    expect(parsed?.spec.evalMode).toBe('observe');
+    expect(parsed?.spec.evalMode).toBe('auto');
     expect(parsed?.spec.targets[0]).toMatchObject({
       kind: 'bot',
       memberId: 'bot-alpha',

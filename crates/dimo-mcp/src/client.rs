@@ -54,8 +54,9 @@ pub async fn call_http(
 }
 
 /// POST one JSON-RPC 2.0 `tools/call` to the Host unified Streamable HTTP `/mcp`
-/// endpoint for the 17 orchestration tools (`orchestrator_capabilities`,
-/// `delegate_task`, `task_*`, `thread_*`, `project_*`, `pending_request`).
+/// endpoint for the 18 orchestration tools (`orchestrator_capabilities`,
+/// `environment_links`, `delegate_task`, `task_*`, `thread_*`, `project_*`,
+/// `pending_request`).
 pub async fn call_mcp_http(
     server_url: &str,
     bearer_token: Option<&str>,

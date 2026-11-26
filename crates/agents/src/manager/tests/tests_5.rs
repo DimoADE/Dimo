@@ -238,7 +238,9 @@ async fn send_and_assert_busy_commands(cmd_tx: &mpsc::Sender<AgentConnectionComm
         .expect("PrepareSession result_tx must NOT be dropped")
         .expect_err("PrepareSession must be rejected as busy");
     assert!(
-        prepare_err.to_string().contains("while a turn is in progress"),
+        prepare_err
+            .to_string()
+            .contains("while a turn is in progress"),
         "unexpected PrepareSession error: {prepare_err}"
     );
 
@@ -257,7 +259,9 @@ async fn send_and_assert_busy_commands(cmd_tx: &mpsc::Sender<AgentConnectionComm
         .expect("ResumeSession result_tx must NOT be dropped")
         .expect_err("ResumeSession must be rejected as busy");
     assert!(
-        resume_err.to_string().contains("while a turn is in progress"),
+        resume_err
+            .to_string()
+            .contains("while a turn is in progress"),
         "unexpected ResumeSession error: {resume_err}"
     );
 
@@ -314,7 +318,9 @@ async fn send_and_assert_busy_commands(cmd_tx: &mpsc::Sender<AgentConnectionComm
         .expect("Steer result_tx must NOT be dropped")
         .expect_err("Steer must be rejected as busy");
     assert!(
-        steer_err.to_string().contains("while a turn is in progress"),
+        steer_err
+            .to_string()
+            .contains("while a turn is in progress"),
         "unexpected Steer error: {steer_err}"
     );
 }

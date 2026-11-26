@@ -97,10 +97,13 @@ describe('webE2ee', () => {
     combined.set(nonce, 0);
     combined.set(ciphertext, 12);
 
-    const mockResponse = new Response(Buffer.from(combined).toString('base64'), {
-      status: 200,
-      headers: { [HEADER_E2EE]: 'v1' },
-    });
+    const mockResponse = new Response(
+      Buffer.from(combined).toString('base64'),
+      {
+        status: 200,
+        headers: { [HEADER_E2EE]: 'v1' },
+      }
+    );
     const decrypted = await decryptResponseBodyText(session, mockResponse);
     expect(JSON.parse(decrypted)).toEqual({ ok: true });
   });

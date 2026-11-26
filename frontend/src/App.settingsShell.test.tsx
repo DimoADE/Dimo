@@ -80,6 +80,10 @@ vi.mock('@/hooks/useProviderBindConfirmations', () => ({
   useProviderBindConfirmations: () => undefined,
 }));
 
+vi.mock('@/features/agents/capabilityCatalogSync', () => ({
+  useAgentCapabilityCatalogSync: () => undefined,
+}));
+
 vi.mock('@/SettingsAppRoutes', () => ({
   SettingsAppRoutes: () => <div data-testid="settings-app-routes" />,
 }));

@@ -39,6 +39,7 @@ import {
   type ImagePreviewPresentation,
 } from '@/contexts/ImagePreviewPresentationContext';
 import { AttachmentPreviewProvider } from '@/components/NormalizedConversation/attachments/AttachmentPreviewOverlay';
+import { useDocumentForegroundActive } from '@/hooks/useDocumentForegroundActive';
 import { useFloatingComposerInset } from '@/hooks/useFloatingComposerInset';
 import {
   resolveActiveSession,
@@ -47,6 +48,11 @@ import {
 } from '@/hooks/useWorkspaceSessions';
 import { attemptsApi, sessionsApi } from '@/lib/api';
 import { buildSessionConversationKey } from '@/lib/conversationKeys';
+import {
+  findCachedSessionReviewState,
+  isSessionReviewReady,
+  markReviewSessionViewed,
+} from '@/lib/sessionQueryCache';
 import { getKanbanSessionDetailQueryState } from './kanbanSessionConversationQuery';
 import { conversationApi } from '@/features/conversation/conversationApi';
 
@@ -574,6 +580,10 @@ function KanbanSessionConversationContent({
   );
   const isAtConversationBottomRef = useRef(isAtConversationBottom);
   isAtConversationBottomRef.current = isAtConversationBottom;
+  useEffect(() => {
+    isAtConversationBottomRef.current = true;
+    setIsAtConversationBottom(true);
+  }, [conversationKey]);
   const hasFloatingComposer = Boolean(
     interactive && !shouldShowNewSessionPrompt && !isPluginModeTakeover
   );
@@ -684,36 +694,34 @@ function KanbanSessionConversationContent({
   );
 }
 
-function useMarkSessionViewed(
-  sessionId: string | undefined,
-  isRunning: boolean,
-  enabled: boolean
-) {
+function useMarkSessionViewed(options: {
+  sessionId: string | undefined;
+  workspaceId: string | undefined;
+  status: string | undefined;
+  isRunning: boolean;
+  enabled: boolean;
+}) {
+  const { sessionId, workspaceId, status, isRunning, enabled } = options;
   const queryClient = useQueryClient();
-  const isRunningRef = useRef(isRunning);
-  isRunningRef.current = isRunning;
+  const isForegroundActive = useDocumentForegroundActive();
 
   useEffect(() => {
-    // A view of the in-flight turn is not a review of the finished turn.
-    // Do not re-run when isRunning later flips false: watching the turn end
-    // must leave the session in review until the user opens it again.
-    if (!sessionId || !enabled || isRunningRef.current) return;
+    if (!sessionId || !enabled || !isForegroundActive || isRunning) return;
+    if (!isSessionReviewReady({ status, isRunning })) return;
 
-    let cancelled = false;
-    void sessionsApi
-      .markViewed(sessionId)
-      .then(() => {
-        if (cancelled) return;
-        void queryClient.invalidateQueries({
-          queryKey: ['workspaceSessions'],
-        });
-      })
-      .catch(() => undefined);
-
-    return () => {
-      cancelled = true;
-    };
-  }, [enabled, queryClient, sessionId]);
+    void markReviewSessionViewed(queryClient, sessionId, {
+      workspaceId,
+      knownState: { status, isRunning },
+    });
+  }, [
+    enabled,
+    isForegroundActive,
+    isRunning,
+    queryClient,
+    sessionId,
+    status,
+    workspaceId,
+  ]);
 }
 
 function KanbanSessionConversationSurface({
@@ -731,10 +739,7 @@ function KanbanSessionConversationSurface({
   markViewed = true,
 }: KanbanSessionConversationSurfaceProps) {
   const { t } = useTranslation(['tasks', 'common']);
-  const isRunning =
-    sessionState.sessions.find((session) => session.id === sessionId)
-      ?.isRunning ?? false;
-  useMarkSessionViewed(sessionId, isRunning, markViewed);
+  const queryClient = useQueryClient();
   const {
     data: workspace,
     isLoading: isWorkspaceLoading,
@@ -772,6 +777,22 @@ function KanbanSessionConversationSurface({
     meta: { suppressGlobalError: true },
     placeholderData: (previousData) =>
       previousData?.id === sessionId ? previousData : undefined,
+  });
+
+  const cachedReviewState =
+    !listSession && sessionId
+      ? findCachedSessionReviewState(queryClient, sessionId)
+      : null;
+  const isRunning =
+    listSession?.isRunning ?? cachedReviewState?.isRunning ?? false;
+  const reviewStatus =
+    listSession?.status ?? cachedReviewState?.status ?? session?.status;
+  useMarkSessionViewed({
+    sessionId,
+    workspaceId,
+    status: reviewStatus,
+    isRunning,
+    enabled: markViewed,
   });
 
   const optimisticSession = useMemo<SessionRecord | undefined>(() => {

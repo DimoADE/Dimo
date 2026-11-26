@@ -100,7 +100,13 @@ export function SessionComposerImageAttachment({
         releaseHostFileSrc(acquiredPath);
       }
     };
-  }, [hasDirectPrimaryUrl, isLoading, metadata?.path, previewKind, primaryImageUrl]);
+  }, [
+    hasDirectPrimaryUrl,
+    isLoading,
+    metadata?.path,
+    previewKind,
+    primaryImageUrl,
+  ]);
 
   const handlePreview = useCallback(() => {
     if (previewKind === 'file' || !imageUrl || imageLoadFailed) return;

@@ -790,27 +790,29 @@ describe('getLocalDesktopTransport & electronRemoteDesktopBridge', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const shell = createMockShell();
-    const hostRpcCall = vi.fn(async (req: { command: string; args?: Record<string, unknown> }) => {
-      if (req.command === 'get_projects') {
+    const hostRpcCall = vi.fn(
+      async (req: { command: string; args?: Record<string, unknown> }) => {
+        if (req.command === 'get_projects') {
+          return {
+            ok: true,
+            status: 200,
+            bodyText: JSON.stringify({
+              operation_id: 'op-ipc-1',
+              data: [{ id: 'proj-ipc', name: 'IPC Project' }],
+            }),
+          };
+        }
         return {
-          ok: true,
-          status: 200,
-          bodyText: JSON.stringify({
-            operation_id: 'op-ipc-1',
-            data: [{ id: 'proj-ipc', name: 'IPC Project' }],
-          }),
+          ok: false,
+          status: 409,
+          code: 'conflict',
+          message: 'Workspace locked',
+          retryable: true,
+          operationId: 'op-ipc-err',
+          details: { reason: 'busy' },
         };
       }
-      return {
-        ok: false,
-        status: 409,
-        code: 'conflict',
-        message: 'Workspace locked',
-        retryable: true,
-        operationId: 'op-ipc-err',
-        details: { reason: 'busy' },
-      };
-    });
+    );
     const hostRpcCancel = vi.fn();
     const hostRpcCapabilities = vi.fn(async () => ({
       protocol_version: '1.0',
@@ -874,15 +876,17 @@ describe('getLocalDesktopTransport & electronRemoteDesktopBridge', () => {
     expect(fetchMock).not.toHaveBeenCalled();
 
     // Non-ok IPC proxy response maps cleanly to WebTransportError with structured details
-    await expect(transport.call('conversation_list', {})).rejects.toMatchObject({
-      name: 'WebTransportError',
-      code: 'conflict',
-      message: 'Workspace locked',
-      retryable: true,
-      operationId: 'op-ipc-err',
-      status: 409,
-      details: { reason: 'busy' },
-    });
+    await expect(transport.call('conversation_list', {})).rejects.toMatchObject(
+      {
+        name: 'WebTransportError',
+        code: 'conflict',
+        message: 'Workspace locked',
+        retryable: true,
+        operationId: 'op-ipc-err',
+        status: 409,
+        details: { reason: 'busy' },
+      }
+    );
 
     // capabilities() returns preloaded sync cache with 0 IPC round-trips
     const cachedCaps = await transport.capabilities();

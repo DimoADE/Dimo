@@ -1211,14 +1211,16 @@ impl CodexNativeDriver {
             active_prompt_id: RwLock::new(preserved_prompt_id),
             active_turn_id: RwLock::new(preserved_turn_id),
         });
-        let previous = self.handles.write().ok().and_then(|mut map| {
-            match map.entry(handle.connection_id) {
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    Some(entry.insert(Arc::clone(&updated_ctx)))
-                }
-                std::collections::hash_map::Entry::Vacant(_) => None,
-            }
-        });
+        let previous =
+            self.handles
+                .write()
+                .ok()
+                .and_then(|mut map| match map.entry(handle.connection_id) {
+                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                        Some(entry.insert(Arc::clone(&updated_ctx)))
+                    }
+                    std::collections::hash_map::Entry::Vacant(_) => None,
+                });
         let Some(prev) = previous else {
             let new_key = CodexServerCacheKey::from_spec(&updated_ctx.spec);
             global_codex_servers()

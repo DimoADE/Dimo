@@ -354,6 +354,30 @@ export function syncSessionStatusInCaches(
   );
 }
 
+export function isDocumentForegroundActive(): boolean {
+  if (typeof document === 'undefined') return true;
+  if (document.visibilityState === 'hidden') return false;
+  if (typeof document.hasFocus === 'function') {
+    return document.hasFocus();
+  }
+  return true;
+}
+
+export function subscribeDocumentForeground(listener: () => void): () => void {
+  if (typeof window === 'undefined' || typeof document === 'undefined') {
+    return () => {};
+  }
+  const notify = () => listener();
+  window.addEventListener('focus', notify);
+  window.addEventListener('blur', notify);
+  document.addEventListener('visibilitychange', notify);
+  return () => {
+    window.removeEventListener('focus', notify);
+    window.removeEventListener('blur', notify);
+    document.removeEventListener('visibilitychange', notify);
+  };
+}
+
 const inFlightMarkViewedRequests = new Map<string, Promise<boolean>>();
 
 export function markReviewSessionViewed(
@@ -362,6 +386,10 @@ export function markReviewSessionViewed(
   options?: {
     workspaceId?: string | null;
     onlyIfCached?: boolean;
+    knownState?: {
+      status?: SessionStatus | string | null;
+      isRunning?: boolean;
+    };
   }
 ): Promise<boolean> {
   const id = sessionId?.trim();
@@ -372,17 +400,28 @@ export function markReviewSessionViewed(
     return existing;
   }
 
-  const cached = findCachedSessionReviewState(queryClient, id);
-  if (cached && !isSessionReviewReady(cached)) {
+  if (options?.knownState?.isRunning) {
     return Promise.resolve(false);
   }
-  if (!cached && options?.onlyIfCached) {
+
+  const cached = findCachedSessionReviewState(queryClient, id);
+  const effectiveState =
+    options?.knownState?.status != null
+      ? {
+          status: options.knownState.status,
+          isRunning: Boolean(options.knownState.isRunning),
+        }
+      : cached;
+  if (effectiveState && !isSessionReviewReady(effectiveState)) {
+    return Promise.resolve(false);
+  }
+  if (!effectiveState && options?.onlyIfCached) {
     return Promise.resolve(false);
   }
 
   const workspaceId =
     options?.workspaceId?.trim() || cached?.workspaceId || null;
-  const previousStatus = cached?.status ?? null;
+  const previousStatus = effectiveState?.status ?? null;
 
   syncSessionStatusInCaches(queryClient, id, 'done');
 

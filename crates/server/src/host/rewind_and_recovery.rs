@@ -336,7 +336,10 @@ mod tests {
             codex_event.channel,
             format!("conversation-rate-limit:{codex_conversation_id}")
         );
-        assert_eq!(codex_event.payload["conversationId"], codex_conversation_id.to_string());
+        assert_eq!(
+            codex_event.payload["conversationId"],
+            codex_conversation_id.to_string()
+        );
         assert_eq!(codex_event.payload["kind"], "rate_limited");
         assert_eq!(codex_event.payload["rateLimit"]["engineId"], "codex");
 
@@ -360,7 +363,10 @@ mod tests {
             .get_state(claude_conversation_id)
             .expect("claude wait state should be recorded");
         assert_eq!(claude_state.engine_id, "claude_code");
-        assert_eq!(claude_state.reset_at.timestamp(), claude_reset_at.timestamp());
+        assert_eq!(
+            claude_state.reset_at.timestamp(),
+            claude_reset_at.timestamp()
+        );
 
         let claude_event = rx.try_recv().expect("claude rate_limited event emitted");
         assert_eq!(
@@ -423,7 +429,10 @@ mod tests {
             cancel_event.channel,
             format!("conversation-rate-limit:{conversation_id}")
         );
-        assert_eq!(cancel_event.payload["conversationId"], conversation_id.to_string());
+        assert_eq!(
+            cancel_event.payload["conversationId"],
+            conversation_id.to_string()
+        );
         assert_eq!(cancel_event.payload["kind"], "rate_limit_cancelled");
 
         // A redundant clear when no wait is active should not emit another event

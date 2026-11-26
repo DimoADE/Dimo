@@ -8,8 +8,6 @@ import { Textarea } from '@/components/ui/textarea';
 import i18n from '@/i18n';
 import {
   pulseApi,
-  type BotConversationScope,
-  type BotMailboxPolicy,
   type EventSourceKind,
   type GateFilterCondition,
   type GroupDispatchMode,
@@ -85,14 +83,12 @@ export function describeGroupDispatchMode(
 
 export function PulseRuleProposalCard({
   initialSpec,
-  ruleId = null,
   contextLabel,
   roster = [],
   onSaved,
   onCancel,
 }: {
   initialSpec: PulseRuleSpec;
-  ruleId?: string | null;
   contextLabel?: string;
   roster?: readonly PulseRosterOption[];
   onSaved?: (saved: PulseRuleView) => void;
@@ -192,28 +188,6 @@ export function PulseRuleProposalCard({
     setSpec((prev) => ({ ...prev, temporal: nextTemporal }));
   };
 
-  const updateMailboxPolicy = (mailboxPolicy: BotMailboxPolicy) => {
-    setSpec((prev) => ({
-      ...prev,
-      targets: prev.targets.map((target, idx) =>
-        idx === 0 && target.kind === 'bot'
-          ? { ...target, mailboxPolicy }
-          : target
-      ),
-    }));
-  };
-
-  const updateConversationScope = (conversationScope: BotConversationScope) => {
-    setSpec((prev) => ({
-      ...prev,
-      targets: prev.targets.map((target, idx) =>
-        idx === 0 && target.kind === 'bot'
-          ? { ...target, conversationScope }
-          : target
-      ),
-    }));
-  };
-
   const updateSubscribeThread = (subscribeThread: boolean) => {
     setSpec((prev) => ({
       ...prev,
@@ -295,7 +269,6 @@ export function PulseRuleProposalCard({
     setSaveError('');
     try {
       const saved = await pulseApi.saveRule({
-        id: ruleId ?? null,
         enabled: effectiveSpec.evalMode !== 'off',
         spec: effectiveSpec,
       });
@@ -321,17 +294,13 @@ export function PulseRuleProposalCard({
     <section
       className="settings-surface rounded-lg border border-border bg-popover p-3 text-xs text-foreground shadow-sm"
       data-testid="pulse-rule-proposal-card"
-      aria-label={
-        ruleId ? t('pulseProposal.editCardTitle') : t('pulseProposal.cardTitle')
-      }
+      aria-label={t('pulseProposal.cardTitle')}
     >
       <div className="mb-2.5 flex items-center justify-between gap-2 border-b border-border/70 pb-2">
         <div className="flex min-w-0 items-center gap-1.5">
           <Sparkles className="h-3.5 w-3.5 shrink-0 text-primary" />
           <span className="truncate font-semibold text-foreground">
-            {ruleId
-              ? t('pulseProposal.editCardTitle')
-              : t('pulseProposal.cardTitle')}
+            {t('pulseProposal.cardTitle')}
           </span>
           {contextLabel ? (
             <span className="truncate rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
@@ -340,28 +309,32 @@ export function PulseRuleProposalCard({
           ) : null}
         </div>
         <div className="flex items-center gap-1">
-          <div
-            className="inline-flex rounded-md bg-muted/60 p-0.5"
-            role="group"
-            aria-label={t('pulseFilter.evalModeAria')}
-          >
-            {EVAL_MODES.map((mode) => (
-              <button
-                key={mode}
-                type="button"
-                data-testid={`pulse-proposal-mode-${mode}`}
-                onClick={() => setSpec((prev) => ({ ...prev, evalMode: mode }))}
-                className={cn(
-                  'rounded px-2 py-0.5 text-[11px] font-medium transition-colors',
-                  spec.evalMode === mode
-                    ? 'bg-primary text-primary-foreground'
-                    : 'text-muted-foreground hover:text-foreground'
-                )}
-              >
-                {t(`pulseDeck.modes.${mode}`)}
-              </button>
-            ))}
-          </div>
+          {primaryTarget?.kind !== 'bot' ? (
+            <div
+              className="inline-flex rounded-md bg-muted/60 p-0.5"
+              role="group"
+              aria-label={t('pulseFilter.evalModeAria')}
+            >
+              {EVAL_MODES.map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  data-testid={`pulse-proposal-mode-${mode}`}
+                  onClick={() =>
+                    setSpec((prev) => ({ ...prev, evalMode: mode }))
+                  }
+                  className={cn(
+                    'rounded px-2 py-0.5 text-[11px] font-medium transition-colors',
+                    spec.evalMode === mode
+                      ? 'bg-primary text-primary-foreground'
+                      : 'text-muted-foreground hover:text-foreground'
+                  )}
+                >
+                  {t(`pulseDeck.modes.${mode}`)}
+                </button>
+              ))}
+            </div>
+          ) : null}
           {onCancel ? (
             <Button
               type="button"
@@ -649,87 +622,18 @@ export function PulseRuleProposalCard({
           </div>
         ) : null}
 
-        {primaryTarget?.kind === 'bot' ? (
-          <div className="space-y-2 rounded-md bg-muted/35 px-2.5 py-2">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-[11px] text-muted-foreground">
-                {t('pulseProposal.botTargetLabel')}{' '}
-                <strong className="font-mono text-foreground">
-                  {primaryTarget.memberId}
-                </strong>{' '}
-                · {t('pulseProposal.persistentMemory')}
-              </span>
-              <div className="inline-flex items-center gap-1">
-                <span className="text-[11px] text-muted-foreground">
-                  {t('pulseProposal.mailboxLabel')}
-                </span>
-                {(['fifo_serial', 'coalesce_batch'] as const).map((policy) => (
-                  <button
-                    key={policy}
-                    type="button"
-                    data-testid={`pulse-mailbox-${policy}`}
-                    onClick={() => updateMailboxPolicy(policy)}
-                    className={cn(
-                      'rounded border px-1.5 py-0.5 text-[11px] font-medium',
-                      (primaryTarget.mailboxPolicy ?? 'fifo_serial') === policy
-                        ? 'border-primary bg-primary text-primary-foreground'
-                        : 'border-border bg-background text-muted-foreground'
-                    )}
-                  >
-                    {t(
-                      `pulseFilter.mailbox.${policy.replace(/_([a-z])/g, (_, ch: string) => ch.toUpperCase())}`
-                    )}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/50 pt-1.5">
-              <div className="inline-flex items-center gap-1">
-                <span className="text-[11px] text-muted-foreground">
-                  {t('pulseProposal.conversationScopeLabel')}
-                </span>
-                {(
-                  [
-                    ['fixed_primary', t('pulseProposal.scopeFixedPrimary')],
-                    [
-                      'per_thread_topic',
-                      t('pulseProposal.scopePerThreadTopic'),
-                    ],
-                  ] as const
-                ).map(([scope, label]) => (
-                  <button
-                    key={scope}
-                    type="button"
-                    data-testid={`pulse-scope-${scope}`}
-                    onClick={() => updateConversationScope(scope)}
-                    className={cn(
-                      'rounded border px-1.5 py-0.5 text-[11px] font-medium',
-                      (primaryTarget.conversationScope ?? 'fixed_primary') ===
-                        scope
-                        ? 'border-primary bg-primary text-primary-foreground'
-                        : 'border-border bg-background text-muted-foreground'
-                    )}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-              {!isTemporalSourceKind(activeSourceKind) ? (
-                <label className="inline-flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground">
-                  <input
-                    type="checkbox"
-                    data-testid="pulse-bot-subscribe-thread"
-                    checked={primaryTarget.subscribeThread ?? true}
-                    onChange={(event) =>
-                      updateSubscribeThread(event.target.checked)
-                    }
-                    className="h-3.5 w-3.5 rounded border-border accent-primary"
-                  />
-                  <span>{t('pulseProposal.subscribeThread')}</span>
-                </label>
-              ) : null}
-            </div>
-          </div>
+        {primaryTarget?.kind === 'bot' &&
+        !isTemporalSourceKind(activeSourceKind) ? (
+          <label className="inline-flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground">
+            <input
+              type="checkbox"
+              data-testid="pulse-bot-subscribe-thread"
+              checked={primaryTarget.subscribeThread ?? true}
+              onChange={(event) => updateSubscribeThread(event.target.checked)}
+              className="h-3.5 w-3.5 rounded border-border accent-primary"
+            />
+            <span>{t('pulseProposal.subscribeThread')}</span>
+          </label>
         ) : null}
 
         {primaryTarget?.kind === 'group' ? (
@@ -938,9 +842,7 @@ export function PulseRuleProposalCard({
           >
             {saving
               ? t('pulseProposal.saving')
-              : ruleId
-                ? t('pulseProposal.updatePulseRule')
-                : t('pulseProposal.savePulseRule')}
+              : t('pulseProposal.savePulseRule')}
           </Button>
         </div>
       </div>

@@ -1407,7 +1407,13 @@ mod subscription_guard_tests {
 
         engine
             .store()
-            .subscribe_thread("sub-1", "thread:debounce-1", "session", "sess-1", &t0.to_rfc3339())
+            .subscribe_thread(
+                "sub-1",
+                "thread:debounce-1",
+                "session",
+                "sess-1",
+                &t0.to_rfc3339(),
+            )
             .await
             .expect("subscribe thread");
 
@@ -1456,7 +1462,13 @@ mod subscription_guard_tests {
 
         engine
             .store()
-            .subscribe_thread("sub-bot-1", "thread:rate-1", "bot", "bot-alpha", &t0.to_rfc3339())
+            .subscribe_thread(
+                "sub-bot-1",
+                "thread:rate-1",
+                "bot",
+                "bot-alpha",
+                &t0.to_rfc3339(),
+            )
             .await
             .expect("subscribe bot");
 
@@ -1474,7 +1486,10 @@ mod subscription_guard_tests {
         }
 
         let tripped = engine
-            .ingest_event(thread_event("r3", "thread:rate-1"), t0 + Duration::seconds(3))
+            .ingest_event(
+                thread_event("r3", "thread:rate-1"),
+                t0 + Duration::seconds(3),
+            )
             .await
             .expect("ingest tripped event");
         assert!(tripped.subscription_hits.is_empty());

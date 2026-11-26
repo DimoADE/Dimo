@@ -187,7 +187,9 @@ vi.mock('@/hooks/useFileContent', async (importOriginal) => {
   return {
     ...actual,
     useFileContent: (path: string | null) =>
-      path && fileContent.byPath?.[path] ? fileContent.byPath[path] : fileContent,
+      path && fileContent.byPath?.[path]
+        ? fileContent.byPath[path]
+        : fileContent,
     useFileAtHead: () => ({
       data: null,
       isLoading: false,

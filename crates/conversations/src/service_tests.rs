@@ -1814,12 +1814,13 @@ async fn reconcile_orphaned_connecting_excludes_closed_done_and_archived_without
 
     // done_conv and archived_conv must remain untouched (still only 1 event each).
     for cid in [done_conv.id, archived_conv.id] {
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM conversation_events WHERE conversation_id = ?")
-                .bind(cid)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM conversation_events WHERE conversation_id = ?",
+        )
+        .bind(cid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(count, 1, "closed/archived session must not be reconciled");
     }
 }

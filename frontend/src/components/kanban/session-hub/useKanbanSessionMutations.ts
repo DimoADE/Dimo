@@ -5,6 +5,7 @@ import {
   type Session,
 } from 'shared/types';
 import { scratchApi, sessionsApi } from '@/lib/api';
+import { recordLastSessionAgent } from '@/lib/lastSessionAgent';
 import type { WorkspaceBranchOption } from '@/lib/workspaceBranchOptions';
 import type { SessionControlsPreset } from '@/components/sessions/SessionCreationForm';
 import {
@@ -99,7 +100,10 @@ export function useKanbanSessionMutations({
 
       return session;
     },
-    onSuccess: (session) => {
+    onSuccess: (session, variables) => {
+      recordLastSessionAgent(
+        variables.executorProfile?.executor ?? session.executor
+      );
       queryClient.invalidateQueries({
         queryKey: ['kanbanProjectWorkspaces', projectId],
       });

@@ -833,28 +833,29 @@ pub trait ContainerService: Send + Sync {
                 .unwrap_or_else(|| workspace_root.clone());
             let git = self.git().clone();
             let repo_path_for_git = repo_path.clone();
-            let before_head_commit =
-                match tokio::task::spawn_blocking(move || git.get_head_info(&repo_path_for_git))
-                    .await
-                {
-                    Ok(Ok(head)) => Some(head.oid),
-                    Ok(Err(e)) => {
-                        tracing::warn!(
-                            repo_path = ?repo_path,
-                            error = %e,
-                            "failed to read HEAD before execution; diff base missing for this repo"
-                        );
-                        None
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            repo_path = ?repo_path,
-                            error = %e,
-                            "HEAD read task failed before execution; diff base missing for this repo"
-                        );
-                        None
-                    }
-                };
+            let before_head_commit = match tokio::task::spawn_blocking(move || {
+                git.get_head_info(&repo_path_for_git)
+            })
+            .await
+            {
+                Ok(Ok(head)) => Some(head.oid),
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        repo_path = ?repo_path,
+                        error = %e,
+                        "failed to read HEAD before execution; diff base missing for this repo"
+                    );
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        repo_path = ?repo_path,
+                        error = %e,
+                        "HEAD read task failed before execution; diff base missing for this repo"
+                    );
+                    None
+                }
+            };
             repo_states.push(CreateExecutionProcessRepoState {
                 repo_id: repo.id,
                 before_head_commit,

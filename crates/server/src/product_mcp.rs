@@ -5,7 +5,7 @@ use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 use application::{CommandRegistry, Principal, RegisteredCommand, SqliteConversationRepository};
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
@@ -96,7 +96,12 @@ pub async fn start_product_mcp_gateway_with_orchestration(
     let app = Router::new()
         .route("/mcp", post(mcp_jsonrpc))
         .route("/internal/companion", post(companion))
-        .route("/api/v1/call/{command}", post(v1_call))
+        .route(
+            "/api/v1/call/{command}",
+            post(v1_call).layer(DefaultBodyLimit::max(
+                crate::runtime::MAX_COMMAND_BODY_BYTES,
+            )),
+        )
         .with_state(state);
     tokio::spawn(async move {
         if let Err(error) = axum::serve(listener_tcp, app).await {
@@ -384,8 +389,7 @@ async fn mcp_jsonrpc(
 
     match orchestration.call_tool(&ctx, tool_name, arguments).await {
         Ok(value) => {
-            let text =
-                serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+            let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
             jsonrpc_ok(
                 id,
                 json!({
@@ -397,8 +401,7 @@ async fn mcp_jsonrpc(
         }
         Err(error) => {
             let payload = error.to_json_error();
-            let text =
-                serde_json::to_string_pretty(&payload).unwrap_or_else(|_| error.to_string());
+            let text = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| error.to_string());
             jsonrpc_ok(
                 id,
                 json!({
@@ -413,10 +416,7 @@ async fn mcp_jsonrpc(
 
 /// Authenticated remote Streamable HTTP MCP handler mounted at `/api/v1/mcp`
 /// behind `require_token` for cross-machine `environment_id` forwarding.
-pub(crate) async fn remote_mcp_jsonrpc(
-    headers: HeaderMap,
-    Json(payload): Json<Value>,
-) -> Response {
+pub(crate) async fn remote_mcp_jsonrpc(headers: HeaderMap, Json(payload): Json<Value>) -> Response {
     let id = payload.get("id").cloned();
     let method = payload
         .get("method")
@@ -509,8 +509,7 @@ pub(crate) async fn remote_mcp_jsonrpc(
 
     match orchestration.call_tool(&ctx, tool_name, arguments).await {
         Ok(value) => {
-            let text =
-                serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
+            let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
             jsonrpc_ok(
                 id,
                 json!({
@@ -522,8 +521,7 @@ pub(crate) async fn remote_mcp_jsonrpc(
         }
         Err(error) => {
             let payload = error.to_json_error();
-            let text =
-                serde_json::to_string_pretty(&payload).unwrap_or_else(|_| error.to_string());
+            let text = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| error.to_string());
             jsonrpc_ok(
                 id,
                 json!({
@@ -717,12 +715,13 @@ fn jsonrpc_err(id: Option<Value>, code: i64, message: impl Into<String>) -> Resp
 
 #[cfg(test)]
 mod mcp_http_tests {
-    use super::*;
     use delegation::{
         ChildStatusLookup, ChildStatusRecord, ConnectionSpawner, DelegationBroker,
         DelegationCompletedEvent, DelegationConfig, DelegationError, DelegationEventEmitter,
         DelegationLink, DelegationMetaWriter, DelegationStartedEvent, DepthLookup, SpawnerError,
     };
+
+    use super::*;
 
     struct NullLookup;
     #[async_trait::async_trait]
@@ -869,7 +868,10 @@ mod mcp_http_tests {
             .json()
             .await
             .unwrap();
-        assert_eq!(init["result"]["serverInfo"]["name"], "dimo-orchestration-mcp");
+        assert_eq!(
+            init["result"]["serverInfo"]["name"],
+            "dimo-orchestration-mcp"
+        );
 
         // 2. tools/list without bearer token returns 401.
         let unauth = client
@@ -885,7 +887,7 @@ mod mcp_http_tests {
             .unwrap();
         assert_eq!(unauth.status(), reqwest::StatusCode::UNAUTHORIZED);
 
-        // 3. tools/list with valid product token returns all 17 tools.
+        // 3. tools/list with valid product token returns all 18 tools.
         let list: Value = client
             .post(format!("{base}/mcp"))
             .bearer_auth("test-product-token")
@@ -902,10 +904,15 @@ mod mcp_http_tests {
             .await
             .unwrap();
         let tools = list["result"]["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 18);
         assert!(tools.iter().any(|t| t["name"] == "delegate_task"));
         assert!(tools.iter().any(|t| t["name"] == "thread_launch"));
-        assert!(tools.iter().any(|t| t["name"] == "orchestrator_capabilities"));
+        assert!(
+            tools
+                .iter()
+                .any(|t| t["name"] == "orchestrator_capabilities")
+        );
+        assert!(tools.iter().any(|t| t["name"] == "environment_links"));
     }
 
     #[tokio::test]
@@ -952,7 +959,7 @@ mod mcp_http_tests {
                 .as_array()
                 .expect("tools array")
                 .len(),
-            17
+            18
         );
     }
 }

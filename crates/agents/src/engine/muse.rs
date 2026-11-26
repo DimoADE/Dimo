@@ -1154,7 +1154,8 @@ impl MuseNativeDriver {
             .and_then(|map| map.get(&handle.connection_id).cloned())
             .ok_or(EngineError::UnknownHandle(handle.connection_id))?;
 
-        let want_disable = desired_disable_sandbox.unwrap_or_else(|| ctx.server().disable_sandbox());
+        let want_disable =
+            desired_disable_sandbox.unwrap_or_else(|| ctx.server().disable_sandbox());
         if ctx.server().is_alive() && ctx.server().disable_sandbox() == want_disable {
             return Ok((Arc::clone(&ctx), Arc::clone(ctx.server())));
         }
@@ -1169,14 +1170,16 @@ impl MuseNativeDriver {
             active_prompt_id: RwLock::new(preserved_prompt_id),
             active_turn_id: RwLock::new(preserved_turn_id),
         });
-        let previous = self.handles.write().ok().and_then(|mut map| {
-            match map.entry(handle.connection_id) {
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    Some(entry.insert(Arc::clone(&updated_ctx)))
-                }
-                std::collections::hash_map::Entry::Vacant(_) => None,
-            }
-        });
+        let previous =
+            self.handles
+                .write()
+                .ok()
+                .and_then(|mut map| match map.entry(handle.connection_id) {
+                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                        Some(entry.insert(Arc::clone(&updated_ctx)))
+                    }
+                    std::collections::hash_map::Entry::Vacant(_) => None,
+                });
         let Some(prev) = previous else {
             let new_key = MuseServerCacheKey::from_spec(&updated_ctx.spec, want_disable);
             global_muse_servers()
@@ -1204,7 +1207,9 @@ async fn get_or_spawn_workspace_server(
 ) -> Result<ServerHandleLease<MuseServer>, EngineError> {
     let key = MuseServerCacheKey::from_spec(spec, disable_sandbox);
     global_muse_servers()
-        .get_or_spawn(key, || MuseServer::spawn_for_workspace(spec, disable_sandbox))
+        .get_or_spawn(key, || {
+            MuseServer::spawn_for_workspace(spec, disable_sandbox)
+        })
         .await
 }
 

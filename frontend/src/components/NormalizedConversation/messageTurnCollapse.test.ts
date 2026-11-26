@@ -155,15 +155,14 @@ describe('collapseTurnSegments', () => {
     ).toEqual([markdown('项目已启动完成。')]);
   });
 
-  it('folds a streaming tool run down to a two-block tail', () => {
+  it('keeps a streaming tool-only run in one items segment so TurnActivity owns the single live group', () => {
     const tools = [tool('bash'), tool('read'), tool('grep'), tool('edit')];
     expect(collapseTurnSegments(tools, { isStreaming: true })).toEqual([
       {
-        kind: 'fold',
+        kind: 'items',
         startIndex: 0,
-        items: [tool('bash'), tool('read')],
+        items: tools,
       },
-      { kind: 'items', startIndex: 2, items: [tool('grep'), tool('edit')] },
     ]);
   });
 

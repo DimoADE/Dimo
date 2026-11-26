@@ -1244,7 +1244,10 @@ async fn manager_event_channel_concurrent_send_recv_never_drifts_or_drops_after_
         }
     }
     assert_eq!(drained, MANAGER_EVENT_SOFT_CAP + 1);
-    assert!(saw_terminal, "non-sheddable terminal event must bypass soft cap");
+    assert!(
+        saw_terminal,
+        "non-sheddable terminal event must bypass soft cap"
+    );
 
     // After draining, sheddable streaming chunks flow again without dropping.
     event_tx.emit(make_chunk(99_999));

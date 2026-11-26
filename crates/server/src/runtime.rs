@@ -9,7 +9,7 @@ use application::{ApplicationCore, CommandRegistry, ConversationRepository};
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Extension, OriginalUri, Path, Query, Request, State},
+    extract::{DefaultBodyLimit, Extension, OriginalUri, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -29,6 +29,11 @@ use crate::{
     AuthStoreError, AuthenticatedCredential, ServerAuth, ServerConfig, ServerCredentials,
     ServerToken, SqliteServerAuth, auth::StaticServerAuth,
 };
+
+/// Upper bound for authenticated JSON command payloads (e.g. base64-encoded
+/// image/file uploads up to ImageService's 100 MiB raw file limit plus JSON
+/// envelope overhead).
+pub(crate) const MAX_COMMAND_BODY_BYTES: usize = 140 * 1024 * 1024;
 
 pub(crate) struct ServerState<R> {
     pub(crate) auth: Arc<dyn ServerAuth>,
@@ -286,7 +291,10 @@ where
         let protected = Router::new()
             .route("/capabilities", get(capabilities::<R>))
             .route("/ws", get(crate::ws::ws_handler::<R>))
-            .route("/call/{command}", post(application_call::<R>))
+            .route(
+                "/call/{command}",
+                post(application_call::<R>).layer(DefaultBodyLimit::max(MAX_COMMAND_BODY_BYTES)),
+            )
             .route("/mcp", post(crate::product_mcp::remote_mcp_jsonrpc))
             .route("/auth/pairings", post(create_pairing::<R>))
             .route(
@@ -776,7 +784,8 @@ where
     if let Some(name) = utils::net::local_hostname() {
         body["name"] = json!(name);
     }
-    let fallback_host_id = (!state.config.host_id.is_empty()).then_some(state.config.host_id.as_str());
+    let fallback_host_id =
+        (!state.config.host_id.is_empty()).then_some(state.config.host_id.as_str());
     body["fingerprint"] = json!(utils::assets::machine_fingerprint(fallback_host_id));
     Json(body)
 }
@@ -1493,5 +1502,60 @@ mod origin_allowed_tests {
         assert!(origin_allowed(&config, "http://47.109.140.92:13630"));
         assert!(!origin_allowed(&config, "http://8.8.8.8:17891"));
         set_extra_browser_origins(Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn call_route_accepts_payloads_above_default_axum_body_limit() {
+        use std::str::FromStr;
+
+        use application::{ApplicationCore, SqliteConversationRepository};
+        use axum::{
+            body::Body,
+            http::{Request, StatusCode},
+        };
+        use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+        use tower::ServiceExt;
+
+        use super::{ServerRuntime, ServerToken};
+
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .expect("sqlite options")
+            .foreign_keys(false);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("memory database");
+        let core = ApplicationCore::new(SqliteConversationRepository::new(pool));
+        let app = ServerRuntime::new(
+            ServerConfig::default(),
+            ServerToken::new("call-secret-with-at-least-32-bytes"),
+            core,
+        )
+        .router();
+
+        // 3 MiB JSON body exceeds Axum's 2 MiB default limit and must reach the
+        // command handler (returning 404 for unknown command) rather than 413.
+        let large_value = "a".repeat(3 * 1024 * 1024);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/call/nonexistent_large_upload_check")
+                    .header("authorization", "Bearer call-secret-with-at-least-32-bytes")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "operation_id": remote_protocol::OperationId::new(),
+                            "args": { "payload": large_value }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

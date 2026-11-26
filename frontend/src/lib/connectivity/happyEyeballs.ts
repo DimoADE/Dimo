@@ -317,7 +317,9 @@ export async function selectBestEndpoint(
         settled = true;
         for (const timer of timers) clearTimeout(timer);
         reject(
-          new Error(`Could not reach Host via any endpoint (${errors[0] ?? 'failed'})`)
+          new Error(
+            `Could not reach Host via any endpoint (${errors[0] ?? 'failed'})`
+          )
         );
       }
     };
@@ -349,7 +351,10 @@ export async function lookupRelayBeacon(
   pairingCode: string,
   options?: { fetchImpl?: typeof fetch; signal?: AbortSignal }
 ): Promise<{ hostId: string; origin: string }> {
-  const canonical = pairingCode.trim().replace(/[\s-]+/g, '').toUpperCase();
+  const canonical = pairingCode
+    .trim()
+    .replace(/[\s-]+/g, '')
+    .toUpperCase();
   if (!canonical) {
     throw new Error('Pairing code is required');
   }

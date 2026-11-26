@@ -169,6 +169,7 @@ describe('conversation tool-call fold spacing and hover', () => {
     expect(nested['padding-inline-end']?.value).toBe('4px');
     expect(nested['margin-inline-start']?.value).toBe('-4px');
     expect(nested['margin-inline-end']?.value).toBe('-4px');
+    expect(nested['overflow-x']?.value).toBe('hidden');
     expect(nested['overflow-y']?.value).toBe('auto');
     expect(expanded['padding-inline-start']?.value).toBe('4px');
     expect(expanded['padding-inline-start']?.important).toBe(true);
@@ -177,5 +178,216 @@ describe('conversation tool-call fold spacing and hover', () => {
     expect(expanded['margin-inline-start']?.value).toBe('-4px');
     expect(expanded['margin-inline-end']?.value).toBe('-4px');
     expect(expandedInner.overflow?.value).toBe('visible');
+  });
+});
+
+function declarationsIn(
+  relativePath: string,
+  selector: string
+): Record<string, { value: string; important: boolean }> {
+  const css = readFileSync(resolve(process.cwd(), relativePath), 'utf8');
+  const declarations: Record<string, { value: string; important: boolean }> =
+    {};
+  parse(css).walkRules((rule: Rule) => {
+    const normalized = rule.selector.replace(/\s+/g, ' ').trim();
+    if (normalized !== selector) return;
+    rule.walkDecls((declaration) => {
+      declarations[declaration.prop] = {
+        value: declaration.value,
+        important: declaration.important,
+      };
+    });
+  });
+  return declarations;
+}
+
+describe('conversation tool-chips typography, truncation, and slim scrollbar', () => {
+  const CHIPS_CSS = 'src/styles/conversation/conv-tool-chips.css';
+  const VARS_CSS = 'src/styles/conversation/conv-variables.css';
+  const COMPONENTS_CSS = 'src/styles/conversation/conv-components.css';
+
+  it('uses compact 13px muted typography, hover-only darkening, disclosure triangle, red error icon, and disabled viewport scroll anchoring', () => {
+    const lightVars = declarationsIn(VARS_CSS, ':root, .legacy-design');
+    const darkVars = declarationsIn(
+      VARS_CSS,
+      '.dark, .legacy-design.dark, .dark .legacy-design'
+    );
+    const header = declarationsIn(CHIPS_CSS, '.conv-tool-chips-header');
+    const headerExpanded = declarationsIn(
+      CHIPS_CSS,
+      '.conv-tool-chips-header.is-expanded'
+    );
+    const headerIcon = declarationsIn(
+      CHIPS_CSS,
+      '.conv-tool-chips-header > .conv-tool-chips-header-icon'
+    );
+    const disclosureIcon = declarationsIn(
+      CHIPS_CSS,
+      '.conv-tool-chips-disclosure-icon'
+    );
+    const disclosureExpanded = declarationsIn(
+      CHIPS_CSS,
+      '.conv-tool-chips-header.is-expanded .conv-tool-chips-disclosure-icon'
+    );
+    const batch = declarationsIn(CHIPS_CSS, '.conv-tool-chips-batch');
+    const viewport = declarationsIn(
+      CHIPS_CSS,
+      '.legacy-design .conv-tool-chips-viewport, .conv-tool-chips-viewport'
+    );
+    const foldToggleBase = declarationsIn(
+      CHIPS_CSS,
+      '.conv-collapsed-process-toggle'
+    );
+    const foldToggle = declarationsIn(
+      CHIPS_CSS,
+      '.conv-collapsed-process.is-expanded > .conv-collapsed-process-toggle'
+    );
+    const foldNested = declarationsIn(
+      CHIPS_CSS,
+      '.conv-collapsed-process.is-expanded .conv-nested-scroll'
+    );
+    const foldLastTools = declarationsIn(
+      CHIPS_CSS,
+      '.conv-collapsed-process.is-expanded .conv-nested-scroll > .dimo-turn-tool-calls:last-child'
+    );
+    const sliceTailTools = declarationsIn(
+      CHIPS_CSS,
+      '.conv-turn-row.is-fold-tail .conv-assistant-body > .dimo-turn-tool-calls'
+    );
+    const row = declarationsIn(CHIPS_CSS, '.conv-tool-chip-row');
+    const rowExpanded = declarationsIn(
+      CHIPS_CSS,
+      '.conv-tool-chip-row.is-expanded'
+    );
+    const list = declarationsIn(CHIPS_CSS, '.conv-tool-chips-list');
+    const iconSlot = declarationsIn(CHIPS_CSS, '.conv-tool-chip-icon-slot');
+    const errorIconSlot = declarationsIn(
+      CHIPS_CSS,
+      '.conv-tool-chip-row.is-error .conv-tool-chip-icon-slot'
+    );
+    const kindIcon = declarationsIn(CHIPS_CSS, '.conv-tool-chip-kind-icon');
+    const removedErrorBadge = declarationsIn(
+      CHIPS_CSS,
+      '.conv-tool-chip-error-badge'
+    );
+
+    expect(lightVars['--conv-tool-chip-text']?.value).toBeTruthy();
+    expect(darkVars['--conv-tool-chip-text']?.value).toBeTruthy();
+
+    expect(batch['margin-block']?.value).toBe('0');
+    expect(batch['padding-bottom']?.value).toBe('0');
+    expect(foldToggleBase.color?.value).toBe('var(--conv-tool-chip-text)');
+    expect(foldToggleBase['font-size']?.value).toBe('13px');
+    expect(foldToggleBase['line-height']?.value).toBe('1.55');
+
+    expect(header.color?.value).toBe('var(--conv-tool-chip-text)');
+    expect(header['font-family']?.value).toBe('var(--font-ui)');
+    expect(header['font-size']?.value).toBe('13px');
+    expect(header['line-height']?.value).toBe('1.55');
+    expect(header['min-height']?.value).toBe('22px');
+    expect(header.padding?.value).toBe('2px');
+    expect(header.gap?.value).toBe('6px');
+    expect(header['margin-inline']?.value).toBe('0');
+    expect(headerExpanded.color).toBeUndefined();
+
+    expect(headerIcon.width?.value).toBe('20px');
+    expect(headerIcon.height?.value).toBe('20px');
+    expect(disclosureIcon.width?.value).toBe('14px');
+    expect(disclosureIcon.height?.value).toBe('14px');
+    expect(disclosureExpanded.transform?.value).toBe('rotate(90deg)');
+
+    expect(viewport['margin-top']?.value).toBe('0');
+    expect(viewport['overflow-anchor']?.value).toBe('none');
+    expect(foldToggle['padding-bottom']?.value).toBe('8px');
+    expect(foldNested['margin-top']?.value).toBe('6px');
+    expect(foldLastTools['margin-bottom']?.value).toBe('10px');
+    expect(sliceTailTools['margin-bottom']?.value).toBe('10px');
+
+    expect(row.color?.value).toBe('var(--conv-tool-chip-text)');
+    expect(row['font-family']?.value).toBe('var(--font-ui)');
+    expect(row['font-size']?.value).toBe('13px');
+    expect(row['line-height']?.value).toBe('1.55');
+    expect(row['min-height']?.value).toBe('22px');
+    expect(row.gap?.value).toBe('6px');
+    expect(row['margin-inline']?.value).toBe('0');
+    expect(rowExpanded.color).toBeUndefined();
+
+    const headerHover = declarationsIn(
+      CHIPS_CSS,
+      '.conv-tool-chips-header:hover'
+    );
+    const rowHover = declarationsIn(
+      CHIPS_CSS,
+      '.conv-tool-chip-row.is-expandable:hover'
+    );
+
+    expect(headerHover.background?.value).toBe('transparent');
+    expect(headerHover.color?.value).toBe('var(--conv-text-primary)');
+    expect(rowHover.background?.value).toBe('transparent');
+    expect(rowHover.color?.value).toBe('var(--conv-text-primary)');
+
+    expect(list.gap?.value).toBe('2px');
+    expect(iconSlot.width?.value).toBe('20px');
+    expect(iconSlot.height?.value).toBe('20px');
+    expect(errorIconSlot.color?.value).toBe('var(--conv-tool-error)');
+    expect(kindIcon.width?.value).toBe('14px');
+    expect(kindIcon.height?.value).toBe('14px');
+    expect(Object.keys(removedErrorBadge)).toEqual([]);
+  });
+
+  it('uses a 4px thumb-only WebKit scrollbar without track or arrow buttons and suppresses horizontal scroll on conversation logs', () => {
+    const css = readFileSync(resolve(process.cwd(), CHIPS_CSS), 'utf8');
+    const root = parse(css);
+    const nonFallbackScrollbarProps: string[] = [];
+    root.walkRules((rule: Rule) => {
+      let insideSupportsFallback = false;
+      let parent:
+        | { type?: string; name?: string; parent?: unknown }
+        | undefined = rule.parent ?? undefined;
+      while (parent) {
+        if (parent.type === 'atrule' && parent.name === 'supports') {
+          insideSupportsFallback = true;
+          break;
+        }
+        const next = parent.parent;
+        parent =
+          next && typeof next === 'object'
+            ? (next as NonNullable<typeof parent>)
+            : undefined;
+      }
+      if (insideSupportsFallback) return;
+      rule.walkDecls((decl) => {
+        if (
+          decl.prop === 'scrollbar-color' ||
+          (decl.prop === 'scrollbar-width' && decl.value === 'thin')
+        ) {
+          nonFallbackScrollbarProps.push(`${decl.prop}: ${decl.value}`);
+        }
+      });
+    });
+    expect(nonFallbackScrollbarProps).toEqual([]);
+
+    const scrollbar = declarationsIn(
+      CHIPS_CSS,
+      '.legacy-design .conv-tool-chips-viewport::-webkit-scrollbar, .conv-tool-chips-viewport::-webkit-scrollbar'
+    );
+    const button = declarationsIn(
+      CHIPS_CSS,
+      '.legacy-design .conv-tool-chips-viewport::-webkit-scrollbar-button, .conv-tool-chips-viewport::-webkit-scrollbar-button'
+    );
+    const thumb = declarationsIn(
+      CHIPS_CSS,
+      '.legacy-design .conv-tool-chips-viewport::-webkit-scrollbar-thumb, .conv-tool-chips-viewport::-webkit-scrollbar-thumb'
+    );
+    const logs = declarationsIn(
+      COMPONENTS_CSS,
+      "[data-panel='conversation-logs'], [data-panel='child-conversation-logs']"
+    );
+
+    expect(scrollbar.width?.value).toBe('4px');
+    expect(scrollbar.height?.value).toBe('0');
+    expect(button.display?.value).toBe('none');
+    expect(thumb['border-radius']?.value).toBe('9999px');
+    expect(logs['overflow-x']?.value).toBe('hidden');
   });
 });

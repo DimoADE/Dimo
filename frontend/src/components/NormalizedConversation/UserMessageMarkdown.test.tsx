@@ -279,7 +279,10 @@ describe('UserMessageMarkdown', () => {
   });
 
   it('renders native ordered-list items with multi-digit gutter metadata when >= 10 items', () => {
-    const items = Array.from({ length: 10 }, (_, idx) => `${idx + 1}. item ${idx + 1}`).join('\n');
+    const items = Array.from(
+      { length: 10 },
+      (_, idx) => `${idx + 1}. item ${idx + 1}`
+    ).join('\n');
     render(<StyledUserMessage value={items} />);
 
     const ordered = screen

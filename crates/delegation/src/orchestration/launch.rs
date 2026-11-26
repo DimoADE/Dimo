@@ -97,7 +97,10 @@ pub struct ActivePreparations {
 impl ActivePreparations {
     pub async fn register(&self, conversation_id: Uuid) -> CancellationToken {
         let token = CancellationToken::new();
-        self.tokens.lock().await.insert(conversation_id, token.clone());
+        self.tokens
+            .lock()
+            .await
+            .insert(conversation_id, token.clone());
         token
     }
 
@@ -141,6 +144,13 @@ impl ConversationLaunchService {
         spec: DelegationLaunchSpec,
     ) -> Result<PreparedLaunchResult, OrchestrationError> {
         let pool = &self.context.deployment.db().pool;
+        self.preflight_target_agent(
+            pool,
+            &spec.target.agent_id,
+            spec.target.provider_instance_id.as_deref(),
+        )
+        .await?;
+
         let child_conversation_id = Uuid::new_v4();
         let target_project = resolve_target_project(pool, spec.target.project_id, false).await?;
         let needs_async_worktree = matches!(
@@ -259,11 +269,43 @@ impl ConversationLaunchService {
             .or_else(|| Some(format!("Delegation · {}", spec.target.agent_id)));
         let task_preview: String = spec.task.chars().take(240).collect();
 
+        // `sessions.parent_session_id` has a SQLite FK on `sessions(id)`. When a
+        // remote Host forwards `delegate_task`, the originating parent conversation
+        // lives on another machine (or is `Uuid::nil()`), so we bind `NULL` on the
+        // local `sessions` row while recording the remote parent ID in `policy` and
+        // `conversation_delegations`.
+        let local_parent_exists = if spec.parent_conversation_id.is_nil() {
+            false
+        } else {
+            Session::find_by_id(pool, spec.parent_conversation_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+        };
+        let session_parent_id = local_parent_exists.then_some(spec.parent_conversation_id);
+        let mut policy = serde_json::json!({
+            "isolation": &spec.isolation,
+            "mode": &spec.mode,
+            "completionWake": &spec.completion_wake,
+            "maxRuntimeMode": spec.target.effective_mode_limit.max_runtime_mode.as_str(),
+            "maxInteractionMode": spec.target.effective_mode_limit.max_interaction_mode.as_str(),
+        });
+        if !local_parent_exists
+            && !spec.parent_conversation_id.is_nil()
+            && let Some(obj) = policy.as_object_mut()
+        {
+            obj.insert(
+                "remoteParentConversationId".to_string(),
+                serde_json::json!(spec.parent_conversation_id),
+            );
+        }
+
         create_orchestrated_conversation(
             pool,
             CreateOrchestratedConversation {
                 id: child_conversation_id,
-                parent_conversation_id: Some(spec.parent_conversation_id),
+                parent_conversation_id: session_parent_id,
                 parent_tool_call_id: Some(spec.parent_tool_use_id.clone()),
                 delegation_id: Some(spec.run_id.clone()),
                 workspace_id: session_workspace_id,
@@ -271,13 +313,7 @@ impl ConversationLaunchService {
                 provider_instance_id: spec.target.provider_instance_id.clone(),
                 title,
                 initial_prompt: Some(spec.task.clone()),
-                policy: serde_json::json!({
-                    "isolation": &spec.isolation,
-                    "mode": &spec.mode,
-                    "completionWake": &spec.completion_wake,
-                    "maxRuntimeMode": spec.target.effective_mode_limit.max_runtime_mode.as_str(),
-                    "maxInteractionMode": spec.target.effective_mode_limit.max_interaction_mode.as_str(),
-                }),
+                policy,
             },
         )
         .await
@@ -331,7 +367,7 @@ impl ConversationLaunchService {
         .map_err(|err| OrchestrationError::Internal(err.to_string()))?;
 
         // Emit AgentEvent::DelegationStarted for parent UI DelegationCard immediately.
-        if let Ok(conn_uuid) = Uuid::parse_str(&spec.parent_connection_id) {
+        if local_parent_exists && let Ok(conn_uuid) = Uuid::parse_str(&spec.parent_connection_id) {
             self.runtime
                 .emit_external(
                     AgentConnectionId::from(conn_uuid),
@@ -395,14 +431,14 @@ impl ConversationLaunchService {
                     Some(&message),
                 )
                 .await;
-                if status == "cancelled" {
+                if status == "cancelled" || !local_parent_exists {
                     let _ = ConversationDelegationRecord::mark_delivered(
                         pool,
                         std::slice::from_ref(&run_id_bg),
                     )
                     .await;
                 }
-                if let Ok(conn_uuid) = Uuid::parse_str(&parent_conn_bg) {
+                if local_parent_exists && let Ok(conn_uuid) = Uuid::parse_str(&parent_conn_bg) {
                     launcher
                         .runtime
                         .emit_external(
@@ -421,7 +457,7 @@ impl ConversationLaunchService {
                         .await;
                 }
                 // Wake async parents immediately when Phase 2 fails so they never hang.
-                if status != "cancelled" && mode_bg == "async" {
+                if local_parent_exists && status != "cancelled" && mode_bg == "async" {
                     super::reactors::deliver_coalesced_completions(
                         &launcher.context,
                         parent_conv_bg,
@@ -449,6 +485,13 @@ impl ConversationLaunchService {
         spec: ThreadLaunchSpec,
     ) -> Result<PreparedLaunchResult, OrchestrationError> {
         let pool = &self.context.deployment.db().pool;
+        self.preflight_target_agent(
+            pool,
+            &spec.target.agent_id,
+            spec.target.provider_instance_id.as_deref(),
+        )
+        .await?;
+
         let conversation_id = Uuid::new_v4();
         let target_project =
             resolve_target_project(pool, spec.target.project_id, spec.target.scratch).await?;
@@ -540,10 +583,8 @@ impl ConversationLaunchService {
             )
         };
 
-        let effective_message = compose_message_with_attachments(
-            spec.message.as_deref(),
-            &spec.attachment_paths,
-        );
+        let effective_message =
+            compose_message_with_attachments(spec.message.as_deref(), &spec.attachment_paths);
 
         create_orchestrated_conversation(
             pool,
@@ -650,7 +691,11 @@ impl ConversationLaunchService {
 
         if needs_async_worktree {
             if cancel_token.is_cancelled() {
-                return Err(("cancelled", "cancelled", "cancelled before preparation".into()));
+                return Err((
+                    "cancelled",
+                    "cancelled",
+                    "cancelled before preparation".into(),
+                ));
             }
             let project_id = target_project_id.ok_or((
                 "failed",
@@ -688,7 +733,11 @@ impl ConversationLaunchService {
                 if prepared.created_worktree {
                     let _ = rollback_prepared_workspace(&self.context, prepared.workspace_id).await;
                 }
-                return Err(("cancelled", "cancelled", "cancelled after worktree creation".into()));
+                return Err((
+                    "cancelled",
+                    "cancelled",
+                    "cancelled after worktree creation".into(),
+                ));
             }
 
             // Reassign the child session onto the newly created worktree workspace and task.
@@ -726,7 +775,11 @@ impl ConversationLaunchService {
             if let Some(ws_id) = created_workspace_id {
                 let _ = rollback_prepared_workspace(&self.context, ws_id).await;
             }
-            return Err(("cancelled", "cancelled", "cancelled before agent bind".into()));
+            return Err((
+                "cancelled",
+                "cancelled",
+                "cancelled before agent bind".into(),
+            ));
         }
 
         let service = ConversationSessionService::new(self.context.clone());
@@ -816,6 +869,88 @@ impl ConversationLaunchService {
         }
         Ok(())
     }
+
+    /// Synchronous Phase-1 preflight check executed BEFORE creating any
+    /// `sessions` row or git worktree. Verifies via the host's authoritative
+    /// `SessionGate` / launch settings resolution that `agent_id` is enabled,
+    /// installed/runnable on this Host, and that `provider_instance_id` (if
+    /// specified) exists for that agent.
+    async fn preflight_target_agent(
+        &self,
+        pool: &sqlx::SqlitePool,
+        agent_id: &AgentId,
+        provider_instance_id: Option<&str>,
+    ) -> Result<(), OrchestrationError> {
+        match self
+            .context
+            .host
+            .launch_settings_with_provider_instance(pool, agent_id, provider_instance_id)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let available = ready_agent_ids_on_host(pool).await;
+                let hint = if available.is_empty() {
+                    "No enabled ready agents detected on this host; call orchestrator_capabilities to inspect agent status."
+                        .to_string()
+                } else {
+                    format!(
+                        "Available ready agents on this host: [{}]. Call orchestrator_capabilities to inspect models/options.",
+                        available.join(", ")
+                    )
+                };
+                Err(OrchestrationError::Unavailable(format!(
+                    "agent '{}' cannot be launched on this host: {error}. {hint}",
+                    agent_id
+                )))
+            }
+        }
+    }
+}
+
+/// Whether a catalog agent entry from `list_available_bot_agents` is enabled
+/// and installed in a launchable lifecycle state (matching ADR-0021 where
+/// persisted `needs_auth` does not hard-block launch).
+pub(crate) fn agent_entry_is_launchable(entry: &serde_json::Value) -> bool {
+    let enabled = entry
+        .get("enabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !enabled {
+        return false;
+    }
+    matches!(
+        entry
+            .get("lifecycle")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("ready" | "needs_auth" | "needs_config")
+    )
+}
+
+async fn ready_agent_ids_on_host(pool: &sqlx::SqlitePool) -> Vec<String> {
+    let Ok(catalog) =
+        conversations::collaboration::list_available_bot_agents(pool, Uuid::nil(), None).await
+    else {
+        return Vec::new();
+    };
+    catalog
+        .get("agents")
+        .and_then(serde_json::Value::as_array)
+        .map(|agents| {
+            agents
+                .iter()
+                .filter(|entry| agent_entry_is_launchable(entry))
+                .filter_map(|entry| {
+                    entry
+                        .get("agent_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub(crate) fn compose_message_with_attachments(

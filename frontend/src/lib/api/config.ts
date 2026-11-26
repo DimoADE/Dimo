@@ -640,7 +640,9 @@ function normalizeClientEndpoints(
         ep.kind?.trim() ||
         (lower.includes('/t/')
           ? 'official_relay'
-          : /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::|\/|$)/i.test(lower)
+          : /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::|\/|$)/i.test(
+                lower
+              )
             ? 'direct'
             : /^http:\/\/(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i.test(
                   lower

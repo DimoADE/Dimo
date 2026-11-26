@@ -1167,7 +1167,10 @@ async fn codex_driver_shutdown_evicts_and_stops_server_despite_transient_arc_clo
         "server must shut down when business handle count reaches 0 despite transient Arc clones"
     );
     assert!(
-        global_codex_servers().remove_for_test(&pool_key).await.is_none(),
+        global_codex_servers()
+            .remove_for_test(&pool_key)
+            .await
+            .is_none(),
         "evicted server must be removed from global_codex_servers"
     );
 }

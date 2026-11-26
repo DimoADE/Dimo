@@ -311,6 +311,60 @@ describe('SessionCanvasView', () => {
     });
   });
 
+  it('auto-marks a selected running canvas session viewed when it finishes in foreground, and defers while unfocused', async () => {
+    let focused = false;
+    const hasFocusSpy = vi
+      .spyOn(document, 'hasFocus')
+      .mockImplementation(() => focused);
+
+    try {
+      let api: SessionCanvasApi | null = null;
+      const runningRecord: KanbanProjectSessionRecord = {
+        ...session('watch-1', new Date().toISOString()),
+        status: 'inprogress',
+        isRunning: true,
+      };
+      const finishedRecord: KanbanProjectSessionRecord = {
+        ...runningRecord,
+        status: 'inreview',
+        isRunning: false,
+      };
+      const view = (records: KanbanProjectSessionRecord[]) => (
+        <SessionCanvasView
+          projectId="p1"
+          sessions={records}
+          listWidth={280}
+          list={<div>list</div>}
+          onApiReady={(next) => {
+            api = next;
+          }}
+        />
+      );
+      const { rerender } = renderCanvas(view([runningRecord]));
+
+      act(() => {
+        api?.addOrFocus(runningRecord);
+      });
+      expect(sessionsApi.markViewed).not.toHaveBeenCalled();
+
+      // Turn finishes while window is unfocused: stays inreview.
+      rerender(view([finishedRecord]));
+      expect(sessionsApi.markViewed).not.toHaveBeenCalled();
+
+      // Returning focus to the window immediately marks the selected session viewed.
+      focused = true;
+      act(() => {
+        window.dispatchEvent(new Event('focus'));
+      });
+
+      await waitFor(() => {
+        expect(sessionsApi.markViewed).toHaveBeenCalledWith('watch-1');
+      });
+    } finally {
+      hasFocusSpy.mockRestore();
+    }
+  });
+
   it('keeps the workspace execution session when the catalog refreshes', () => {
     const onSelectedSessionChange = vi.fn();
     const current = session('alpha', '2026-10-15T00:00:00.000Z');

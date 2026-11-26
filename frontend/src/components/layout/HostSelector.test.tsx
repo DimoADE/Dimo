@@ -433,7 +433,10 @@ describe('HostSelector', () => {
                   hostKind: 'desktop',
                   online: true,
                   endpoints: [
-                    { origin: 'https://relay.dimo-ai.com/t/local-machine-id', kind: 'official_relay' },
+                    {
+                      origin: 'https://relay.dimo-ai.com/t/local-machine-id',
+                      kind: 'official_relay',
+                    },
                   ],
                 },
                 {
@@ -442,7 +445,10 @@ describe('HostSelector', () => {
                   hostKind: 'headless',
                   online: true,
                   endpoints: [
-                    { origin: 'https://relay.dimo-ai.com/t/remote-gpu-id', kind: 'official_relay' },
+                    {
+                      origin: 'https://relay.dimo-ai.com/t/remote-gpu-id',
+                      kind: 'official_relay',
+                    },
                   ],
                 },
               ],

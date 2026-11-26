@@ -1299,9 +1299,7 @@ fn build_emitted_envelope(
     let root_event_id = payload
         .get("rootEventId")
         .or_else(|| payload.get("root_event_id"))
-        .or_else(|| {
-            trace_obj.and_then(|t| t.get("rootEventId").or_else(|| t.get("root_event_id")))
-        })
+        .or_else(|| trace_obj.and_then(|t| t.get("rootEventId").or_else(|| t.get("root_event_id"))))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -1309,9 +1307,7 @@ fn build_emitted_envelope(
     let parent_run_id = payload
         .get("parentRunId")
         .or_else(|| payload.get("parent_run_id"))
-        .or_else(|| {
-            trace_obj.and_then(|t| t.get("parentRunId").or_else(|| t.get("parent_run_id")))
-        })
+        .or_else(|| trace_obj.and_then(|t| t.get("parentRunId").or_else(|| t.get("parent_run_id"))))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -1483,7 +1479,8 @@ mod trace_propagation_tests {
             },
             "payload": {}
         });
-        let env = build_emitted_envelope(&principal, &payload, now).expect("remote envelope builds");
+        let env =
+            build_emitted_envelope(&principal, &payload, now).expect("remote envelope builds");
         assert_ne!(env.event_id, "evt-forged-id");
         assert_eq!(env.trace.root_event_id, "evt-original-root");
         assert_eq!(env.trace.parent_run_id.as_deref(), Some("run-5"));

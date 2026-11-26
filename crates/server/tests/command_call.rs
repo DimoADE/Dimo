@@ -490,3 +490,61 @@ async fn authenticated_call_starts_a_turn_through_the_execution_port() {
     assert_eq!(calls[0].workflow_refs[0].plugin_id, "dimo.office");
     assert_eq!(calls[0].workflow_refs[0].workflow_id, "create-presentation");
 }
+
+#[tokio::test]
+async fn authenticated_call_accepts_payloads_larger_than_default_axum_body_limit() {
+    let options = SqliteConnectOptions::from_str("sqlite::memory:")
+        .expect("sqlite options")
+        .foreign_keys(false);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .expect("memory database");
+    let execution = Arc::new(FakeExecution::default());
+    let core =
+        ApplicationCore::with_execution(SqliteConversationRepository::new(pool), execution.clone());
+    let app = ServerRuntime::new(
+        ServerConfig::default(),
+        ServerToken::new("call-secret-with-at-least-32-bytes"),
+        core,
+    )
+    .router();
+    let workspace_id = Uuid::new_v4();
+    let conversation_id = Uuid::new_v4();
+    let large_text = "x".repeat(3 * 1024 * 1024);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/call/conversation_start_turn")
+                .header("authorization", "Bearer call-secret-with-at-least-32-bytes")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "operation_id": OperationId::new(),
+                        "args": {
+                            "request": {
+                                "agentId": "codex",
+                                "workspaceId": workspace_id,
+                                "conversationId": conversation_id,
+                                "executorProfileId": null,
+                                "text": large_text,
+                                "images": [],
+                                "modeOverride": null,
+                                "configOverrides": []
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = execution.starts.lock().expect("start calls");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].text.len(), 3 * 1024 * 1024);
+}

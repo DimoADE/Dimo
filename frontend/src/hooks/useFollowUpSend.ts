@@ -21,6 +21,7 @@ import {
 } from '@/components/tasks/follow-up/sessionComposerStructuredTokens';
 import { fileExtension, mimeForMediaExtension } from '@/utils/mediaAttachments';
 import { normalizeProviderInstanceIdForApi } from '@/lib/providerInstancesApi';
+import { recordLastSessionAgent } from '@/lib/lastSessionAgent';
 
 function formatOptimisticFileRefLabel(ref: {
   path: string;
@@ -215,6 +216,9 @@ export function useFollowUpSend({
             name: newSessionName?.trim() ? newSessionName.trim() : null,
             initial_prompt: displayPrompt,
           });
+          recordLastSessionAgent(
+            executorProfileId.executor ?? session.executor
+          );
 
           targetSessionId = session.id;
           targetWorkspaceId = session.workspace_id;

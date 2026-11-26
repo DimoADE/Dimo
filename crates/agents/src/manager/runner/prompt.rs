@@ -973,9 +973,7 @@ impl AgentConnectionRunner {
         }
     }
 
-    fn reject_busy_turn_command(
-        command: AgentConnectionCommand,
-    ) -> Option<AgentConnectionCommand> {
+    fn reject_busy_turn_command(command: AgentConnectionCommand) -> Option<AgentConnectionCommand> {
         match command {
             AgentConnectionCommand::ForkSession { result_tx, .. } => {
                 // A fork can't be taken mid-turn: the session state is

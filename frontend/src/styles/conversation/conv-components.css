@@ -460,18 +460,21 @@
    leading to layout thrashing and scroll jitter. */
 .conv-entry-item {
   /* intentionally left without content-visibility */
+  min-width: 0;
+  max-width: 100%;
 }
 
 [data-panel='conversation-logs'],
 [data-panel='child-conversation-logs'] {
   overflow-anchor: none;
+  overflow-x: hidden;
 }
 
 .conversation-floating-stage[data-floating-composer='true']
   [data-panel='conversation-logs'] {
-  padding-bottom: calc(0.75rem + var(--conv-floating-composer-height, 0px));
+  padding-bottom: calc(1.25rem + var(--conv-floating-composer-height, 0px));
   scroll-padding-bottom: calc(
-    0.75rem + var(--conv-floating-composer-height, 0px)
+    1.25rem + var(--conv-floating-composer-height, 0px)
   );
 }
 
@@ -480,19 +483,51 @@
   padding-bottom: var(--conv-floating-composer-height, 0px);
 }
 
+.conversation-floating-composer-dock {
+  isolation: isolate;
+}
+
+.conversation-floating-composer-dock::before {
+  content: '';
+  position: absolute;
+  inset: auto 0 0 0;
+  height: min(100%, 6.5rem);
+  pointer-events: none;
+  z-index: -1;
+  background: linear-gradient(
+    to top,
+    color-mix(in srgb, var(--surface-content) 82%, transparent) 0%,
+    color-mix(in srgb, var(--surface-content) 68%, transparent) 56%,
+    color-mix(in srgb, var(--surface-content) 0%, transparent) 100%
+  );
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  mask-image: linear-gradient(to top, #000 0%, #000 56%, transparent 100%);
+  -webkit-mask-image: linear-gradient(
+    to top,
+    #000 0%,
+    #000 56%,
+    transparent 100%
+  );
+}
+
 .conversation-floating-composer-dock .composer-shell {
   background: color-mix(in srgb, var(--surface-composer) 86%, transparent);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
 }
 
-.conversation-floating-composer-dock .composer-cockpit-footer-left,
-.conversation-floating-composer-dock .composer-cockpit-footer-right {
-  background: color-mix(in srgb, var(--surface-content) 80%, transparent);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border-radius: 999px;
-  padding: 1px 6px;
+.reduced-transparency .conversation-floating-composer-dock::before {
+  background: linear-gradient(
+    to top,
+    var(--surface-content) 0%,
+    var(--surface-content) 56%,
+    transparent 100%
+  );
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  mask-image: none;
+  -webkit-mask-image: none;
 }
 
 .reduced-transparency .conversation-floating-composer-dock .composer-shell {
@@ -501,27 +536,22 @@
   -webkit-backdrop-filter: none;
 }
 
-.reduced-transparency
-  .conversation-floating-composer-dock
-  .composer-cockpit-footer-left,
-.reduced-transparency
-  .conversation-floating-composer-dock
-  .composer-cockpit-footer-right {
-  background: var(--surface-content);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-}
-
 @media (prefers-reduced-transparency: reduce) {
-  .conversation-floating-composer-dock .composer-shell {
-    background: var(--surface-composer);
+  .conversation-floating-composer-dock::before {
+    background: linear-gradient(
+      to top,
+      var(--surface-content) 0%,
+      var(--surface-content) 56%,
+      transparent 100%
+    );
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
+    mask-image: none;
+    -webkit-mask-image: none;
   }
 
-  .conversation-floating-composer-dock .composer-cockpit-footer-left,
-  .conversation-floating-composer-dock .composer-cockpit-footer-right {
-    background: var(--surface-content);
+  .conversation-floating-composer-dock .composer-shell {
+    background: var(--surface-composer);
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
   }

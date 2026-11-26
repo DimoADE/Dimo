@@ -793,7 +793,11 @@ impl ServerApplicationDomains {
             .ok()
             .flatten()
             .and_then(|session| session.initial_prompt);
-        if first_prompt.as_deref().map(str::trim).is_none_or(str::is_empty) {
+        if first_prompt
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(str::is_empty)
+        {
             first_prompt = ConversationTurnRecord::find_by_ordinal(&self.pool, source_id, 1)
                 .await
                 .ok()
@@ -823,68 +827,20 @@ impl ServerApplicationDomains {
         if let (Some(source_agent), Some(target_agent)) =
             (source_agent_id.as_ref(), resolved_target_agent_id.as_ref())
         {
-            if imported_event_count > 0
-                && let Ok(Some(child_last_turn)) =
-                    ConversationTurnRecord::latest_for_conversation(&self.pool, new_id).await
-            {
-                let mut source_model = child_last_turn
-                    .model
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|m| !m.is_empty())
-                    .map(str::to_string)
-                    .or_else(|| {
-                        summary
-                            .model
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|m| !m.is_empty())
-                            .map(str::to_string)
-                    });
-                if source_model.is_none()
-                    && let Ok(Some(snapshot)) =
-                        ConversationUsageSnapshotRecord::find(&self.pool, source_id).await
-                {
-                    source_model = snapshot
-                        .model
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|m| !m.is_empty())
-                        .map(str::to_string);
-                }
+            if imported_event_count > 0 {
                 let service =
                     conversations::ConversationSessionService::new(self.conversations.clone());
-                let handoff_tokens = service
-                    .compute_fork_handoff_tokens(new_id, target_agent)
-                    .await;
                 service
-                    .append_fork_handoff_notice_entry(conversations::ForkHandoffNoticeParams {
-                        conversation_id: new_id,
-                        after_turn_id: child_last_turn.id,
+                    .record_fork_handoff_notices(conversations::ForkHandoffNoticeContext {
+                        source_conversation_id: source_id,
+                        child_conversation_id: new_id,
+                        workspace_id: summary.workspace_id,
+                        source_after_turn_id,
                         from_agent: source_agent,
                         to_agent: target_agent,
-                        from_model: source_model.as_deref(),
-                        handoff_tokens,
-                        linked_conversation_id: Some(source_id),
-                        linked_workspace_id: Some(summary.workspace_id),
-                        fork_role: Some("child"),
+                        fallback_model: summary.model.as_deref(),
                     })
                     .await;
-                if let Some(source_turn_id) = source_after_turn_id {
-                    service
-                        .append_fork_handoff_notice_entry(conversations::ForkHandoffNoticeParams {
-                            conversation_id: source_id,
-                            after_turn_id: source_turn_id,
-                            from_agent: source_agent,
-                            to_agent: target_agent,
-                            from_model: source_model.as_deref(),
-                            handoff_tokens,
-                            linked_conversation_id: Some(new_id),
-                            linked_workspace_id: Some(summary.workspace_id),
-                            fork_role: Some("source"),
-                        })
-                        .await;
-                }
             }
             emit_changed();
             return Ok(ConversationForkResult::with_agent_context(

@@ -17,10 +17,7 @@ import {
   normalizeRemoteOrigin,
   type ReachabilityEndpoint,
 } from './happyEyeballs';
-import {
-  extractHostGrantJti,
-  signWebHostGrantPop,
-} from './webHostStore';
+import { extractHostGrantJti, signWebHostGrantPop } from './webHostStore';
 
 export interface AccountDirectoryHost {
   hostId: string;

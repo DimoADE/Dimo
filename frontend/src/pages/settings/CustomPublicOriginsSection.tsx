@@ -125,7 +125,9 @@ export function CustomPublicOriginsSection({
     }
   };
 
-  const probeHealthy = Boolean(lastCheck?.reachable && lastCheck?.host_id_matched);
+  const probeHealthy = Boolean(
+    lastCheck?.reachable && lastCheck?.host_id_matched
+  );
 
   return (
     <div

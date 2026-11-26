@@ -27,6 +27,11 @@
   --conv-text-primary: var(--text-strong);
   --conv-text-secondary: var(--text-muted);
   --conv-text-tertiary: var(--text-faint);
+  --conv-tool-chip-text: color-mix(
+    in srgb,
+    var(--conv-text-secondary) 55%,
+    var(--conv-text-tertiary)
+  );
   --conv-tool-icon: hsl(var(--primary));
 
   --conv-shimmer-from: hsl(var(--primary) / 0.14);
@@ -56,4 +61,9 @@
 .legacy-design.dark,
 .dark .legacy-design {
   --conv-user-bg: var(--surface-raised-control);
+  --conv-tool-chip-text: color-mix(
+    in srgb,
+    var(--conv-text-secondary) 72%,
+    var(--conv-text-tertiary)
+  );
 }

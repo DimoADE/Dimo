@@ -1,8 +1,4 @@
-import type {
-  AgentId,
-  ExecutorConfigs,
-  ExecutorProfileId,
-} from 'shared/types';
+import type { AgentId, ExecutorConfigs, ExecutorProfileId } from 'shared/types';
 
 const RESERVED_KEYS = new Set(['recently_used_models']);
 

@@ -1542,7 +1542,8 @@ where
             if row_id == "notice:agent-connection-recovering" {
                 has_recovering_notice = true;
             } else if row_id == "status:agent-connection"
-                && let Ok(row) = serde_json::from_str::<agents::conversation::TimelineRow>(&row_json)
+                && let Ok(row) =
+                    serde_json::from_str::<agents::conversation::TimelineRow>(&row_json)
                 && let agents::conversation::ConversationTimelineRow::SessionNotice { notice } =
                     row.row
                 && notice.connection_status.as_ref().is_some_and(|connection| {

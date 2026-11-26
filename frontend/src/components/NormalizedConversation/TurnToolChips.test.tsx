@@ -1,8 +1,18 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import i18n from '@/i18n';
 import { TurnActivity } from './TurnActivity';
 import type { IndexedTurnItem } from './messageTurnAggregate';
 import type { ToolResultBlock, ToolUseBlock } from './messageTurnBlocks';
+
+const INITIAL_LANGUAGE = i18n.language;
 
 const { openFilePreviewMock } = vi.hoisted(() => ({
   openFilePreviewMock: vi.fn(),
@@ -55,6 +65,11 @@ function makeToolItem(
 describe('TurnToolChips integration in TurnActivity', () => {
   beforeEach(() => {
     openFilePreviewMock.mockReset();
+  });
+
+  afterEach(async () => {
+    cleanup();
+    await i18n.changeLanguage(INITIAL_LANGUAGE);
   });
 
   it('keeps aggregated file-diff chips visible while collapsed, previews unified diff in a portal on hover, and opens inline diff on click', () => {
@@ -177,14 +192,15 @@ describe('TurnToolChips integration in TurnActivity', () => {
       />
     );
 
-    const row = screen.getByRole('button', { name: '终端pnpm lint' });
+    const row = screen.getByRole('button', { name: 'pnpm lint' });
     expect(row).toHaveAttribute('aria-expanded', 'false');
     expect(screen.queryByTestId('tool-detail-entry')).not.toBeInTheDocument();
 
     fireEvent.keyDown(row, { key: 'Enter' });
-    expect(
-      screen.getByRole('button', { name: '终端pnpm lint' })
-    ).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('button', { name: 'pnpm lint' })).toHaveAttribute(
+      'aria-expanded',
+      'true'
+    );
     expect(screen.getByTestId('tool-detail-entry')).toBeInTheDocument();
   });
 
@@ -237,9 +253,14 @@ describe('TurnToolChips integration in TurnActivity', () => {
 
     fireEvent.click(header);
     expect(header).toHaveAttribute('aria-expanded', 'true');
-    expect(screen.getAllByTestId('turn-tool-chip-row')).toHaveLength(3);
+    const rows = screen.getAllByTestId('turn-tool-chip-row');
+    expect(rows).toHaveLength(3);
     expect(screen.getByText(/git status --short/)).toBeInTheDocument();
-    expect(screen.getByText('工具调用失败')).toBeInTheDocument();
+    expect(rows[1]).toHaveClass('is-error');
+    expect(rows[1]).toHaveAttribute('title', '命令退出码 1');
+    expect(rows[2]).toHaveClass('is-error');
+    expect(rows[2]).toHaveAttribute('title', '工具调用失败');
+    expect(document.querySelector('.conv-tool-chip-error-badge')).toBeNull();
   });
 
   it('renders synthesized unified_diff counts and honors precomputed stats when diff_truncated is true', () => {
@@ -332,5 +353,369 @@ describe('TurnToolChips integration in TurnActivity', () => {
     });
     expect(secondChip).toHaveTextContent('+420');
     expect(secondChip).toHaveTextContent('-17');
+  });
+
+  it('renders a single settled tool call directly without wrapping it in a batch', () => {
+    render(
+      <TurnActivity
+        turnId="turn-single-settled"
+        timestamp="2026-10-12T00:00:00.000Z"
+        workspacePath="/workspace/app"
+        items={[
+          makeToolItem(0, 'Edit', {
+            file_path: '/workspace/app/src/solo.ts',
+            old_string: 'const a = 1;',
+            new_string: 'const a = 2;',
+          }),
+        ]}
+        attempt={{ id: 'ws-1', container_ref: '/workspace/app' } as never}
+        task={null}
+        isStreaming={false}
+      />
+    );
+
+    expect(
+      screen.queryByTestId('turn-tool-chips-batch')
+    ).not.toBeInTheDocument();
+    const row = screen.getByTestId('turn-tool-chip-row');
+    expect(row).toHaveTextContent('solo.ts');
+    expect(row).toHaveTextContent('+1');
+    expect(row).toHaveTextContent('-1');
+  });
+
+  it('groups streaming tool calls into one unified live batch and preserves expansion on settlement', () => {
+    const items = [
+      makeToolItem(0, 'bash', { command: 'echo 0' }, '0'),
+      makeToolItem(1, 'bash', { command: 'echo 1' }, '1'),
+      makeToolItem(2, 'bash', { command: 'echo 2' }, null),
+    ];
+    const props = {
+      turnId: 'turn-unified-live',
+      timestamp: '2026-10-12T00:00:00.000Z',
+      items,
+      attempt: { id: 'ws-1', container_ref: null } as never,
+      task: null,
+    };
+    const { rerender } = render(<TurnActivity {...props} isStreaming={true} />);
+
+    expect(screen.getAllByTestId('turn-tool-chips-batch')).toHaveLength(1);
+    expect(screen.queryByTestId('turn-tool-chip-row')).not.toBeInTheDocument();
+    const liveHeader = screen.getByRole('button', { name: 'echo 2' });
+    expect(liveHeader).toHaveClass('is-live');
+    expect(liveHeader).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.click(liveHeader);
+    const viewport = screen.getByTestId('turn-tool-chips-viewport');
+    expect(viewport).toHaveAttribute('role', 'region');
+    expect(viewport).toHaveAttribute('data-tool-group-scroll');
+    expect(viewport).toHaveAttribute('data-overlay-scrollbar', 'off');
+    expect(viewport).toHaveAttribute('data-scroll-fade', 'none');
+    expect(within(viewport).getAllByTestId('turn-tool-chip-row')).toHaveLength(
+      3
+    );
+
+    rerender(
+      <TurnActivity
+        {...props}
+        items={[
+          items[0]!,
+          items[1]!,
+          makeToolItem(2, 'bash', { command: 'echo 2' }, '2'),
+        ]}
+        isStreaming={false}
+      />
+    );
+
+    const settledHeader = screen.getByRole('button', { name: '运行 3 个命令' });
+    expect(settledHeader).not.toHaveClass('is-live');
+    expect(settledHeader).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getAllByTestId('turn-tool-chip-row')).toHaveLength(3);
+  });
+
+  it('formats priority-ordered Top-2 plus other actions summaries in zh-CN and en', async () => {
+    const items = [
+      makeToolItem(0, 'bash', { command: 'pnpm test' }, 'ok'),
+      makeToolItem(1, 'bash', { command: 'pnpm lint' }, 'ok'),
+      makeToolItem(2, 'Read', { file_path: 'src/a.ts' }, 'ok'),
+      makeToolItem(3, 'Read', { file_path: 'src/b.ts' }, 'ok'),
+      makeToolItem(4, 'Edit', {
+        file_path: 'src/a.ts',
+        old_string: 'a',
+        new_string: 'b',
+      }),
+      makeToolItem(5, 'Grep', { pattern: 'foo' }, 'ok'),
+    ];
+    const props = {
+      turnId: 'turn-top2-summary',
+      timestamp: '2026-10-12T00:00:00.000Z',
+      items,
+      attempt: { id: 'ws-1', container_ref: null } as never,
+      task: null,
+      isStreaming: false,
+    };
+
+    const { rerender } = render(<TurnActivity {...props} />);
+    expect(
+      screen.getByRole('button', {
+        name: '运行 2 个命令、已改 1 个文件，以及其他 3 项操作',
+      })
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      await i18n.changeLanguage('en');
+    });
+    rerender(<TurnActivity {...props} />);
+    expect(
+      screen.getByRole('button', {
+        name: 'Ran 2 commands, changed 1 file, and performed 3 other actions',
+      })
+    ).toBeInTheDocument();
+  });
+
+  it('updates scroll fades and dynamic --conv-batch-expanded-extra height inside the batch viewport', () => {
+    render(
+      <TurnActivity
+        turnId="turn-viewport-metrics"
+        timestamp="2026-10-12T00:00:00.000Z"
+        items={[
+          makeToolItem(0, 'bash', { command: 'cmd-0' }, 'output-0'),
+          makeToolItem(1, 'bash', { command: 'cmd-1' }, 'output-1'),
+        ]}
+        attempt={{ id: 'ws-1', container_ref: null } as never}
+        task={null}
+        isStreaming={false}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '运行 2 个命令' }));
+    const viewport = screen.getByTestId('turn-tool-chips-viewport');
+    Object.defineProperty(viewport, 'clientHeight', {
+      configurable: true,
+      value: 200,
+    });
+    Object.defineProperty(viewport, 'scrollHeight', {
+      configurable: true,
+      value: 500,
+    });
+
+    viewport.scrollTop = 0;
+    fireEvent.scroll(viewport);
+    expect(viewport).toHaveAttribute('data-scroll-fade', 'bottom');
+
+    viewport.scrollTop = 120;
+    fireEvent.scroll(viewport);
+    expect(viewport).toHaveAttribute('data-scroll-fade', 'both');
+
+    viewport.scrollTop = 300;
+    fireEvent.scroll(viewport);
+    expect(viewport).toHaveAttribute('data-scroll-fade', 'top');
+
+    fireEvent.click(screen.getByRole('button', { name: 'cmd-0' }));
+    const detail = viewport.querySelector('.conv-tool-chip-detail');
+    expect(detail).not.toBeNull();
+    Object.defineProperty(detail, 'offsetHeight', {
+      configurable: true,
+      value: 140,
+    });
+    fireEvent.scroll(viewport);
+    expect(viewport.style.getPropertyValue('--conv-batch-expanded-extra')).toBe(
+      '140px'
+    );
+  });
+
+  it('keeps the left semantic icon with error tint and right-aligned chevron on failed rows', () => {
+    render(
+      <TurnActivity
+        turnId="turn-failed-row-layout"
+        timestamp="2026-10-12T00:00:00.000Z"
+        items={[
+          makeToolItem(0, 'Read', { file_path: 'src/ok.ts' }, 'ok'),
+          makeToolItem(
+            1,
+            'Read',
+            { file_path: 'src/missing.ts' },
+            'ENOENT',
+            true
+          ),
+        ]}
+        attempt={{ id: 'ws-1', container_ref: null } as never}
+        task={null}
+        isStreaming={false}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '已读 2 个文件' }));
+    const items = screen.getAllByTestId('turn-tool-chip-item');
+    const failedItem = items[1]!;
+    const failedRow = within(failedItem).getByTestId('turn-tool-chip-row');
+    expect(failedItem).toHaveAttribute('data-tool-status', 'error');
+    expect(failedRow).toHaveClass('is-error');
+    expect(
+      failedRow.querySelector(
+        '.conv-tool-chip-icon-slot .conv-tool-chip-kind-icon'
+      )
+    ).not.toBeNull();
+    expect(
+      failedRow.querySelector(
+        '.conv-tool-chip-trailing .conv-tool-chip-chevron'
+      )
+    ).not.toBeNull();
+  });
+
+  it('omits terminal and edit-file labels, displays Read only for file reads, and hides duplicate mini file icons', () => {
+    render(
+      <TurnActivity
+        turnId="turn-t3-simplified-rows"
+        timestamp="2026-10-12T00:00:00.000Z"
+        workspacePath="/workspace/app"
+        items={[
+          makeToolItem(0, 'bash', { command: 'git status --short' }, 'clean'),
+          makeToolItem(1, 'Edit', {
+            file_path: '/workspace/app/src/app.ts',
+            old_string: 'const a = 1;',
+            new_string: 'const a = 2;',
+          }),
+          makeToolItem(2, 'Read', {
+            file_path: '/workspace/app/docs/guide.md',
+          }),
+        ]}
+        attempt={{ id: 'ws-1', container_ref: '/workspace/app' } as never}
+        task={null}
+        isStreaming={false}
+      />
+    );
+
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: '运行 1 个命令、已改 1 个文件，以及其他 1 项操作',
+      })
+    );
+    const viewport = screen.getByTestId('turn-tool-chips-viewport');
+    expect(within(viewport).queryByText('终端')).not.toBeInTheDocument();
+    expect(within(viewport).queryByText('编辑文件')).not.toBeInTheDocument();
+    expect(within(viewport).queryByText('查看文件')).not.toBeInTheDocument();
+    expect(within(viewport).getByText('Read')).toBeInTheDocument();
+    expect(
+      within(viewport).getByText('git status --short')
+    ).toBeInTheDocument();
+    expect(within(viewport).getByText('app.ts')).toBeInTheDocument();
+    expect(within(viewport).getByText('guide.md')).toBeInTheDocument();
+    expect(viewport.querySelector('.dimo-tool-call-file-icon')).toBeNull();
+
+    const rows = within(viewport).getAllByTestId('turn-tool-chip-row');
+    expect(rows[0]!.querySelector('.conv-tool-chip-label')).toBeNull();
+    expect(rows[1]!.querySelector('.conv-tool-chip-label')).toBeNull();
+    expect(rows[2]!.querySelector('.conv-tool-chip-label')).toHaveTextContent(
+      'Read'
+    );
+  });
+
+  it('renders a disclosure triangle on the batch header and only shows a spinner while collapsed and running', () => {
+    const items = [
+      makeToolItem(0, 'bash', { command: 'cmd-0' }, 'ok'),
+      makeToolItem(1, 'bash', { command: 'cmd-1' }, null),
+    ];
+    const { rerender } = render(
+      <TurnActivity
+        turnId="turn-disclosure-triangle"
+        timestamp="2026-10-12T00:00:00.000Z"
+        items={items}
+        attempt={{ id: 'ws-1', container_ref: null } as never}
+        task={null}
+        isStreaming={true}
+      />
+    );
+
+    const liveHeader = screen.getByRole('button', { name: 'cmd-1' });
+    expect(
+      within(liveHeader).queryByTestId('turn-tool-chips-disclosure')
+    ).not.toBeInTheDocument();
+    expect(liveHeader.querySelector('.conv-tool-chip-spinner')).not.toBeNull();
+
+    // Expanding while still streaming switches the header icon to the disclosure triangle
+    fireEvent.click(liveHeader);
+    expect(
+      within(liveHeader).getByTestId('turn-tool-chips-disclosure')
+    ).toBeInTheDocument();
+    expect(liveHeader.querySelector('.conv-tool-chip-spinner')).toBeNull();
+
+    // Settled collapsed header also renders the disclosure triangle (never a hammer)
+    fireEvent.click(liveHeader);
+    rerender(
+      <TurnActivity
+        turnId="turn-disclosure-triangle"
+        timestamp="2026-10-12T00:00:00.000Z"
+        items={[
+          items[0]!,
+          makeToolItem(1, 'bash', { command: 'cmd-1' }, 'done'),
+        ]}
+        attempt={{ id: 'ws-1', container_ref: null } as never}
+        task={null}
+        isStreaming={false}
+      />
+    );
+    const settledHeader = screen.getByRole('button', { name: '运行 2 个命令' });
+    expect(
+      within(settledHeader).getByTestId('turn-tool-chips-disclosure')
+    ).toBeInTheDocument();
+  });
+
+  it('preserves viewport scrollTop when expanding and then collapsing a tool item', async () => {
+    render(
+      <TurnActivity
+        turnId="turn-collapse-scroll-anchor"
+        timestamp="2026-10-12T00:00:00.000Z"
+        items={[
+          makeToolItem(0, 'bash', { command: 'cmd-0' }, 'output-0'),
+          makeToolItem(1, 'bash', { command: 'cmd-1' }, 'output-1'),
+          makeToolItem(2, 'bash', { command: 'cmd-2' }, 'output-2'),
+        ]}
+        attempt={{ id: 'ws-1', container_ref: null } as never}
+        task={null}
+        isStreaming={false}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '运行 3 个命令' }));
+    const viewport = screen.getByTestId('turn-tool-chips-viewport');
+    Object.defineProperty(viewport, 'clientHeight', {
+      configurable: true,
+      value: 200,
+    });
+    Object.defineProperty(viewport, 'scrollHeight', {
+      configurable: true,
+      value: 520,
+    });
+
+    // User scrolls down inside the tool-call list before expanding an item
+    viewport.scrollTop = 180;
+    fireEvent.scroll(viewport);
+
+    // Expand cmd-1
+    const targetRow = screen.getByRole('button', { name: 'cmd-1' });
+    fireEvent.click(targetRow);
+    const detail = viewport.querySelector('.conv-tool-chip-detail');
+    expect(detail).not.toBeNull();
+    Object.defineProperty(detail, 'offsetHeight', {
+      configurable: true,
+      value: 160,
+    });
+    fireEvent.scroll(viewport);
+    expect(viewport.style.getPropertyValue('--conv-batch-expanded-extra')).toBe(
+      '160px'
+    );
+    expect(viewport.scrollTop).toBe(180);
+
+    // Collapse cmd-1 and simulate Chromium clamping scrollTop to 0 during layout
+    fireEvent.click(targetRow);
+    viewport.scrollTop = 0;
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(viewport.style.getPropertyValue('--conv-batch-expanded-extra')).toBe(
+      ''
+    );
+    expect(viewport.scrollTop).toBe(180);
   });
 });

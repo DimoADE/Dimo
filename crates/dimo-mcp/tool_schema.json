@@ -21,6 +21,19 @@
     }
   },
   {
+    "name": "environment_links",
+    "description": "List paired remote Dimo Hosts (environments) available for cross-Host orchestration (`environment_id`, `host_id`, `name`, `origin`, credential status). Call before targeting a remote Host with `environment_id` on `orchestrator_capabilities`, `project_list`, `delegate_task`, or `thread_launch`.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Optional substring filter across environment ids, names, and origins."
+        }
+      }
+    }
+  },
+  {
     "name": "delegate_task",
     "description": "Delegate a self-contained sub-task to another coding agent in its own child conversation (same project or another project, shared directory or isolated git worktree). A structured user mention such as `[&Codex](dimo://agent/codex)` is an explicit user request to consider delegation: for every AgentMention in the prompt, call `delegate_task` once with the matching stable agent id unless delegation would be unsafe or impossible, and explain any refusal. The mention does not itself start a child session; only this tool call does. Supports `mode: \"async\"` (returns immediately and automatically pushes coalesced completion results back into your conversation — do NOT poll in a loop) or `mode: \"wait\"` (waits up to `timeout_ms`). Respects monotonic mode ceiling and `client_request_id` idempotency. This tool is already in the session MCP list — do not call search_tool or grep the repository for its schema.",
     "inputSchema": {

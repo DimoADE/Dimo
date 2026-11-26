@@ -289,9 +289,10 @@ pub async fn prepare_project_workspace(
         .await
         .map_err(|error| IsolatedWorkspaceError::other(error.to_string()))?
         .ok_or_else(|| IsolatedWorkspaceError::other(format!("Project {project_id} not found")))?;
-    let project_repos = db::models::project_repo::ProjectRepo::find_repos_for_project(pool, project_id)
-        .await
-        .map_err(|error| IsolatedWorkspaceError::other(error.to_string()))?;
+    let project_repos =
+        db::models::project_repo::ProjectRepo::find_repos_for_project(pool, project_id)
+            .await
+            .map_err(|error| IsolatedWorkspaceError::other(error.to_string()))?;
     let root_path = std::path::PathBuf::from(&project.root_path);
 
     match strategy {
@@ -635,8 +636,7 @@ pub async fn ensure_orchestration_scratch_workspace(
             .await
             .unwrap_or_default();
     let workspace =
-        ensure_root_workspace_for_project(pool, &project, &project_repos, None, "Scratch")
-            .await?;
+        ensure_root_workspace_for_project(pool, &project, &project_repos, None, "Scratch").await?;
     Ok(PreparedProjectWorkspace {
         project_id: project.id,
         workspace_id: workspace.id,

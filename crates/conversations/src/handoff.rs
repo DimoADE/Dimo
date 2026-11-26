@@ -1194,6 +1194,77 @@ impl crate::ConversationSessionService {
         })
         .await;
     }
+
+    pub async fn record_fork_handoff_notices(&self, ctx: ForkHandoffNoticeContext<'_>) {
+        let pool = &self.ctx.deployment.db().pool;
+        let Ok(Some(child_last_turn)) =
+            db::models::conversation_turn::ConversationTurnRecord::latest_for_conversation(
+                pool,
+                ctx.child_conversation_id,
+            )
+            .await
+        else {
+            return;
+        };
+
+        let mut source_model = child_last_turn
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                ctx.fallback_model
+                    .map(str::trim)
+                    .filter(|m| !m.is_empty())
+                    .map(str::to_string)
+            });
+        if source_model.is_none()
+            && let Ok(Some(snapshot)) =
+                db::models::conversation_usage::ConversationUsageSnapshotRecord::find(
+                    pool,
+                    ctx.source_conversation_id,
+                )
+                .await
+        {
+            source_model = snapshot
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .map(str::to_string);
+        }
+
+        let handoff_tokens = self
+            .compute_fork_handoff_tokens(ctx.child_conversation_id, ctx.to_agent)
+            .await;
+        self.append_fork_handoff_notice_entry(ForkHandoffNoticeParams {
+            conversation_id: ctx.child_conversation_id,
+            after_turn_id: child_last_turn.id,
+            from_agent: ctx.from_agent,
+            to_agent: ctx.to_agent,
+            from_model: source_model.as_deref(),
+            handoff_tokens,
+            linked_conversation_id: Some(ctx.source_conversation_id),
+            linked_workspace_id: Some(ctx.workspace_id),
+            fork_role: Some("child"),
+        })
+        .await;
+        if let Some(source_turn_id) = ctx.source_after_turn_id {
+            self.append_fork_handoff_notice_entry(ForkHandoffNoticeParams {
+                conversation_id: ctx.source_conversation_id,
+                after_turn_id: source_turn_id,
+                from_agent: ctx.from_agent,
+                to_agent: ctx.to_agent,
+                from_model: source_model.as_deref(),
+                handoff_tokens,
+                linked_conversation_id: Some(ctx.child_conversation_id),
+                linked_workspace_id: Some(ctx.workspace_id),
+                fork_role: Some("source"),
+            })
+            .await;
+        }
+    }
 }
 
 /// Parameters for persisting a fork handoff timeline notice on either the source
@@ -1209,6 +1280,19 @@ pub struct ForkHandoffNoticeParams<'a> {
     pub linked_conversation_id: Option<Uuid>,
     pub linked_workspace_id: Option<Uuid>,
     pub fork_role: Option<&'a str>,
+}
+
+/// Parameters for resolving source metadata and persisting paired child/source
+/// fork handoff notices after cloning visible conversation history.
+#[derive(Debug, Clone)]
+pub struct ForkHandoffNoticeContext<'a> {
+    pub source_conversation_id: Uuid,
+    pub child_conversation_id: Uuid,
+    pub workspace_id: Uuid,
+    pub source_after_turn_id: Option<Uuid>,
+    pub from_agent: &'a agents::AgentId,
+    pub to_agent: &'a agents::AgentId,
+    pub fallback_model: Option<&'a str>,
 }
 
 #[cfg(test)]

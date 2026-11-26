@@ -315,6 +315,9 @@
       "other_other": "{{count}} other tool calls",
       "otherActivities_one": "{{count}} other activity",
       "otherActivities_other": "{{count}} other activities",
+      "otherActions_one": "and performed {{count}} other action",
+      "otherActions_other": "and performed {{count}} other actions",
+      "otherActionsJoin": ", ",
       "separator": ", ",
       "failed": "Tool call failed",
       "commandExitCode": "Command exited with code {{code}}",
@@ -327,7 +330,8 @@
   },
   "toolChips": {
     "showDiff": "Show diff for {{file}}",
-    "more": "+{{count}} more"
+    "more": "+{{count}} more",
+    "activityList": "Tool calls"
   },
   "statusDock": {
     "dismiss": "Dismiss notice",

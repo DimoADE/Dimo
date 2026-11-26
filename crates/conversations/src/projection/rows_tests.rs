@@ -2158,7 +2158,10 @@ async fn multiple_fork_handoff_notices_after_same_turn_do_not_overwrite() {
     let fork_rows: Vec<_> = timeline
         .rows
         .iter()
-        .filter(|row| row.row_id.starts_with(&format!("host-note:agent-handoff:after:{turn_id}:fork:")))
+        .filter(|row| {
+            row.row_id
+                .starts_with(&format!("host-note:agent-handoff:after:{turn_id}:fork:"))
+        })
         .collect();
     assert_eq!(fork_rows.len(), 2);
     let messages: Vec<serde_json::Value> = fork_rows

@@ -41,7 +41,8 @@ vi.mock('@/lib/hostAsset', () => ({
   isBrowserDisplayUrl: (value?: string | null) =>
     Boolean(
       value &&
-        (/^(blob:|data:|https?:|asset:)/i.test(value) || value.startsWith('/api/'))
+        (/^(blob:|data:|https?:|asset:)/i.test(value) ||
+          value.startsWith('/api/'))
     ),
 }));
 

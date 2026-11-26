@@ -161,10 +161,7 @@ export function ContextHandoffDivider({
         ) : mode === 'fork' ? (
           <GitFork className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
         ) : (
-          <ArrowLeftRight
-            className="h-3.5 w-3.5 shrink-0"
-            aria-hidden="true"
-          />
+          <ArrowLeftRight className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
         )}
         <span>
           {title}

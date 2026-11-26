@@ -109,9 +109,7 @@ function readProjectKanbanState(
       lastActiveWorkspaceId: null,
     };
   }
-  const stored = useProjectViewStateStore
-    .getState()
-    .getKanbanState(projectKey);
+  const stored = useProjectViewStateStore.getState().getKanbanState(projectKey);
   const migrated =
     stored.activeViewId ?? migrateKanbanViewId(stored.panelView, style);
   const viewId = viewIdForBoardStyleChange(style, migrated);

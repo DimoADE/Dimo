@@ -25,7 +25,9 @@ const ALERT_META: Record<
   caution: { label: 'Caution', Icon: OctagonAlert },
 };
 
-export function isMarkdownAlertKind(value: unknown): value is MarkdownAlertKind {
+export function isMarkdownAlertKind(
+  value: unknown
+): value is MarkdownAlertKind {
   return (
     typeof value === 'string' &&
     Object.prototype.hasOwnProperty.call(ALERT_META, value)

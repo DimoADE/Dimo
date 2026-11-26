@@ -149,13 +149,14 @@ fn tools_list_reflects_features() {
         .filter_map(|t| t["name"].as_str())
         .collect();
     assert!(names.contains(&"orchestrator_capabilities"));
+    assert!(names.contains(&"environment_links"));
     assert!(names.contains(&"delegate_task"));
     assert!(names.contains(&"task_status"));
     assert!(names.contains(&"task_cancel"));
     assert!(names.contains(&"thread_launch"));
     assert!(names.contains(&"project_list"));
     assert!(names.contains(&"pending_request"));
-    assert_eq!(names.len(), 17);
+    assert_eq!(names.len(), 18);
     assert!(!names.contains(&"check_user_feedback"));
     assert!(!names.contains(&"ask_user_question"));
     assert!(!names.contains(&"plugin_dev_link_request"));
@@ -310,7 +311,7 @@ fn all_features_expose_orchestration_feedback_and_ask_tools() {
         "delegation,feedback,ask",
         r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#,
     ));
-    assert_eq!(value["result"]["tools"].as_array().unwrap().len(), 19);
+    assert_eq!(value["result"]["tools"].as_array().unwrap().len(), 20);
 }
 
 #[test]

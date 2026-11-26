@@ -603,13 +603,13 @@ function CollapsedProcessGroup({
         className="conv-collapsed-process-toggle inline-flex items-center gap-1 rounded-md text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         aria-expanded={expanded}
       >
+        {label ? <span className="tabular-nums">{label}</span> : null}
         <ChevronDown
           className={cn(
             'h-3.5 w-3.5 transition-transform',
             expanded ? '' : '-rotate-90'
           )}
         />
-        {label ? <span>{label}</span> : null}
       </button>
       {expanded ? (
         <div ref={bodyRef} className="conv-nested-scroll" data-nested-scroll="">

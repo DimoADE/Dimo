@@ -49,6 +49,9 @@ vi.mock('@/contexts/PanelActionsContext', () => ({
   usePanelActionsContext: () => ({
     openSessionTab: openSessionTabMock,
   }),
+  useOptionalPanelActionsContext: () => ({
+    openSessionTab: openSessionTabMock,
+  }),
 }));
 
 vi.mock('@/hooks/useNavigateWithSearch', () => ({

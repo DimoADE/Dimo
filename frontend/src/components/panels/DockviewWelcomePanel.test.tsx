@@ -60,8 +60,8 @@ const {
   useWorktreeMock: vi.fn(),
 }));
 
-vi.mock('@/contexts/PanelActionsContext', () => ({
-  usePanelActionsContext: () => ({
+vi.mock('@/contexts/PanelActionsContext', () => {
+  const actions = {
     openDiffPreview,
     openFilePreview,
     openNewTerminal,
@@ -69,8 +69,12 @@ vi.mock('@/contexts/PanelActionsContext', () => ({
     openWebPreview,
     showFileTree,
     toggleFileTree,
-  }),
-}));
+  };
+  return {
+    usePanelActionsContext: () => actions,
+    useOptionalPanelActionsContext: () => actions,
+  };
+});
 
 vi.mock('@/contexts/KanbanSessionContext', () => ({
   useKanbanSessionContext: () => ({

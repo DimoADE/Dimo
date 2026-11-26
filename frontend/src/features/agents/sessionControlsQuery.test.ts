@@ -353,7 +353,9 @@ describe('loadAgentSessionControlsCatalog', () => {
   it('returns null without blocking on refreshCapabilityCatalog when no catalog is cached yet', async () => {
     capabilityCatalog.mockResolvedValue(null);
 
-    await expect(loadAgentSessionControlsCatalog('antigravity')).resolves.toBeNull();
+    await expect(
+      loadAgentSessionControlsCatalog('antigravity')
+    ).resolves.toBeNull();
     expect(capabilityCatalog).toHaveBeenCalledWith('antigravity');
     expect(refreshCapabilityCatalog).not.toHaveBeenCalled();
   });

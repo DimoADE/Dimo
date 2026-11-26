@@ -329,9 +329,7 @@
   color: var(--conv-link-color) !important;
 }
 
-.conv-user-bubble
-  .conv-markdown
-  .conv-resource-link[data-resource-kind='file'],
+.conv-user-bubble .conv-markdown .conv-resource-link[data-resource-kind='file'],
 .conv-user-bubble
   .conv-markdown
   .conv-resource-link[data-resource-kind='file']

@@ -14,49 +14,336 @@
   }
 }
 
+.conv-collapsed-process-toggle {
+  color: var(--conv-tool-chip-text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.55;
+}
+
+/* T3Code-aligned vertical rhythm between tool-call groups and prose:
+   - Fold divider: 8px above hairline, 6px below (+ 2px header padding = 8px).
+   - Tool-call group <-> prose: 10px block spacing (+ 2px header/row padding = 12px).
+   - Consecutive tool-call containers stay tightly coupled without extra margin. */
+.conv-collapsed-process.is-expanded > .conv-collapsed-process-toggle {
+  padding-bottom: 8px;
+}
+
+.conv-collapsed-process.is-expanded .conv-nested-scroll {
+  margin-top: 6px;
+}
+
+.conv-collapsed-process:not(.is-expanded) > .conv-assistant-body:empty {
+  display: none;
+}
+
+.conv-nested-scroll
+  > :not(.dimo-turn-tool-calls):not(.conv-thinking)
+  + .dimo-turn-tool-calls,
+.conv-nested-scroll
+  > .dimo-turn-tool-calls:not(:has(> .conv-thinking))
+  + :not(.dimo-turn-tool-calls):not(.conv-thinking),
+.conv-nested-scroll > .conv-markdown + .conv-markdown,
+.conv-nested-scroll > .conv-streaming-markdown + .conv-markdown,
+.conv-nested-scroll > .conv-markdown + .conv-streaming-markdown {
+  margin-top: 10px;
+}
+
+.conv-collapsed-process.is-expanded
+  .conv-nested-scroll
+  > .dimo-turn-tool-calls:last-child {
+  margin-bottom: 10px;
+}
+
+.conv-turn-row.is-fold-tail .conv-assistant-body > .dimo-turn-tool-calls {
+  margin-bottom: 10px;
+}
+
 .conv-tool-chips-batch {
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  margin-block: 0;
+  padding-bottom: 0;
 }
 
 .conv-tool-chips-header {
   gap: 6px;
-  padding: 2px 0;
-  color: var(--conv-text-secondary);
+  margin-inline: 0;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 22px;
+  padding: 2px;
+  border-radius: var(--radius-inner);
+  color: var(--conv-tool-chip-text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.55;
   transition: color 140ms ease;
 }
 
-.conv-tool-chips-header.is-expanded,
 .conv-tool-chips-header:hover {
+  background: transparent;
   color: var(--conv-text-primary);
 }
 
-.conv-tool-chips-batch-chevron {
-  width: 14px;
-  height: 14px;
-  flex-shrink: 0;
-  color: var(--conv-text-tertiary);
-  transform: rotate(-90deg);
-  transition:
-    transform 160ms cubic-bezier(0.22, 1, 0.36, 1),
-    color 140ms ease;
+.conv-tool-chips-header:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 1px;
 }
 
-.conv-tool-chips-header:hover .conv-tool-chips-batch-chevron,
-.conv-tool-chips-batch-chevron.is-expanded {
+.conv-tool-chips-header > .conv-tool-chips-header-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  color: var(--conv-text-tertiary);
+  transition: color 140ms ease;
+}
+
+.conv-tool-chips-header:not(.is-error):hover > .conv-tool-chips-header-icon {
   color: var(--conv-text-secondary);
 }
 
-.conv-tool-chips-batch-chevron.is-expanded {
+.conv-tool-chips-header.is-error > .conv-tool-chips-header-icon {
+  color: var(--conv-tool-error);
+}
+
+.conv-tool-chips-disclosure-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
   transform: rotate(0deg);
+  transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.conv-tool-chips-header.is-expanded .conv-tool-chips-disclosure-icon {
+  transform: rotate(90deg);
+}
+
+.conv-tool-chips-header > .conv-tool-chips-header-label {
+  display: block;
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conv-tool-chips-header > .conv-tool-chips-live-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.conv-tool-chips-live-target {
+  min-width: 0;
+  flex: 1 1 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: inherit;
+  font-family: var(--font-ui);
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.conv-tool-chips-header > .conv-tool-chips-live-count {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 0 5px;
+  border-radius: var(--radius-inner);
+  background: var(--conv-surface-control);
+  color: var(--conv-text-tertiary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.conv-tool-chips-timestamp {
+  flex: 0 0 auto;
+  margin-inline-start: 8px;
+  color: var(--conv-text-tertiary);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1;
+}
+
+/* Compact dynamic-height scrollable viewport with slim 4px thumb-only scrollbar
+   (no track, no arrow buttons) and top/bottom scroll-fade masks.
+   `scrollbar-width: auto` overrides `.legacy-design * { scrollbar-width: none }`
+   without activating Chromium's native standard scrollbar paint (which forces
+   Windows track + up/down arrows when `thin` or `scrollbar-color` is set). */
+.legacy-design .conv-tool-chips-viewport,
+.conv-tool-chips-viewport {
+  position: relative;
+  margin-top: 0;
+  margin-inline: 0;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  padding-inline: 0;
+  max-height: calc(min(18rem, 50dvh) + var(--conv-batch-expanded-extra, 0px));
+  overflow-y: auto;
+  overflow-x: hidden;
+  overflow-anchor: none;
+  overscroll-behavior: auto;
+  scroll-padding-block: 24px;
+  border-radius: var(--radius-inner);
+  scrollbar-gutter: stable;
+  scrollbar-width: auto;
+  animation: conv-tool-chip-fade-up 150ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@supports not selector(::-webkit-scrollbar) {
+  .legacy-design .conv-tool-chips-viewport,
+  .conv-tool-chips-viewport {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(
+        in srgb,
+        var(--conv-text-tertiary) 32%,
+        transparent
+      )
+      transparent;
+  }
+}
+
+.conv-tool-chips-viewport:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: -2px;
+}
+
+.legacy-design .conv-tool-chips-viewport::-webkit-scrollbar,
+.conv-tool-chips-viewport::-webkit-scrollbar {
+  width: 4px;
+  height: 0;
+  background: transparent;
+}
+
+.legacy-design .conv-tool-chips-viewport::-webkit-scrollbar-button,
+.conv-tool-chips-viewport::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.legacy-design .conv-tool-chips-viewport::-webkit-scrollbar-track,
+.legacy-design .conv-tool-chips-viewport::-webkit-scrollbar-track-piece,
+.legacy-design .conv-tool-chips-viewport::-webkit-scrollbar-corner,
+.conv-tool-chips-viewport::-webkit-scrollbar-track,
+.conv-tool-chips-viewport::-webkit-scrollbar-track-piece,
+.conv-tool-chips-viewport::-webkit-scrollbar-corner {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+
+.legacy-design .conv-tool-chips-viewport::-webkit-scrollbar-thumb,
+.conv-tool-chips-viewport::-webkit-scrollbar-thumb {
+  border: none;
+  border-radius: 9999px;
+  background: color-mix(in srgb, var(--conv-text-tertiary) 32%, transparent);
+}
+
+.legacy-design .conv-tool-chips-viewport::-webkit-scrollbar-thumb:hover,
+.conv-tool-chips-viewport::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--conv-text-tertiary) 52%, transparent);
+}
+
+.conv-tool-chips-viewport[data-scroll-fade='top'] {
+  mask-image:
+    linear-gradient(to bottom, transparent 0, #000 20px, #000 100%),
+    linear-gradient(#000, #000);
+  mask-position: left, right;
+  mask-repeat: no-repeat;
+  mask-size:
+    calc(100% - 4px) 100%,
+    4px 100%;
+  -webkit-mask-image:
+    linear-gradient(to bottom, transparent 0, #000 20px, #000 100%),
+    linear-gradient(#000, #000);
+  -webkit-mask-position: left, right;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-size:
+    calc(100% - 4px) 100%,
+    4px 100%;
+}
+
+.conv-tool-chips-viewport[data-scroll-fade='bottom'] {
+  mask-image:
+    linear-gradient(
+      to bottom,
+      #000 0,
+      #000 calc(100% - 24px),
+      transparent 100%
+    ),
+    linear-gradient(#000, #000);
+  mask-position: left, right;
+  mask-repeat: no-repeat;
+  mask-size:
+    calc(100% - 4px) 100%,
+    4px 100%;
+  -webkit-mask-image:
+    linear-gradient(
+      to bottom,
+      #000 0,
+      #000 calc(100% - 24px),
+      transparent 100%
+    ),
+    linear-gradient(#000, #000);
+  -webkit-mask-position: left, right;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-size:
+    calc(100% - 4px) 100%,
+    4px 100%;
+}
+
+.conv-tool-chips-viewport[data-scroll-fade='both'] {
+  mask-image:
+    linear-gradient(
+      to bottom,
+      transparent 0,
+      #000 20px,
+      #000 calc(100% - 24px),
+      transparent 100%
+    ),
+    linear-gradient(#000, #000);
+  mask-position: left, right;
+  mask-repeat: no-repeat;
+  mask-size:
+    calc(100% - 4px) 100%,
+    4px 100%;
+  -webkit-mask-image:
+    linear-gradient(
+      to bottom,
+      transparent 0,
+      #000 20px,
+      #000 calc(100% - 24px),
+      transparent 100%
+    ),
+    linear-gradient(#000, #000);
+  -webkit-mask-position: left, right;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-size:
+    calc(100% - 4px) 100%,
+    4px 100%;
 }
 
 .conv-tool-chips-list {
   display: flex;
   flex-direction: column;
-  gap: 1px;
-  margin-top: 2px;
-  animation: conv-tool-chip-fade-up 150ms cubic-bezier(0.22, 1, 0.36, 1);
+  min-width: 0;
+  width: 100%;
+  gap: 2px;
+  padding-block: 1px;
 }
 
 /* ---------- Individual ToolChip Row ---------- */
@@ -65,63 +352,72 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
+  max-width: 100%;
 }
 
 .conv-tool-chip-row {
   display: flex;
   width: 100%;
   min-width: 0;
+  max-width: 100%;
+  min-height: 22px;
   align-items: center;
-  gap: 8px;
-  margin-inline: -6px;
-  padding: 3px 6px;
+  gap: 6px;
+  margin-inline: 0;
+  padding: 2px;
   border-radius: var(--radius-inner);
-  color: var(--conv-text-secondary);
+  color: var(--conv-tool-chip-text);
   font-family: var(--font-ui);
   font-size: 13px;
   font-weight: 400;
-  line-height: 1.6;
+  line-height: 1.55;
   text-align: left;
-  transition:
-    background-color 140ms ease,
-    color 140ms ease;
+  transition: color 140ms ease;
+}
+
+.conv-tool-chips-viewport .conv-tool-chip-row {
+  padding: 0 2px;
 }
 
 .conv-tool-chip-row.is-expandable {
   cursor: pointer;
 }
 
-.conv-tool-chip-row.is-expandable:hover,
-.conv-tool-chip-row.is-expanded {
-  background: var(--conv-surface-control);
+.conv-tool-chip-row.is-expandable:hover {
+  background: transparent;
   color: var(--conv-text-primary);
+}
+
+.conv-tool-chip-row.is-expandable:not(.is-error):hover
+  .conv-tool-chip-icon-slot {
+  color: var(--conv-text-secondary);
 }
 
 .conv-tool-chip-row.is-expandable:focus-visible {
   outline: 2px solid hsl(var(--ring));
-  outline-offset: 1px;
+  outline-offset: -1px;
 }
 
-/* 16x16 icon slot that swaps semantic icon -> rotating chevron on hover/open */
+/* Permanent 20x20 left icon slot paired with 14px icon for 13px compact rows */
 .conv-tool-chip-icon-slot {
-  position: relative;
   display: inline-flex;
-  width: 16px;
-  height: 16px;
+  width: 20px;
+  height: 20px;
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
   color: var(--conv-text-tertiary);
+  transition: color 140ms ease;
 }
 
-.conv-tool-chip-kind-icon,
-.conv-tool-chip-chevron {
-  width: 13.5px;
-  height: 13.5px;
-  transition:
-    opacity 140ms ease,
-    transform 160ms cubic-bezier(0.22, 1, 0.36, 1),
-    color 140ms ease;
+.conv-tool-chip-row.is-error .conv-tool-chip-icon-slot {
+  color: var(--conv-tool-error);
+}
+
+.conv-tool-chip-kind-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
 }
 
 .conv-tool-chip-spinner {
@@ -129,25 +425,14 @@
   color: var(--conv-tool-icon);
 }
 
-.conv-tool-chip-chevron {
-  position: absolute;
-  opacity: 0;
-  transform: rotate(-90deg);
-}
-
-.conv-tool-chip-chevron.is-expanded {
-  transform: rotate(0deg);
-}
-
-.conv-tool-chip-row.is-expandable:hover .conv-tool-chip-kind-icon,
-.conv-tool-chip-row.is-expandable.is-expanded .conv-tool-chip-kind-icon {
-  opacity: 0;
-}
-
-.conv-tool-chip-row.is-expandable:hover .conv-tool-chip-chevron,
-.conv-tool-chip-row.is-expandable.is-expanded .conv-tool-chip-chevron {
-  opacity: 1;
-  color: var(--conv-text-secondary);
+/* Flat single-line primary content: optional verb + truncated target */
+.conv-tool-chip-main {
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+  align-items: baseline;
+  gap: 5px;
+  overflow: hidden;
 }
 
 .conv-tool-chip-label {
@@ -156,74 +441,101 @@
   color: inherit;
 }
 
-/* Inline target pill (hosts <ToolCallTarget>) */
 .conv-tool-chip-pill {
   display: inline-flex;
+  flex: 1 1 0;
   min-width: 0;
-  max-width: min(30rem, 100%);
+  max-width: 100%;
   align-items: center;
   gap: 4px;
-  padding: 1px 7px;
-  border-radius: var(--radius-inner);
-  border: 1px solid var(--conv-border-subtle);
-  background: var(--conv-surface-control);
-  color: var(--conv-text-primary);
+  overflow: hidden;
+  color: inherit;
   font-family: var(--font-ui);
-  font-size: 12px;
-  line-height: 1.45;
-  transition:
-    background-color 140ms ease,
-    border-color 140ms ease;
+  font-size: inherit;
+  line-height: inherit;
 }
 
-.conv-tool-chip-row:hover .conv-tool-chip-pill {
-  border-color: var(--conv-border-strong);
-}
-
-.conv-tool-chip-pill.is-mono {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
+.conv-tool-chip-pill-text {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .conv-tool-chip-pill .dimo-tool-call-target {
   min-width: 0;
   max-width: 100%;
+  overflow: hidden;
+}
+
+.conv-tool-chip-pill .dimo-tool-call-file-icon {
+  display: none;
 }
 
 .conv-tool-chip-pill .dimo-tool-call-target-label {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: inherit;
   font: inherit;
 }
 
 .conv-tool-chip-pill button.dimo-tool-call-target-label:hover {
+  color: var(--conv-text-primary);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 
-.conv-tool-chip-error-badge {
+/* Right-aligned trailing metadata & rotating chevron */
+.conv-tool-chip-trailing {
+  display: inline-flex;
   flex-shrink: 0;
-  padding: 1px 6px;
-  border-radius: var(--radius-inner);
-  /* Failure stays readable, but the hue is mixed into the muted text and
-     control surface so a stack of failed calls does not read as an alarm. */
-  background: color-mix(
-    in srgb,
-    var(--conv-tool-error) 8%,
-    var(--conv-surface-control)
-  );
-  color: color-mix(
-    in srgb,
-    var(--conv-tool-error) 32%,
-    var(--conv-text-secondary)
-  );
-  font-size: 11px;
-  font-weight: 400;
-  line-height: 1.4;
+  max-width: 50%;
+  align-items: center;
+  gap: 6px;
+  margin-inline-start: auto;
+}
+
+.conv-tool-chip-chevron-slot {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  color: var(--conv-text-tertiary);
+}
+
+.conv-tool-chip-chevron {
+  width: 12px;
+  height: 12px;
+  opacity: 0.65;
+  transform: rotate(0deg);
+  transition:
+    transform 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 140ms ease,
+    color 140ms ease;
+}
+
+.conv-tool-chip-row.is-expandable:hover .conv-tool-chip-chevron {
+  opacity: 1;
+  color: var(--conv-text-secondary);
+}
+
+.conv-tool-chip-chevron.is-expanded {
+  transform: rotate(90deg);
 }
 
 /* Indented left-guide expanded detail container */
 .conv-tool-chip-detail {
-  margin-inline-start: 7px;
+  min-width: 0;
+  max-width: 100%;
+  margin-inline-start: 10px;
   margin-top: 3px;
   margin-bottom: 6px;
   padding-inline-start: 14px;
@@ -394,16 +706,16 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .conv-tool-chips-batch-chevron,
-  .conv-tool-chip-kind-icon,
+  .conv-tool-chips-header,
+  .conv-tool-chips-disclosure-icon,
+  .conv-tool-chip-icon-slot,
   .conv-tool-chip-chevron,
   .conv-tool-chip-row,
-  .conv-tool-chip-pill,
   .conv-tool-diff-chip {
     transition: none;
   }
 
-  .conv-tool-chips-list,
+  .conv-tool-chips-viewport,
   .conv-tool-chip-detail,
   .conv-tool-diff-preview {
     animation: none;

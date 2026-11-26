@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Path, Request, State},
+    extract::{DefaultBodyLimit, Path, Request, State},
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -41,7 +41,12 @@ pub fn desktop_router(state: DesktopRuntimeState) -> Router {
         .route("/window-destroyed", post(window_destroyed))
         .route("/plugin-dev-connection", get(plugin_dev_connection))
         .route("/browser-bridge", get(browser_bridge::ws_browser_bridge))
-        .route("/invoke/{command}", post(invoke_desktop_command))
+        .route(
+            "/invoke/{command}",
+            post(invoke_desktop_command).layer(DefaultBodyLimit::max(
+                crate::runtime::MAX_COMMAND_BODY_BYTES,
+            )),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_desktop_token,

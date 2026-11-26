@@ -1,4 +1,10 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
 import { createPortal } from 'react-dom';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -9,6 +15,11 @@ import {
   RightPanelSlotContext,
 } from '@/contexts/RightPanelSlotContext';
 import { requestWorkspaceCreateSessionOverlay } from '@/lib/requestCreateSession';
+import {
+  clearLastSessionAgent,
+  getLastSessionAgent,
+  recordLastSessionAgent,
+} from '@/lib/lastSessionAgent';
 import { RightPanelContent } from './RightPanelContent';
 
 import { sessionsApi } from '@/lib/api';
@@ -18,6 +29,7 @@ const {
   projectState,
   worktreeState,
   projectWorktreesState,
+  selectableAgentsState,
   useTaskAttemptMock,
   branchHeaderRenderSpy,
   conversationRenderSpy,
@@ -48,6 +60,19 @@ const {
     isLoading: false,
     isSuccess: true,
   },
+  selectableAgentsState: {
+    agents: [] as Array<{
+      agentId: string;
+      displayName: string;
+      iconLight: null;
+      iconDark: null;
+      iconSvg: null;
+      enabled: boolean;
+      lifecycle: string;
+      runnable: boolean;
+      settingsFeatures: [];
+    }>,
+  },
   useTaskAttemptMock: vi.fn((_workspaceId?: string) => ({
     data: undefined as Record<string, unknown> | undefined,
   })),
@@ -55,6 +80,10 @@ const {
   conversationRenderSpy: vi.fn(),
   sessionCreationFormSpy: vi.fn(),
   openSessionTabMock: vi.fn(),
+}));
+
+vi.mock('@/features/agents/useSelectableAgents', () => ({
+  useSelectableAgents: () => selectableAgentsState.agents,
 }));
 
 vi.mock('@/components/layout/BranchInfoHeader', () => ({
@@ -84,19 +113,45 @@ vi.mock('@/components/kanban/KanbanSessionConversationView', () => ({
 vi.mock('@/components/sessions/SessionCreationForm', () => ({
   SessionCreationForm: (props: {
     title: string;
+    selectedExecutorProfile?: {
+      executor?: string;
+      variant?: string | null;
+    } | null;
+    onSelectedExecutorProfileChange?: (profile: {
+      executor: string;
+      variant: string | null;
+    }) => void;
     workspaceBranchOptions?: Array<{
       value: string;
       existingWorkspaceId?: string | null;
       branch?: string;
     }>;
     onSubmit?: () => void;
+    onCancel?: () => void;
   }) => {
     sessionCreationFormSpy(props);
     return (
-      <div data-testid="session-creation-form">
+      <div
+        data-testid="session-creation-form"
+        data-selected-agent={props.selectedExecutorProfile?.executor ?? ''}
+      >
         {props.title}
+        <button
+          type="button"
+          onClick={() =>
+            props.onSelectedExecutorProfileChange?.({
+              executor: 'codex',
+              variant: null,
+            })
+          }
+        >
+          select-codex
+        </button>
         <button type="button" onClick={props.onSubmit}>
           submit-create
+        </button>
+        <button type="button" onClick={props.onCancel}>
+          cancel-create
         </button>
       </div>
     );
@@ -108,6 +163,9 @@ vi.mock('@/components/ConfigProvider', () => ({
     profiles: {
       CLAUDE_CODE: {
         DEFAULT: { CLAUDE_CODE: {} },
+      },
+      codex: {
+        DEFAULT: { codex: {} },
       },
     },
     config: {
@@ -205,6 +263,8 @@ describe('RightPanelContent detached host deduplication', () => {
     projectState.project = { id: 'project-1', is_git: true };
     worktreeState.activeWorktreeId = 'workspace-1';
     projectWorktreesState.worktrees = [];
+    selectableAgentsState.agents = [];
+    clearLastSessionAgent();
     useTaskAttemptMock.mockReset();
     useTaskAttemptMock.mockReturnValue({ data: undefined });
   });
@@ -450,7 +510,10 @@ describe('RightPanelContent detached host deduplication', () => {
       <QueryClientProvider client={queryClient}>
         <MemoryRouter initialEntries={[entry]}>
           <Routes>
-            <Route path="/projects/:projectId" element={<RightPanelContent />} />
+            <Route
+              path="/projects/:projectId"
+              element={<RightPanelContent />}
+            />
           </Routes>
         </MemoryRouter>
       </QueryClientProvider>
@@ -502,7 +565,9 @@ describe('RightPanelContent detached host deduplication', () => {
       expect(invalidateSpy).not.toHaveBeenCalledWith({
         queryKey: ['projectWorktrees', 'project-b'],
       });
-      expect(kanbanSessionState.activateExecutionSession).not.toHaveBeenCalled();
+      expect(
+        kanbanSessionState.activateExecutionSession
+      ).not.toHaveBeenCalled();
       expect(kanbanSessionState.placeCreatedSession).not.toHaveBeenCalled();
       expect(openSessionTabMock).not.toHaveBeenCalled();
     } finally {
@@ -585,5 +650,144 @@ describe('RightPanelContent detached host deduplication', () => {
     } finally {
       createProjectSpy.mockRestore();
     }
+  });
+
+  it('defaults new sessions to the last created session agent and ignores canceled selections', async () => {
+    projectState.projectId = 'project-1';
+    projectState.project = { id: 'project-1', is_git: false };
+    selectableAgentsState.agents = [
+      {
+        agentId: 'CLAUDE_CODE',
+        displayName: 'Claude Code',
+        iconLight: null,
+        iconDark: null,
+        iconSvg: null,
+        enabled: true,
+        lifecycle: 'ready',
+        runnable: true,
+        settingsFeatures: [],
+      },
+      {
+        agentId: 'codex',
+        displayName: 'Codex',
+        iconLight: null,
+        iconDark: null,
+        iconSvg: null,
+        enabled: true,
+        lifecycle: 'ready',
+        runnable: true,
+        settingsFeatures: [],
+      },
+    ];
+
+    const createProjectSpy = vi
+      .spyOn(sessionsApi, 'createProject')
+      .mockResolvedValue({
+        id: 'session-created',
+        workspace_id: 'workspace-1',
+        executor: 'codex',
+      } as never);
+
+    try {
+      render(
+        <TestHarness initialEntry="/projects/project-1">
+          <RightPanelContent />
+        </TestHarness>
+      );
+
+      // Initially falls back to user's configured default agent.
+      act(() => {
+        requestWorkspaceCreateSessionOverlay();
+      });
+      expect(screen.getByTestId('session-creation-form')).toHaveAttribute(
+        'data-selected-agent',
+        'CLAUDE_CODE'
+      );
+
+      // Selecting codex and canceling does NOT update the remembered agent.
+      fireEvent.click(screen.getByRole('button', { name: 'select-codex' }));
+      expect(screen.getByTestId('session-creation-form')).toHaveAttribute(
+        'data-selected-agent',
+        'codex'
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'cancel-create' }));
+      expect(getLastSessionAgent()).toBeNull();
+
+      // Reopening still uses user's default agent.
+      act(() => {
+        requestWorkspaceCreateSessionOverlay();
+      });
+      expect(screen.getByTestId('session-creation-form')).toHaveAttribute(
+        'data-selected-agent',
+        'CLAUDE_CODE'
+      );
+
+      // Selecting codex and creating a session remembers codex.
+      fireEvent.click(screen.getByRole('button', { name: 'select-codex' }));
+      fireEvent.click(screen.getByRole('button', { name: 'submit-create' }));
+      await waitFor(() => {
+        expect(createProjectSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ executor: 'codex' })
+        );
+      });
+      await waitFor(() => {
+        expect(getLastSessionAgent()).toBe('codex');
+      });
+
+      // Next time the create overlay opens, codex is selected by default.
+      act(() => {
+        requestWorkspaceCreateSessionOverlay();
+      });
+      expect(screen.getByTestId('session-creation-form')).toHaveAttribute(
+        'data-selected-agent',
+        'codex'
+      );
+    } finally {
+      createProjectSpy.mockRestore();
+    }
+  });
+
+  it('falls back to the user default agent when the remembered agent is unavailable', () => {
+    projectState.projectId = 'project-1';
+    projectState.project = { id: 'project-1', is_git: false };
+    recordLastSessionAgent('codex');
+    selectableAgentsState.agents = [
+      {
+        agentId: 'CLAUDE_CODE',
+        displayName: 'Claude Code',
+        iconLight: null,
+        iconDark: null,
+        iconSvg: null,
+        enabled: true,
+        lifecycle: 'ready',
+        runnable: true,
+        settingsFeatures: [],
+      },
+      {
+        agentId: 'codex',
+        displayName: 'Codex',
+        iconLight: null,
+        iconDark: null,
+        iconSvg: null,
+        enabled: false,
+        lifecycle: 'ready',
+        runnable: false,
+        settingsFeatures: [],
+      },
+    ];
+
+    render(
+      <TestHarness initialEntry="/projects/project-1">
+        <RightPanelContent />
+      </TestHarness>
+    );
+
+    act(() => {
+      requestWorkspaceCreateSessionOverlay();
+    });
+    expect(screen.getByTestId('session-creation-form')).toHaveAttribute(
+      'data-selected-agent',
+      'CLAUDE_CODE'
+    );
   });
 });

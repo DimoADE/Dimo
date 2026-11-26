@@ -125,7 +125,8 @@ where
     if let Some(resp) = require_host_admin(&credential) {
         return resp;
     }
-    let expected_host_id = (!state.config.host_id.is_empty()).then_some(state.config.host_id.as_str());
+    let expected_host_id =
+        (!state.config.host_id.is_empty()).then_some(state.config.host_id.as_str());
     match custom_public::probe_custom_public_origin(&input.origin, expected_host_id).await {
         Ok(result) => Json(result).into_response(),
         Err(error) => bad_request(error),
@@ -143,7 +144,8 @@ where
     if let Some(resp) = require_host_admin(&credential) {
         return resp;
     }
-    let expected_host_id = (!state.config.host_id.is_empty()).then_some(state.config.host_id.as_str());
+    let expected_host_id =
+        (!state.config.host_id.is_empty()).then_some(state.config.host_id.as_str());
     match custom_public::add_custom_public_origin(
         &input.origin,
         input.label,

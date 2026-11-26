@@ -2142,10 +2142,7 @@ mod tests {
             resolve_git_path(repo.path(), ".git/rebase-merge\n"),
             repo.path().join(".git/rebase-merge")
         );
-        assert_eq!(
-            resolve_git_path(repo.path(), &abs.to_string_lossy()),
-            abs
-        );
+        assert_eq!(resolve_git_path(repo.path(), &abs.to_string_lossy()), abs);
     }
 
     #[test]
@@ -2158,7 +2155,10 @@ mod tests {
         git.worktree_add(repo.path(), &wt_new, "feature/new-branch", true)
             .expect("worktree_add(create_branch = true) should create new branch from HEAD");
         assert!(wt_new.join("README").is_file());
-        assert!(git.local_branch_exists(repo.path(), "feature/new-branch").unwrap());
+        assert!(
+            git.local_branch_exists(repo.path(), "feature/new-branch")
+                .unwrap()
+        );
 
         // Attempting to create a worktree with create_branch=true for an already-existing
         // branch must fail AND must NOT delete the pre-existing branch.
@@ -2171,7 +2171,8 @@ mod tests {
             "worktree_add(create_branch = true) must fail when branch already exists"
         );
         assert!(
-            git.local_branch_exists(repo.path(), "existing-keep").unwrap(),
+            git.local_branch_exists(repo.path(), "existing-keep")
+                .unwrap(),
             "failed worktree_add must never delete a pre-existing branch"
         );
         assert_eq!(
@@ -2186,7 +2187,8 @@ mod tests {
                 .is_err()
         );
         assert!(
-            git.local_branch_exists(repo.path(), "existing-keep").unwrap(),
+            git.local_branch_exists(repo.path(), "existing-keep")
+                .unwrap(),
             "failed worktree_add_from_ref must never delete a pre-existing branch"
         );
     }

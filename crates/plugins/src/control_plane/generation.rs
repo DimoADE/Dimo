@@ -358,13 +358,12 @@ impl SqlitePluginRegistry {
         let candidate = candidate.ok_or_else(|| {
             PluginError::registry("candidate generation is missing or no longer publishable")
         })?;
-        let installed_exists: Option<i64> = sqlx::query_scalar(
-            "SELECT 1 FROM plugin_installations_v4 WHERE plugin_id = ? LIMIT 1",
-        )
-        .bind(plugin_id)
-        .fetch_optional(&mut *transaction)
-        .await
-        .map_err(registry_error)?;
+        let installed_exists: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM plugin_installations_v4 WHERE plugin_id = ? LIMIT 1")
+                .bind(plugin_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(registry_error)?;
         if installed_exists.is_none() {
             return Err(PluginError::not_found(plugin_id));
         }

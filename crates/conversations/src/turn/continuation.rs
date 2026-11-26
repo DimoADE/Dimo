@@ -188,15 +188,15 @@ impl ConversationSessionService {
             {
                 let latest_dir_switched = !latest.working_dir.trim().is_empty()
                     && !working_dirs_equal(&latest.working_dir, &prepared.working_dir);
-                let latest_instance_switched = latest
-                    .continuation_key
-                    .as_deref()
-                    .is_some_and(|existing_key| {
-                        continuation_key_instance_id(existing_key) != effective_instance.as_deref()
-                    });
-                latest.agent_id != input.agent_id
-                    || latest_dir_switched
-                    || latest_instance_switched
+                let latest_instance_switched =
+                    latest
+                        .continuation_key
+                        .as_deref()
+                        .is_some_and(|existing_key| {
+                            continuation_key_instance_id(existing_key)
+                                != effective_instance.as_deref()
+                        });
+                latest.agent_id != input.agent_id || latest_dir_switched || latest_instance_switched
             } else {
                 session
                     .agent_id
@@ -266,9 +266,9 @@ impl ConversationSessionService {
                     "Turn was cancelled during history preparation".into(),
                 ));
             }
-            let use_portable_handoff =
-                input.continuation_policy == Some(ContinuationPolicy::Portable)
-                    || (working_dir_switched && !fresh);
+            let use_portable_handoff = input.continuation_policy
+                == Some(ContinuationPolicy::Portable)
+                || (working_dir_switched && !fresh);
             let selection = if use_portable_handoff {
                 let _ = crate::ensure_legacy_jsonl_migrated_on_pool(pool, input.conversation_id)
                     .await?;
@@ -803,8 +803,8 @@ mod tests {
 
     use agents::{
         AgentAutoApproveMode, AgentConnectionId, AgentContentBlock, AgentId, AgentRuntime,
-        AgentSessionId, AgentSessionSnapshot, AgentSessionStatus, NoopEventSink,
-        SessionLaunchLock, SessionRecoveryStrategy,
+        AgentSessionId, AgentSessionSnapshot, AgentSessionStatus, NoopEventSink, SessionLaunchLock,
+        SessionRecoveryStrategy,
         conversation::{ContinuationPolicy, ConversationEvent, ConversationInputBlock},
     };
     use db::models::{
@@ -981,12 +981,14 @@ mod tests {
         )
         .await
         .unwrap();
-        sqlx::query("UPDATE conversation_turns SET agent_binding_id = ?, status = 'completed' WHERE id = ?")
-            .bind(claude_binding.id)
-            .bind(turn1.id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE conversation_turns SET agent_binding_id = ?, status = 'completed' WHERE id = ?",
+        )
+        .bind(claude_binding.id)
+        .bind(turn1.id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         // Binding 2: codex owns Turn 2
         let codex_binding =
@@ -1022,12 +1024,14 @@ mod tests {
         )
         .await
         .unwrap();
-        sqlx::query("UPDATE conversation_turns SET agent_binding_id = ?, status = 'completed' WHERE id = ?")
-            .bind(codex_binding.id)
-            .bind(turn2.id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE conversation_turns SET agent_binding_id = ?, status = 'completed' WHERE id = ?",
+        )
+        .bind(codex_binding.id)
+        .bind(turn2.id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         // Append conversation events for Turn 1 and Turn 2 so handoff packs both.
         let events = [
@@ -1289,10 +1293,11 @@ mod tests {
         );
 
         // 3. A brand-new binding must be created and activated with the new session id.
-        let active = ConversationAgentBindingRecord::active_for_conversation(&pool, conversation_id)
-            .await
-            .unwrap()
-            .expect("active binding exists");
+        let active =
+            ConversationAgentBindingRecord::active_for_conversation(&pool, conversation_id)
+                .await
+                .unwrap()
+                .expect("active binding exists");
         assert_ne!(active.id, old_claude_binding.id);
         assert_eq!(
             active.acp_session_id.as_deref(),
@@ -1372,10 +1377,11 @@ mod tests {
             "true native resume must carry Turn 2 delta: {handoff_prompt}"
         );
 
-        let active = ConversationAgentBindingRecord::active_for_conversation(&pool, conversation_id)
-            .await
-            .unwrap()
-            .expect("active binding exists");
+        let active =
+            ConversationAgentBindingRecord::active_for_conversation(&pool, conversation_id)
+                .await
+                .unwrap()
+                .expect("active binding exists");
         assert_eq!(active.id, old_claude_binding.id);
     }
 }

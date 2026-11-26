@@ -4,7 +4,10 @@ import { resolveLocalMarkdownImagePath } from './localImagePaths';
 describe('resolveLocalMarkdownImagePath', () => {
   it('collapses parent directory segments relative to workspacePath', () => {
     expect(
-      resolveLocalMarkdownImagePath('../assets/diagram.png', 'E:\\0A\\notes\\sub')
+      resolveLocalMarkdownImagePath(
+        '../assets/diagram.png',
+        'E:\\0A\\notes\\sub'
+      )
     ).toBe('E:\\0A\\notes\\assets\\diagram.png');
     expect(
       resolveLocalMarkdownImagePath('../../shared/logo.svg', '/tmp/a/b/c')
@@ -40,14 +43,17 @@ describe('resolveLocalMarkdownImagePath', () => {
   });
 
   it('resolves arbitrary non-project absolute paths and ignores remote URLs', () => {
-    expect(
-      resolveLocalMarkdownImagePath('D:/External/sub/../cover.jpg')
-    ).toBe('D:/External/cover.jpg');
+    expect(resolveLocalMarkdownImagePath('D:/External/sub/../cover.jpg')).toBe(
+      'D:/External/cover.jpg'
+    );
     expect(
       resolveLocalMarkdownImagePath('https://example.com/a.png', '/tmp/outside')
     ).toBeNull();
     expect(
-      resolveLocalMarkdownImagePath('data:image/png;base64,AAAA', '/tmp/outside')
+      resolveLocalMarkdownImagePath(
+        'data:image/png;base64,AAAA',
+        '/tmp/outside'
+      )
     ).toBeNull();
     expect(
       resolveLocalMarkdownImagePath('#section', '/tmp/outside')

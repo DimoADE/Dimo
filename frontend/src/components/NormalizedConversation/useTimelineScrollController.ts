@@ -172,6 +172,10 @@ export function useTimelineScrollController({
   const smoothFollowRef = useRef(false);
   const seenExpansionRef = useRef<number | null>(null);
   const expansionInViewRef = useRef(false);
+  const activeExpansionRowRef = useRef<{
+    index: number;
+    expiresAt: number;
+  } | null>(null);
 
   const sessionPinRef = useRef<string | null>(null);
   const pinnedSessionReadyRef = useRef<string | null>(null);
@@ -362,6 +366,16 @@ export function useTimelineScrollController({
       instance
     ) => {
       if (followTailRef.current) return false;
+      const activeExpansion = activeExpansionRowRef.current;
+      if (activeExpansion) {
+        if (Date.now() <= activeExpansion.expiresAt) {
+          if (item.index === activeExpansion.index) {
+            return false;
+          }
+        } else {
+          activeExpansionRowRef.current = null;
+        }
+      }
       return item.start < (instance.scrollOffset ?? 0);
     };
   }, [rowVirtualizer]);
@@ -372,7 +386,12 @@ export function useTimelineScrollController({
       cancelPinToBottomRaf();
       cancelRevealRestoreRaf();
     },
-    [cancelAnchorRestore, cancelPinToBottomRaf, cancelRevealRestoreRaf, sessionId]
+    [
+      cancelAnchorRestore,
+      cancelPinToBottomRaf,
+      cancelRevealRestoreRaf,
+      sessionId,
+    ]
   );
 
   const cancelPendingJump = useCallback(() => {
@@ -1617,8 +1636,17 @@ export function useTimelineScrollController({
     });
   }, [runProgrammaticScroll]);
 
-  const markExpansionInView = useCallback(() => {
+  const markExpansionInView = useCallback((target?: EventTarget | null) => {
     expansionInViewRef.current = true;
+    const rowEl =
+      target instanceof Element ? target.closest('[data-index]') : null;
+    const index = rowEl ? Number(rowEl.getAttribute('data-index')) : Number.NaN;
+    if (Number.isFinite(index)) {
+      activeExpansionRowRef.current = {
+        index,
+        expiresAt: Date.now() + 500,
+      };
+    }
   }, []);
 
   return {

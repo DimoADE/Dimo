@@ -592,11 +592,12 @@ impl LocalContainerService {
         for repo in &ctx.repos {
             let repo_path = Self::workspace_repo_path(&ctx.workspace, &workspace_root, &repo.name);
             let git = self.git().clone();
-            let current_head =
-                tokio::task::spawn_blocking(move || git.get_head_info(&repo_path).ok().map(|h| h.oid))
-                    .await
-                    .ok()
-                    .flatten();
+            let current_head = tokio::task::spawn_blocking(move || {
+                git.get_head_info(&repo_path).ok().map(|h| h.oid)
+            })
+            .await
+            .ok()
+            .flatten();
 
             let before_head = repo_states
                 .iter()
@@ -1293,7 +1294,11 @@ impl ContainerService for LocalContainerService {
             let branch_for_base = branch.to_string();
             let target_branch_for_base = target_branch.clone();
             let base_commit = match tokio::task::spawn_blocking(move || {
-                git.get_base_commit(&repo_path_for_base, &branch_for_base, &target_branch_for_base)
+                git.get_base_commit(
+                    &repo_path_for_base,
+                    &branch_for_base,
+                    &target_branch_for_base,
+                )
             })
             .await
             {

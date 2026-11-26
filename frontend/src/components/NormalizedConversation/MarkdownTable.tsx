@@ -43,7 +43,10 @@ export function computeTableScrollbarMetrics(input: {
   const minThumb = input.minThumb ?? TABLE_SCROLLBAR_MIN_THUMB_PX;
   const thumbWidth = Math.min(
     input.trackWidth,
-    Math.max(minThumb, (input.clientWidth / input.scrollWidth) * input.trackWidth)
+    Math.max(
+      minThumb,
+      (input.clientWidth / input.scrollWidth) * input.trackWidth
+    )
   );
   const travel = Math.max(0, input.trackWidth - thumbWidth);
   const clampedScrollLeft = Math.min(overflow, Math.max(0, input.scrollLeft));
@@ -72,9 +75,7 @@ export function formatMatrixAsMarkdown(matrix: string[][]): string {
 
   const header = `| ${padRow(matrix[0] ?? []).join(' | ')} |`;
   const separator = `| ${Array(colCount).fill('---').join(' | ')} |`;
-  const body = matrix
-    .slice(1)
-    .map((row) => `| ${padRow(row).join(' | ')} |`);
+  const body = matrix.slice(1).map((row) => `| ${padRow(row).join(' | ')} |`);
   return [header, separator, ...body].join('\n');
 }
 
@@ -93,7 +94,9 @@ export function formatMatrixAsDelimited(
     .map((row) =>
       row
         .map((cell) =>
-          delimiter === ',' ? escapeCsvCell(cell) : cell.replace(/[\t\r\n]+/g, ' ')
+          delimiter === ','
+            ? escapeCsvCell(cell)
+            : cell.replace(/[\t\r\n]+/g, ' ')
         )
         .join(delimiter)
     )
@@ -185,7 +188,8 @@ export function MarkdownTable({
         clientWidth: scrollEl.clientWidth,
         scrollWidth: scrollEl.scrollWidth,
         scrollLeft: scrollEl.scrollLeft,
-        trackWidth: trackRect.width || trackEl.clientWidth || scrollEl.clientWidth,
+        trackWidth:
+          trackRect.width || trackEl.clientWidth || scrollEl.clientWidth,
       });
       if (!metrics || metrics.travel <= 0) return;
 
@@ -287,7 +291,9 @@ export function MarkdownTable({
             <button
               type="button"
               className={`conv-md-table-copy${copied ? ' is-copied' : ''}`}
-              title={copied ? `已复制 (${copiedFormat.toUpperCase()})` : '复制表格'}
+              title={
+                copied ? `已复制 (${copiedFormat.toUpperCase()})` : '复制表格'
+              }
               aria-label="复制表格"
             >
               {copied ? (

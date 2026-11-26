@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use super::{
     BeforeTurnContext, CommittedTurnLaunch, ConversationSessionService, ConversationStartTurnInput,
+    collect_registered_async_before_turn_contributions,
     collect_registered_before_turn_contributions, ensure_conversation_has_no_in_flight_turn,
     is_in_flight_turn_status, start::agent_blocks_with_display_text,
 };
@@ -423,6 +424,8 @@ impl ConversationSessionService {
         internal_contributions.extend(collect_registered_before_turn_contributions(
             &before_turn_ctx,
         ));
+        internal_contributions
+            .extend(collect_registered_async_before_turn_contributions(&before_turn_ctx).await);
         match agents::format_internal_prompt_contributions(&internal_contributions) {
             Ok(Some(plugin_context_block)) => {
                 if agent_text.trim().is_empty() {

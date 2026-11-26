@@ -93,7 +93,10 @@ export function buildBranchSegment({
       continue;
     }
 
-    if (inWorktree && (branch.is_current || sameBranch(branch.name, mainName))) {
+    if (
+      inWorktree &&
+      (branch.is_current || sameBranch(branch.name, mainName))
+    ) {
       entries.push({
         name: branch.name,
         role: 'occupied',

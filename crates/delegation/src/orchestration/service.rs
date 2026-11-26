@@ -1,18 +1,21 @@
-//! Unified SQLite-backed OrchestrationService handling all 17 orchestration MCP
-//! tools (`orchestrator_capabilities`, `delegate_task`, `task_*`, `thread_*`,
-//! `project_*`, `pending_request`) with Access Guard, Mode Ceiling, deterministic
-//! `client_request_id` idempotency, quotas, and optional remote Host forwarding.
+//! Unified SQLite-backed OrchestrationService handling all 18 orchestration MCP
+//! tools (`orchestrator_capabilities`, `environment_links`, `delegate_task`,
+//! `task_*`, `thread_*`, `project_*`, `pending_request`) with Access Guard,
+//! Mode Ceiling, deterministic `client_request_id` idempotency, quotas, and
+//! cross-Host remote forwarding + shadow tracking.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     path::PathBuf,
     sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
 
 use agents::{
-    AgentId, AgentPermissionOptionKind, AgentPermissionResponse, AgentRuntime, AgentSessionId,
+    AgentEvent, AgentId, AgentPermissionOptionKind, AgentPermissionResponse, AgentRuntime,
+    AgentSessionId, ids::AgentConnectionId,
 };
+use chrono::{Duration as ChronoDuration, Utc};
 use conversations::{
     ConversationContext, ConversationSessionService, ForkVisibleConversation,
     ScopedConversationControl, WorkspaceLaunchStrategy, fork_visible_conversation,
@@ -20,13 +23,16 @@ use conversations::{
 };
 use db::models::{
     conversation::{ConversationRecord, DbConversationSummary},
-    conversation_delegation::{ConversationDelegationRecord, McpIdempotencyReceipt},
+    conversation_delegation::{
+        ConversationDelegationRecord, CreateConversationDelegation, McpIdempotencyReceipt,
+    },
     project::{CreateProject, Project},
     project_repo::ProjectRepo,
     session::Session,
     workspace::Workspace,
 };
 use serde_json::{Value, json};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::{
@@ -34,9 +40,13 @@ use super::{
     OrchestrationError, PendingPermissionStore, SharedRemoteForwarder, conversation_link,
     idempotency_scope_key,
     launch::{
-        DelegationLaunchSpec, LaunchTargetSpec, ThreadLaunchSpec, resolve_conversation_project_id,
+        DelegationLaunchSpec, LaunchTargetSpec, ThreadLaunchSpec, agent_entry_is_launchable,
+        resolve_conversation_project_id,
     },
-    reactors::emit_parent_completion_event,
+    reactors::{
+        RemoteDelegationWatchSpec, emit_parent_completion_event, maybe_schedule_parent_wakeup,
+        spawn_remote_delegation_watcher, sync_remote_status_into_shadow,
+    },
 };
 use crate::{
     mode_limit::{InteractionModeRank, OrchestrationModeLimit, RuntimeModeRank},
@@ -51,6 +61,8 @@ pub struct OrchestrationService {
     pub pending_permissions: PendingPermissionStore,
     pub companion_memory: Arc<InMemoryCompanionFeatures>,
     remote_forwarder: RwLock<Option<SharedRemoteForwarder>>,
+    coalescing_parents: Arc<Mutex<HashSet<Uuid>>>,
+    remote_poll_interval: Duration,
 }
 
 impl OrchestrationService {
@@ -72,6 +84,8 @@ impl OrchestrationService {
             pending_permissions,
             companion_memory,
             remote_forwarder: RwLock::new(None),
+            coalescing_parents: Arc::new(Mutex::new(HashSet::new())),
+            remote_poll_interval: Duration::from_secs(2),
         }
     }
 
@@ -86,6 +100,10 @@ impl OrchestrationService {
 
     pub fn config_snapshot(&self) -> OrchestrationConfig {
         self.config.read().unwrap().clone()
+    }
+
+    fn current_remote_forwarder(&self) -> Option<Arc<dyn super::RemoteMcpForwarder>> {
+        self.remote_forwarder.read().unwrap().clone()
     }
 
     /// Unified guarded entry point for every orchestration MCP tool call.
@@ -104,19 +122,31 @@ impl OrchestrationService {
         // Cross-machine forwarding when a non-local `environment_id` is specified.
         let env_id = extract_environment_id(&args);
         if let Some(env_id) = env_id {
-            let forwarder = self.remote_forwarder.read().unwrap().clone();
-            let Some(forwarder) = forwarder else {
+            let Some(forwarder) = self.current_remote_forwarder() else {
                 return Err(OrchestrationError::Unavailable(format!(
                     "remote Host forwarding is not configured for environment_id '{env_id}'"
                 )));
             };
-            return forwarder
-                .forward_tool_call(&env_id, name, args, ctx.mode_limit)
-                .await;
+            return match name {
+                "delegate_task" => {
+                    self.delegate_task_remote(ctx, &env_id, args, forwarder)
+                        .await
+                }
+                "task_status" => self.task_status_remote(ctx, &env_id, args, forwarder).await,
+                "task_cancel" => self.task_cancel_remote(ctx, &env_id, args, forwarder).await,
+                _ => {
+                    let mut result = forwarder
+                        .forward_tool_call(&env_id, name, args, ctx.mode_limit)
+                        .await?;
+                    annotate_remote_links(&mut result, &env_id);
+                    Ok(result)
+                }
+            };
         }
 
         match name {
             "orchestrator_capabilities" => self.orchestrator_capabilities(ctx, args).await,
+            "environment_links" => self.environment_links(args).await,
             "delegate_task" => self.delegate_task(ctx, args).await,
             "task_status" => self.task_status(ctx, args).await,
             "task_cancel" => self.task_cancel(ctx, args).await,
@@ -139,6 +169,26 @@ impl OrchestrationService {
         }
     }
 
+    async fn environment_links(&self, args: Value) -> Result<Value, OrchestrationError> {
+        let query = str_field(&args, "query").map(|q| q.to_ascii_lowercase());
+        let forwarder = self.current_remote_forwarder();
+        let mut payload = match forwarder {
+            Some(forwarder) => forwarder.list_environments().await?,
+            None => json!({
+                "local": { "environment_id": "local" },
+                "environments": [],
+            }),
+        };
+        if let Some(q) = query.as_deref()
+            && let Some(envs) = payload
+                .get_mut("environments")
+                .and_then(Value::as_array_mut)
+        {
+            envs.retain(|entry| entry.to_string().to_ascii_lowercase().contains(q));
+        }
+        Ok(payload)
+    }
+
     async fn orchestrator_capabilities(
         &self,
         ctx: &McpInvocationContext,
@@ -155,11 +205,37 @@ impl OrchestrationService {
         .await
         .map_err(|e| OrchestrationError::Internal(e.to_string()))?;
 
-        let raw_agents = catalog
+        let raw_agents: Vec<Value> = catalog
             .get("agents")
             .and_then(Value::as_array)
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_default()
+            .into_iter()
+            .map(|mut entry| {
+                let launchable = agent_entry_is_launchable(&entry);
+                if let Some(obj) = entry.as_object_mut() {
+                    obj.insert("available_for_launch".to_string(), json!(launchable));
+                }
+                entry
+            })
+            .collect();
+
+        let ready_agent_ids: Vec<String> = raw_agents
+            .iter()
+            .filter(|entry| {
+                entry
+                    .get("available_for_launch")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            })
+            .filter_map(|entry| {
+                entry
+                    .get("agent_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect();
+
         let agents: Vec<Value> = match query.as_deref() {
             None => raw_agents,
             Some(q) => raw_agents
@@ -171,6 +247,7 @@ impl OrchestrationService {
         let config = self.config_snapshot();
         Ok(json!({
             "caller_agent_id": catalog.get("caller_agent_id").cloned().unwrap_or(Value::Null),
+            "ready_agent_ids": ready_agent_ids,
             "agents": agents,
             "caller_mode_limit": {
                 "max_runtime_mode": ctx.mode_limit.max_runtime_mode.as_str(),
@@ -194,8 +271,9 @@ impl OrchestrationService {
         let pool = &self.context.deployment.db().pool;
 
         // Deterministic idempotency check.
-        let idempotency_key = str_field(&args, "client_request_id")
-            .map(|req_id| idempotency_scope_key(ctx.caller_conversation_id, "delegate_task", req_id));
+        let idempotency_key = str_field(&args, "client_request_id").map(|req_id| {
+            idempotency_scope_key(ctx.caller_conversation_id, "delegate_task", req_id)
+        });
         if let Some(scope_key) = idempotency_key.as_deref()
             && let Some(receipt) = McpIdempotencyReceipt::find(pool, scope_key)
                 .await
@@ -229,24 +307,20 @@ impl OrchestrationService {
                 config.depth_limit
             )));
         }
-        let active = ConversationDelegationRecord::count_active_for_parent(
-            pool,
-            ctx.caller_conversation_id,
-        )
-        .await
-        .map_err(|e| OrchestrationError::Internal(e.to_string()))?;
+        let active =
+            ConversationDelegationRecord::count_active_for_parent(pool, ctx.caller_conversation_id)
+                .await
+                .map_err(|e| OrchestrationError::Internal(e.to_string()))?;
         if active >= config.max_active_children {
             return Err(OrchestrationError::QuotaExceeded(format!(
                 "max_active_children ({}) reached",
                 config.max_active_children
             )));
         }
-        let total = ConversationDelegationRecord::count_total_for_parent(
-            pool,
-            ctx.caller_conversation_id,
-        )
-        .await
-        .map_err(|e| OrchestrationError::Internal(e.to_string()))?;
+        let total =
+            ConversationDelegationRecord::count_total_for_parent(pool, ctx.caller_conversation_id)
+                .await
+                .map_err(|e| OrchestrationError::Internal(e.to_string()))?;
         if total >= config.max_calls_per_parent {
             return Err(OrchestrationError::QuotaExceeded(format!(
                 "max_calls_per_parent ({}) reached",
@@ -271,14 +345,17 @@ impl OrchestrationService {
             .flatten()
             .map(|s| s.workspace_id);
         let target_project_id = match target.get("project_id").and_then(Value::as_str) {
-            Some(raw) if !raw.trim().is_empty() => Some(
-                Uuid::parse_str(raw.trim())
-                    .map_err(|_| OrchestrationError::BadRequest("invalid target.project_id".into()))?,
-            ),
+            Some(raw) if !raw.trim().is_empty() => {
+                Some(Uuid::parse_str(raw.trim()).map_err(|_| {
+                    OrchestrationError::BadRequest("invalid target.project_id".into())
+                })?)
+            }
             _ => resolve_conversation_project_id(pool, ctx.caller_conversation_id).await,
         };
 
-        let isolation = str_field(&args, "isolation").unwrap_or("shared").to_string();
+        let isolation = str_field(&args, "isolation")
+            .unwrap_or("shared")
+            .to_string();
         let workspace_strategy = match isolation.as_str() {
             "worktree" => {
                 let wt = args.get("worktree").and_then(Value::as_object);
@@ -401,6 +478,384 @@ impl OrchestrationService {
         Ok(response)
     }
 
+    async fn delegate_task_remote(
+        &self,
+        ctx: &McpInvocationContext,
+        env_id: &str,
+        args: Value,
+        forwarder: SharedRemoteForwarder,
+    ) -> Result<Value, OrchestrationError> {
+        let pool = &self.context.deployment.db().pool;
+
+        // Deterministic idempotency check on the local Host before forwarding.
+        let idempotency_key = str_field(&args, "client_request_id").map(|req_id| {
+            idempotency_scope_key(ctx.caller_conversation_id, "delegate_task", req_id)
+        });
+        if let Some(scope_key) = idempotency_key.as_deref()
+            && let Some(receipt) = McpIdempotencyReceipt::find(pool, scope_key)
+                .await
+                .map_err(|e| OrchestrationError::Internal(e.to_string()))?
+            && let Ok(cached) = serde_json::from_str::<Value>(&receipt.response_json)
+        {
+            return Ok(cached);
+        }
+
+        let task = str_field(&args, "task")
+            .filter(|t| !t.trim().is_empty())
+            .ok_or_else(|| OrchestrationError::BadRequest("task is required".into()))?
+            .to_string();
+        let target = args
+            .get("target")
+            .and_then(Value::as_object)
+            .ok_or_else(|| OrchestrationError::BadRequest("target object is required".into()))?;
+        let raw_agent_id = target
+            .get("agent_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| OrchestrationError::BadRequest("target.agent_id is required".into()))?;
+        let agent_id = AgentId::parse(raw_agent_id)
+            .map_err(|e| OrchestrationError::BadRequest(format!("invalid agent_id: {e}")))?;
+
+        // Enforce local parent quotas before dispatching to the remote Host.
+        let config = self.config_snapshot();
+        let caller_depth = compute_delegation_depth(pool, ctx.caller_conversation_id).await?;
+        if caller_depth >= config.depth_limit {
+            return Err(OrchestrationError::QuotaExceeded(format!(
+                "delegation depth limit ({}) reached",
+                config.depth_limit
+            )));
+        }
+        let active =
+            ConversationDelegationRecord::count_active_for_parent(pool, ctx.caller_conversation_id)
+                .await
+                .map_err(|e| OrchestrationError::Internal(e.to_string()))?;
+        if active >= config.max_active_children {
+            return Err(OrchestrationError::QuotaExceeded(format!(
+                "max_active_children ({}) reached",
+                config.max_active_children
+            )));
+        }
+        let total =
+            ConversationDelegationRecord::count_total_for_parent(pool, ctx.caller_conversation_id)
+                .await
+                .map_err(|e| OrchestrationError::Internal(e.to_string()))?;
+        if total >= config.max_calls_per_parent {
+            return Err(OrchestrationError::QuotaExceeded(format!(
+                "max_calls_per_parent ({}) reached",
+                config.max_calls_per_parent
+            )));
+        }
+
+        let req_runtime = str_field(&args, "runtime_mode").and_then(RuntimeModeRank::parse_str);
+        let req_interaction =
+            str_field(&args, "interaction_mode").and_then(InteractionModeRank::parse_str);
+        let effective_mode_limit = ctx.mode_limit.clamp(req_runtime, req_interaction);
+
+        let isolation = str_field(&args, "isolation")
+            .unwrap_or("shared")
+            .to_string();
+        let mode = match str_field(&args, "mode").unwrap_or("async") {
+            "async" => "async",
+            "wait" => "wait",
+            other => {
+                return Err(OrchestrationError::BadRequest(format!(
+                    "unsupported mode '{other}'"
+                )));
+            }
+        };
+        let completion_wake = match str_field(&args, "completion_wake").unwrap_or("always") {
+            "always" => "always",
+            "settled_only" => "settled_only",
+            other => {
+                return Err(OrchestrationError::BadRequest(format!(
+                    "unsupported completion_wake '{other}'"
+                )));
+            }
+        };
+        let timeout_ms = args
+            .get("timeout_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(config.child_deadline_ms)
+            .clamp(1_000, 86_400_000);
+        let role = str_field(&args, "role").map(str::to_string);
+        let provider_instance_id = target
+            .get("provider_instance_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let model = target
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+
+        // Forward to the remote Host with the clamped monotonic mode ceiling.
+        let mut remote_response = forwarder
+            .forward_tool_call(env_id, "delegate_task", args, effective_mode_limit)
+            .await?;
+
+        let run_id = remote_response
+            .get("run_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("run_{}", Uuid::new_v4().simple()));
+        let child_conversation_id = remote_response
+            .get("child_conversation_id")
+            .and_then(Value::as_str)
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .ok_or_else(|| {
+                OrchestrationError::Internal(format!(
+                    "remote host '{env_id}' returned invalid or missing child_conversation_id"
+                ))
+            })?;
+        let remote_project_id = remote_response
+            .get("project_id")
+            .and_then(Value::as_str)
+            .and_then(|s| Uuid::parse_str(s).ok());
+        let remote_workspace_id = remote_response
+            .get("workspace_id")
+            .and_then(Value::as_str)
+            .and_then(|s| Uuid::parse_str(s).ok());
+        let remote_status = remote_response
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("running")
+            .to_string();
+        let remote_branch = remote_response
+            .get("branch")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let remote_worktree_path = remote_response
+            .get("worktree_path")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+
+        let task_preview: String = task.chars().take(240).collect();
+        let deadline_at =
+            Utc::now() + ChronoDuration::milliseconds(timeout_ms.min(86_400_000) as i64);
+
+        // Persist a local shadow row so quotas, UI DelegationCards, `task_status`,
+        // `task_cancel`, and automatic coalesced completion wakeups work seamlessly
+        // across Hosts.
+        ConversationDelegationRecord::create(
+            pool,
+            CreateConversationDelegation {
+                run_id: &run_id,
+                parent_conversation_id: ctx.caller_conversation_id,
+                child_conversation_id,
+                parent_tool_call_id: &ctx.parent_tool_use_id,
+                target_project_id: remote_project_id,
+                target_workspace_id: remote_workspace_id,
+                target_environment_id: Some(env_id),
+                agent_id: agent_id.as_str(),
+                provider_instance_id: provider_instance_id.as_deref(),
+                model: model.as_deref(),
+                role: role.as_deref(),
+                task_preview: &task_preview,
+                isolation: &isolation,
+                mode,
+                completion_wake,
+                max_runtime_mode: effective_mode_limit.max_runtime_mode.as_i64(),
+                max_interaction_mode: effective_mode_limit.max_interaction_mode.as_i64(),
+                status: &remote_status,
+                preparation_stage: remote_response
+                    .get("preparation_stage")
+                    .and_then(Value::as_str),
+                worktree_path: remote_worktree_path.as_deref(),
+                branch: remote_branch.as_deref(),
+                deadline_at: Some(deadline_at),
+            },
+        )
+        .await
+        .map_err(|e| OrchestrationError::Internal(e.to_string()))?;
+
+        // Emit DelegationStarted on the local parent connection for UI cards.
+        if let Ok(conn_uuid) = Uuid::parse_str(&ctx.caller_connection_id) {
+            self.runtime
+                .emit_external(
+                    AgentConnectionId::from(conn_uuid),
+                    Some(AgentSessionId::from(ctx.caller_conversation_id)),
+                    AgentEvent::DelegationStarted {
+                        delegation_id: run_id.clone(),
+                        parent_tool_use_id: ctx.parent_tool_use_id.clone(),
+                        child_session_id: child_conversation_id,
+                        agent_id: agent_id.clone(),
+                        task_preview,
+                    },
+                )
+                .await;
+        }
+
+        if let Some(obj) = remote_response.as_object_mut() {
+            obj.insert(
+                "link".to_string(),
+                json!(conversation_link(child_conversation_id, Some(env_id))),
+            );
+            obj.insert("environment_id".to_string(), json!(env_id));
+        }
+
+        if matches!(
+            remote_status.as_str(),
+            "completed" | "failed" | "cancelled" | "timed_out"
+        ) {
+            if let Some(finished) = sync_remote_status_into_shadow(
+                pool,
+                &run_id,
+                &remote_response,
+                config.max_result_bytes,
+            )
+            .await
+            {
+                let _ = ConversationDelegationRecord::mark_delivered(
+                    pool,
+                    std::slice::from_ref(&finished.run_id),
+                )
+                .await;
+                emit_parent_completion_event(&self.runtime, &finished).await;
+            }
+        } else {
+            let cancel_token = self
+                .launcher
+                .preparations
+                .register(child_conversation_id)
+                .await;
+            spawn_remote_delegation_watcher(RemoteDelegationWatchSpec {
+                context: self.context.clone(),
+                runtime: self.runtime.clone(),
+                preparations: self.launcher.preparations.clone(),
+                forwarder,
+                coalescing_parents: self.coalescing_parents.clone(),
+                environment_id: env_id.to_string(),
+                run_id: run_id.clone(),
+                child_conversation_id,
+                mode_limit: effective_mode_limit,
+                deadline_at: Some(deadline_at),
+                max_result_bytes: config.max_result_bytes,
+                cancel_token,
+                initial_poll_interval: self.remote_poll_interval,
+            });
+        }
+
+        if let Some(scope_key) = idempotency_key.as_deref()
+            && let Ok(raw) = serde_json::to_string(&remote_response)
+        {
+            let _ = McpIdempotencyReceipt::put(pool, scope_key, "delegate_task", &raw).await;
+        }
+        Ok(remote_response)
+    }
+
+    async fn task_status_remote(
+        &self,
+        ctx: &McpInvocationContext,
+        env_id: &str,
+        args: Value,
+        forwarder: SharedRemoteForwarder,
+    ) -> Result<Value, OrchestrationError> {
+        let mut remote_payload = forwarder
+            .forward_tool_call(env_id, "task_status", args, ctx.mode_limit)
+            .await?;
+        annotate_remote_links(&mut remote_payload, env_id);
+        if let Some(obj) = remote_payload.as_object_mut() {
+            obj.insert("environment_id".to_string(), json!(env_id));
+        }
+
+        // Sync terminal state back into any matching local shadow row.
+        if let Some(run_id) = remote_payload.get("run_id").and_then(Value::as_str) {
+            let pool = &self.context.deployment.db().pool;
+            if let Ok(Some(local)) =
+                ConversationDelegationRecord::find_by_run_id(pool, run_id).await
+                && !local.is_terminal()
+            {
+                let config = self.config_snapshot();
+                if let Some(finished) = sync_remote_status_into_shadow(
+                    pool,
+                    run_id,
+                    &remote_payload,
+                    config.max_result_bytes,
+                )
+                .await
+                {
+                    self.launcher
+                        .preparations
+                        .cancel(finished.child_conversation_id)
+                        .await;
+                    emit_parent_completion_event(&self.runtime, &finished).await;
+                    maybe_schedule_parent_wakeup(
+                        self.context.clone(),
+                        self.coalescing_parents.clone(),
+                        &finished,
+                    )
+                    .await;
+                }
+            }
+        }
+        Ok(remote_payload)
+    }
+
+    async fn task_cancel_remote(
+        &self,
+        ctx: &McpInvocationContext,
+        env_id: &str,
+        args: Value,
+        forwarder: SharedRemoteForwarder,
+    ) -> Result<Value, OrchestrationError> {
+        let reason = str_field(&args, "reason")
+            .unwrap_or("cancelled by parent via task_cancel")
+            .to_string();
+        let mut remote_payload = forwarder
+            .forward_tool_call(env_id, "task_cancel", args.clone(), ctx.mode_limit)
+            .await?;
+        annotate_remote_links(&mut remote_payload, env_id);
+        if let Some(obj) = remote_payload.as_object_mut() {
+            obj.insert("environment_id".to_string(), json!(env_id));
+        }
+
+        // Also mark any matching local shadow row cancelled and stop its watcher.
+        let pool = &self.context.deployment.db().pool;
+        let shadow = if let Some(run_id) = remote_payload
+            .get("run_id")
+            .and_then(Value::as_str)
+            .or_else(|| str_field(&args, "run_id"))
+        {
+            ConversationDelegationRecord::find_by_run_id(pool, run_id)
+                .await
+                .ok()
+                .flatten()
+        } else if let Some(child_id) =
+            str_field(&args, "child_conversation_id").and_then(|s| Uuid::parse_str(s).ok())
+        {
+            ConversationDelegationRecord::find_by_child_conversation(pool, child_id)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        if let Some(record) = shadow {
+            self.launcher
+                .preparations
+                .cancel(record.child_conversation_id)
+                .await;
+            let updated = ConversationDelegationRecord::finish(
+                pool,
+                &record.run_id,
+                "cancelled",
+                None,
+                Some("cancelled"),
+                Some(&reason),
+            )
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(record);
+            let _ = ConversationDelegationRecord::mark_delivered(
+                pool,
+                std::slice::from_ref(&updated.run_id),
+            )
+            .await;
+            emit_parent_completion_event(&self.runtime, &updated).await;
+        }
+        Ok(remote_payload)
+    }
+
     async fn wait_for_delegation(
         &self,
         run_id: &str,
@@ -413,7 +868,10 @@ impl OrchestrationService {
                 .await
                 .map_err(|e| OrchestrationError::Internal(e.to_string()))?
                 .ok_or_else(|| OrchestrationError::NotFound(format!("run '{run_id}' not found")))?;
-            if record.is_terminal() || record.status == "waiting_for_input" || Instant::now() >= deadline {
+            if record.is_terminal()
+                || record.status == "waiting_for_input"
+                || Instant::now() >= deadline
+            {
                 return Ok(self.serialize_delegation_record(&record).await);
             }
             tokio::time::sleep(Duration::from_millis(150)).await;
@@ -422,16 +880,32 @@ impl OrchestrationService {
 
     async fn task_status(
         &self,
-        _ctx: &McpInvocationContext,
+        ctx: &McpInvocationContext,
         args: Value,
     ) -> Result<Value, OrchestrationError> {
         let record = self.find_delegation_by_args(&args).await?;
+        // Transparently query the remote Host when inspecting a non-terminal
+        // cross-Host shadow row without explicitly repeating `environment_id`.
+        if let Some(ref remote_env) = record.target_environment_id
+            && !record.is_terminal()
+            && let Some(forwarder) = self.current_remote_forwarder()
+            && let Ok(remote_payload) = self
+                .task_status_remote(
+                    ctx,
+                    remote_env,
+                    json!({ "run_id": record.run_id }),
+                    forwarder,
+                )
+                .await
+        {
+            return Ok(remote_payload);
+        }
         Ok(self.serialize_delegation_record(&record).await)
     }
 
     async fn task_cancel(
         &self,
-        _ctx: &McpInvocationContext,
+        ctx: &McpInvocationContext,
         args: Value,
     ) -> Result<Value, OrchestrationError> {
         let pool = &self.context.deployment.db().pool;
@@ -444,15 +918,33 @@ impl OrchestrationService {
             .preparations
             .cancel(record.child_conversation_id)
             .await;
-        if record.status == "preparing"
-            && let Some(ws_id) = record.target_workspace_id
-        {
-            let _ = rollback_prepared_workspace(&self.context, ws_id).await;
+
+        if let Some(ref remote_env) = record.target_environment_id {
+            // Forward cancellation to the remote Host when cancelling a shadow row.
+            if let Some(forwarder) = self.current_remote_forwarder() {
+                let _ = forwarder
+                    .forward_tool_call(
+                        remote_env,
+                        "task_cancel",
+                        json!({
+                            "run_id": record.run_id,
+                            "reason": reason,
+                        }),
+                        ctx.mode_limit,
+                    )
+                    .await;
+            }
+        } else {
+            if record.status == "preparing"
+                && let Some(ws_id) = record.target_workspace_id
+            {
+                let _ = rollback_prepared_workspace(&self.context, ws_id).await;
+            }
+            let service = ConversationSessionService::new(self.context.clone());
+            let _ = service
+                .cancel_turn(record.child_conversation_id, Some(reason.clone()))
+                .await;
         }
-        let service = ConversationSessionService::new(self.context.clone());
-        let _ = service
-            .cancel_turn(record.child_conversation_id, Some(reason.clone()))
-            .await;
 
         let updated = ConversationDelegationRecord::finish(
             pool,
@@ -484,8 +976,9 @@ impl OrchestrationService {
         args: Value,
     ) -> Result<Value, OrchestrationError> {
         let pool = &self.context.deployment.db().pool;
-        let idempotency_key = str_field(&args, "client_request_id")
-            .map(|req_id| idempotency_scope_key(ctx.caller_conversation_id, "thread_launch", req_id));
+        let idempotency_key = str_field(&args, "client_request_id").map(|req_id| {
+            idempotency_scope_key(ctx.caller_conversation_id, "thread_launch", req_id)
+        });
         if let Some(scope_key) = idempotency_key.as_deref()
             && let Some(receipt) = McpIdempotencyReceipt::find(pool, scope_key)
                 .await
@@ -1023,7 +1516,9 @@ impl OrchestrationService {
         let project = Project::find_by_id(pool, project_id)
             .await
             .map_err(|e| OrchestrationError::Internal(e.to_string()))?
-            .ok_or_else(|| OrchestrationError::NotFound(format!("project {project_id} not found")))?;
+            .ok_or_else(|| {
+                OrchestrationError::NotFound(format!("project {project_id} not found"))
+            })?;
         let repos = ProjectRepo::find_repos_for_project(pool, project_id)
             .await
             .unwrap_or_default();
@@ -1063,9 +1558,7 @@ impl OrchestrationService {
                 path.display()
             )));
         }
-        let canonical = tokio::fs::canonicalize(&path)
-            .await
-            .unwrap_or(path);
+        let canonical = tokio::fs::canonicalize(&path).await.unwrap_or(path);
         let root_str = canonical.to_string_lossy().into_owned();
         if let Some(existing) = Project::find_any_by_root_path(pool, &root_str)
             .await
@@ -1204,8 +1697,8 @@ impl OrchestrationService {
 
                 // Otherwise handle a pending AgentPermissionRequest.
                 let decision = str_field(&args, "decision").unwrap_or("escalate");
-                let requesting_approval =
-                    matches!(decision, "allow_once" | "allow_always") || args.get("option_id").is_some();
+                let requesting_approval = matches!(decision, "allow_once" | "allow_always")
+                    || args.get("option_id").is_some();
 
                 // Mode Ceiling guard: parent cannot auto-approve beyond its own mode limit.
                 if decision == "escalate"
@@ -1298,8 +1791,9 @@ impl OrchestrationService {
                 .ok_or_else(|| OrchestrationError::NotFound(format!("run '{run_id}' not found")));
         }
         if let Some(child_raw) = str_field(args, "child_conversation_id") {
-            let child_id = Uuid::parse_str(child_raw)
-                .map_err(|_| OrchestrationError::BadRequest("invalid child_conversation_id".into()))?;
+            let child_id = Uuid::parse_str(child_raw).map_err(|_| {
+                OrchestrationError::BadRequest("invalid child_conversation_id".into())
+            })?;
             return ConversationDelegationRecord::find_by_child_conversation(pool, child_id)
                 .await
                 .map_err(|e| OrchestrationError::Internal(e.to_string()))?
@@ -1407,14 +1901,39 @@ impl OrchestrationService {
         if record.is_terminal() {
             return;
         }
-        self.launcher.preparations.cancel(child_conversation_id).await;
-        let _ = ConversationSessionService::new(self.context.clone())
-            .cancel_turn(child_conversation_id, Some(reason.to_string()))
+        self.launcher
+            .preparations
+            .cancel(child_conversation_id)
             .await;
-        if let Some(ws_id) = record.target_workspace_id
-            && record.status == "preparing"
-        {
-            let _ = rollback_prepared_workspace(&self.context, ws_id).await;
+        if let Some(ref remote_env) = record.target_environment_id {
+            if let Some(forwarder) = self.current_remote_forwarder() {
+                let mode_limit = OrchestrationModeLimit {
+                    max_runtime_mode: RuntimeModeRank::from_i64(record.max_runtime_mode),
+                    max_interaction_mode: InteractionModeRank::from_i64(
+                        record.max_interaction_mode,
+                    ),
+                };
+                let _ = forwarder
+                    .forward_tool_call(
+                        remote_env,
+                        "task_cancel",
+                        json!({
+                            "run_id": record.run_id,
+                            "reason": reason,
+                        }),
+                        mode_limit,
+                    )
+                    .await;
+            }
+        } else {
+            let _ = ConversationSessionService::new(self.context.clone())
+                .cancel_turn(child_conversation_id, Some(reason.to_string()))
+                .await;
+            if let Some(ws_id) = record.target_workspace_id
+                && record.status == "preparing"
+            {
+                let _ = rollback_prepared_workspace(&self.context, ws_id).await;
+            }
         }
         let updated = ConversationDelegationRecord::finish(
             pool,
@@ -1434,6 +1953,30 @@ impl OrchestrationService {
         )
         .await;
         emit_parent_completion_event(&self.runtime, &updated).await;
+    }
+}
+
+/// Recursively append `?env=<env_id>` to any `dimo://conversation/<id>` deep
+/// links returned by a remote Host so links open on the right environment.
+fn annotate_remote_links(value: &mut Value, env_id: &str) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(link)) = map.get_mut("link")
+                && link.starts_with("dimo://conversation/")
+                && !link.contains("?env=")
+            {
+                link.push_str(&format!("?env={env_id}"));
+            }
+            for child in map.values_mut() {
+                annotate_remote_links(child, env_id);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                annotate_remote_links(item, env_id);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1505,11 +2048,7 @@ fn parse_workspace_strategy(
     let Some(obj) = value.and_then(Value::as_object) else {
         return Ok(WorkspaceLaunchStrategy::Root);
     };
-    match obj
-        .get("kind")
-        .and_then(Value::as_str)
-        .unwrap_or("root")
-    {
+    match obj.get("kind").and_then(Value::as_str).unwrap_or("root") {
         "root" => Ok(WorkspaceLaunchStrategy::Root),
         "worktree" => Ok(WorkspaceLaunchStrategy::Worktree {
             base_ref: obj

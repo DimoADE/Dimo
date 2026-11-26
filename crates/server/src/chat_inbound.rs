@@ -242,15 +242,10 @@ pub fn start_chat_inbound(pool: SqlitePool, conversations: ConversationContext) 
                     }
                 }
                 for target in targets {
-                    let restart = running
-                        .get(&target.channel_id)
-                        .is_none_or(|channel| {
-                            channel.signature != target.signature
-                                || channel
-                                    .handle
-                                    .as_ref()
-                                    .is_some_and(JoinHandle::is_finished)
-                        });
+                    let restart = running.get(&target.channel_id).is_none_or(|channel| {
+                        channel.signature != target.signature
+                            || channel.handle.as_ref().is_some_and(JoinHandle::is_finished)
+                    });
                     if restart {
                         if let Some(previous) = running.remove(&target.channel_id) {
                             previous.stop().await;
@@ -1135,7 +1130,10 @@ mod tests {
     #[test]
     fn telegram_error_parsing_and_exponential_backoff() {
         assert!(parse_telegram_updates(false, &json!({ "ok": true, "result": [] })).is_none());
-        assert!(parse_telegram_updates(true, &json!({ "ok": false, "description": "Unauthorized" })).is_none());
+        assert!(
+            parse_telegram_updates(true, &json!({ "ok": false, "description": "Unauthorized" }))
+                .is_none()
+        );
         assert!(parse_telegram_updates(true, &json!({ "ok": true })).is_none());
         assert!(parse_telegram_updates(true, &json!({ "result": [] })).is_none());
         let ok_payload = json!({ "ok": true, "result": [{ "update_id": 1 }] });

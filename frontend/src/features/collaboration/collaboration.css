@@ -780,9 +780,9 @@
 }
 
 .collaboration-thread[data-floating-composer='true'] .collaboration-thread-log {
-  padding-bottom: calc(0.75rem + var(--conv-floating-composer-height, 0px));
+  padding-bottom: calc(1.25rem + var(--conv-floating-composer-height, 0px));
   scroll-padding-bottom: calc(
-    0.75rem + var(--conv-floating-composer-height, 0px)
+    1.25rem + var(--conv-floating-composer-height, 0px)
   );
 }
 

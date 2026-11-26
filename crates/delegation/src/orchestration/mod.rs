@@ -4,6 +4,7 @@
 //! Replaces the legacy volatile in-memory `DelegationBroker` while keeping
 //! Collaboration Space completely isolated behind `HostCompanionFeatures`.
 
+pub mod instructions;
 pub mod launch;
 pub mod reactors;
 pub mod service;
@@ -18,8 +19,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    mode_limit::OrchestrationModeLimit,
-    token_registry::TokenPermissions,
+    mode_limit::OrchestrationModeLimit, token_registry::TokenPermissions,
     types::AgentDelegationDefaults,
 };
 
@@ -80,6 +80,15 @@ pub trait RemoteMcpForwarder: Send + Sync {
         arguments: Value,
         mode_limit: OrchestrationModeLimit,
     ) -> Result<Value, OrchestrationError>;
+
+    /// Enumerate paired remote Hosts available for cross-Host orchestration.
+    /// Implementations MUST NOT expose `access_token` values.
+    async fn list_environments(&self) -> Result<Value, OrchestrationError> {
+        Ok(serde_json::json!({
+            "local": { "environment_id": "local" },
+            "environments": []
+        }))
+    }
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -180,9 +189,16 @@ pub struct PendingPermissionEntry {
 
 pub type SharedRemoteForwarder = Arc<dyn RemoteMcpForwarder>;
 
-pub use launch::{ActivePreparations, ConversationLaunchService, LaunchTargetSpec, PreparedLaunchResult};
+pub use instructions::{
+    DELEGATED_CHILD_INSTRUCTIONS, ORCHESTRATION_PLUGIN_ID, TOP_LEVEL_ORCHESTRATION_INSTRUCTIONS,
+    build_orchestration_before_turn_blocks, install_orchestration_before_turn_hook,
+};
+pub use launch::{
+    ActivePreparations, ConversationLaunchService, LaunchTargetSpec, PreparedLaunchResult,
+};
 pub use reactors::{
-    DelegationReactors, PendingPermissionStore, run_startup_reconciler, spawn_orchestration_reactors,
+    DelegationReactors, PendingPermissionStore, run_startup_reconciler,
+    run_startup_reconciler_with_remote, spawn_orchestration_reactors,
 };
 pub use service::OrchestrationService;
 pub use tools::{is_orchestration_tool, orchestration_tool_schemas};

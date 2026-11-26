@@ -34,8 +34,9 @@ use uuid::Uuid;
 
 type ResolverMap = Arc<Mutex<HashMap<Uuid, ResolverEntry>>>;
 
-static ACTIVE_ORCHESTRATION: std::sync::RwLock<Option<Arc<delegation::orchestration::OrchestrationService>>> =
-    std::sync::RwLock::new(None);
+static ACTIVE_ORCHESTRATION: std::sync::RwLock<
+    Option<Arc<delegation::orchestration::OrchestrationService>>,
+> = std::sync::RwLock::new(None);
 
 pub(crate) fn active_orchestration_service()
 -> Option<Arc<delegation::orchestration::OrchestrationService>> {
@@ -134,22 +135,36 @@ impl HeadlessDelegationRuntime {
             features.clone(),
             orchestration_config,
         ));
-        orchestration.set_remote_forwarder(Arc::new(
+        let remote_forwarder: delegation::SharedRemoteForwarder = Arc::new(
             crate::remote_mcp_forwarder::PairedHostMcpForwarder::new(data_dir),
-        ));
+        );
+        orchestration.set_remote_forwarder(remote_forwarder.clone());
         if let Ok(mut slot) = ACTIVE_ORCHESTRATION.write() {
             *slot = Some(orchestration.clone());
         }
+        static ORCHESTRATION_BEFORE_TURN_INSTALLED: std::sync::Once = std::sync::Once::new();
+        ORCHESTRATION_BEFORE_TURN_INSTALLED.call_once(|| {
+            let official_mcp_for_hook = official_mcp.clone();
+            delegation::install_orchestration_before_turn_hook(pool.clone(), move || {
+                official_mcp_for_hook.allow_delegation_mcp()
+            });
+        });
         let reactors = delegation::orchestration::spawn_orchestration_reactors(
             conversation_context.clone(),
             runtime.clone(),
-            preparations,
+            preparations.clone(),
             pending_permissions,
             max_result_bytes,
         );
-        let reconciler_task = tokio::spawn(delegation::orchestration::run_startup_reconciler(
-            conversation_context,
-        ));
+        let reconciler_task = tokio::spawn(
+            delegation::orchestration::run_startup_reconciler_with_remote(
+                conversation_context,
+                Some(runtime.clone()),
+                Some(preparations),
+                Some(remote_forwarder),
+                max_result_bytes,
+            ),
+        );
 
         let listener = Arc::new(DelegationListener::new_with_features(
             broker.clone(),

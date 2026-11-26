@@ -1416,7 +1416,7 @@ async fn pages_a_ten_thousand_event_history_without_loading_the_full_log() {
 
 #[tokio::test]
 async fn rebuild_projection_waits_for_all_needs_review_steps_before_resuming_and_restoring_siblings()
-{
+ {
     let (core, store) = setup().await;
     let agent = |id: &str| WorkflowStep {
         id: id.to_string(),

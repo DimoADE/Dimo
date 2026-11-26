@@ -48,6 +48,15 @@ beforeEach(async () => {
   if (i18n.language !== 'zh-CN') await i18n.changeLanguage('zh-CN');
 });
 
+// jsdom returns false from document.hasFocus() unless explicitly mocked.
+// Default to a focused foreground window in tests; individual tests can spy on
+// document.hasFocus to simulate background/unfocused states.
+Object.defineProperty(document, 'hasFocus', {
+  configurable: true,
+  writable: true,
+  value: () => true,
+});
+
 // Mock window.matchMedia
 Object.defineProperty(window, 'matchMedia', {
   writable: true,

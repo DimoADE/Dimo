@@ -1465,7 +1465,8 @@ async fn lightweight_snapshot_hydration_preserves_denied_tool_calls() {
         .await
         .expect("fold at permission response");
     assert!(full_at_perm.denied_tool_calls.contains("call-deny-1"));
-    let light_state = full_at_perm.to_lightweight_snapshot_state(&std::collections::BTreeMap::new());
+    let light_state =
+        full_at_perm.to_lightweight_snapshot_state(&std::collections::BTreeMap::new());
     assert!(!light_state.full_fold);
     assert!(light_state.denied_tool_calls.contains("call-deny-1"));
     let light_json = serde_json::to_string(&light_state).expect("serialize lightweight snapshot");

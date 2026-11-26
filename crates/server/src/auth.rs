@@ -2597,8 +2597,7 @@ mod host_console_pairing_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn poll_connect_request_delivers_approved_credential_exactly_once_under_concurrency() {
-        use std::sync::Arc;
-        use std::time::Duration;
+        use std::{sync::Arc, time::Duration};
 
         use remote_protocol::DeviceConnectRequestStatus;
         use sqlx::sqlite::SqliteJournalMode;

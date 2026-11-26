@@ -93,12 +93,15 @@ function renderCommand({
 }
 
 describe('terminal failure summaries in the timeline', () => {
-  it('shows a reported nonzero exit code while collapsed and preserves output on expansion', () => {
+  it('marks nonzero exit code as error with tooltip without a right-side badge and preserves output on expansion', () => {
     renderCommand({ id: 'exit-23', code: 23 });
-    expect(screen.getByText('命令退出码 23')).toBeVisible();
-    expect(screen.queryByText('工具调用失败')).not.toBeInTheDocument();
     const row = screen.getByTestId('turn-tool-chip-row');
     expect(row).toHaveAttribute('aria-expanded', 'false');
+    expect(row).toHaveClass('is-error');
+    expect(row).toHaveAttribute('title', '命令退出码 23');
+    expect(screen.queryByText('命令退出码 23')).not.toBeInTheDocument();
+    expect(screen.queryByText('工具调用失败')).not.toBeInTheDocument();
+    expect(document.querySelector('.conv-tool-chip-error-badge')).toBeNull();
     expect(screen.getByTestId('turn-tool-chip-item')).toHaveAttribute(
       'data-tool-status',
       'error'
@@ -111,18 +114,23 @@ describe('terminal failure summaries in the timeline', () => {
 
   it('uses the command result when the transport reports completion', () => {
     renderCommand({ id: 'completed-exit-1', status: 'completed', code: 1 });
-    expect(screen.getByText('命令退出码 1')).toBeVisible();
+    const row = screen.getByTestId('turn-tool-chip-row');
+    expect(row).toHaveClass('is-error');
+    expect(row).toHaveAttribute('title', '命令退出码 1');
+    expect(screen.queryByText('命令退出码 1')).not.toBeInTheDocument();
     expect(screen.getByTestId('turn-tool-chip-item')).toHaveAttribute(
       'data-tool-status',
       'error'
     );
   });
 
-  it('shows timeout summary when collapsed even if killed with an exit code, and preserves output on expansion', async () => {
+  it('records timeout summary in tooltip even if killed with an exit code, and preserves output on expansion', async () => {
     renderCommand({ id: 'timeout-124', status: 'timed_out', code: 124 });
-    expect(screen.getByText('执行超时')).toBeVisible();
-    expect(screen.queryByText('工具调用失败')).not.toBeInTheDocument();
     const row = screen.getByTestId('turn-tool-chip-row');
+    expect(row).toHaveClass('is-error');
+    expect(row).toHaveAttribute('title', '执行超时');
+    expect(screen.queryByText('执行超时')).not.toBeInTheDocument();
+    expect(screen.queryByText('工具调用失败')).not.toBeInTheDocument();
     expect(screen.getByTestId('turn-tool-chip-item')).toHaveAttribute(
       'data-tool-status',
       'error'
@@ -138,14 +146,19 @@ describe('terminal failure summaries in the timeline', () => {
       status: 'failed',
       outputPreview: JSON.stringify({ timedOut: true, stdout: 'partial' }),
     });
-    expect(screen.getByText('Timed out')).toBeVisible();
+    expect(screen.getByTestId('turn-tool-chip-row')).toHaveAttribute(
+      'title',
+      'Timed out'
+    );
   });
 
-  it('shows permission denied summary when collapsed and localizes in English', async () => {
+  it('records permission denied summary in tooltip and localizes in English', async () => {
     renderCommand({ id: 'denied-zh', status: 'denied' });
-    expect(screen.getByText('权限被拒绝')).toBeVisible();
-    expect(screen.queryByText('工具调用失败')).not.toBeInTheDocument();
     const row = screen.getByTestId('turn-tool-chip-row');
+    expect(row).toHaveClass('is-error');
+    expect(row).toHaveAttribute('title', '权限被拒绝');
+    expect(screen.queryByText('权限被拒绝')).not.toBeInTheDocument();
+    expect(screen.queryByText('工具调用失败')).not.toBeInTheDocument();
     expect(screen.getByTestId('turn-tool-chip-item')).toHaveAttribute(
       'data-tool-status',
       'error'
@@ -160,7 +173,10 @@ describe('terminal failure summaries in the timeline', () => {
       status: 'failed',
       outputPreview: JSON.stringify({ status: 'declined', stdout: 'declined' }),
     });
-    expect(screen.getByText('Permission denied')).toBeVisible();
+    expect(screen.getByTestId('turn-tool-chip-row')).toHaveAttribute(
+      'title',
+      'Permission denied'
+    );
   });
 
   it.each([
@@ -175,6 +191,9 @@ describe('terminal failure summaries in the timeline', () => {
         'data-tool-status',
         expected
       );
+      expect(screen.getByTestId('turn-tool-chip-row')).not.toHaveAttribute(
+        'title'
+      );
       expect(
         screen.queryByText(/命令退出码|工具调用失败|执行超时|权限被拒绝/)
       ).not.toBeInTheDocument();
@@ -186,15 +205,21 @@ describe('terminal failure summaries in the timeline', () => {
       id: 'unknown-failure',
       outputPreview: 'Permission denied',
     });
-    expect(screen.getByText('工具调用失败')).toBeVisible();
+    const row = screen.getByTestId('turn-tool-chip-row');
+    expect(row).toHaveClass('is-error');
+    expect(row).toHaveAttribute('title', '工具调用失败');
     expect(
       screen.queryByText(/命令退出码|权限被拒绝|执行超时/)
     ).not.toBeInTheDocument();
   });
 
-  it('localizes the reported exit code in English', async () => {
+  it('localizes the reported exit code tooltip in English', async () => {
     await i18n.changeLanguage('en');
     renderCommand({ id: 'english-exit', code: 7 });
-    expect(screen.getByText('Command exited with code 7')).toBeVisible();
+    const row = screen.getByTestId('turn-tool-chip-row');
+    expect(row).toHaveAttribute('title', 'Command exited with code 7');
+    expect(
+      screen.queryByText('Command exited with code 7')
+    ).not.toBeInTheDocument();
   });
 });

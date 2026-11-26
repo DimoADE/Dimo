@@ -760,10 +760,9 @@ mod bridge_trace_tests {
             "root_event_id": "evt_root_abc",
             "parent_run_id": "run_parent_99"
         });
-        let result =
-            execute_host_pulse_tool(&caller, "pulse_event_emit", &args, Some(&meta), None)
-                .await
-                .expect("tool executes");
+        let result = execute_host_pulse_tool(&caller, "pulse_event_emit", &args, Some(&meta), None)
+            .await
+            .expect("tool executes");
         assert_eq!(result["ok"], json!(true));
 
         let calls = caller.captured.lock().unwrap();

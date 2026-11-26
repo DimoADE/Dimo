@@ -808,9 +808,7 @@ async fn copy_sqlite_conversation_snapshot_on_connection(
                 payload: Some(ref mut payload_val),
             } = event
                 && (label == "agent_handoff"
-                    || payload_val
-                        .get("kind")
-                        .and_then(serde_json::Value::as_str)
+                    || payload_val.get("kind").and_then(serde_json::Value::as_str)
                         == Some("agent_handoff"))
             {
                 let is_fork = payload_val
@@ -996,54 +994,53 @@ pub async fn create_orchestrated_conversation(
     let mut conn = pool.acquire().await?;
     sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
     let transaction = async {
-        if let (Some(parent_id), Some(delegation_id)) = (
-            input.parent_conversation_id,
-            input.delegation_id.as_deref(),
-        ) {
+        if let Some(delegation_id) = input.delegation_id.as_deref() {
             let parent_tool_call_id = input.parent_tool_call_id.as_deref().unwrap_or("");
-            Session::create_with_delegation_on_connection(
+            Session::create_with_optional_delegation_on_connection(
                 &mut conn,
                 &session,
                 input.id,
                 input.workspace_id,
-                parent_id,
+                input.parent_conversation_id,
                 parent_tool_call_id,
                 delegation_id,
             )
             .await
             .map_err(|error| ConversationServiceError::Internal(error.to_string()))?;
 
-            let relation = ConversationEvent::ConversationRelationCreated {
-                relation_id: Uuid::new_v4(),
-                parent_conversation_id: parent_id,
-                child_conversation_id: input.id,
-                relation_kind: agents::ConversationRelationKind::Delegation,
-                visibility: agents::ConversationRelationVisibility::Visible,
-                metadata: serde_json::json!({
-                    "parentToolCallId": parent_tool_call_id,
-                    "delegationId": delegation_id,
-                    "policy": &input.policy,
-                }),
-            };
-            let normalized_json = serde_json::to_string(&relation)?;
-            let relation_key = format!("conversation-relation-delegation:{}", input.id);
-            ConversationEventAppender::append_and_apply(
-                &mut conn,
-                AppendConversationEvent {
-                    id: Uuid::new_v4(),
-                    conversation_id: parent_id,
-                    turn_id: None,
-                    binding_id: None,
-                    connection_id: None,
-                    prompt_id: None,
-                    source: "system",
-                    event_kind: "conversation_relation_created",
-                    normalized_json: &normalized_json,
-                    raw_json: None,
-                    idempotency_key: Some(&relation_key),
-                },
-            )
-            .await?;
+            if let Some(parent_id) = input.parent_conversation_id {
+                let relation = ConversationEvent::ConversationRelationCreated {
+                    relation_id: Uuid::new_v4(),
+                    parent_conversation_id: parent_id,
+                    child_conversation_id: input.id,
+                    relation_kind: agents::ConversationRelationKind::Delegation,
+                    visibility: agents::ConversationRelationVisibility::Visible,
+                    metadata: serde_json::json!({
+                        "parentToolCallId": parent_tool_call_id,
+                        "delegationId": delegation_id,
+                        "policy": &input.policy,
+                    }),
+                };
+                let normalized_json = serde_json::to_string(&relation)?;
+                let relation_key = format!("conversation-relation-delegation:{}", input.id);
+                ConversationEventAppender::append_and_apply(
+                    &mut conn,
+                    AppendConversationEvent {
+                        id: Uuid::new_v4(),
+                        conversation_id: parent_id,
+                        turn_id: None,
+                        binding_id: None,
+                        connection_id: None,
+                        prompt_id: None,
+                        source: "system",
+                        event_kind: "conversation_relation_created",
+                        normalized_json: &normalized_json,
+                        raw_json: None,
+                        idempotency_key: Some(&relation_key),
+                    },
+                )
+                .await?;
+            }
         } else {
             Session::create_on_connection(&mut conn, &session, input.id, input.workspace_id)
                 .await
